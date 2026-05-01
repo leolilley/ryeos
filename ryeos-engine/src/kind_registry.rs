@@ -510,7 +510,7 @@ pub struct ExecutionSchema {
     pub delegate: Option<DelegationSpec>,
     /// Schema-declared thread-profile name (looked up in the daemon's
     /// `KindProfileRegistry`). The terminator dispatchers
-    /// (`dispatch_subprocess`, `dispatch_native_runtime`) read this
+    /// (`dispatch_subprocess`, `dispatch_managed_subprocess`) read this
     /// instead of hardcoding profile names — V5.4 SSE adds a streaming
     /// runtime profile by changing the schema, not the dispatch code.
     #[serde(default)]

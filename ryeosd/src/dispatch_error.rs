@@ -57,7 +57,7 @@ pub enum DispatchError {
     ProjectSource(String),
     // ── P1.2: operator-fixable failures, no longer 500 ────────────
     /// Service handler not found in the in-process handler registry.
-    /// The kind schema declared `InProcessHandler { Services }` but
+    /// The kind schema declared `InProcess { registry: Services }` but
     /// no handler matched the item's service name.
     #[error("service handler not found for '{service_ref}' in {registry}; available: [{available}]")]
     ServiceHandlerMissing {

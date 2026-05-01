@@ -185,7 +185,7 @@ pub async fn execute_service_verified(
     // 5. Cap enforcement (live mode only)
     let effective_caps = if mode == ExecutionMode::Live {
         // Wildcard scope ("*") satisfies all requirements — matches the
-        // behaviour of dispatch::enforce_runtime_caps.
+        // behaviour of dispatch_role::enforce_runtime_target_caps.
         if ctx.caller_scopes.iter().any(|s| s == "*") {
             required_caps.clone()
         } else {

@@ -26,7 +26,7 @@
 //!   instead so the verified runtime metadata is still available
 //!   downstream. The per-hop resolved item is threaded into
 //!   `DispatchRequest.current_resolved` to avoid double-resolution in
-//!   `dispatch_native_runtime`.
+//!   `dispatch_managed_subprocess`.
 //! - **A1** Errors are typed as `DispatchError` end-to-end; the HTTP
 //!   layer in `api/execute.rs` maps them via `http_status()` once per
 //!   request — no substring matching survives.
@@ -73,8 +73,8 @@ use crate::state::AppState;
 pub(crate) const ROOT_KIND_RUNTIME: &str = "runtime";
 
 /// Request shape consumed by the schema-driven dispatch fns. Carries
-/// every input the three terminators (Subprocess, InProcessHandler,
-/// NativeRuntimeSpawn) need so `/execute`'s HTTP layer can hand off
+/// every input the two terminators (Subprocess, InProcess) need so
+/// `/execute`'s HTTP layer can hand off
 /// once and let `dispatch::dispatch` do all routing.
 ///
 /// V5.2 native-runtime cap fields (`launch_mode`, `target_site_id`,
@@ -110,7 +110,7 @@ pub struct DispatchRequest<'a> {
     /// disarms its `TempDirGuard` before constructing this request.
     pub temp_dir: Option<PathBuf>,
     /// **B1**: kind parsed from the user-supplied root `item_ref`.
-    /// `dispatch_native_runtime` gates `runtime.execute` enforcement
+    /// `dispatch_managed_subprocess` gates `runtime.execute` enforcement
     /// on this being `"runtime"` so indirect alias chains are not
     /// retroactively cap-broadened.
     pub original_root_kind: &'a str,
@@ -118,7 +118,7 @@ pub struct DispatchRequest<'a> {
     /// must use this id verbatim instead of minting a fresh one
     /// (via `create_root_thread_with_id` / equivalent for the
     /// service audit row). All built-in leaves honor it:
-    /// `dispatch_native_runtime`, `dispatch_subprocess` (inline +
+    /// `dispatch_managed_subprocess`, `dispatch_subprocess` (inline +
     /// detached), and `dispatch_service`. The kind-agnostic SSE
     /// `dispatch_launch` source mints the id up front so it can
     /// subscribe to the event hub *before* the launch task begins,
@@ -425,7 +425,7 @@ pub(crate) fn resolve_dispatch_hop(
 // ── Service terminator ────────────────────────────────────────────────
 
 /// Dispatch a `service:*` ref through the schema-declared
-/// `InProcessHandler { Services }` terminator.
+/// `InProcess { registry: Services }` terminator.
 ///
 /// **A3**: the service envelope's `kind` field is read from
 /// `schema.execution.thread_profile` (validated at engine init) — no
@@ -502,7 +502,7 @@ pub async fn dispatch_service(
         other => Err(DispatchError::SchemaMisconfigured {
             kind: canonical.kind.clone(),
             detail: format!(
-                "dispatch_service called on schema declaring terminator {other:?}, not InProcessHandler {{ Services }}"
+                "dispatch_service called on schema declaring terminator {other:?}, not InProcess {{ registry: Services }}"
             ),
         }),
     }
@@ -514,7 +514,7 @@ pub async fn dispatch_service(
 // re-resolved runtime refs from the engine. P1.4 made it dead — the
 // dispatch loop now attaches `VerifiedRuntime` to the hop via
 // `RuntimeRegistry::lookup_by_ref` (see `resolve_dispatch_hop`), and
-// `dispatch_native_runtime` consumes that owned value. Don't reintroduce
+// `dispatch_managed_subprocess` consumes that owned value. Don't reintroduce
 // a per-call lookup; the loop owns runtime metadata as part of the hop.
 
 /// Strip the `bin/<triple>/` prefix from a runtime YAML's `binary_ref`.
@@ -970,7 +970,7 @@ pub(crate) struct RootSubject {
 ///
 /// **P1.1**: The loop captures a `RootSubject` from the first hop's
 /// `thread_profile` and carries it forward through alias/registry
-/// hops. When the loop terminates on a `NativeRuntimeSpawn`, the
+/// hops. When the loop terminates on a `Subprocess` (runtime), the
 /// root subject's identity (not the runtime's) is used for the thread
 /// record. This fixes the subject/executor conflation where indirect
 /// paths incorrectly recorded the runtime's `thread_profile` and
@@ -1257,7 +1257,7 @@ metadata:
     // that helper was deleted. The dispatch loop now attaches the
     // verified runtime to the hop via `RuntimeRegistry::lookup_by_ref`
     // (covered by `runtime_registry` integration tests) and
-    // `dispatch_native_runtime` consumes that owned value, so the
+    // `dispatch_managed_subprocess` consumes that owned value, so the
     // per-call lookup path no longer exists.
 
     #[test]
@@ -1277,8 +1277,8 @@ metadata:
         assert!(msg.contains("unexpected shape"), "got: {msg}");
     }
 
-    /// **B1 unit test**: `enforce_runtime_caps` itself is unconditional
-    /// (it always checks). The CALLER (`dispatch_native_runtime`) is
+    /// **B1 unit test**: `enforce_runtime_target_caps` itself is unconditional
+    /// (it always checks). The CALLER (`dispatch_managed_subprocess`) is
     /// what gates the call on `original_root_kind == "runtime"`. This
     /// test pins the caller-side gate by simulating the indirect-alias
     /// posture: an empty `required_caps` cannot accidentally deny, and
@@ -1290,7 +1290,7 @@ metadata:
     /// this fully covers B1.
     #[test]
     fn enforce_runtime_caps_skipped_for_indirect_alias_chain() {
-        // If `dispatch_native_runtime` skips the call entirely (B1
+        // If `dispatch_managed_subprocess` skips the call entirely (B1
         // gate), then a missing cap does NOT translate to an error.
         // We model this by simply never calling `enforce_runtime_caps`
         // and asserting the synthetic outcome is `Ok`.

@@ -137,10 +137,10 @@ pub async fn execute(
     // ── Sole dispatch path ────────────────────────────────────────────
     //
     // V5.3 Task 7 — `dispatch::dispatch` is now the SOLE path from
-    // `/execute` to any terminator (Subprocess, InProcessHandler,
-    // NativeRuntimeSpawn). It walks the kind-schema alias chain
+    // `/execute` to any terminator (Subprocess, InProcess). It walks
+    // the kind-schema alias chain
     // (cycle-checked, hop-bounded), then routes to the matching
-    // dispatch_subprocess / dispatch_service / dispatch_native_runtime.
+    // dispatch_subprocess / dispatch_service / dispatch_managed_subprocess.
     // No silent fallback: a kind without an `execution:` block returns
     // 501; a schema misconfiguration returns 400 with a clear message.
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};

@@ -47,7 +47,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
 }
 
 /// V5.5 P2: enforce the callback's composed `effective_caps` against
-/// the requested item ref. Mirrors `dispatch::enforce_runtime_caps`
+/// the requested item ref. Mirrors `dispatch_role::enforce_runtime_target_caps`
 /// but for the callback boundary — the runtime is the untrusted
 /// principal here, the daemon is the gate.
 ///
