@@ -11,6 +11,34 @@ mod common;
 use common::DaemonHarness;
 use serde_json::{json, Value};
 
+/// Spawn the fast-fixture daemon harness with `RYE_SYSTEM_SPACE`
+/// pointed at a per-test isolated copy of the `core` bundle. Use this
+/// instead of `DaemonHarness::start_fast()` for any test that
+/// exercises `bin:rye-inspect` resolution
+/// (`tool:rye/core/{fetch,verify,identity}`).
+///
+/// Each test gets its own bundle directory under
+/// `target/test-bundles/service_data_e2e/<test_name>/` so concurrent
+/// nextest processes never race the same `target/debug/rye-inspect`
+/// symlink against the bundle manifest hash. See
+/// [`ryeos_tools::test_support::isolated_core_bundle`] and
+/// `docs/operations/dev-tree-caveats.md`.
+async fn start_with_isolated_bundle(
+    test_name: &str,
+) -> (DaemonHarness, common::fast_fixture::FastFixture) {
+    let bundle = ryeos_tools::test_support::isolated_core_bundle(&format!(
+        "service_data_e2e/{test_name}"
+    ));
+    DaemonHarness::start_fast_with(
+        |_, _, _| Ok(()),
+        move |cmd| {
+            cmd.env("RYE_SYSTEM_SPACE", &bundle);
+        },
+    )
+    .await
+    .expect("start daemon with isolated bundle")
+}
+
 /// Convenience: POST /execute and unwrap as JSON, panicking on transport error.
 async fn exec(h: &DaemonHarness, item_ref: &str, params: Value) -> (reqwest::StatusCode, Value) {
     h.post_execute(item_ref, ".", params)
@@ -60,8 +88,7 @@ async fn service_system_status_returns_snapshot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_identity_public_key_returns_doc() {
-    common::ensure_rye_inspect_in_core_bundle();
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = start_with_isolated_bundle("tool_identity_public_key_returns_doc").await;
     let (status, body) = exec(&h, "tool:rye/core/identity/public_key", json!({})).await;
     let result = unwrap_tool_result(status, &body, "identity.public_key");
     // The node identity doc must contain a non-empty fingerprint and a
@@ -256,8 +283,7 @@ async fn service_events_chain_replay_returns_events_for_audit_chain() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_fetch_resolves_known_service() {
-    common::ensure_rye_inspect_in_core_bundle();
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = start_with_isolated_bundle("tool_fetch_resolves_known_service").await;
     let (status, body) = exec(
         &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": false, "verify": true}),
@@ -276,8 +302,7 @@ async fn tool_fetch_resolves_known_service() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_fetch_with_content_includes_body() {
-    common::ensure_rye_inspect_in_core_bundle();
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = start_with_isolated_bundle("tool_fetch_with_content_includes_body").await;
     let (status, body) = exec(
         &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": true, "verify": false}),
@@ -293,8 +318,7 @@ async fn tool_fetch_with_content_includes_body() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_fetch_unknown_ref_errors() {
-    common::ensure_rye_inspect_in_core_bundle();
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = start_with_isolated_bundle("tool_fetch_unknown_ref_errors").await;
     let (status, body) = exec(
         &h, "tool:rye/core/fetch",
         json!({"item_ref": "service:does/not/exist"}),
@@ -317,8 +341,7 @@ async fn tool_fetch_unknown_ref_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_verify_returns_trusted_for_core_service() {
-    common::ensure_rye_inspect_in_core_bundle();
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = start_with_isolated_bundle("tool_verify_returns_trusted_for_core_service").await;
     let (status, body) = exec(
         &h, "tool:rye/core/verify",
         json!({"item_ref": "service:system/status"}),

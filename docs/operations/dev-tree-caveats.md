@@ -18,6 +18,15 @@ The trust store the test harness pins (`ryeos_engine::test_support::live_trust_s
 
 Because `bin:` resolution requires a hash match (Part C of the foundation-hardening wave — no soft fallback), every `tool:rye/core/{fetch,verify,identity}` invocation will fail with `BinHashMismatch` until the manifest is rebuilt.
 
+> **Status:** the `cargo nextest run --workspace` concurrency variant
+> of this race (~5 `service_data_e2e` tests failing because nextest
+> rebuilt `rye-inspect` mid-run) was closed structurally by commit θ
+> of the Protocols-as-Data Stabilization wave. Tests that need a
+> manifest-stable bundle copy now use
+> [`ryeos_tools::test_support::isolated_core_bundle`] instead of
+> `system_data_dir()`. Direct manual invocations still hit this caveat
+> and the `gate.sh` re-sync remains the fix for them.
+
 ### Symptom — primary
 
 The error message is the giveaway. Look for `rye-inspect` hash mismatch in HTTP body or panic output:
@@ -132,3 +141,5 @@ The canonical gate is `./scripts/gate.sh`. It auto-syncs the manifest if drift i
 One cleanup remains on the radar (not yet scheduled): investigate making the manifest verification tolerant of "dev-tree symlink → just-rebuilt binary" without weakening the production trust contract. Probably a config flag the test harness opts into, never enabled in production builds.
 
 (The "auto rebuild-manifest before tests" cleanup is now handled by `scripts/gate.sh`.)
+
+(The "concurrent nextest race rebuilds rye-inspect mid-run" issue was closed by commit θ of the Protocols-as-Data Stabilization wave — see `ryeos_tools::test_support::isolated_core_bundle` and the migration in `ryeosd/tests/service_data_e2e.rs`.)

@@ -6,6 +6,9 @@
 
 pub mod actions;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 use anyhow::{Context, Result};
 
 /// Parse RYE_STATE environment variable.

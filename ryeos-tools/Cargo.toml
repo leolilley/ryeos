@@ -37,6 +37,12 @@ tempfile = "3"
 [features]
 default = []
 
+# Exposes `ryeos_tools::test_support` for downstream test crates that
+# need a manifest-stable copy of the `core` bundle (eliminates the
+# dev-tree manifest concurrency race documented in
+# `docs/operations/dev-tree-caveats.md`).
+test-support = []
+
 # ── Operator-side sign binary ──────────────────────────────────────
 # Resolves a canonical ref → file path via the engine kind registry,
 # enforces the path-anchoring validator, then signs in place using
