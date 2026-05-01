@@ -512,7 +512,6 @@ impl Runner {
                                     project_path: self.callback.project_path().to_string(),
                                     action: ryeos_runtime::callback::ActionPayload {
                                         item_id: dispatch_result.canonical_ref.clone(),
-                                        kind: Some("tool".to_string()),
                                         params: dispatch_result.arguments.clone(),
                                         thread: "inline".to_string(),
                                     },

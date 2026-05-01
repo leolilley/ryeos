@@ -113,7 +113,8 @@ fn main() -> anyhow::Result<()> {
             }
             let cb_env = EnvelopeCallback {
                 socket_path: ryeos_runtime::resolve_daemon_socket_path(None),
-                token: std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default(),
+                token: std::env::var("RYEOSD_CALLBACK_TOKEN")
+                    .expect("RYEOSD_CALLBACK_TOKEN must be set by daemon"),
             };
             CallbackClient::new(
                 &cb_env,

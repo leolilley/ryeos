@@ -21,7 +21,10 @@ impl UdsRuntimeClient {
 
     pub fn from_env() -> Result<Self, CallbackError> {
         let path = crate::daemon_rpc::resolve_daemon_socket_path(None);
-        let token = std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default();
+        let token = std::env::var("RYEOSD_CALLBACK_TOKEN")
+            .map_err(|_| CallbackError::Transport(
+                anyhow::anyhow!("RYEOSD_CALLBACK_TOKEN must be set by daemon")
+            ))?;
         Ok(Self::new(path, token))
     }
 
@@ -64,7 +67,6 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             "project_path": request.project_path,
             "action": {
                 "item_id": request.action.item_id,
-                "kind": request.action.kind,
                 "params": request.action.params,
                 "thread": request.action.thread,
             },
@@ -237,8 +239,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_env_returns_client() {
-        let _ = UdsRuntimeClient::from_env();
+    fn from_env_returns_error_without_token() {
+        std::env::remove_var("RYEOSD_CALLBACK_TOKEN");
+        let result = UdsRuntimeClient::from_env();
+        assert!(result.is_err(), "from_env() should fail when RYEOSD_CALLBACK_TOKEN is not set");
     }
 
     #[test]

@@ -34,7 +34,6 @@ pub async fn dispatch_action(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     tracing::Span::current().record("tool_name", item_id);
-    let kind = action.get("kind").and_then(|v| v.as_str()).map(String::from);
     let params = action.get("params").cloned().unwrap_or(json!({}));
     let thread = action.get("thread").and_then(|v| v.as_str()).unwrap_or("inline");
 
@@ -43,7 +42,6 @@ pub async fn dispatch_action(
         project_path: project_path.to_string(),
         action: ryeos_runtime::callback::ActionPayload {
             item_id: item_id.to_string(),
-            kind,
             params,
             thread: thread.to_string(),
         },

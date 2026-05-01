@@ -39,8 +39,6 @@ pub struct DispatchActionRequest {
 #[serde(deny_unknown_fields)]
 pub struct ActionPayload {
     pub item_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
     #[serde(default)]
     pub params: Value,
     #[serde(default = "default_thread")]
@@ -116,7 +114,8 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
 pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
     let socket_path = crate::daemon_rpc::resolve_daemon_socket_path(None);
-    let token = std::env::var("RYEOSD_CALLBACK_TOKEN").unwrap_or_default();
+    let token = std::env::var("RYEOSD_CALLBACK_TOKEN")
+        .expect("RYEOSD_CALLBACK_TOKEN must be set by daemon");
     if socket_path.exists() {
         Box::new(
             crate::callback_uds::UdsRuntimeClient::new(socket_path, token),

@@ -414,7 +414,6 @@ mod tests {
             project_path: "/project".to_string(),
             action: ActionPayload {
                 item_id: "my/tool".to_string(),
-                kind: None,
                 params: json!({}),
                 thread: "inline".to_string(),
             },

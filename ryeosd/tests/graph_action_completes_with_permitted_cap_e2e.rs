@@ -51,8 +51,6 @@ fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Res
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: ""
 version: "1.0.0"
-permissions:
-  - rye.execute.tool.echo.echo
 config:
   start: greet
   nodes:
@@ -78,7 +76,6 @@ fn plant_denied_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: ""
 version: "1.0.0"
-permissions: []
 config:
   start: greet
   nodes:
