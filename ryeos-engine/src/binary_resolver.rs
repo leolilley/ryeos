@@ -284,11 +284,17 @@ mod tests {
         assert!(is_dispatchable_trust_class(tc));
     }
 
-    /// Descriptor=System, binary signed by a key absent from the trust store
-    /// (modeling a user-tier signer not promoted to system trust).
-    /// Effective tier = UntrustedUserSpace; gate refuses.
+    /// Descriptor=System, binary signed by a key absent from the trust
+    /// store (modeling an untrusted signer under a system root). The
+    /// effective tier collapses to UntrustedUserSpace and the gate refuses.
+    ///
+    /// Note: `verify_executor_trust` does not currently model a raw
+    /// `TrustedUser` signer tier — its `raw_trust` is only TrustedSystem,
+    /// UntrustedUserSpace, or Unsigned. So a "binary signed by a user-tier
+    /// signer" is equivalent to "binary signed by a key not in the trust
+    /// store" today; this test covers that.
     #[test]
-    fn descriptor_system_binary_user_dispatches_as_user() {
+    fn descriptor_system_unknown_signer_refused() {
         let item_source = json!({
             "signature_info": { "fingerprint": "user-fp" }
         });
@@ -297,15 +303,18 @@ mod tests {
             |_| false,
             TrustClass::TrustedSystem,
         );
-        // Without a system-trusted signer we cannot dispatch under a
-        // system descriptor; the binary is treated as untrusted user space.
         assert_eq!(tc, TrustClass::UntrustedUserSpace);
         assert_eq!(fp.as_deref(), Some("user-fp"));
         assert!(!is_dispatchable_trust_class(tc));
     }
 
     /// Descriptor=User, binary signed by a system-trusted key.
-    /// Effective tier = TrustedUser (capped); gate accepts.
+    /// Effective tier = TrustedUser (capped by descriptor); gate accepts.
+    ///
+    /// This is the case the wave-5 oracle audit flagged: previously the
+    /// gate hardcoded acceptance to `TrustedSystem` only, so this case
+    /// — which is the *normal* dispatch path for any user-tier descriptor
+    /// invoking a system-shipped runtime/handler binary — was rejected.
     #[test]
     fn descriptor_user_binary_system_dispatches_as_user() {
         let item_source = json!({
@@ -318,28 +327,24 @@ mod tests {
         );
         assert_eq!(tc, TrustClass::TrustedUser);
         assert_eq!(fp.as_deref(), Some("sys-fp"));
-        // This is the case the wave-5 audit flagged: previously rejected,
-        // now accepted because TrustedUser is a dispatchable tier.
         assert!(is_dispatchable_trust_class(tc));
     }
 
-    /// Descriptor=User, binary signed by a system-trusted key (the only
-    /// signer trust we model today — see `verify_executor_trust`'s raw
-    /// derivation). Effective tier under a User-cap descriptor remains
-    /// TrustedUser; gate accepts.
+    /// Descriptor=User, binary signed by an unknown signer.
+    /// Effective tier = UntrustedUserSpace; gate refuses.
     #[test]
-    fn descriptor_user_binary_user_dispatches_as_user() {
+    fn descriptor_user_unknown_signer_refused() {
         let item_source = json!({
-            "signature_info": { "fingerprint": "sys-fp" }
+            "signature_info": { "fingerprint": "stranger-fp" }
         });
         let (tc, fp) = verify_executor_trust(
             &item_source,
-            |f| f == "sys-fp",
+            |_| false,
             TrustClass::TrustedUser,
         );
-        assert_eq!(tc, TrustClass::TrustedUser);
-        assert_eq!(fp.as_deref(), Some("sys-fp"));
-        assert!(is_dispatchable_trust_class(tc));
+        assert_eq!(tc, TrustClass::UntrustedUserSpace);
+        assert_eq!(fp.as_deref(), Some("stranger-fp"));
+        assert!(!is_dispatchable_trust_class(tc));
     }
 
     /// Sanity floor: anything below TrustedUser must never dispatch.

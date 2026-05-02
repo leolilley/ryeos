@@ -426,11 +426,8 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         }
     })?;
     let registry = build_runtime_registry(runtime_spec)?;
-    let root_trust_class = match item.trust_class {
-        ContractTrustClass::Trusted => TrustClass::TrustedSystem,
-        ContractTrustClass::Untrusted => TrustClass::UntrustedUserSpace,
-        ContractTrustClass::Unsigned => TrustClass::Unsigned,
-    };
+    let root_trust_class =
+        widen_root_trust_class(item.trust_class, item.resolved.source_space);
     let spec = compile_with_handlers(
         &terminal.intermediates,
         &terminal.root_source_path,
@@ -524,6 +521,38 @@ fn compute_cache_key(
     format!("{result:x}")
 }
 
+/// Widen the contract-side 3-variant trust class into the resolution-side
+/// 4-variant tier, preserving the source-space distinction.
+///
+/// Wave 5.5 oracle audit: previously this collapsed every `Trusted` item
+/// to `TrustedSystem` regardless of source space, so a user-space item
+/// whose signer happened to be in the trust store was passed downstream
+/// as if it were system-tier. The `binary_resolver` then computed
+/// `min(raw_binary_trust, root_trust_class)` against an over-strong
+/// `TrustedSystem` cap, defeating the cap on the runtime command
+/// resolution path.
+///
+/// The mapping is:
+/// - `Trusted` from `System` → `TrustedSystem`
+/// - `Trusted` from `User` or `Project` → `TrustedUser` (any binary they
+///   reach is dispatched at user tier even if the signer is a system
+///   author — the descriptor's space is the cap)
+/// - `Untrusted` (any space) → `UntrustedUserSpace`
+/// - `Unsigned` (any space) → `Unsigned`
+fn widen_root_trust_class(
+    trust_class: ContractTrustClass,
+    source_space: crate::contracts::ItemSpace,
+) -> TrustClass {
+    use crate::contracts::ItemSpace;
+    match (trust_class, source_space) {
+        (ContractTrustClass::Trusted, ItemSpace::System) => TrustClass::TrustedSystem,
+        (ContractTrustClass::Trusted, ItemSpace::User)
+        | (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedUser,
+        (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedUserSpace,
+        (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -537,6 +566,52 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn widen_trusted_system_stays_trusted_system() {
+        assert_eq!(
+            widen_root_trust_class(ContractTrustClass::Trusted, ItemSpace::System),
+            ResolutionTrustClass::TrustedSystem
+        );
+    }
+
+    #[test]
+    fn widen_trusted_user_demotes_to_trusted_user() {
+        assert_eq!(
+            widen_root_trust_class(ContractTrustClass::Trusted, ItemSpace::User),
+            ResolutionTrustClass::TrustedUser
+        );
+    }
+
+    #[test]
+    fn widen_trusted_project_demotes_to_trusted_user() {
+        assert_eq!(
+            widen_root_trust_class(ContractTrustClass::Trusted, ItemSpace::Project),
+            ResolutionTrustClass::TrustedUser
+        );
+    }
+
+    #[test]
+    fn widen_untrusted_any_space_is_untrusted_userspace() {
+        for space in [ItemSpace::System, ItemSpace::User, ItemSpace::Project] {
+            assert_eq!(
+                widen_root_trust_class(ContractTrustClass::Untrusted, space),
+                ResolutionTrustClass::UntrustedUserSpace,
+                "untrusted in {space:?} should widen to UntrustedUserSpace"
+            );
+        }
+    }
+
+    #[test]
+    fn widen_unsigned_any_space_is_unsigned() {
+        for space in [ItemSpace::System, ItemSpace::User, ItemSpace::Project] {
+            assert_eq!(
+                widen_root_trust_class(ContractTrustClass::Unsigned, space),
+                ResolutionTrustClass::Unsigned,
+                "unsigned in {space:?} should widen to Unsigned"
+            );
+        }
+    }
 
     const AI_DIR: &str = crate::AI_DIR;
 
