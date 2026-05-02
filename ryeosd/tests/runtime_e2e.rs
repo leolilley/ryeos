@@ -338,6 +338,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
 
     let status = exit_status.unwrap_or_else(|| {
         child.kill().ok();
+        let _ = child.wait();
         panic!("daemon did not exit within 10s on multi-default conflict")
     });
     assert!(

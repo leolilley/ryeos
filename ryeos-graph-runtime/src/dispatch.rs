@@ -120,6 +120,7 @@ fn inject_parent_context(action: &mut Value, ctx: &ExecutionContext) {
     params.entry("depth").or_insert(json!(ctx.depth + 1));
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn follow_continuation<'a>(
     client: &'a CallbackClient,
     result: &'a Value,

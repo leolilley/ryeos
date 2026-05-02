@@ -843,7 +843,7 @@ pub struct DelegatedPrincipal {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectivePrincipal {
     Local(Principal),
-    Delegated(DelegatedPrincipal),
+    Delegated(Box<DelegatedPrincipal>),
 }
 
 // ── Plan context (resolve/verify/build_plan) ─────────────────────────

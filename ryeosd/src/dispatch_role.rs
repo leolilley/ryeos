@@ -18,7 +18,7 @@ pub enum SubprocessRole {
     /// Direct user invocation of a `runtime:*` root ref. Triggers
     /// the `runtime.execute` cap gate.
     RuntimeTarget {
-        verified_runtime: VerifiedRuntime,
+        verified_runtime: Box<VerifiedRuntime>,
     },
 }
 
