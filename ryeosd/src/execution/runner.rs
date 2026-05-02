@@ -243,17 +243,28 @@ fn checkout_from_snapshot(
     Ok((exec_dir, Some(manifest_hash), Some(snap_hash.to_string())))
 }
 
-/// Post-execution: fold back outputs and advance HEAD.
-fn post_execution_foldback(
-    state: &AppState,
-    _thread_id: &str,
-    _acting_principal: &str,
-    pre_manifest_hash: &Option<String>,
-    base_snapshot_hash: &Option<String>,
-    project_path: Option<&std::path::Path>,
-    execution_dir: Option<&std::path::Path>,
-    _completion: &ExecutionCompletion,
-) {
+struct PostExecutionFoldbackParams<'a> {
+    pub state: &'a AppState,
+    pub thread_id: &'a str,
+    pub acting_principal: &'a str,
+    pub pre_manifest_hash: &'a Option<String>,
+    pub base_snapshot_hash: &'a Option<String>,
+    pub project_path: Option<&'a std::path::Path>,
+    pub execution_dir: Option<&'a std::path::Path>,
+    pub completion: &'a ExecutionCompletion,
+}
+
+fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
+    let PostExecutionFoldbackParams {
+        state,
+        thread_id: _thread_id,
+        acting_principal: _acting_principal,
+        pre_manifest_hash,
+        base_snapshot_hash,
+        project_path,
+        execution_dir,
+        completion: _completion,
+    } = params;
     let Some(manifest_hash) = pre_manifest_hash else {
         return;
     };
@@ -497,7 +508,7 @@ fn mint_callback_env(
         thread_id: thread_id.to_string(),
         project_path: project_path
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(PathBuf::new),
+            .unwrap_or_default(),
         acting_principal: String::new(),
         cas_root: state.config.state_dir.join("cas"),
         callback_token: Some(cap.token.clone()),
@@ -611,15 +622,17 @@ pub async fn run_inline(
     let inline_snapshot = base_snapshot_hash.clone();
     let mut spawned = match task::spawn_blocking(move || {
         thread_lifecycle::spawn_item(
-            &engine,
-            &resolved,
-            &tid,
-            &crid,
-            vault,
-            cb_bindings,
-            Some(state_dir.as_path()),
-            false,
-            inline_snapshot.as_deref(),
+            thread_lifecycle::SpawnItemParams {
+                engine: &engine,
+                resolved: &resolved,
+                thread_id: &tid,
+                chain_root_id: &crid,
+                vault_bindings: vault,
+                daemon_callback_env: cb_bindings,
+                thread_state_dir: Some(state_dir.as_path()),
+                is_resume: false,
+                original_snapshot_hash: inline_snapshot.as_deref(),
+            },
         )
     })
     .await
@@ -687,14 +700,16 @@ pub async fn run_inline(
 
     // Post-execution fold-back
     post_execution_foldback(
-        &state,
-        &running.thread_id,
-        &params.acting_principal,
-        &pre_manifest_hash,
-        &base_snapshot_hash,
-        params.project_path.as_deref(),
-        guard.temp_dir.as_deref(),
-        &completion,
+        PostExecutionFoldbackParams {
+            state: &state,
+            thread_id: &running.thread_id,
+            acting_principal: &params.acting_principal,
+            pre_manifest_hash: &pre_manifest_hash,
+            base_snapshot_hash: &base_snapshot_hash,
+            project_path: params.project_path.as_deref(),
+            execution_dir: guard.temp_dir.as_deref(),
+            completion: &completion,
+        },
     );
 
     // Finalize
@@ -907,15 +922,17 @@ async fn dispatch_detached_bg_task(
 
     let spawn_result = task::spawn_blocking(move || {
         thread_lifecycle::spawn_item(
-            &eng_for_spawn,
-            &res_for_spawn,
-            &tid_for_spawn,
-            &crid_for_spawn,
-            vault_for_spawn,
-            cb_for_spawn,
-            Some(state_dir.as_path()),
-            is_resume,
-            snap_for_spawn.as_deref(),
+            thread_lifecycle::SpawnItemParams {
+                engine: &eng_for_spawn,
+                resolved: &res_for_spawn,
+                thread_id: &tid_for_spawn,
+                chain_root_id: &crid_for_spawn,
+                vault_bindings: vault_for_spawn,
+                daemon_callback_env: cb_for_spawn,
+                thread_state_dir: Some(state_dir.as_path()),
+                is_resume,
+                original_snapshot_hash: snap_for_spawn.as_deref(),
+            },
         )
     })
     .await;
@@ -1005,14 +1022,16 @@ async fn dispatch_detached_bg_task(
     match wait_result {
         Ok(completion) => {
             post_execution_foldback(
-                &bg_state,
-                &bg_thread_id,
-                &bg_acting_principal,
-                &bg_pre_manifest_hash,
-                &bg_base_snapshot_hash,
-                bg_project_path.as_deref(),
-                bg_temp_dir.as_deref(),
-                &completion,
+                PostExecutionFoldbackParams {
+                    state: &bg_state,
+                    thread_id: &bg_thread_id,
+                    acting_principal: &bg_acting_principal,
+                    pre_manifest_hash: &bg_pre_manifest_hash,
+                    base_snapshot_hash: &bg_base_snapshot_hash,
+                    project_path: bg_project_path.as_deref(),
+                    execution_dir: bg_temp_dir.as_deref(),
+                    completion: &completion,
+                },
             );
             if let Err(err) = finalize_completion(&bg_state, &bg_thread_id, completion) {
                 tracing::error!(

@@ -7,17 +7,30 @@ use crate::context::ExecutionContext;
 use crate::model::{GraphNode, WalkContext};
 use ryeos_runtime::callback_client::CallbackClient;
 
+pub struct ForeachContext<'a> {
+    pub items: &'a [Value],
+    pub var: &'a str,
+    pub node: &'a GraphNode,
+    pub thread_id: &'a str,
+    pub project_path: &'a str,
+    pub client: &'a CallbackClient,
+    pub exec_ctx: Option<&'a ExecutionContext>,
+}
+
 pub async fn run_foreach_sequential(
-    items: &[Value],
-    var: &str,
-    node: &GraphNode,
+    ctx: ForeachContext<'_>,
     state: &mut Value,
     inputs: &Value,
-    thread_id: &str,
-    project_path: &str,
-    client: &CallbackClient,
-    exec_ctx: Option<&ExecutionContext>,
 ) -> Vec<Value> {
+    let ForeachContext {
+        items,
+        var,
+        node,
+        thread_id,
+        project_path,
+        client,
+        exec_ctx,
+    } = ctx;
     let mut results = Vec::new();
     for item in items {
         let ctx = WalkContext {
@@ -55,16 +68,21 @@ pub async fn run_foreach_sequential(
 }
 
 pub async fn run_foreach_parallel(
-    items: &[Value],
-    var: &str,
-    node: &GraphNode,
+    ctx: ForeachContext<'_>,
     state: &Value,
     inputs: &Value,
-    thread_id: &str,
-    project_path: &str,
     client: CallbackClient,
     exec_ctx: Arc<ExecutionContext>,
 ) -> Vec<Value> {
+    let ForeachContext {
+        items,
+        var,
+        node,
+        thread_id,
+        project_path,
+        client: _client_ref,
+        exec_ctx: _exec_ctx_ref,
+    } = ctx;
     let max_conc = node.max_concurrency.unwrap_or(8);
     let sem = Arc::new(Semaphore::new(max_conc));
     let mut handles = Vec::new();

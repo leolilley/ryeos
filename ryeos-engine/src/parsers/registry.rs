@@ -131,15 +131,17 @@ impl ParserRegistry {
                 continue;
             }
             walk_tools(
+                WalkToolsContext {
+                    tools_root: &tools_root,
+                    descriptors: &mut descriptors,
+                    origin_paths: &mut origin_paths,
+                    duplicates: &mut duplicates,
+                    fingerprint_data: &mut fingerprint_data,
+                    replace_existing: false,
+                    trust_store,
+                    bootstrap: &bootstrap,
+                },
                 &tools_root,
-                &tools_root,
-                &mut descriptors,
-                &mut origin_paths,
-                &mut duplicates,
-                &mut fingerprint_data,
-                false,
-                trust_store,
-                &bootstrap,
             )?;
         }
 
@@ -197,15 +199,17 @@ impl ParserRegistry {
         let mut duplicates: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
         walk_tools(
+            WalkToolsContext {
+                tools_root: &tools_root,
+                descriptors: &mut descriptors,
+                origin_paths: &mut origin_paths,
+                duplicates: &mut duplicates,
+                fingerprint_data: &mut fingerprint_data,
+                replace_existing: true,
+                trust_store,
+                bootstrap: &bootstrap,
+            },
             &tools_root,
-            &tools_root,
-            &mut descriptors,
-            &mut origin_paths,
-            &mut duplicates,
-            &mut fingerprint_data,
-            true,
-            trust_store,
-            &bootstrap,
         )?;
 
         let fingerprint = lillux::cas::sha256_hex(&fingerprint_data);
@@ -352,17 +356,28 @@ impl ParserBootstrap {
 /// `.ai/`. Every file matching the parser kind's accepted extensions
 /// is strict-deserialized + signature-verified using the parser kind's
 /// declared signature envelope.
-fn walk_tools(
-    tools_root: &Path,
-    cur: &Path,
-    descriptors: &mut HashMap<String, ParserDescriptor>,
-    origin_paths: &mut HashMap<String, PathBuf>,
-    duplicates: &mut HashMap<String, Vec<PathBuf>>,
-    fingerprint_data: &mut Vec<u8>,
+struct WalkToolsContext<'a> {
+    tools_root: &'a Path,
+    descriptors: &'a mut HashMap<String, ParserDescriptor>,
+    origin_paths: &'a mut HashMap<String, PathBuf>,
+    duplicates: &'a mut HashMap<String, Vec<PathBuf>>,
+    fingerprint_data: &'a mut Vec<u8>,
     replace_existing: bool,
-    trust_store: &TrustStore,
-    bootstrap: &ParserBootstrap,
-) -> Result<(), EngineError> {
+    trust_store: &'a TrustStore,
+    bootstrap: &'a ParserBootstrap,
+}
+
+fn walk_tools(ctx: WalkToolsContext<'_>, cur: &Path) -> Result<(), EngineError> {
+    let WalkToolsContext {
+        tools_root,
+        descriptors,
+        origin_paths,
+        duplicates,
+        fingerprint_data,
+        replace_existing,
+        trust_store,
+        bootstrap,
+    } = ctx;
     let entries = match std::fs::read_dir(cur) {
         Ok(d) => d,
         Err(e) => {
@@ -378,15 +393,17 @@ fn walk_tools(
     for path in sorted {
         if path.is_dir() {
             walk_tools(
-                tools_root,
+                WalkToolsContext {
+                    tools_root,
+                    descriptors,
+                    origin_paths,
+                    duplicates,
+                    fingerprint_data,
+                    replace_existing,
+                    trust_store,
+                    bootstrap,
+                },
                 &path,
-                descriptors,
-                origin_paths,
-                duplicates,
-                fingerprint_data,
-                replace_existing,
-                trust_store,
-                bootstrap,
             )?;
             continue;
         }

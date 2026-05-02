@@ -328,16 +328,28 @@ pub(crate) fn derive_effective_caps(
     composed.policy_fact_string_seq(POLICY_FACT_EFFECTIVE_CAPS)
 }
 
-pub async fn build_and_launch(
-    state: &AppState,
-    executor_ref: &str,
-    acting_principal: &str,
-    resolved: &ResolvedExecutionRequest,
-    project_path: &Path,
-    parameters: &Value,
-    vault_bindings: &HashMap<String, String>,
-    pre_minted_thread_id: Option<&str>,
-) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+pub struct BuildAndLaunchParams<'a> {
+    pub state: &'a AppState,
+    pub executor_ref: &'a str,
+    pub acting_principal: &'a str,
+    pub resolved: &'a ResolvedExecutionRequest,
+    pub project_path: &'a Path,
+    pub parameters: &'a Value,
+    pub vault_bindings: &'a HashMap<String, String>,
+    pub pre_minted_thread_id: Option<&'a str>,
+}
+
+pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let BuildAndLaunchParams {
+        state,
+        executor_ref,
+        acting_principal,
+        resolved,
+        project_path,
+        parameters,
+        vault_bindings,
+        pre_minted_thread_id,
+    } = params;
     tracing::info!(
         executor_ref,
         acting_principal,
@@ -604,14 +616,16 @@ pub async fn build_and_launch(
         .collect();
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(
-            &descriptor_clone,
-            &binary_path,
-            &project_owned,
-            &envelope,
-            duration,
-            &callback_owned,
-            &thread_id_owned,
-            &vault_owned,
+            SpawnRuntimeParams {
+                descriptor: &descriptor_clone,
+                binary: &binary_path,
+                project_path: &project_owned,
+                envelope: &envelope,
+                timeout_secs: duration,
+                callback: &callback_owned,
+                thread_id: &thread_id_owned,
+                vault_bindings: &vault_owned,
+            },
         )
     })
     .await
@@ -677,16 +691,28 @@ pub async fn build_and_launch(
     })
 }
 
-fn spawn_runtime(
-    descriptor: &ryeos_engine::protocols::ProtocolDescriptor,
-    binary: &str,
-    project_path: &Path,
-    envelope: &LaunchEnvelope,
+struct SpawnRuntimeParams<'a> {
+    descriptor: &'a ryeos_engine::protocols::ProtocolDescriptor,
+    binary: &'a str,
+    project_path: &'a Path,
+    envelope: &'a LaunchEnvelope,
     timeout_secs: u64,
-    callback: &EnvelopeCallback,
-    thread_id: &str,
-    vault_bindings: &[(String, String)],
-) -> Result<RuntimeResult> {
+    callback: &'a EnvelopeCallback,
+    thread_id: &'a str,
+    vault_bindings: &'a [(String, String)],
+}
+
+fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
+    let SpawnRuntimeParams {
+        descriptor,
+        binary,
+        project_path,
+        envelope,
+        timeout_secs,
+        callback,
+        thread_id,
+        vault_bindings,
+    } = params;
     // Build the base env: allowlisted parent vars + declared secrets.
     // The builder adds descriptor-declared injection env vars on top.
     let secret_map: std::collections::BTreeMap<String, String> =

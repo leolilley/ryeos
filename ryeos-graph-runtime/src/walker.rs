@@ -124,6 +124,43 @@ impl Drop for RunGuard {
     }
 }
 
+struct RunNodeBodyContext<'a> {
+    pub current: &'a str,
+    pub node: &'a GraphNode,
+    pub cfg: &'a GraphConfig,
+    pub step: u32,
+    pub state: &'a Value,
+    pub inputs: &'a Value,
+    pub exec_ctx: &'a context::ExecutionContext,
+    pub cache: &'a NodeCache,
+    pub graph_run_id: &'a str,
+}
+
+struct CommitStepInput<'a> {
+    pub graph_run_id: &'a str,
+    pub step: u32,
+    pub current: &'a str,
+    pub state: &'a mut Value,
+    pub receipts: &'a mut Vec<NodeReceipt>,
+    pub suppressed_errors: &'a mut Vec<ErrorRecord>,
+    pub outcome: StepOutcome,
+    pub guard: &'a mut RunGuard,
+    pub hook_list: &'a [Value],
+    pub inputs: &'a Value,
+}
+
+struct CommitTerminalInput<'a> {
+    pub graph_run_id: &'a str,
+    pub steps: u32,
+    pub state: &'a mut Value,
+    pub suppressed_errors: &'a mut Vec<ErrorRecord>,
+    pub base_status: &'a str,
+    pub error: Option<&'a str>,
+    pub guard: &'a mut RunGuard,
+    pub hook_list: &'a [Value],
+    pub current_node_id: &'a str,
+}
+
 impl Walker {
     pub fn new(
         graph: GraphDefinition,
@@ -331,17 +368,19 @@ impl Walker {
                         status: "error",
                         error: Some(format!("node '{current}' not found")),
                     };
-                    match self.commit_step(
-                        &graph_run_id,
-                        step,
-                        &current,
-                        &mut state,
-                        &mut receipts,
-                        &mut suppressed_errors,
-                        outcome,
-                        &mut guard,
-                        &hook_list,
-                        &inputs,
+                     match self.commit_step(
+                        CommitStepInput {
+                            graph_run_id: &graph_run_id,
+                            step,
+                            current: &current,
+                            state: &mut state,
+                            receipts: &mut receipts,
+                            suppressed_errors: &mut suppressed_errors,
+                            outcome,
+                            guard: &mut guard,
+                            hook_list: &hook_list,
+                            inputs: &inputs,
+                        },
                     ).await {
                         CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
                         CommitResult::Terminate(result) => return result,
@@ -350,28 +389,32 @@ impl Walker {
             };
 
             let outcome = self.run_node_body(
-                &current,
-                node,
-                cfg,
-                step,
-                &state,
-                &inputs,
-                &exec_ctx,
-                &cache,
-                &graph_run_id,
+                RunNodeBodyContext {
+                    current: &current,
+                    node,
+                    cfg,
+                    step,
+                    state: &state,
+                    inputs: &inputs,
+                    exec_ctx: &exec_ctx,
+                    cache: &cache,
+                    graph_run_id: &graph_run_id,
+                },
             ).await;
 
             match self.commit_step(
-                &graph_run_id,
-                step,
-                &current,
-                &mut state,
-                &mut receipts,
-                &mut suppressed_errors,
-                outcome,
-                &mut guard,
-                &hook_list,
-                &inputs,
+                CommitStepInput {
+                    graph_run_id: &graph_run_id,
+                    step,
+                    current: &current,
+                    state: &mut state,
+                    receipts: &mut receipts,
+                    suppressed_errors: &mut suppressed_errors,
+                    outcome,
+                    guard: &mut guard,
+                    hook_list: &hook_list,
+                    inputs: &inputs,
+                },
             ).await {
                 CommitResult::Advance { next_node, next_step } => {
                     current = next_node;
@@ -387,16 +430,18 @@ impl Walker {
             error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
         };
         match self.commit_step(
-            &graph_run_id,
-            step,
-            "",
-            &mut state,
-            &mut receipts,
-            &mut suppressed_errors,
-            outcome,
-            &mut guard,
-            &hook_list,
-            &inputs,
+            CommitStepInput {
+                graph_run_id: &graph_run_id,
+                step,
+                current: "",
+                state: &mut state,
+                receipts: &mut receipts,
+                suppressed_errors: &mut suppressed_errors,
+                outcome,
+                guard: &mut guard,
+                hook_list: &hook_list,
+                inputs: &inputs,
+            },
         ).await {
             CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
             CommitResult::Terminate(result) => result,
@@ -406,18 +451,18 @@ impl Walker {
     /// Run a single node's body, producing a `StepOutcome` without
     /// emitting any events, writing any receipts, or writing any
     /// checkpoints. ALL persistence is deferred to `commit_step`.
-    async fn run_node_body(
-        &self,
-        current: &str,
-        node: &GraphNode,
-        cfg: &GraphConfig,
-        step: u32,
-        state: &Value,
-        inputs: &Value,
-        exec_ctx: &context::ExecutionContext,
-        cache: &NodeCache,
-        graph_run_id: &str,
-    ) -> StepOutcome {
+    async fn run_node_body(&self, ctx: RunNodeBodyContext<'_>) -> StepOutcome {
+        let RunNodeBodyContext {
+            current,
+            node,
+            cfg,
+            step,
+            state,
+            inputs,
+            exec_ctx,
+            cache,
+            graph_run_id,
+        } = ctx;
         let start = Instant::now();
 
         match node.node_type {
@@ -464,15 +509,22 @@ impl Walker {
 
                 let results = if parallel {
                     foreach::run_foreach_parallel(
-                        &items, &var, node, state, inputs,
-                        &self.thread_id, &self.project_path,
+                        foreach::ForeachContext {
+                            items: &items, var: &var, node,
+                            thread_id: &self.thread_id, project_path: &self.project_path,
+                            client: &self.client, exec_ctx: Some(exec_ctx),
+                        },
+                        state, inputs,
                         self.client.clone(), Arc::new(exec_ctx.clone()),
                     ).await
                 } else {
                     foreach::run_foreach_sequential(
-                        &items, &var, node, &mut state.clone(), inputs,
-                        &self.thread_id, &self.project_path,
-                        &self.client, Some(exec_ctx),
+                        foreach::ForeachContext {
+                            items: &items, var: &var, node,
+                            thread_id: &self.thread_id, project_path: &self.project_path,
+                            client: &self.client, exec_ctx: Some(exec_ctx),
+                        },
+                        &mut state.clone(), inputs,
                     ).await
                 };
 
@@ -486,7 +538,9 @@ impl Walker {
             }
 
             NodeType::Action => {
-                self.run_action_body(current, node, cfg, step, state, inputs, exec_ctx, cache, graph_run_id, start).await
+                self.run_action_body(RunNodeBodyContext {
+                    current, node, cfg, step, state, inputs, exec_ctx, cache, graph_run_id,
+                }, start).await
             }
         }
     }
@@ -494,19 +548,18 @@ impl Walker {
     /// Action node body: permission check → env preflight → dispatch
     /// → classify result. Returns a StepOutcome without emitting any
     /// events or persisting anything.
-    async fn run_action_body(
-        &self,
-        current: &str,
-        node: &GraphNode,
-        cfg: &GraphConfig,
-        _step: u32,
-        state: &Value,
-        inputs: &Value,
-        exec_ctx: &context::ExecutionContext,
-        cache: &NodeCache,
-        _graph_run_id: &str,
-        start: Instant,
-    ) -> StepOutcome {
+    async fn run_action_body(&self, ctx: RunNodeBodyContext<'_>, start: Instant) -> StepOutcome {
+        let RunNodeBodyContext {
+            current,
+            node,
+            cfg,
+            step: _step,
+            state,
+            inputs,
+            exec_ctx,
+            cache,
+            graph_run_id: _graph_run_id,
+        } = ctx;
         let action = match &node.action {
             Some(a) => a.clone(),
             None => {
@@ -656,31 +709,33 @@ impl Walker {
     ///   - finalize the thread on terminal
     ///
     /// `commit_step` MUST be called exactly once per loop iteration.
-    async fn commit_step(
-        &self,
-        graph_run_id: &str,
-        step: u32,
-        current: &str,
-        state: &mut Value,
-        receipts: &mut Vec<NodeReceipt>,
-        suppressed_errors: &mut Vec<ErrorRecord>,
-        outcome: StepOutcome,
-        guard: &mut RunGuard,
-        hook_list: &[Value],
-        inputs: &Value,
-    ) -> CommitResult {
+    async fn commit_step(&self, input: CommitStepInput<'_>) -> CommitResult {
+        let CommitStepInput {
+            graph_run_id,
+            step,
+            current,
+            state,
+            receipts,
+            suppressed_errors,
+            outcome,
+            guard,
+            hook_list,
+            inputs,
+        } = input;
         match outcome {
             StepOutcome::Terminal { status, error } => {
                 self.commit_terminal(
-                    graph_run_id,
-                    step,
-                    state,
-                    suppressed_errors,
-                    status,
-                    error.as_deref(),
-                    guard,
-                    hook_list,
-                    current,
+                    CommitTerminalInput {
+                        graph_run_id,
+                        steps: step,
+                        state,
+                        suppressed_errors,
+                        base_status: status,
+                        error: error.as_deref(),
+                        guard,
+                        hook_list,
+                        current_node_id: current,
+                    },
                 ).await
             }
 
@@ -704,15 +759,17 @@ impl Walker {
                     }
                     None => {
                         self.commit_terminal(
-                            graph_run_id,
-                            step + 1,
-                            state,
-                            suppressed_errors,
-                            "completed",
-                            None,
-                            guard,
-                            hook_list,
-                            current,
+                            CommitTerminalInput {
+                                graph_run_id,
+                                steps: step + 1,
+                                state,
+                                suppressed_errors,
+                                base_status: "completed",
+                                error: None,
+                                guard,
+                                hook_list,
+                                current_node_id: current,
+                            },
                         ).await
                     }
                 }
@@ -781,15 +838,17 @@ impl Walker {
                     }
                     None => {
                         self.commit_terminal(
-                            graph_run_id,
-                            step + 1,
-                            state,
-                            suppressed_errors,
-                            "completed",
-                            None,
-                            guard,
-                            hook_list,
-                            current,
+                            CommitTerminalInput {
+                                graph_run_id,
+                                steps: step + 1,
+                                state,
+                                suppressed_errors,
+                                base_status: "completed",
+                                error: None,
+                                guard,
+                                hook_list,
+                                current_node_id: current,
+                            },
                         ).await
                     }
                 }
@@ -857,15 +916,17 @@ impl Walker {
                     }
                     None => {
                         self.commit_terminal(
-                            graph_run_id,
-                            step + 1,
-                            state,
-                            suppressed_errors,
-                            "completed",
-                            None,
-                            guard,
-                            hook_list,
-                            current,
+                            CommitTerminalInput {
+                                graph_run_id,
+                                steps: step + 1,
+                                state,
+                                suppressed_errors,
+                                base_status: "completed",
+                                error: None,
+                                guard,
+                                hook_list,
+                                current_node_id: current,
+                            },
                         ).await
                     }
                 }
@@ -926,30 +987,34 @@ impl Walker {
                             }
                             None => {
                                 self.commit_terminal(
-                                    graph_run_id,
-                                    step + 1,
-                                    state,
-                                    suppressed_errors,
-                                    "completed",
-                                    None,
-                                    guard,
-                                    hook_list,
-                                    current,
+                                    CommitTerminalInput {
+                                        graph_run_id,
+                                        steps: step + 1,
+                                        state,
+                                        suppressed_errors,
+                                        base_status: "completed",
+                                        error: None,
+                                        guard,
+                                        hook_list,
+                                        current_node_id: current,
+                                    },
                                 ).await
                             }
                         }
                     }
                     NextOnError::PolicyFail => {
                         self.commit_terminal(
-                            graph_run_id,
-                            step,
-                            state,
-                            suppressed_errors,
-                            "error",
-                            Some(&format!("node '{}' failed: {}", current, error)),
-                            guard,
-                            hook_list,
-                            current,
+                            CommitTerminalInput {
+                                graph_run_id,
+                                steps: step,
+                                state,
+                                suppressed_errors,
+                                base_status: "error",
+                                error: Some(&format!("node '{}' failed: {}", current, error)),
+                                guard,
+                                hook_list,
+                                current_node_id: current,
+                            },
                         ).await
                     }
                 }
@@ -1014,30 +1079,34 @@ impl Walker {
                             }
                             None => {
                                 self.commit_terminal(
-                                    graph_run_id,
-                                    step + 1,
-                                    state,
-                                    suppressed_errors,
-                                    "completed",
-                                    None,
-                                    guard,
-                                    hook_list,
-                                    current,
+                                    CommitTerminalInput {
+                                        graph_run_id,
+                                        steps: step + 1,
+                                        state,
+                                        suppressed_errors,
+                                        base_status: "completed",
+                                        error: None,
+                                        guard,
+                                        hook_list,
+                                        current_node_id: current,
+                                    },
                                 ).await
                             }
                         }
                     }
                     NextOnError::PolicyFail => {
                         self.commit_terminal(
-                            graph_run_id,
-                            step,
-                            state,
-                            suppressed_errors,
-                            "error",
-                            Some(&format!("node '{}' failed: {}", current, error)),
-                            guard,
-                            hook_list,
-                            current,
+                            CommitTerminalInput {
+                                graph_run_id,
+                                steps: step,
+                                state,
+                                suppressed_errors,
+                                base_status: "error",
+                                error: Some(&format!("node '{}' failed: {}", current, error)),
+                                guard,
+                                hook_list,
+                                current_node_id: current,
+                            },
                         ).await
                     }
                 }
@@ -1048,18 +1117,18 @@ impl Walker {
     /// Commit a terminal outcome: emit GraphCompleted, write
     /// transcript, publish artifact, finalize thread. Called from
     /// `commit_step` for all terminal variants.
-    async fn commit_terminal(
-        &self,
-        graph_run_id: &str,
-        steps: u32,
-        state: &mut Value,
-        suppressed_errors: &mut Vec<ErrorRecord>,
-        base_status: &str,
-        error: Option<&str>,
-        guard: &mut RunGuard,
-        hook_list: &[Value],
-        current_node_id: &str,
-    ) -> CommitResult {
+    async fn commit_terminal(&self, input: CommitTerminalInput<'_>) -> CommitResult {
+        let CommitTerminalInput {
+            graph_run_id,
+            steps,
+            state,
+            suppressed_errors,
+            base_status,
+            error,
+            guard,
+            hook_list,
+            current_node_id,
+        } = input;
         let (success, status) = match base_status {
             "completed" => {
                 let s = if suppressed_errors.is_empty() {

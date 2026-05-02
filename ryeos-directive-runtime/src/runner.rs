@@ -96,21 +96,37 @@ fn record_callback_warning(
     }
 }
 
+pub struct RunnerConfig {
+    pub messages: Vec<ProviderMessage>,
+    pub tools: Vec<ToolSchema>,
+    pub system_prompt: Option<String>,
+    pub harness: Harness,
+    pub budget: BudgetTracker,
+    pub callback: CallbackClient,
+    pub context_window: u64,
+    pub provider_config: crate::directive::ProviderConfig,
+    pub execution: ExecutionConfig,
+    pub model_name: String,
+    pub thread_id: String,
+    pub hooks: Vec<ryeos_runtime::HookDefinition>,
+}
+
 impl Runner {
-    pub fn new(
-        messages: Vec<ProviderMessage>,
-        tools: Vec<ToolSchema>,
-        system_prompt: Option<String>,
-        harness: Harness,
-        budget: BudgetTracker,
-        callback: CallbackClient,
-        context_window: u64,
-        provider_config: crate::directive::ProviderConfig,
-        execution: ExecutionConfig,
-        model_name: String,
-        thread_id: String,
-        hooks: Vec<ryeos_runtime::HookDefinition>,
-    ) -> Self {
+    pub fn new(config: RunnerConfig) -> Self {
+        let RunnerConfig {
+            messages,
+            tools,
+            system_prompt,
+            harness,
+            budget,
+            callback,
+            context_window,
+            provider_config,
+            execution,
+            model_name,
+            thread_id,
+            hooks,
+        } = config;
         let mut initial_messages = Vec::new();
 
         if let Some(ref sys) = system_prompt {
@@ -147,36 +163,14 @@ impl Runner {
 
     pub fn from_resume(
         resume: ResumeState,
-        tools: Vec<ToolSchema>,
-        system_prompt: Option<String>,
-        mut harness: Harness,
-        mut budget: BudgetTracker,
-        callback: CallbackClient,
-        context_window: u64,
-        provider_config: crate::directive::ProviderConfig,
-        execution: ExecutionConfig,
-        model_name: String,
-        thread_id: String,
-        hooks: Vec<ryeos_runtime::HookDefinition>,
+        mut config: RunnerConfig,
     ) -> Self {
         if let Some(ref usage) = resume.thread_usage {
-            harness.reseed(usage.completed_turns, usage.input_tokens + usage.output_tokens, usage.spend_usd, usage.spawns_used);
-            budget.reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd);
+            config.harness.reseed(usage.completed_turns, usage.input_tokens + usage.output_tokens, usage.spend_usd, usage.spawns_used);
+            config.budget.reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd);
         }
-        let mut runner = Self::new(
-            resume.messages,
-            tools,
-            system_prompt,
-            harness,
-            budget,
-            callback,
-            context_window,
-            provider_config,
-            execution,
-            model_name,
-            thread_id,
-            hooks,
-        );
+        config.messages = resume.messages;
+        let mut runner = Self::new(config);
         runner.initial_turn = resume.turns_completed;
         runner
     }
@@ -255,14 +249,16 @@ impl Runner {
                     // broadcast on the daemon side then re-publishes
                     // these durable events.
                     match crate::provider_adapter::call_provider_streaming(
-                        &client,
-                        &self.provider_config,
-                        &self.execution,
-                        &self.model_name,
-                        &self.messages,
-                        &self.tools,
-                        &self.callback,
-                        turn,
+                        crate::provider_adapter::StreamingCallInput {
+                            client: &client,
+                            provider: &self.provider_config,
+                            execution: &self.execution,
+                            model: &self.model_name,
+                            messages: &self.messages,
+                            tools: &self.tools,
+                            callback: &self.callback,
+                            turn,
+                        },
                     )
                     .await
                     {
@@ -852,20 +848,20 @@ mod tests {
             extra: Default::default(),
         };
 
-        let runner = Runner::new(
-            vec![],
-            vec![],
-            None,
-            Harness::new(&make_policy(), 0, None),
-            BudgetTracker::new(1.0),
-            make_callback(),
-            200_000,
-            provider,
-            ExecutionConfig::default(),
-            "test-model".to_string(),
-            "T-test".to_string(),
-            vec![],
-        );
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            budget: BudgetTracker::new(1.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            provider_config: provider,
+            execution: ExecutionConfig::default(),
+            model_name: "test-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+        });
 
         let cost = runner.compute_cost(1_000_000, 500_000);
         assert!((cost - 10.5).abs() < f64::EPSILON);
@@ -882,20 +878,20 @@ mod tests {
             extra: Default::default(),
         };
 
-        let runner = Runner::new(
-            vec![],
-            vec![],
-            None,
-            Harness::new(&make_policy(), 0, None),
-            BudgetTracker::new(1.0),
-            make_callback(),
-            200_000,
-            provider,
-            ExecutionConfig::default(),
-            "test-model".to_string(),
-            "T-test".to_string(),
-            vec![],
-        );
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            budget: BudgetTracker::new(1.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            provider_config: provider,
+            execution: ExecutionConfig::default(),
+            model_name: "test-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+        });
 
         let result = runner.finalize(json!("Hello world"));
         assert!(result.success);
@@ -914,25 +910,25 @@ mod tests {
             extra: Default::default(),
         };
 
-        let runner = Runner::new(
-            vec![ProviderMessage {
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![ProviderMessage {
                 role: "user".to_string(),
                 content: Some(json!("hello")),
                 tool_calls: None,
                 tool_call_id: None,
             }],
-            vec![],
-            Some("You are helpful".to_string()),
-            Harness::new(&make_policy(), 0, None),
-            BudgetTracker::new(1.0),
-            make_callback(),
-            200_000,
-            provider,
-            ExecutionConfig::default(),
-            "test-model".to_string(),
-            "T-test".to_string(),
-            vec![],
-        );
+            tools: vec![],
+            system_prompt: Some("You are helpful".to_string()),
+            harness: Harness::new(&make_policy(), 0, None),
+            budget: BudgetTracker::new(1.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            provider_config: provider,
+            execution: ExecutionConfig::default(),
+            model_name: "test-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+        });
 
         assert_eq!(runner.messages.len(), 2);
         assert_eq!(runner.messages[0].role, "system");

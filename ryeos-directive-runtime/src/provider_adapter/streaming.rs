@@ -295,24 +295,36 @@ fn parse_complete_chunks(parsed: &Value, events: &mut Vec<StreamEvent>) {
 /// streaming contract: live broadcasts may never deliver a delta the
 /// store doesn't already hold.
 ///
-/// Returns the accumulated `AdapterResponse` (final assistant message
-/// + usage + finish_reason) plus the full sequence of `StreamEvent`s
-/// for the runner to consume.
+/// Returns the accumulated `AdapterResponse` (final assistant message + usage +
+/// finish_reason) plus the full sequence of `StreamEvent`s for the runner to
+/// consume.
+pub struct StreamingCallInput<'a> {
+    pub client: &'a reqwest::Client,
+    pub provider: &'a ProviderConfig,
+    pub execution: &'a ExecutionConfig,
+    pub model: &'a str,
+    pub messages: &'a [ProviderMessage],
+    pub tools: &'a [ToolSchema],
+    pub callback: &'a CallbackClient,
+    pub turn: u32,
+}
+
 #[tracing::instrument(
     name = "provider:request_streaming",
-    skip(client, messages, tools, callback),
-    fields(adapter_type = "stream", model = %model, turn = turn)
+    skip(input),
+    fields(adapter_type = "stream", model = %input.model, turn = input.turn)
 )]
-pub async fn call_provider_streaming(
-    client: &reqwest::Client,
-    provider: &ProviderConfig,
-    execution: &ExecutionConfig,
-    model: &str,
-    messages: &[ProviderMessage],
-    tools: &[ToolSchema],
-    callback: &CallbackClient,
-    turn: u32,
-) -> Result<(AdapterResponse, Vec<StreamEvent>)> {
+pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(AdapterResponse, Vec<StreamEvent>)> {
+    let StreamingCallInput {
+        client,
+        provider,
+        execution,
+        model,
+        messages,
+        tools,
+        callback,
+        turn,
+    } = input;
     let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
 
     let (converted_messages, system_prompt) =

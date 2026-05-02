@@ -59,6 +59,17 @@ mod types {
     }
 }
 
+/// Parameters for [`append_events`].
+pub struct AppendEventsInput<'a> {
+    pub cas_root: &'a Path,
+    pub refs_root: &'a Path,
+    pub chain_root_id: &'a str,
+    pub thread_id: &'a str,
+    pub events: Vec<ThreadEvent>,
+    pub snapshot_updates: Vec<SnapshotUpdate>,
+    pub signer: &'a dyn Signer,
+}
+
 /// File lock for a chain.
 pub struct ChainLock {
     /// Held only for RAII; Drop releases the file lock via closed fd.
@@ -240,23 +251,27 @@ pub fn create_chain(
 /// 9. Update head cache
 #[tracing::instrument(
     name = "state:chain_append",
-    skip(cas_root, refs_root, events, snapshot_updates, signer, head_cache),
+    skip(input, head_cache),
     fields(
-        chain_root_id = %chain_root_id,
-        thread_id = %thread_id,
-        event_count = events.len(),
+        chain_root_id = %input.chain_root_id,
+        thread_id = %input.thread_id,
+        event_count = input.events.len(),
     )
 )]
 pub fn append_events(
-    cas_root: &Path,
-    refs_root: &Path,
-    chain_root_id: &str,
-    thread_id: &str,
-    events: Vec<ThreadEvent>,
-    snapshot_updates: Vec<SnapshotUpdate>,
-    signer: &dyn Signer,
+    input: AppendEventsInput<'_>,
     head_cache: &mut HeadCache,
 ) -> anyhow::Result<AppendResult> {
+    let AppendEventsInput {
+        cas_root,
+        refs_root,
+        chain_root_id,
+        thread_id,
+        events,
+        snapshot_updates,
+        signer,
+    } = input;
+
     if events.is_empty() {
         anyhow::bail!("cannot append empty event list");
     }
@@ -786,13 +801,15 @@ mod tests {
         // Append events
         let event = make_test_event("T-root", "T-root");
         let result = append_events(
-            &cas_root,
-            &refs_root,
-            "T-root",
-            "T-root",
-            vec![event],
-            vec![],
-            &signer,
+            AppendEventsInput {
+                cas_root: &cas_root,
+                refs_root: &refs_root,
+                chain_root_id: "T-root",
+                thread_id: "T-root",
+                events: vec![event],
+                snapshot_updates: vec![],
+                signer: &signer,
+            },
             &mut head_cache,
         );
 
@@ -825,13 +842,15 @@ mod tests {
         // Append events
         let event = make_test_event("T-root", "T-root");
         let result = append_events(
-            &cas_root,
-            &refs_root,
-            "T-root",
-            "T-root",
-            vec![event],
-            vec![],
-            &signer,
+            AppendEventsInput {
+                cas_root: &cas_root,
+                refs_root: &refs_root,
+                chain_root_id: "T-root",
+                thread_id: "T-root",
+                events: vec![event],
+                snapshot_updates: vec![],
+                signer: &signer,
+            },
             &mut head_cache,
         )
         .unwrap();
@@ -955,13 +974,15 @@ mod tests {
         .unwrap();
 
         let result = append_events(
-            &cas_root,
-            &refs_root,
-            "T-root",
-            "T-root",
-            vec![],
-            vec![],
-            &signer,
+            AppendEventsInput {
+                cas_root: &cas_root,
+                refs_root: &refs_root,
+                chain_root_id: "T-root",
+                thread_id: "T-root",
+                events: vec![],
+                snapshot_updates: vec![],
+                signer: &signer,
+            },
             &mut head_cache,
         );
 
@@ -989,13 +1010,15 @@ mod tests {
 
         let event = make_test_event("T-wrong", "T-root");
         let result = append_events(
-            &cas_root,
-            &refs_root,
-            "T-root",
-            "T-root",
-            vec![event],
-            vec![],
-            &signer,
+            AppendEventsInput {
+                cas_root: &cas_root,
+                refs_root: &refs_root,
+                chain_root_id: "T-root",
+                thread_id: "T-root",
+                events: vec![event],
+                snapshot_updates: vec![],
+                signer: &signer,
+            },
             &mut head_cache,
         );
 
@@ -1023,13 +1046,15 @@ mod tests {
 
         let event = make_test_event("T-root", "T-wrong");
         let result = append_events(
-            &cas_root,
-            &refs_root,
-            "T-root",
-            "T-root",
-            vec![event],
-            vec![],
-            &signer,
+            AppendEventsInput {
+                cas_root: &cas_root,
+                refs_root: &refs_root,
+                chain_root_id: "T-root",
+                thread_id: "T-root",
+                events: vec![event],
+                snapshot_updates: vec![],
+                signer: &signer,
+            },
             &mut head_cache,
         );
 
@@ -1188,7 +1213,15 @@ mod tests {
 
         let event = make_test_event("T-trace2", "T-trace2");
         let (_, spans) = test::capture_traces(|| {
-            let _ = append_events(&cas_root, &refs_root, "T-trace2", "T-trace2", vec![event], vec![], &signer, &mut head_cache);
+            let _ = append_events(AppendEventsInput {
+                cas_root: &cas_root,
+                refs_root: &refs_root,
+                chain_root_id: "T-trace2",
+                thread_id: "T-trace2",
+                events: vec![event],
+                snapshot_updates: vec![],
+                signer: &signer,
+            }, &mut head_cache);
         });
 
         let span = test::find_span(&spans, "state:chain_append");

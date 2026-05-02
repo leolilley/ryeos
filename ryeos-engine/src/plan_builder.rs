@@ -283,22 +283,35 @@ fn build_runtime_registry(
 /// 3. Compiles intermediates into a SubprocessSpec
 /// 4. Emits the DispatchSubprocess plan node
 /// 5. Computes a cache key
+pub struct BuildPlanInput<'a> {
+    pub item: &'a VerifiedItem,
+    pub parameters: &'a serde_json::Value,
+    pub hints: &'a ExecutionHints,
+    pub ctx: &'a PlanContext,
+    pub kinds: &'a KindRegistry,
+    pub parsers: &'a ParserDispatcher,
+    pub roots: &'a ResolutionRoots,
+    pub registry_fingerprint: &'a str,
+    pub trust_store: &'a TrustStore,
+}
+
 #[tracing::instrument(
     name = "engine:build_plan",
-    skip(item, parameters, hints, ctx, kinds, parsers, roots, trust_store),
-    fields(canonical_ref = %item.resolved.canonical_ref)
+    skip(input),
+    fields(canonical_ref = %input.item.resolved.canonical_ref)
 )]
-pub fn build_plan(
-    item: &VerifiedItem,
-    parameters: &serde_json::Value,
-    hints: &ExecutionHints,
-    ctx: &PlanContext,
-    kinds: &KindRegistry,
-    parsers: &ParserDispatcher,
-    roots: &ResolutionRoots,
-    registry_fingerprint: &str,
-    trust_store: &TrustStore,
-) -> Result<ExecutionPlan, EngineError> {
+pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineError> {
+    let BuildPlanInput {
+        item,
+        parameters,
+        hints,
+        ctx,
+        kinds,
+        parsers,
+        roots,
+        registry_fingerprint,
+        trust_store,
+    } = input;
     let resolved = &item.resolved;
     let canonical_ref = resolved.canonical_ref.to_string();
 
@@ -760,15 +773,17 @@ config:
         );
 
         let plan = build_plan(
-            &item,
-            &json!({"key": "value"}),
-            &ExecutionHints::default(),
-            &ctx,
-            &kinds,
-            &parsers,
-            &roots,
-            "fp:test",
-            &ts,
+            BuildPlanInput {
+                item: &item,
+                parameters: &json!({"key": "value"}),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &ts,
+            },
         )
         .unwrap();
 
@@ -808,15 +823,17 @@ config:
         );
 
         let err = build_plan(
-            &item,
-            &json!(null),
-            &ExecutionHints::default(),
-            &ctx,
-            &kinds,
-            &parsers,
-            &roots,
-            "fp:test",
-            &ts,
+            BuildPlanInput {
+                item: &item,
+                parameters: &json!(null),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &ts,
+            },
         )
         .unwrap_err();
 
@@ -874,15 +891,17 @@ config:
         );
 
         let err = build_plan(
-            &item,
-            &json!(null),
-            &ExecutionHints::default(),
-            &ctx,
-            &kinds,
-            &parsers,
-            &roots,
-            "fp:test",
-            &ts,
+            BuildPlanInput {
+                item: &item,
+                parameters: &json!(null),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &ts,
+            },
         )
         .unwrap_err();
 
@@ -915,15 +934,17 @@ config:
         let roots = ResolutionRoots::from_flat(None, None, vec![]);
 
         let err = build_plan(
-            &item,
-            &json!(null),
-            &ExecutionHints::default(),
-            &ctx,
-            &kinds,
-            &parsers,
-            &roots,
-            "fp:test",
-            &TrustStore::empty(),
+            BuildPlanInput {
+                item: &item,
+                parameters: &json!(null),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &TrustStore::empty(),
+            },
         )
         .unwrap_err();
 
@@ -1247,15 +1268,17 @@ config:
         );
 
         let err = build_plan(
-            &item,
-            &json!(null),
-            &ExecutionHints::default(),
-            &ctx,
-            &kinds,
-            &parsers,
-            &roots,
-            "fp:test",
-            &ts,
+            BuildPlanInput {
+                item: &item,
+                parameters: &json!(null),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &ts,
+            },
         )
         .unwrap_err();
 
@@ -1375,15 +1398,17 @@ category: rye/core/subprocess\n";
 
         // 5. Build plan — this walks the full 3-hop chain
         let plan = build_plan(
-            &item,
-            &json!({"message": "hello"}),
-            &ExecutionHints::default(),
-            &ctx,
-            &kinds,
-            &parsers,
-            &roots,
-            "fp:test",
-            &ts,
+            BuildPlanInput {
+                item: &item,
+                parameters: &json!({"message": "hello"}),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &ts,
+            },
         )
         .expect("build_plan should succeed for valid 3-hop chain");
 

@@ -602,18 +602,31 @@ pub fn new_thread_id() -> String {
 }
 
 /// Resolve a canonical item ref through the engine.
-pub fn resolve_root_execution(
-    engine: &Engine,
-    site_id: &str,
-    project_path: impl AsRef<Path>,
-    item_ref: &str,
-    launch_mode: &str,
-    parameters: Value,
-    requested_by: Option<String>,
-    caller_scopes: Vec<String>,
-    validate_only: bool,
-) -> Result<ResolvedExecutionRequest> {
-    let project_path = project_path.as_ref().to_path_buf();
+pub struct ResolveRootExecutionParams<'a> {
+    pub engine: &'a Engine,
+    pub site_id: &'a str,
+    pub project_path: &'a Path,
+    pub item_ref: &'a str,
+    pub launch_mode: &'a str,
+    pub parameters: Value,
+    pub requested_by: Option<String>,
+    pub caller_scopes: Vec<String>,
+    pub validate_only: bool,
+}
+
+pub fn resolve_root_execution(params: ResolveRootExecutionParams<'_>) -> Result<ResolvedExecutionRequest> {
+    let ResolveRootExecutionParams {
+        engine,
+        site_id,
+        project_path,
+        item_ref,
+        launch_mode,
+        parameters,
+        requested_by,
+        caller_scopes,
+        validate_only,
+    } = params;
+    let project_path = project_path.to_path_buf();
 
     let canonical_ref =
         CanonicalRef::parse(item_ref).map_err(|e| anyhow!("invalid item ref: {e}"))?;
@@ -724,28 +737,41 @@ impl SpawnedItem {
 /// daemon can persist it for the resume path. When `is_resume = true`,
 /// `RYE_RESUME=1` is also injected so replay-aware tools can branch
 /// on cold-start vs. resume.
+pub struct SpawnItemParams<'a> {
+    pub engine: &'a Engine,
+    pub resolved: &'a ResolvedExecutionRequest,
+    pub thread_id: &'a str,
+    pub chain_root_id: &'a str,
+    pub vault_bindings: std::collections::HashMap<String, String>,
+    pub daemon_callback_env: std::collections::HashMap<String, String>,
+    pub thread_state_dir: Option<&'a std::path::Path>,
+    pub is_resume: bool,
+    pub original_snapshot_hash: Option<&'a str>,
+}
+
 #[tracing::instrument(
     name = "thread:spawn",
-    skip(engine, resolved, vault_bindings, daemon_callback_env, thread_state_dir, original_snapshot_hash),
+    skip(params),
     fields(
-        thread_id,
-        chain_root_id,
-        item_ref = %resolved.item_ref,
-        is_resume,
-        snapshot_pinned = original_snapshot_hash.is_some(),
+        thread_id = %params.thread_id,
+        chain_root_id = %params.chain_root_id,
+        item_ref = %params.resolved.item_ref,
+        is_resume = params.is_resume,
+        snapshot_pinned = params.original_snapshot_hash.is_some(),
     )
 )]
-pub fn spawn_item(
-    engine: &Engine,
-    resolved: &ResolvedExecutionRequest,
-    thread_id: &str,
-    chain_root_id: &str,
-    vault_bindings: std::collections::HashMap<String, String>,
-    daemon_callback_env: std::collections::HashMap<String, String>,
-    thread_state_dir: Option<&std::path::Path>,
-    is_resume: bool,
-    original_snapshot_hash: Option<&str>,
-) -> Result<SpawnedItem> {
+pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
+    let SpawnItemParams {
+        engine,
+        resolved,
+        thread_id,
+        chain_root_id,
+        vault_bindings,
+        daemon_callback_env,
+        thread_state_dir,
+        is_resume,
+        original_snapshot_hash,
+    } = params;
     // vault_bindings: user-provided secret/capability env vars.
     // daemon_callback_env: daemon infrastructure env (socket path, callback
     // token, thread id, project path). Sourced from AppState by the caller

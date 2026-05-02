@@ -129,6 +129,18 @@ pub struct DispatchRequest<'a> {
     pub pre_minted_thread_id: Option<String>,
 }
 
+pub struct SubprocessDispatchContext<'a> {
+    current_ref: &'a CanonicalRef,
+    thread_profile: &'a str,
+    verified: Option<&'a VerifiedItem>,
+    request: &'a DispatchRequest<'a>,
+    ctx: &'a ExecutionContext,
+    state: &'a AppState,
+    role: &'a SubprocessRole,
+    root_subject: Option<RootSubject>,
+    hop_runtime: Option<VerifiedRuntime>,
+}
+
 /// Check protocol-derived capabilities against the request shape.
 /// Reads the capability bits from the verified protocol descriptor.
 /// On mismatch, returns the V5.2 wording verbatim (pin tests assert
@@ -572,17 +584,18 @@ fn enforce_caps(
 /// the `runtime.execute` cap check. This is a ROLE check, NOT a protocol
 /// check — a future kind using `protocol: runtime_v1` without being a
 /// runtime MUST NOT trigger the cap.
-pub async fn dispatch_subprocess(
-    current_ref: &CanonicalRef,
-    thread_profile: &str,
-    verified: Option<&VerifiedItem>,
-    request: &DispatchRequest<'_>,
-    ctx: &ExecutionContext,
-    state: &AppState,
-    role: &SubprocessRole,
-    root_subject: Option<RootSubject>,
-    hop_runtime: Option<VerifiedRuntime>,
-) -> Result<Value, DispatchError> {
+pub async fn dispatch_subprocess(ctx: SubprocessDispatchContext<'_>) -> Result<Value, DispatchError> {
+    let SubprocessDispatchContext {
+        current_ref,
+        thread_profile,
+        verified,
+        request,
+        ctx,
+        state,
+        role,
+        root_subject,
+        hop_runtime,
+    } = ctx;
     // Defense-in-depth schema check.
     let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
         let mut available: Vec<String> =
@@ -647,15 +660,17 @@ pub async fn dispatch_subprocess(
             // Managed-lifecycle dispatch: runtime (callback-driven) or
             // streaming tool (builder-driven). Role determines the path.
             dispatch_managed_subprocess(
-                current_ref,
-                verified,
-                thread_profile,
-                hop_runtime,
-                root_subject,
-                request,
-                ctx,
-                state,
-                role,
+                SubprocessDispatchContext {
+                    current_ref,
+                    thread_profile,
+                    verified,
+                    request,
+                    ctx,
+                    state,
+                    role,
+                    root_subject,
+                    hop_runtime,
+                },
                 protocol,
             )
             .await
@@ -681,17 +696,20 @@ pub async fn dispatch_subprocess(
 /// - `RuntimeTarget` → callback-driven execution via `launch::build_and_launch`
 /// - `Regular` → synchronous streaming tool execution via the protocol builder
 async fn dispatch_managed_subprocess(
-    canonical_ref: &CanonicalRef,
-    hop_verified: Option<&VerifiedItem>,
-    hop_thread_profile: &str,
-    _hop_runtime: Option<VerifiedRuntime>,
-    root_subject: Option<RootSubject>,
-    request: &DispatchRequest<'_>,
-    ctx: &ExecutionContext,
-    state: &AppState,
-    role: &SubprocessRole,
+    sctx: SubprocessDispatchContext<'_>,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<Value, DispatchError> {
+    let SubprocessDispatchContext {
+        current_ref: canonical_ref,
+        verified: hop_verified,
+        thread_profile: hop_thread_profile,
+        hop_runtime: _hop_runtime,
+        root_subject,
+        request,
+        ctx,
+        state,
+        role,
+    } = sctx;
     // Streaming tools (callback_channel: none) use the protocol builder +
     // lillux directly, without the callback/thread infrastructure. All
     // other managed-lifecycle items (callback_channel: http_v1) go through
@@ -717,7 +735,7 @@ async fn dispatch_managed_subprocess(
     // the canonical ref still identifies a registered runtime — look it
     // up by ref so callback-driven execution can proceed.
     let verified_runtime = match role {
-        SubprocessRole::RuntimeTarget { verified_runtime } => Some(verified_runtime.clone()),
+        SubprocessRole::RuntimeTarget { verified_runtime } => Some(verified_runtime.as_ref().clone()),
         SubprocessRole::Regular => {
             state
                 .engine
@@ -819,14 +837,16 @@ async fn dispatch_managed_subprocess(
     .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
 
     let result = launch::build_and_launch(
-        state,
-        &executor_ref,
-        acting_principal,
-        &resolved,
-        project_path,
-        &params,
-        &vault_bindings,
-        request.pre_minted_thread_id.as_deref(),
+        launch::BuildAndLaunchParams {
+            state,
+            executor_ref: &executor_ref,
+            acting_principal,
+            resolved: &resolved,
+            project_path,
+            parameters: &params,
+            vault_bindings: &vault_bindings,
+            pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
+        },
     )
     .await
     .map_err(|e| match e {
@@ -1016,15 +1036,17 @@ async fn dispatch_tool_subprocess(
     let item_ref = current_ref.to_string();
 
     let mut resolved = crate::services::thread_lifecycle::resolve_root_execution(
-        &state.engine,
-        &ctx.plan_ctx.current_site_id,
-        request.project_path,
-        &item_ref,
-        request.launch_mode,
-        request.params.clone(),
-        Some(request.acting_principal.to_string()),
-        ctx.caller_scopes.clone(),
-        request.validate_only,
+        crate::services::thread_lifecycle::ResolveRootExecutionParams {
+            engine: &state.engine,
+            site_id: &ctx.plan_ctx.current_site_id,
+            project_path: request.project_path,
+            item_ref: &item_ref,
+            launch_mode: request.launch_mode,
+            parameters: request.params.clone(),
+            requested_by: Some(request.acting_principal.to_string()),
+            caller_scopes: ctx.caller_scopes.clone(),
+            validate_only: request.validate_only,
+        },
     )?;
 
     // A3: override the thread-lifecycle's heuristic kind with the
@@ -1205,7 +1227,7 @@ pub async fn dispatch(
                 }
             })?;
         SubprocessRole::RuntimeTarget {
-            verified_runtime: verified.clone(),
+            verified_runtime: Box::new(verified.clone()),
         }
     } else {
         SubprocessRole::Regular
@@ -1260,12 +1282,14 @@ pub async fn dispatch(
         match next {
             HopAction::Terminate(terminator, _hop_profile) => {
                 return dispatch_by(
-                    terminator,
-                    hop_ref,
-                    verified,
-                    thread_profile,
-                    runtime,
-                    root_subject,
+                    DispatchByParams {
+                        terminator,
+                        canonical_ref: hop_ref,
+                        verified,
+                        thread_profile,
+                        runtime,
+                        root_subject,
+                    },
                     request,
                     ctx,
                     state,
@@ -1287,18 +1311,30 @@ pub async fn dispatch(
 /// captured from the first hop. Leaf dispatchers consume what they
 /// need from both. No borrowed view struct — owned values flow through
 /// the match.
-async fn dispatch_by(
+struct DispatchByParams {
     terminator: TerminatorDecl,
     canonical_ref: CanonicalRef,
     verified: Option<VerifiedItem>,
     thread_profile: Option<String>,
     runtime: Option<VerifiedRuntime>,
     root_subject: Option<RootSubject>,
+}
+
+async fn dispatch_by(
+    params: DispatchByParams,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
     role: &SubprocessRole,
 ) -> Result<Value, DispatchError> {
+    let DispatchByParams {
+        terminator,
+        canonical_ref,
+        verified,
+        thread_profile,
+        runtime,
+        root_subject,
+    } = params;
     match terminator {
         TerminatorDecl::Subprocess { .. } => {
             let tp = thread_profile.ok_or_else(|| {
@@ -1308,15 +1344,17 @@ async fn dispatch_by(
                 }
             })?;
             dispatch_subprocess(
-                &canonical_ref,
-                &tp,
-                verified.as_ref(),
-                request,
-                ctx,
-                state,
-                role,
-                root_subject,
-                runtime,
+                SubprocessDispatchContext {
+                    current_ref: &canonical_ref,
+                    thread_profile: &tp,
+                    verified: verified.as_ref(),
+                    request,
+                    ctx,
+                    state,
+                    role,
+                    root_subject,
+                    hop_runtime: runtime,
+                },
             )
             .await
         }

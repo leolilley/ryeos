@@ -167,17 +167,20 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         }
         runner::Runner::from_resume(
             resume_state,
-            bootstrap_output.config.tools,
-            bootstrap_output.config.system_prompt,
-            harness,
-            budget,
-            callback,
-            context_window,
-            provider,
-            execution,
-            model_name,
-            envelope.thread_id.clone(),
-            hooks,
+            runner::RunnerConfig {
+                messages: vec![], // overridden by from_resume with resume.messages
+                tools: bootstrap_output.config.tools,
+                system_prompt: bootstrap_output.config.system_prompt,
+                harness,
+                budget,
+                callback,
+                context_window,
+                provider_config: provider,
+                execution,
+                model_name,
+                thread_id: envelope.thread_id.clone(),
+                hooks,
+            },
         )
     } else {
         let user_prompt = bootstrap_output.config.user_prompt.clone();
@@ -243,20 +246,20 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             });
         }
 
-        runner::Runner::new(
+        runner::Runner::new(runner::RunnerConfig {
             messages,
-            bootstrap_output.config.tools,
-            bootstrap_output.config.system_prompt,
+            tools: bootstrap_output.config.tools,
+            system_prompt: bootstrap_output.config.system_prompt,
             harness,
             budget,
             callback,
             context_window,
-            provider,
+            provider_config: provider,
             execution,
             model_name,
-            envelope.thread_id.clone(),
+            thread_id: envelope.thread_id.clone(),
             hooks,
-        )
+        })
     };
 
     let result = runner_inst.run().await;

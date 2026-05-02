@@ -154,13 +154,15 @@ impl StateDb {
         let result = {
             let mut cache = self.head_cache.lock().expect("head_cache lock");
             chain::append_events(
-                &self.cas_root,
-                &self.refs_root,
-                chain_root_id,
-                thread_id,
-                events,
-                snapshot_updates.clone(),
-                signer,
+                chain::AppendEventsInput {
+                    cas_root: &self.cas_root,
+                    refs_root: &self.refs_root,
+                    chain_root_id,
+                    thread_id,
+                    events,
+                    snapshot_updates: snapshot_updates.clone(),
+                    signer,
+                },
                 &mut cache,
             )?
         };
