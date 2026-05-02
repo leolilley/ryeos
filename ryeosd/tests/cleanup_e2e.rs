@@ -292,3 +292,200 @@ async fn init_only_does_not_mutate_system_space() {
         "RYE_SYSTEM_SPACE was mutated by --init-only — daemon bootstrap must NEVER touch operator-managed bundle content"
     );
 }
+
+// ── Test 9: UDS namespace rejects service methods (Gate 3 daemon-spawn) ──
+//   The bare UDS server must only expose `system.health` and `runtime.*`
+//   methods. A service method like `system/status` must get "unknown_method".
+//   This closes the TODO at cleanup_invariants.rs:171.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uds_namespace_rejects_service_methods() {
+    let h = DaemonHarness::start().await.expect("start daemon");
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(&h.uds_path)
+        .await
+        .expect("connect to UDS socket");
+
+    let mut stream = stream;
+
+    let request = serde_json::json!({
+        "request_id": 1u64,
+        "method": "system/status",
+        "params": {}
+    });
+    let payload = rmp_serde::to_vec(&request).expect("encode rpc request");
+    let len = (payload.len() as u32).to_be_bytes();
+    stream
+        .write_all(&len)
+        .await
+        .expect("write frame length");
+    stream
+        .write_all(&payload)
+        .await
+        .expect("write frame body");
+    stream.shutdown().await.expect("shutdown write side");
+
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .expect("read response length");
+    let resp_len = u32::from_be_bytes(len_buf) as usize;
+    let mut resp_buf = vec![0u8; resp_len];
+    stream
+        .read_exact(&mut resp_buf)
+        .await
+        .expect("read response body");
+    let response: serde_json::Value =
+        rmp_serde::from_slice(&resp_buf).expect("decode rpc response");
+
+    assert!(
+        response.get("error").is_some(),
+        "UDS should reject 'system/status' with an error, got: {response}"
+    );
+    let error = &response["error"];
+    assert_eq!(
+        error["code"], "unknown_method",
+        "expected 'unknown_method' error code, got: {response}"
+    );
+    let msg = error["message"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase();
+    assert!(
+        msg.contains("unknown") || msg.contains("system/status"),
+        "error message should mention unknown method, got: {}",
+        error["message"]
+    );
+}
+
+// ── Test 10: State lock prevents concurrent daemons (Gate 8 daemon-spawn) ──
+//   Two daemons sharing the same state_dir: the second must fail to acquire
+//   the state lock and exit with an error. This closes the TODO at
+//   cleanup_invariants.rs:289.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn state_lock_prevents_concurrent_daemons() {
+    let h1 = DaemonHarness::start().await.expect("start first daemon");
+
+    let state_dir_outer = tempfile::tempdir().expect("state tempdir");
+    let user_space = tempfile::tempdir().expect("user tempdir");
+    common::populate_user_space(user_space.path());
+    let state_path = state_dir_outer.path().join("state");
+
+    let port = common::pick_free_port();
+    let bind: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let uds_path = state_path.join("ryeosd.sock");
+
+    // Point the second daemon at the SAME state dir as the first
+    let mut cmd = tokio::process::Command::new(common::ryeosd_binary());
+    cmd.arg("--state-dir").arg(&h1.state_path)
+        .arg("--bind").arg(bind.to_string())
+        .arg("--uds-path").arg(&uds_path)
+        .env("RYE_SYSTEM_SPACE", common::system_data_dir())
+        .env("USER_SPACE", user_space.path())
+        .env("HOME", user_space.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = cmd.output().await.expect("spawn second daemon");
+
+    // The second daemon should fail — either the state lock blocks it,
+    // or the UDS bind fails because the first daemon already owns it.
+    assert!(
+        !output.status.success(),
+        "second daemon should fail when sharing state_dir with first daemon; \
+         exit={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+// ── Test 11: Symlinked node config items are rejected (Gate 12 daemon-spawn) ──
+//   The node_config loader must reject symlinks in `.ai/node/bundles/`.
+//   A symlinked YAML placed in the state bundles dir must cause daemon
+//   startup to fail. This closes the TODO at cleanup_invariants.rs:405.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn symlinked_node_config_rejected_at_startup() {
+    let result = DaemonHarness::start_with_pre_init(|state_path, _user_space| {
+        let bundles_dir = state_path.join(".ai").join("node").join("bundles");
+        std::fs::create_dir_all(&bundles_dir)?;
+        let link_target = bundles_dir.join("adversarial.yaml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/passwd", &link_target)?;
+        Ok(())
+    }, |_cmd| {}).await;
+
+    match result {
+        Ok(_) => panic!(
+            "daemon should reject symlinked node config items in bundles dir"
+        ),
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            assert!(
+                err_msg.contains("symlink") || err_msg.contains("not a regular file"),
+                "error should mention symlink rejection, got: {err_msg}"
+            );
+        }
+    }
+}
+
+// ── Test 12: Daemon loads all bundle YAMLs successfully (Gate 13 daemon-spawn) ──
+//   A successful daemon start proves the full node_config + engine pipeline
+//   loaded every bundle YAML from the system bundle without parse errors.
+//   If any YAML is malformed, the daemon would fail at bootstrap.
+//   This closes the TODO at cleanup_invariants.rs:437.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_startup_proves_bundle_yamls_parse() {
+    let h = DaemonHarness::start().await.expect("daemon should start — bundle YAMLs must all parse");
+    // If we got here, the daemon completed Phase 1 + Phase 2 node_config
+    // bootstrap and the self-check. Every bundle YAML in the system bundle
+    // was loaded and verified. Verify the daemon is actually healthy.
+    let (status, body) = h
+        .post_execute("service:system/status", ".", serde_json::json!({}))
+        .await
+        .expect("post /execute");
+    assert!(status.is_success(), "daemon healthy check failed: {status}, body={body}");
+}
+
+// ── Test 13: Path=section invariant enforced by daemon (Gate 15 daemon-spawn) ──
+//   A node config YAML whose `section` field doesn't match its parent
+//   directory must cause daemon startup to fail. We plant a valid
+//   signed route YAML (section: routes) into the bundles directory
+//   to trigger the mismatch. This closes the TODO at
+//   cleanup_invariants.rs:521.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn path_section_mismatch_rejected_at_startup() {
+    let workspace = common::workspace_root();
+    let route_yaml = workspace
+        .join("ryeos-bundles/core/.ai/node/routes/execute-stream.yaml");
+    assert!(route_yaml.is_file(), "route fixture must exist");
+
+    let result = DaemonHarness::start_with_pre_init(move |state_path, _user_space| {
+        let bundles_dir = state_path.join(".ai").join("node").join("bundles");
+        std::fs::create_dir_all(&bundles_dir)?;
+        let dest = bundles_dir.join("execute-stream.yaml");
+        std::fs::copy(&route_yaml, &dest)?;
+        Ok(())
+    }, |_cmd| {}).await;
+
+    match result {
+        Ok(_) => panic!(
+            "daemon should reject node config item with section != parent directory"
+        ),
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            assert!(
+                err_msg.contains("path = section invariant") || err_msg.contains("declares section"),
+                "error should mention path=section invariant violation, got: {err_msg}"
+            );
+        }
+    }
+}
