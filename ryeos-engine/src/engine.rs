@@ -270,15 +270,17 @@ impl Engine {
 
         // Kind schemas and trust are system-only — no overlays
         crate::plan_builder::build_plan(
-            item,
-            parameters,
-            hints,
-            ctx,
-            &self.kinds,
-            &effective_parsers,
-            &roots,
-            &effective_fp,
-            &self.trust_store,
+            crate::plan_builder::BuildPlanInput {
+                item,
+                parameters,
+                hints,
+                ctx,
+                kinds: &self.kinds,
+                parsers: &effective_parsers,
+                roots: &roots,
+                registry_fingerprint: &effective_fp,
+                trust_store: &self.trust_store,
+            },
         )
     }
 
