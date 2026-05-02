@@ -782,6 +782,153 @@ mod tests {
         assert_eq!(commands[0]["command_type"], "cancel");
     }
 
+    // ── per-request MCP auth (wave 5.5 audit closure) ──────────────
+    //
+    // Three tests covering the trust boundary at runtime.dispatch_action:
+    //   1. missing thread_auth_token → bail
+    //   2. wrong / unknown thread_auth_token → bail
+    //   3. correct thread_auth_token → server-side principal authoritative
+    //      (the request body cannot smuggle a different acting principal,
+    //      because the param struct is `deny_unknown_fields` and there is
+    //      no principal field; the only path to a principal is through
+    //      `state.thread_auth.validate(...)`)
+
+    #[tokio::test]
+    async fn dispatch_action_without_thread_auth_token_is_rejected() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-tat-missing", "T-tat-missing")).unwrap();
+        let cbt = state.callback_tokens.generate(
+            "T-tat-missing",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["*".to_string()],
+        );
+
+        // Note: `thread_auth_token` field intentionally absent.
+        let resp = dispatch(rpc("runtime.dispatch_action", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-tat-missing",
+                "project_path": "/p",
+                "action": {
+                    "item_id": "directive:rye/agent/core/base",
+                    "thread": "inline",
+                },
+            })),
+            &state,
+        ).await;
+        let err = rpc_err(&resp);
+        assert!(
+            err.message.contains("missing thread_auth_token") || err.message.contains("thread_auth_token"),
+            "expected missing thread_auth_token error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_action_with_wrong_thread_auth_token_is_rejected() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-tat-wrong", "T-tat-wrong")).unwrap();
+        let cbt = state.callback_tokens.generate(
+            "T-tat-wrong",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["*".to_string()],
+        );
+
+        // Use a syntactically plausible but unminted tat — must not be
+        // accepted by ThreadAuthStore.validate.
+        let resp = dispatch(rpc("runtime.dispatch_action", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-tat-wrong",
+                "project_path": "/p",
+                "thread_auth_token": "tat-deadbeef0000000000000000000000000000000000000000000000000000",
+                "action": {
+                    "item_id": "directive:rye/agent/core/base",
+                    "thread": "inline",
+                },
+            })),
+            &state,
+        ).await;
+        let err = rpc_err(&resp);
+        assert!(
+            err.message.contains("invalid thread auth token")
+                || err.message.contains("thread auth")
+                || err.message.contains("thread_auth"),
+            "expected invalid-thread-auth error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_action_with_correct_token_uses_server_side_principal() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-tat-ok", "T-tat-ok")).unwrap();
+        let cbt = state.callback_tokens.generate(
+            "T-tat-ok",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["*".to_string()],
+        );
+        // Mint a tat for a SPECIFIC principal — this is the value the
+        // daemon must use, not anything caller-controllable.
+        let tat = state.thread_auth.mint(
+            "T-tat-ok",
+            "fp:server-authoritative-principal".to_string(),
+            vec!["execute".to_string()],
+            std::time::Duration::from_secs(300),
+        );
+
+        // The DispatchActionParams struct is `deny_unknown_fields` and
+        // does NOT include a principal field, so the only acting principal
+        // available downstream is the one from `thread_auth.validate(...)`.
+        // Even attempting to pass an unknown field like `acting_principal`
+        // must be rejected at parse time — proving spoofed body principals
+        // never reach the inner handler.
+        let resp = dispatch(rpc("runtime.dispatch_action", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-tat-ok",
+                "project_path": "/p",
+                "thread_auth_token": tat.token.clone(),
+                "acting_principal": "fp:attacker-spoofed-principal",
+                "action": {
+                    "item_id": "directive:rye/agent/core/base",
+                    "thread": "inline",
+                },
+            })),
+            &state,
+        ).await;
+        let err = rpc_err(&resp);
+        // Must fail at deserialization — `acting_principal` is unknown.
+        // This is the structural proof that body cannot smuggle principal.
+        assert!(
+            err.message.to_lowercase().contains("unknown field")
+                || err.message.contains("acting_principal")
+                || err.message.contains("invalid runtime.dispatch_action params"),
+            "expected unknown-field rejection of body-side principal, got: {err:?}"
+        );
+
+        // Sanity: the same call without the spoof field should make it past
+        // auth (it will still fail later because the directive isn't loaded
+        // in this minimal test state, but the failure must NOT be auth).
+        let resp_clean = dispatch(rpc("runtime.dispatch_action", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-tat-ok",
+                "project_path": "/p",
+                "thread_auth_token": tat.token,
+                "action": {
+                    "item_id": "directive:rye/agent/core/base",
+                    "thread": "inline",
+                },
+            })),
+            &state,
+        ).await;
+        if let Some(err) = resp_clean.error.as_ref() {
+            assert!(
+                !err.message.contains("missing thread_auth_token")
+                    && !err.message.contains("invalid thread auth token"),
+                "auth must succeed; downstream errors are fine: {err:?}"
+            );
+        }
+    }
+
     // ── facets (via runtime.* token-gated) ─────────────────────────
 
     #[tokio::test]

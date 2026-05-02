@@ -70,6 +70,7 @@ struct ExecutionGuard {
     temp_dir: Option<PathBuf>,
     thread_finalized: bool,
     callback_token: Option<String>,
+    thread_auth_token: Option<String>,
 }
 
 impl ExecutionGuard {
@@ -80,6 +81,7 @@ impl ExecutionGuard {
             temp_dir: None,
             thread_finalized: false,
             callback_token: None,
+            thread_auth_token: None,
         }
     }
 
@@ -98,10 +100,22 @@ impl ExecutionGuard {
         self.callback_token = Some(token);
     }
 
+    /// Track a thread-auth token for revocation on cleanup. Wave 5.5
+    /// audit: previously the runner minted a thread-auth token via
+    /// `mint_callback_env` and dropped the return value (`_tat`), so
+    /// the token outlived its only legitimate use and was never
+    /// invalidated on resume/retry. The detached background task
+    /// now also acquires a `TatTokenGuard` so revocation is symmetric
+    /// with the callback token.
+    fn track_thread_auth_token(&mut self, token: String) {
+        self.thread_auth_token = Some(token);
+    }
+
     /// Fail the tracked thread if it hasn't been finalized yet.
-    /// Also revokes the callback token.
+    /// Also revokes the callback and thread-auth tokens.
     fn fail_thread(&mut self, outcome_code: &str) {
         self.revoke_callback_token();
+        self.revoke_thread_auth_token();
         if self.thread_finalized {
             return;
         }
@@ -136,9 +150,23 @@ impl ExecutionGuard {
         }
     }
 
+    /// Revoke the thread-auth token if one was tracked. Symmetric to
+    /// `revoke_callback_token` so resume/retry rotation that mints a
+    /// fresh `tat-` token also kills the previous one server-side
+    /// instead of leaving it dangling in `ThreadAuthStore`.
+    fn revoke_thread_auth_token(&mut self) {
+        if let Some(ref token) = self.thread_auth_token {
+            self.state.thread_auth.invalidate(token);
+            if let Some(ref tid) = self.thread_id {
+                self.state.thread_auth.invalidate_for_thread(tid);
+            }
+        }
+    }
+
     /// Perform all cleanup: remove temp dir.
     fn cleanup(&mut self) {
         self.revoke_callback_token();
+        self.revoke_thread_auth_token();
         if let Some(ref d) = self.temp_dir {
             if d.exists() {
                 let _ = std::fs::remove_dir_all(d);
@@ -147,15 +175,29 @@ impl ExecutionGuard {
     }
 
     /// Consume into parts for moving into tokio::spawn.
-    fn into_detached_parts(
-        mut self,
-    ) -> (AppState, Option<String>, Option<PathBuf>, Option<String>) {
-        let state = self.state.clone();
-        let thread_id = self.thread_id.take();
-        let temp_dir = self.temp_dir.take();
-        let callback_token = self.callback_token.take();
-        (state, thread_id, temp_dir, callback_token)
+    fn into_detached_parts(mut self) -> ExecutionGuardParts {
+        ExecutionGuardParts {
+            state: self.state.clone(),
+            temp_dir: self.temp_dir.take(),
+            callback_token: self.callback_token.take(),
+            thread_auth_token: self.thread_auth_token.take(),
+        }
     }
+}
+
+/// Parts harvested from an `ExecutionGuard` before moving into a
+/// detached `tokio::spawn`. The background task re-installs deferred
+/// revocation guards (`CbTokenGuard`, `TatTokenGuard`) from the token
+/// fields so cleanup still runs on every exit path of the spawn.
+///
+/// `thread_id` is intentionally omitted — both detached call sites
+/// already keep an owned `bg_thread_id` from the `ThreadInsertResult`
+/// so the guard's copy would be redundant.
+struct ExecutionGuardParts {
+    state: AppState,
+    temp_dir: Option<PathBuf>,
+    callback_token: Option<String>,
+    thread_auth_token: Option<String>,
 }
 
 /// Prepare CAS execution context.
@@ -616,13 +658,17 @@ pub async fn run_inline(
     let resolved = params.resolved.clone();
     let vault = params.vault_bindings.clone();
 
-    // Mint callback token for the spawned subprocess.
-    let (cb_bindings, _cb_token, _tat) = mint_callback_env(
+    // Mint callback + thread-auth tokens for the spawned subprocess.
+    // Track both on the guard so the inline cleanup path invalidates
+    // them whether the run succeeds, errors, or panics.
+    let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state, &tid, Some(&effective_path), None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
     )?;
+    guard.track_callback_token(cb_token);
+    guard.track_thread_auth_token(tat_token);
 
     // Daemon-owned per-thread state dir under config.state_dir — does
     // NOT live under the (ephemeral, CAS-checkout) working directory,
@@ -807,18 +853,24 @@ pub async fn run_detached(
     // Capture thread details before moving guard
     let running_thread_id = running.thread_id.clone();
 
-    // Mint callback token for the spawned subprocess. Token lifetime is
-    // owned by the background task (revoked on wait completion or error).
-    let (cb_bindings, cb_token, _tat) = mint_callback_env(
+    // Mint callback + thread-auth tokens for the spawned subprocess.
+    // Token lifetimes are owned by the background task (revoked via
+    // CbTokenGuard / TatTokenGuard on wait completion, error, or panic).
+    let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state, &running.thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
     )?;
     guard.track_callback_token(cb_token);
+    guard.track_thread_auth_token(tat_token);
 
     // Move guard parts into the background task
-    let (bg_state, _bg_thread_id, bg_temp_dir, bg_cb_token) = guard.into_detached_parts();
+    let parts = guard.into_detached_parts();
+    let bg_state = parts.state;
+    let bg_temp_dir = parts.temp_dir;
+    let bg_cb_token = parts.callback_token;
+    let bg_tat_token = parts.thread_auth_token;
     let bg_thread_id = running.thread_id.clone();
     let bg_chain_root_id = running.chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
@@ -848,6 +900,7 @@ pub async fn run_detached(
         false, // is_resume
         None,  // prior_status_for_mark_running
         bg_cb_token,
+        bg_tat_token,
     ));
 
     // Re-fetch the thread detail (the original was consumed by the background task setup)
@@ -883,7 +936,7 @@ pub async fn run_detached(
         bg_cb_bindings, bg_acting_principal, bg_pre_manifest_hash,
         bg_base_snapshot_hash,
         bg_project_path, bg_temp_dir, bg_state_root, prior_status_for_mark_running,
-        bg_cb_token
+        bg_cb_token, bg_tat_token
     ),
     fields(
         thread_id = %bg_thread_id,
@@ -909,10 +962,12 @@ async fn dispatch_detached_bg_task(
     is_resume: bool,
     prior_status_for_mark_running: Option<String>,
     bg_cb_token: Option<String>,
+    bg_tat_token: Option<String>,
 ) {
-    // Revoke callback token on every exit path of this function.
-    // The token's lifetime is owned by this background task.
+    // Revoke callback + thread-auth tokens on every exit path of this
+    // function. Both tokens' lifetimes are owned by this background task.
     let _cb_guard = defer_cb_token_revocation(&bg_state, &bg_thread_id, &bg_cb_token);
+    let _tat_guard = defer_tat_token_revocation(&bg_state, &bg_thread_id, &bg_tat_token);
 
     if let Some(ref s) = prior_status_for_mark_running {
         tracing::Span::current().record("prior_status", s.as_str());
@@ -1127,6 +1182,49 @@ fn defer_cb_token_revocation(state: &AppState, thread_id: &str, token: &Option<S
     CbTokenGuard::new(state.clone(), thread_id.to_string(), token.clone())
 }
 
+/// Deferred thread-auth-token revocation. Symmetric to `CbTokenGuard`:
+/// the detached background task installs one of these as its first
+/// statement so every exit path (success, error, panic) invalidates
+/// the `tat-` token in `ThreadAuthStore`.
+///
+/// Wave 5.5 audit: previously the `tat` returned by `mint_callback_env`
+/// was dropped by the caller (`let (.., _tat) = ...`), so resume/retry
+/// would mint a fresh token but the previous one would survive in the
+/// store until either its TTL expired or the thread was finalized
+/// elsewhere. Now both tokens have lifetimes scoped to the bg task.
+fn revoke_tat_token(state: &AppState, thread_id: &str, token: &Option<String>) {
+    if let Some(ref t) = token {
+        state.thread_auth.invalidate(t);
+    }
+    state.thread_auth.invalidate_for_thread(thread_id);
+}
+
+struct TatTokenGuard {
+    state: AppState,
+    thread_id: String,
+    token: Option<String>,
+}
+
+impl TatTokenGuard {
+    fn new(state: AppState, thread_id: String, token: Option<String>) -> Self {
+        Self { state, thread_id, token }
+    }
+}
+
+impl Drop for TatTokenGuard {
+    fn drop(&mut self) {
+        revoke_tat_token(&self.state, &self.thread_id, &self.token);
+    }
+}
+
+fn defer_tat_token_revocation(
+    state: &AppState,
+    thread_id: &str,
+    token: &Option<String>,
+) -> TatTokenGuard {
+    TatTokenGuard::new(state.clone(), thread_id.to_string(), token.clone())
+}
+
 /// Build `ExecutionParams` from a captured `ResumeContext`.
 ///
 /// Re-runs the engine resolver against the **original**
@@ -1309,17 +1407,24 @@ pub async fn run_existing_detached(
         };
     }
 
-    // Mint a FRESH callback token for the resumed subprocess (never reuse
-    // the original — it was revoked when the prior process exited).
-    let (cb_bindings, cb_token, _tat) = mint_callback_env(
+    // Mint FRESH callback + thread-auth tokens for the resumed
+    // subprocess (never reuse the originals — they were revoked when
+    // the prior process exited via the bg task's CbTokenGuard /
+    // TatTokenGuard drops).
+    let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state, &thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
     )?;
     guard.track_callback_token(cb_token);
+    guard.track_thread_auth_token(tat_token);
 
-    let (bg_state, _bg_thread_id, bg_temp_dir, bg_cb_token) = guard.into_detached_parts();
+    let parts = guard.into_detached_parts();
+    let bg_state = parts.state;
+    let bg_temp_dir = parts.temp_dir;
+    let bg_cb_token = parts.callback_token;
+    let bg_tat_token = parts.thread_auth_token;
     let bg_thread_id = thread_id.clone();
     let bg_chain_root_id = chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
@@ -1349,6 +1454,7 @@ pub async fn run_existing_detached(
         true, // is_resume
         Some(prior_status),
         bg_cb_token,
+        bg_tat_token,
     ));
 
     Ok(())
