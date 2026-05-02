@@ -1927,7 +1927,6 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
 name = "ryeos-handler-bins"
 version = "0.1.0"
 dependencies = [
@@ -1949,8 +1948,6 @@ dependencies = [
 ]
 
 [[package]]
-=======
->>>>>>> 0ce9828f (feat(daemon): op dispatch path + wire-type restructuring)
 name = "ryeos-knowledge-runtime"
 version = "0.2.0"
 dependencies = [

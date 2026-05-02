@@ -1,18 +1,32 @@
-# rye:signed:2026-05-02T05:18:05Z:93095f4408501fcd52bc13ffc00f17a02a234e64435eead4db155ebe99b36073:deunwcAXcv02fJJgGRezshQhq7zJdr/h3M1dRbtXu7EqLPfnr5j5lV3Ia+SphQNWMgjNN5tZyEzehsSLAdQ6Cg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-02T11:21:57Z:c282f01f6b6f504687e663246c2d13ca9de91c0b219c1f107ae9a46684bb7a5e:YO1vJys0azoDULbzSbwvMxn2fXfwtPHSGNikG/wi2wOjTyr+zyT3l0iQDvNlNvzHPe20tZwTY0Cf9V4XZNn8CA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
   directory: knowledge
 execution:
-  # Explicit delegation to the runtime registry. The dispatcher will
-  # call `RuntimeRegistry::lookup_for("knowledge")` to find the default
-  # runtime serving this kind (today: `runtime:knowledge-runtime`).
-  # Without this `delegate` block the dispatcher refuses to consult
-  # the registry — there is no implicit fallback.
-  delegate:
-    via: runtime_registry
+  # Op-dispatch execution model. The daemon resolves the requested op
+  # (default: `compose`) against the declared operations, validates
+  # inputs, then spawns the kind's runtime with a BatchOpEnvelope.
+  # Mixed-dispatch reject forbids `operations` + `delegate`/`terminator`.
+  operations:
+    - name: compose
+      side_effects: writes_chain
+      dispatch: { via: runtime_registry }
+      inputs:
+        token_budget:
+          type: integer
+          required: false
+          default: 4000
+        exclude_refs:
+          type: array
+          items:
+            type: string
+          required: false
+          default: []
+  default_operation: compose
   thread_profile: knowledge_run
-  resolution: []
+  resolution:
+    - step: resolve_references
 formats:
   - extensions: [".md"]
     parser: parser:rye/core/markdown/frontmatter

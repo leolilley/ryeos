@@ -133,6 +133,19 @@ pub enum DispatchError {
     /// Projection invariant violated during slim-payload construction.
     #[error("projection invariant violated: {reason}")]
     ProjectionInvariant { reason: String },
+    /// Protocol descriptor not found in the protocol registry.
+    #[error("protocol `{0}` not registered")]
+    ProtocolNotRegistered(String),
+    /// Streaming protocol cannot be invoked with launch_mode=detached.
+    #[error("streaming protocols cannot be invoked with launch_mode=detached")]
+    StreamingNotDetachable,
+    /// Invalid launch_mode value.
+    #[error("invalid launch_mode: {other}")]
+    InvalidLaunchMode { other: String },
+    /// Caller lacks a required capability for the dispatch role.
+    /// Mapped to 403 by the HTTP layer with body `{ "required_cap": "..." }`.
+    #[error("missing required capability: {required}")]
+    MissingCap { required: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -217,7 +230,8 @@ impl DispatchError {
             | Self::CapabilityRejected { .. }
             | Self::SchemaMisconfigured { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
-            | Self::ServiceCapDenied { .. } => StatusCode::FORBIDDEN,
+            | Self::ServiceCapDenied { .. }
+            | Self::MissingCap { .. } => StatusCode::FORBIDDEN,
             Self::NotRootExecutable { .. } | Self::StreamingNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
@@ -237,8 +251,44 @@ impl DispatchError {
             | Self::OpNotImplemented { .. } => StatusCode::BAD_GATEWAY,
             Self::UnknownOp { .. }
             | Self::OpInvalidInput { .. }
-            | Self::ProjectionInvariant { .. } => StatusCode::BAD_REQUEST,
+            | Self::ProjectionInvariant { .. }
+            | Self::InvalidLaunchMode { .. } => StatusCode::BAD_REQUEST,
+            Self::ProtocolNotRegistered(_) => StatusCode::BAD_GATEWAY,
+            Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Stable machine-readable error code for structured error surfaces.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRef(..) => "invalid_ref",
+            Self::NotRootExecutable { .. } => "not_root_executable",
+            Self::InsufficientCaps { .. } => "insufficient_caps",
+            Self::AliasCycle { .. } => "alias_cycle",
+            Self::AliasChainTooLong { .. } => "alias_chain_too_long",
+            Self::SchemaMisconfigured { .. } => "schema_misconfigured",
+            Self::CapabilityRejected { .. } => "capability_rejected",
+            Self::StreamingNotImplemented => "streaming_not_implemented",
+            Self::ProjectSource(_) => "project_source",
+            Self::ServiceHandlerMissing { .. } => "service_handler_missing",
+            Self::ServiceCapDenied { .. } => "service_cap_denied",
+            Self::ServiceUnavailable { .. } => "service_unavailable",
+            Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
+            Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
+            Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
+            Self::ProjectSourcePushFirst(_) => "project_source_push_first",
+            Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
+            Self::MissingCap { .. } => "missing_cap",
+            Self::UnknownOp { .. } => "unknown_op",
+            Self::OpInvalidInput { .. } => "op_invalid_input",
+            Self::OpFailed { .. } => "op_failed",
+            Self::OpNotImplemented { .. } => "op_not_implemented",
+            Self::ProjectionInvariant { .. } => "projection_invariant",
+            Self::ProtocolNotRegistered(_) => "protocol_not_registered",
+            Self::StreamingNotDetachable => "streaming_not_detachable",
+            Self::InvalidLaunchMode { .. } => "invalid_launch_mode",
+            Self::Internal(_) => "internal",
         }
     }
 }

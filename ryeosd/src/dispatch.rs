@@ -51,12 +51,13 @@ use serde_json::{json, Value};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    capabilities_for, DelegationVia, DispatchCapabilities, ExecutionSchema,
-    HandlerRegistryKind, OperationDecl, TerminatorSpec,
+    DelegationVia, ExecutionSchema, InProcessRegistryKind, OperationDecl,
+    TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
 use crate::dispatch_error::DispatchError;
+use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
 use crate::execution::launch;
 use crate::service_executor::{
     self, ExecutionContext, ExecutionMode, ServiceExecutionResult,
@@ -139,10 +140,9 @@ pub struct DispatchRequest<'a> {
 /// * `target_site_id` → "remote execution not yet supported for native runtimes"
 /// * `launch_mode == "detached"` → "detached mode not yet supported for native runtimes"
 fn check_dispatch_capabilities(
-    terminator: &TerminatorSpec,
+    caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
     request: &DispatchRequest<'_>,
 ) -> Result<(), DispatchError> {
-    let caps: DispatchCapabilities = capabilities_for(terminator);
     if request.project_source_is_pushed_head && !caps.allows_pushed_head {
         return Err(DispatchError::CapabilityRejected {
             reason: "pushed_head not yet supported for native runtimes".into(),
@@ -161,6 +161,20 @@ fn check_dispatch_capabilities(
     Ok(())
 }
 
+/// Context struct for subprocess dispatch, carrying all the hop-derived
+/// data plus the shared request/ctx/state.
+pub(crate) struct SubprocessDispatchContext<'a> {
+    current_ref: &'a CanonicalRef,
+    thread_profile: &'a str,
+    verified: Option<&'a VerifiedItem>,
+    request: &'a DispatchRequest<'a>,
+    ctx: &'a ExecutionContext,
+    state: &'a AppState,
+    role: &'a SubprocessRole,
+    root_subject: Option<RootSubject>,
+    hop_runtime: Option<VerifiedRuntime>,
+}
+
 // ── A4: per-hop resolution helper + HopAction ─────────────────────────
 
 /// What the dispatch loop should do after a single hop's
@@ -170,7 +184,7 @@ pub(crate) enum HopAction {
     /// Schema declares a terminator; the second tuple element is the
     /// schema-declared `thread_profile` (A3 — never a kind-name
     /// hardcode in the dispatch sites).
-    Terminate(TerminatorSpec, String),
+    Terminate(TerminatorDecl, String),
     /// Schema has no terminator but declares an `@<kind>` alias the
     /// loop must follow next iteration.
     FollowAlias(CanonicalRef),
@@ -819,6 +833,7 @@ pub(crate) async fn dispatch_op(
         &executor_ref,
         &materialize_dir,
         &state.engine.trust_store,
+        ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .map_err(|e| DispatchError::RuntimeMaterializationFailed {
         executor_ref: executor_ref.clone(),
@@ -1004,8 +1019,8 @@ pub async fn dispatch_service(
         }
     })?;
     match terminator {
-        TerminatorSpec::InProcessHandler {
-            registry: HandlerRegistryKind::Services,
+        TerminatorDecl::InProcess {
+            registry: InProcessRegistryKind::Services,
         } => {
             let verified = service_executor::resolve_and_verify(
                 &ctx.engine,
@@ -1021,6 +1036,7 @@ pub async fn dispatch_service(
                     ExecutionMode::Live,
                     ctx,
                     state,
+                    None,
                 )
                 .await?;
             let envelope = serde_json::json!({
@@ -1039,20 +1055,13 @@ pub async fn dispatch_service(
         other => Err(DispatchError::SchemaMisconfigured {
             kind: canonical.kind.clone(),
             detail: format!(
-                "dispatch_service called on schema declaring terminator {other:?}, not InProcessHandler {{ Services }}"
+                "dispatch_service called on schema declaring terminator {other:?}, not InProcess {{ Services }}"
             ),
         }),
     }
 }
 
-// ── Native runtime terminator ─────────────────────────────────────────
-
-// Note: pre-P1.4 there was a `lookup_runtime_for_dispatch` helper that
-// re-resolved runtime refs from the engine. P1.4 made it dead — the
-// dispatch loop now attaches `VerifiedRuntime` to the hop via
-// `RuntimeRegistry::lookup_by_ref` (see `resolve_dispatch_hop`), and
-// `dispatch_native_runtime` consumes that owned value. Don't reintroduce
-// a per-call lookup; the loop owns runtime metadata as part of the hop.
+// ── Unified subprocess terminator ─────────────────────────────────────
 
 /// Strip the `bin/<triple>/` prefix from a runtime YAML's `binary_ref`.
 pub(crate) fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, DispatchError> {
@@ -1069,10 +1078,6 @@ pub(crate) fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, Dispat
 }
 
 /// **B1**: cap gate factored out for unit testing.
-///
-/// Returns `Err(DispatchError::InsufficientCaps)` so `api/execute.rs`
-/// maps it to 403 via `http_status()`. There is no substring matching
-/// anywhere on this path.
 fn enforce_runtime_caps(
     item_ref: &str,
     required_caps: &[String],
@@ -1097,39 +1102,144 @@ fn enforce_runtime_caps(
     }
 }
 
-/// Dispatch a `runtime:*` ref through the schema-declared
-/// `NativeRuntimeSpawn` terminator.
-///
-/// **P1.1 root/runtime split**: The thread record uses the *subject*
-/// item's identity (from `root_subject`), not the runtime's. For
-/// direct `runtime:foo` invocation, the subject IS the runtime. For
-/// indirect `directive:bar` → registry → runtime, the subject is the
-/// directive. This ensures:
-/// - `thread.item_ref` echoes the user's original ref
-/// - `thread.kind` uses the subject's `thread_profile` (e.g.
-///   `directive_run`, not `runtime_run`)
-/// - The resolution pipeline runs on the subject item (directives have
-///   extends chains; runtimes do not)
-/// - Effective-cap composition is computed from the subject
-///
-/// The runtime executor is metadata: binary path from the registry's
-/// `VerifiedRuntime`, required caps for the B1 gate.
-pub(crate) async fn dispatch_native_runtime(
-    canonical_ref: CanonicalRef,
-    hop_verified: Option<VerifiedItem>,
-    hop_thread_profile: Option<String>,
-    hop_runtime: Option<VerifiedRuntime>,
-    root_subject: Option<RootSubject>,
-    request: &DispatchRequest<'_>,
-    ctx: &ExecutionContext,
-    state: &AppState,
+pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> Result<Value, DispatchError> {
+    let SubprocessDispatchContext {
+        current_ref,
+        thread_profile: _,
+        verified: _,
+        request,
+        ctx,
+        state,
+        role,
+        root_subject,
+        hop_runtime,
+    } = sctx;
+    let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
+        let mut available: Vec<String> =
+            ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
+        available.sort();
+        DispatchError::SchemaMisconfigured {
+            kind: current_ref.kind.clone(),
+            detail: format!(
+                "no kind schema registered for ref '{current_ref}'; registered kinds: [{}]",
+                available.join(", ")
+            ),
+        }
+    })?;
+    let exec = schema.execution().ok_or_else(|| {
+        DispatchError::NotRootExecutable {
+            kind: current_ref.kind.clone(),
+            detail: "schema has no `execution:` block".into(),
+        }
+    })?;
+    let terminator = exec.terminator.as_ref().ok_or_else(|| {
+        DispatchError::SchemaMisconfigured {
+            kind: current_ref.kind.clone(),
+            detail: "dispatch_subprocess called on a schema with no terminator".into(),
+        }
+    })?;
+    let protocol_ref = match terminator {
+        TerminatorDecl::Subprocess { protocol_ref } => protocol_ref.as_str(),
+        TerminatorDecl::InProcess { .. } => {
+            return Err(DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: "dispatch_subprocess called on schema declaring InProcess terminator, not Subprocess".into(),
+            });
+        }
+    };
+
+    enforce_runtime_target_caps(role, &ctx.caller_scopes)?;
+
+    let protocol = ctx
+        .engine
+        .protocols
+        .require(protocol_ref)
+        .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.to_string()))?;
+
+    check_dispatch_capabilities(&protocol.descriptor.capabilities, request)?;
+
+    use ryeos_engine::protocol_vocabulary::StdoutMode;
+    if protocol.descriptor.stdout.mode == StdoutMode::Streaming && request.launch_mode == "detached"
+    {
+        return Err(DispatchError::StreamingNotDetachable);
+    }
+
+    use ryeos_engine::protocol_vocabulary::LifecycleMode;
+    match protocol.descriptor.lifecycle.mode {
+        LifecycleMode::Managed => {
+            dispatch_managed_subprocess(
+                SubprocessDispatchContext {
+                    current_ref,
+                    thread_profile: "",
+                    verified: None,
+                    request,
+                    ctx,
+                    state,
+                    role,
+                    root_subject,
+                    hop_runtime,
+                },
+                protocol,
+            )
+            .await
+        }
+        LifecycleMode::DetachedOk => {
+            dispatch_tool_subprocess(
+                current_ref,
+                "",
+                None,
+                request,
+                ctx,
+                state,
+            )
+            .await
+        }
+    }
+}
+
+async fn dispatch_managed_subprocess(
+    sctx: SubprocessDispatchContext<'_>,
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<Value, DispatchError> {
+    let SubprocessDispatchContext {
+        current_ref: canonical_ref,
+        verified: hop_verified,
+        thread_profile: hop_thread_profile,
+        hop_runtime: _hop_runtime,
+        root_subject,
+        request,
+        ctx,
+        state,
+        role,
+    } = sctx;
+
+    use ryeos_engine::protocol_vocabulary::CallbackChannel;
+    if protocol.descriptor.callback_channel == CallbackChannel::None {
+        return dispatch_streaming_subprocess(
+            canonical_ref,
+            hop_verified,
+            request,
+            ctx,
+            state,
+            protocol,
+        )
+        .await;
+    }
+
     let runtime_ref = canonical_ref.to_string();
 
-    // The runtime metadata comes from the hop's registry lookup (P1.4).
-    let verified_runtime = hop_runtime.ok_or_else(|| {
-        // No runtime in registry — this shouldn't happen since the
-        // hop matched NativeRuntimeSpawn, but fail closed.
+    let verified_runtime = match role {
+        SubprocessRole::RuntimeTarget { verified_runtime } => Some(verified_runtime.as_ref().clone()),
+        SubprocessRole::Regular => {
+            state
+                .engine
+                .runtimes
+                .lookup_by_ref(canonical_ref)
+                .cloned()
+        }
+    };
+
+    let verified_runtime = verified_runtime.ok_or_else(|| {
         let mut available: Vec<String> = ctx
             .engine
             .runtimes
@@ -1150,10 +1260,6 @@ pub(crate) async fn dispatch_native_runtime(
     let acting_principal = request.acting_principal;
     let project_path: &Path = request.project_path;
 
-    // **B1**: only enforce `runtime.execute` for DIRECT `runtime:*`
-    // invocation. Indirect alias chains (directive→registry→runtime)
-    // do NOT inherit the cap; the `original_root_kind` field tells us
-    // what the user actually typed at /execute.
     if request.original_root_kind == ROOT_KIND_RUNTIME {
         enforce_runtime_caps(
             &runtime_ref,
@@ -1162,36 +1268,18 @@ pub(crate) async fn dispatch_native_runtime(
         )?;
     }
 
-    // Schema-derived capability gate. Wording preserved verbatim —
-    // pinned by `ryeosd/tests/dispatch_pin.rs::pin_native_runtime_with_*`.
-    check_dispatch_capabilities(&TerminatorSpec::NativeRuntimeSpawn, request)?;
-
     let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
     let executor_ref = format!("native:{bare}");
 
-    // **P1.1**: determine the subject item for the thread record.
-    // For indirect paths, root_subject carries the directive's identity.
-    // For direct runtime invocation, root_subject IS the runtime hop.
-    // If root_subject wasn't captured (edge case), fall back to the
-    // current hop's data.
     let subject = root_subject.unwrap_or_else(|| RootSubject {
         item_ref: runtime_ref.clone(),
-        thread_profile: hop_thread_profile
-            .unwrap_or_else(|| "runtime_run".to_string()),
-        verified: hop_verified,
+        thread_profile: hop_thread_profile.to_string(),
+        verified: hop_verified.cloned(),
     });
 
-    // Resolve the subject item for the resolution pipeline. The subject
-    // is the directive for indirect paths — we need its extends chain,
-    // references DAG, and trust class. For direct runtime paths the
-    // hop already has the verified item.
     let resolved_item: ResolvedItem = match subject.verified {
         Some(v) => v.resolved,
         None => {
-            // Subject wasn't verified at the first hop — resolve now.
-            // This should be rare (only if the first hop's engine.resolve
-            // failed). The resolution pipeline below will handle the
-            // error if the item truly doesn't exist.
             let canonical = CanonicalRef::parse(&subject.item_ref).map_err(|e| {
                 DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string())
             })?;
@@ -1222,18 +1310,17 @@ pub(crate) async fn dispatch_native_runtime(
     };
 
     let result = launch::build_and_launch(
-        state,
-        &executor_ref,
-        acting_principal,
-        &resolved,
-        project_path,
-        &params,
-        &HashMap::new(),
-        request.pre_minted_thread_id.as_deref(),
+        launch::BuildAndLaunchParams {
+            state,
+            executor_ref: &executor_ref,
+            acting_principal,
+            resolved: &resolved,
+            project_path,
+            parameters: &params,
+            vault_bindings: &HashMap::new(),
+            pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
+        },
     ).await.map_err(|e| {
-        // P1.2: classify the anyhow error. Materialization failures
-        // (binary not in manifest, CAS miss, arch mismatch) get 502.
-        // Everything else stays 500 (unexpected internal errors).
         let msg = e.to_string();
         if msg.contains("manifest") || msg.contains("binary") || msg.contains("blob")
             || msg.contains("materializ") || msg.contains("native executor")
@@ -1244,7 +1331,7 @@ pub(crate) async fn dispatch_native_runtime(
                 detail: msg,
             }
         } else {
-            DispatchError::Internal(e)
+            DispatchError::Internal(e.into())
         }
     })?;
 
@@ -1254,9 +1341,119 @@ pub(crate) async fn dispatch_native_runtime(
     }))
 }
 
-// ── Subprocess terminator ─────────────────────────────────────────────
+async fn dispatch_streaming_subprocess(
+    current_ref: &CanonicalRef,
+    _verified: Option<&VerifiedItem>,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    _protocol: &ryeos_engine::protocols::VerifiedProtocol,
+) -> Result<Value, DispatchError> {
+    let item_ref_str = current_ref.to_string();
+    let engine_roots = ctx.engine.resolution_roots(Some(request.project_path.to_path_buf()));
 
-pub async fn dispatch_subprocess(
+    let system_roots: Vec<std::path::PathBuf> = engine_roots
+        .ordered
+        .iter()
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or(r.ai_root.clone())
+        })
+        .collect();
+
+    let effective_parsers = ctx
+        .engine
+        .effective_parser_dispatcher(Some(request.project_path))
+        .map_err(|e| DispatchError::InvalidRef(
+            current_ref.to_string(),
+            format!("parser dispatcher: {e}"),
+        ))?;
+
+    let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
+        current_ref,
+        &ctx.engine.kinds,
+        &effective_parsers,
+        &engine_roots,
+        &ctx.engine.trust_store,
+        &ctx.engine.composers,
+    )
+    .map_err(|e| DispatchError::InvalidRef(
+        current_ref.to_string(),
+        format!("resolution pipeline failed: {e}"),
+    ))?;
+
+    let single_root = project_single_root(&resolution_output)?;
+
+    let stdin_data = serde_json::to_string(&single_root)
+        .map_err(|e| DispatchError::Internal(e.into()))?;
+
+    let verified_runtime = state
+        .engine
+        .runtimes
+        .lookup_for(&current_ref.kind)
+        .map_err(|_| DispatchError::SchemaMisconfigured {
+            kind: current_ref.kind.clone(),
+            detail: format!("no runtime serves kind '{}'", current_ref.kind),
+        })?;
+
+    let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
+    let executor_ref = format!("native:{bare}");
+
+    let executor_path = crate::execution::launch::resolve_native_executor_path(
+        &system_roots,
+        &executor_ref,
+        request.project_path,
+        &state.engine.trust_store,
+        ryeos_engine::resolution::TrustClass::TrustedSystem,
+    )
+    .map_err(|e| DispatchError::RuntimeMaterializationFailed {
+        executor_ref: executor_ref.clone(),
+        detail: e.to_string(),
+    })?;
+
+    let executor_path_str = executor_path.to_string_lossy().to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        lillux::run(lillux::SubprocessRequest {
+            cmd: executor_path_str,
+            args: vec![],
+            cwd: None,
+            envs: vec![],
+            stdin_data: Some(stdin_data),
+            timeout: 120.0,
+        })
+    })
+    .await
+    .map_err(|e| DispatchError::Internal(e.into()))?;
+
+    if !result.success {
+        return Err(DispatchError::SubprocessRunFailed {
+            item_ref: item_ref_str,
+            detail: format!(
+                "streaming tool exited with code {}: {}",
+                result.exit_code,
+                &result.stderr[..result.stderr.len().min(500)]
+            ),
+        });
+    }
+
+    let frames = ryeos_engine::protocol_vocabulary::read_all_frames(
+        std::io::Cursor::new(result.stdout.as_bytes()),
+    )
+    .map_err(|e| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "frame read failed for streaming tool: {e}"
+        ))
+    })?;
+
+    serde_json::to_value(&frames).map_err(|e| {
+        DispatchError::Internal(anyhow::anyhow!("frame serialize: {e}"))
+    })
+}
+
+async fn dispatch_tool_subprocess(
     current_ref: &CanonicalRef,
     thread_profile: &str,
     _verified: Option<&VerifiedItem>,
@@ -1264,71 +1461,29 @@ pub async fn dispatch_subprocess(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    // Defense-in-depth schema check. The loop already matched
-    // Subprocess; we re-check here so any future direct caller cannot
-    // accidentally route a non-subprocess ref through.
-    let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
-        let mut available: Vec<String> =
-            ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
-        available.sort();
-        DispatchError::SchemaMisconfigured {
-            kind: current_ref.kind.clone(),
-            detail: format!(
-                "no kind schema registered for ref '{current_ref}'; registered kinds: [{}]",
-                available.join(", ")
-            ),
-        }
-    })?;
-    let exec = schema.execution().ok_or_else(|| {
-        DispatchError::NotRootExecutable {
-            kind: current_ref.kind.clone(),
-            detail: "schema has no `execution:` block".into(),
-        }
-    })?;
-    let terminator = exec.terminator.as_ref().ok_or_else(|| {
-        DispatchError::SchemaMisconfigured {
-            kind: current_ref.kind.clone(),
-            detail: "dispatch_subprocess called on a schema with no terminator".into(),
-        }
-    })?;
-    if !matches!(terminator, TerminatorSpec::Subprocess) {
-        return Err(DispatchError::SchemaMisconfigured {
-            kind: current_ref.kind.clone(),
-            detail: format!(
-                "dispatch_subprocess called on schema declaring terminator {terminator:?}, not Subprocess"
-            ),
-        });
-    }
-
     let item_ref = current_ref.to_string();
 
     let mut resolved = crate::services::thread_lifecycle::resolve_root_execution(
-        &state.engine,
-        &ctx.plan_ctx.current_site_id,
-        request.project_path,
-        &item_ref,
-        request.launch_mode,
-        request.params.clone(),
-        Some(request.acting_principal.to_string()),
-        ctx.caller_scopes.clone(),
-        request.validate_only,
+        crate::services::thread_lifecycle::ResolveRootExecutionParams {
+            engine: &state.engine,
+            site_id: &ctx.plan_ctx.current_site_id,
+            project_path: request.project_path,
+            item_ref: &item_ref,
+            launch_mode: request.launch_mode,
+            parameters: request.params.clone(),
+            requested_by: Some(request.acting_principal.to_string()),
+            caller_scopes: ctx.caller_scopes.clone(),
+            validate_only: request.validate_only,
+        },
     )?;
 
-    // **A3**: override the thread-lifecycle's heuristic kind with the
-    // schema-declared `thread_profile`. Schema is the source of truth;
-    // `map_to_thread_kind` was only ever a `<kind>_run` fallback that
-    // happened to coincide. Now the audit trail's `thread.kind` is
-    // exactly what the schema declared.
     resolved.kind = thread_profile.to_string();
 
-    // Schema misconfiguration: an alias chain landed on Subprocess
-    // but the resolved executor is itself a runtime. Surface loudly
-    // so the schema gets fixed.
     if resolved.executor_ref.starts_with("runtime:") {
         return Err(DispatchError::SchemaMisconfigured {
             kind: current_ref.kind.clone(),
             detail: format!(
-                "subprocess terminator received an item whose resolved executor is a runtime ref ('{}'); this should have been routed through NativeRuntimeSpawn — fix the kind schema",
+                "subprocess terminator received an item whose resolved executor is a runtime ref ('{}'); this should have been routed through Managed lifecycle — fix the kind schema",
                 resolved.executor_ref
             ),
         });
@@ -1362,11 +1517,13 @@ pub async fn dispatch_subprocess(
 
     let item_ref_for_error = resolved.item_ref.clone();
 
-    // V5.5 P2 — subprocess (raw tool) terminator: no permissions
-    // composition step exists, so the callback token carries no caps
-    // (deny-all). Tools that need to call back into the daemon must
-    // be lifted to a kind that has a permissions model (directive,
-    // graph, …) and dispatched through that kind's runtime.
+    let required_caps = crate::service_registry::extract_required_caps(
+        &resolved.resolved_item.metadata.extra,
+    );
+    if !required_caps.is_empty() {
+        enforce_runtime_caps(&item_ref_for_error, &required_caps, &ctx.caller_scopes)?;
+    }
+
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
@@ -1375,6 +1532,7 @@ pub async fn dispatch_subprocess(
         snapshot_hash: request.snapshot_hash.clone(),
         parameters: request.params.clone(),
         temp_dir: request.temp_dir.clone(),
+        pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps: Vec::new(),
     };
 
@@ -1458,6 +1616,37 @@ pub async fn dispatch(
     // paths, it's the directive/tool that initiated the chain.
     let mut root_subject: Option<RootSubject> = None;
 
+    // B1: derive the SubprocessRole ONCE based on the user's original
+    // item_ref. Only direct `runtime:*` invocation triggers the
+    // runtime.execute cap gate. Alias chains do NOT inherit the role.
+    let role = if request.original_root_kind == ROOT_KIND_RUNTIME {
+        let verified = state
+            .engine
+            .runtimes
+            .lookup_by_ref(&current_ref)
+            .ok_or_else(|| {
+                let mut available: Vec<String> = state
+                    .engine
+                    .runtimes
+                    .all()
+                    .map(|r| r.canonical_ref.to_string())
+                    .collect();
+                available.sort();
+                DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail: format!(
+                        "runtime '{item_ref}' not registered; registered runtimes: [{}]",
+                        available.join(", ")
+                    ),
+                }
+            })?;
+        SubprocessRole::RuntimeTarget {
+            verified_runtime: Box::new(verified.clone()),
+        }
+    } else {
+        SubprocessRole::Regular
+    };
+
     loop {
         if !visited.insert(current_ref.clone()) {
             let mut visited_strs: Vec<String> =
@@ -1507,15 +1696,18 @@ pub async fn dispatch(
         match next {
             HopAction::Terminate(terminator, _hop_profile) => {
                 return dispatch_by(
-                    terminator,
-                    hop_ref,
-                    verified,
-                    thread_profile,
-                    runtime,
-                    root_subject,
+                    DispatchByParams {
+                        terminator,
+                        canonical_ref: hop_ref,
+                        verified,
+                        thread_profile,
+                        runtime,
+                        root_subject,
+                    },
                     request,
                     ctx,
                     state,
+                    &role,
                 )
                 .await;
             }
@@ -1546,22 +1738,32 @@ pub async fn dispatch(
 /// captured from the first hop. Leaf dispatchers consume what they
 /// need from both. No borrowed view struct — owned values flow through
 /// the match.
-async fn dispatch_by(
-    terminator: TerminatorSpec,
+struct DispatchByParams {
+    terminator: TerminatorDecl,
     canonical_ref: CanonicalRef,
     verified: Option<VerifiedItem>,
     thread_profile: Option<String>,
     runtime: Option<VerifiedRuntime>,
     root_subject: Option<RootSubject>,
+}
+
+async fn dispatch_by(
+    params: DispatchByParams,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    role: &SubprocessRole,
 ) -> Result<Value, DispatchError> {
+    let DispatchByParams {
+        terminator,
+        canonical_ref,
+        verified,
+        thread_profile,
+        runtime,
+        root_subject,
+    } = params;
     match terminator {
-        TerminatorSpec::Subprocess => {
-            // Subprocess uses the hop's thread_profile directly —
-            // there's no registry hop for subprocess, so root_subject
-            // and hop always agree.
+        TerminatorDecl::Subprocess { .. } => {
             let tp = thread_profile.ok_or_else(|| {
                 DispatchError::SchemaMisconfigured {
                     kind: canonical_ref.kind.clone(),
@@ -1569,17 +1771,22 @@ async fn dispatch_by(
                 }
             })?;
             dispatch_subprocess(
-                &canonical_ref,
-                &tp,
-                verified.as_ref(),
-                request,
-                ctx,
-                state,
+                SubprocessDispatchContext {
+                    current_ref: &canonical_ref,
+                    thread_profile: &tp,
+                    verified: verified.as_ref(),
+                    request,
+                    ctx,
+                    state,
+                    role,
+                    root_subject,
+                    hop_runtime: runtime,
+                },
             )
             .await
         }
-        TerminatorSpec::InProcessHandler {
-            registry: HandlerRegistryKind::Services,
+        TerminatorDecl::InProcess {
+            registry: InProcessRegistryKind::Services,
         } => {
             let tp = thread_profile.ok_or_else(|| {
                 DispatchError::SchemaMisconfigured {
@@ -1590,19 +1797,6 @@ async fn dispatch_by(
             dispatch_service(
                 &canonical_ref.to_string(),
                 &tp,
-                request,
-                ctx,
-                state,
-            )
-            .await
-        }
-        TerminatorSpec::NativeRuntimeSpawn => {
-            dispatch_native_runtime(
-                canonical_ref,
-                verified,
-                thread_profile,
-                runtime,
-                root_subject,
                 request,
                 ctx,
                 state,
@@ -1622,7 +1816,7 @@ mod tests {
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{
-        NativeParserHandlerRegistry, ParserDispatcher, ParserRegistry,
+        ParserDispatcher, ParserRegistry,
     };
     use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
@@ -1661,7 +1855,9 @@ version: "1.0.0"
 location:
   directory: runtimes
 execution:
-  terminator: native_runtime_spawn
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
   thread_profile: runtime_run
   resolution: []
 formats:
@@ -1669,7 +1865,7 @@ formats:
     parser: parser:rye/core/yaml/yaml
     signature:
       prefix: "#"
-composer: rye/core/identity
+composer: handler:rye/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -1700,7 +1896,7 @@ metadata:
             .expect("load runtime kind schema");
         let parser_dispatcher = ParserDispatcher::new(
             ParserRegistry::empty(),
-            NativeParserHandlerRegistry::with_builtins(),
+            std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
         );
         Engine::new(kinds, parser_dispatcher, None, vec![]).with_trust_store(ts)
     }

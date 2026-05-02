@@ -76,10 +76,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
+    let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
+        .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     let client = CallbackClient::new(
         &envelope.callback,
         &envelope.thread_id,
         envelope.project_root.to_str().unwrap_or(""),
+        &thread_auth_token,
     );
 
     if let Err(e) = client.mark_running().await {

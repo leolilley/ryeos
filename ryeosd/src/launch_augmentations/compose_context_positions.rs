@@ -177,6 +177,7 @@ pub async fn run(
         &executor_ref,
         project_path,
         &engine.trust_store,
+        ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
 

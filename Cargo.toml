@@ -1,7 +1,3 @@
 [workspace]
-<<<<<<< HEAD
 members = ["ryeosd", "ryeos-engine", "lillux", "ryeos-runtime", "ryeos-state", "ryeos-graph-runtime", "ryeos-directive-runtime", "ryeos-knowledge-runtime", "ryeos-tools", "ryeos-tracing", "ryeos-cli", "ryeos-handler-protocol", "ryeos-handler-bins"]
-=======
-members = ["ryeosd", "ryeos-engine", "lillux", "ryeos-runtime", "ryeos-state", "ryeos-graph-runtime", "ryeos-directive-runtime", "ryeos-knowledge-runtime", "ryeos-tools", "ryeos-tracing", "rye-cli"]
->>>>>>> 0ce9828f (feat(daemon): op dispatch path + wire-type restructuring)
 resolver = "2"

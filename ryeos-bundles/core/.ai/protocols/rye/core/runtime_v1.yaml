@@ -1,4 +1,4 @@
-# rye:signed:2026-05-02T05:18:05Z:adbfe99deec4ef059ae800f1d7ecbcb9ba2ed15fb939a81dc101bdbebeb845ec:CAHrEmlUuGTx22nMlcyNTFmOpXnXNK5pBgHJ/pr2h+lGHr6t8MmNeURqVkTVioRjPJiFDOnJXszRYTWrYo6sCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-02T11:21:57Z:cf2107f1767a93dfd826ac3c76af2c1b3d5b0ccfe4af91cd608551c9a68eb0a1:Kg73p0krb4bNkPAx1rN2+DeVY4fW1WHRwp1jAwbM2MC9h1xD/mhobPjureBB7B+YHtEYop61Ckih/wQH/dQDAQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 kind: protocol
 name: runtime_v1
 category: rye/core
@@ -14,8 +14,6 @@ env_injections:
   - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
   - { name: RYEOSD_THREAD_ID, source: thread_id }
   - { name: RYEOSD_PROJECT_PATH, source: project_path }
-  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
-  - { name: RYEOS_STATE_DIR, source: state_dir }
 capabilities:
   allows_pushed_head: false
   allows_target_site: false

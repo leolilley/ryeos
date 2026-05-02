@@ -449,6 +449,7 @@ mod tests {
                 step_outputs: HashMap::new(),
                 executor_trust_class: TrustClass::Unsigned,
                 composed: crate::resolution::KindComposedView::identity(serde_json::json!({})),
+                referenced_items: vec![],
             },
             inventory: HashMap::new(),
         }

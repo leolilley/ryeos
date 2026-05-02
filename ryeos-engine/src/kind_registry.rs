@@ -2640,7 +2640,9 @@ execution:
     fn reject_mixed_dispatch_operations_and_terminator() {
         let yaml = "\
 execution:
-  terminator: subprocess
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
   operations:
     - name: compose
       side_effects: none
@@ -2697,7 +2699,9 @@ execution:
     fn operations_default_to_empty() {
         let yaml = "\
 execution:
-  terminator: subprocess
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.operations.is_empty());
@@ -2780,7 +2784,9 @@ execution:
     fn launch_augmentations_default_to_empty() {
         let yaml = "\
 execution:
-  terminator: subprocess
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.launch_augmentations.is_empty());

@@ -13,7 +13,7 @@ use crate::routes::streaming_sources::{
 use crate::services::event_store::EventReplayParams;
 use crate::state::AppState;
 
-pub struct DirectiveLaunchSource;
+pub struct DispatchLaunchSource;
 
 const REQUIRED_AUTH: &str = "rye_signed";
 
@@ -60,9 +60,9 @@ struct ExecuteStreamRequest {
     parameters: Value,
 }
 
-impl StreamingSource for DirectiveLaunchSource {
+impl StreamingSource for DispatchLaunchSource {
     fn key(&self) -> &'static str {
-        "directive_launch"
+        "dispatch_launch"
     }
 
     fn compile(
@@ -122,13 +122,13 @@ impl StreamingSource for DirectiveLaunchSource {
             }
         }
 
-        Ok(Arc::new(CompiledDirectiveLaunchSource {
+        Ok(Arc::new(CompiledDispatchLaunchSource {
             keep_alive_secs,
         }))
     }
 }
 
-struct CompiledDirectiveLaunchSource {
+struct CompiledDispatchLaunchSource {
     keep_alive_secs: u64,
 }
 
@@ -208,7 +208,7 @@ fn build_launch_task(
 }
 
 #[axum::async_trait]
-impl BoundStreamingSource for CompiledDirectiveLaunchSource {
+impl BoundStreamingSource for CompiledDispatchLaunchSource {
     async fn open(
         &self,
         ctx: &RouteDispatchContext,
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_auth_none() {
-        let source = DirectiveLaunchSource;
+        let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_non_json_body() {
-        let source = DirectiveLaunchSource;
+        let source = DispatchLaunchSource;
         let mut raw = make_test_raw("r1", "/execute/stream");
         raw.request.body = RawRequestBody::Raw;
         let es = RawEventStreamResponse {
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_keep_alive_zero() {
-        let source = DirectiveLaunchSource;
+        let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_unknown_source_config_key() {
-        let source = DirectiveLaunchSource;
+        let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn compile_succeeds_with_valid_config() {
-        let source = DirectiveLaunchSource;
+        let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
             source: "directive_launch".into(),
