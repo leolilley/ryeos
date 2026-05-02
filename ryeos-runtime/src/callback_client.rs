@@ -27,6 +27,7 @@ pub struct CallbackClient {
     inner: Option<Arc<dyn RuntimeCallbackAPI>>,
     thread_id: String,
     project_path: String,
+    thread_auth_token: String,
 }
 
 impl CallbackClient {
@@ -35,11 +36,13 @@ impl CallbackClient {
         inner: Arc<dyn RuntimeCallbackAPI>,
         thread_id: &str,
         project_path: &str,
+        thread_auth_token: &str,
     ) -> Self {
         Self {
             inner: Some(inner),
             thread_id: thread_id.to_string(),
             project_path: project_path.to_string(),
+            thread_auth_token: thread_auth_token.to_string(),
         }
     }
 }
@@ -50,17 +53,19 @@ impl Clone for CallbackClient {
             inner: self.inner.clone(),
             thread_id: self.thread_id.clone(),
             project_path: self.project_path.clone(),
+            thread_auth_token: self.thread_auth_token.clone(),
         }
     }
 }
 
 impl CallbackClient {
-    pub fn new(callback: &EnvelopeCallback, thread_id: &str, project_path: &str) -> Self {
+    pub fn new(callback: &EnvelopeCallback, thread_id: &str, project_path: &str, thread_auth_token: &str) -> Self {
         let inner: Option<Arc<dyn RuntimeCallbackAPI>> = if callback.socket_path.exists() {
             Some(Arc::new(
                 crate::callback_uds::UdsRuntimeClient::new(
                     callback.socket_path.clone(),
                     callback.token.clone(),
+                    thread_auth_token.to_string(),
                 )
             ))
         } else {
@@ -76,6 +81,7 @@ impl CallbackClient {
             inner,
             thread_id: thread_id.to_string(),
             project_path: project_path.to_string(),
+            thread_auth_token: thread_auth_token.to_string(),
         }
     }
 
@@ -399,7 +405,7 @@ mod tests {
     }
 
     fn make_client() -> CallbackClient {
-        CallbackClient::new(&make_callback(), "T-test", "/project")
+        CallbackClient::new(&make_callback(), "T-test", "/project", "tat-test")
     }
 
     #[tokio::test]

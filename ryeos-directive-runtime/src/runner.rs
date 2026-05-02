@@ -824,7 +824,7 @@ mod tests {
     }
 
     fn make_callback() -> CallbackClient {
-        CallbackClient::new(&make_callback_env(), "T-test", "/project")
+        CallbackClient::new(&make_callback_env(), "T-test", "/project", "tat-test")
     }
 
     fn make_policy() -> EnvelopePolicy {

@@ -129,6 +129,9 @@ mod tests {
             callback_tokens: Arc::new(
                 crate::execution::callback_token::CallbackCapabilityStore::new(),
             ),
+            thread_auth: Arc::new(
+                crate::execution::callback_token::ThreadAuthStore::new(),
+            ),
             write_barrier: Arc::new(write_barrier),
             started_at: std::time::Instant::now(),
             started_at_iso: String::new(),

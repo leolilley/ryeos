@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::state::AppState;
+use crate::execution::callback_token::ThreadAuthState;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -10,6 +11,7 @@ struct DispatchActionParams {
     callback_token: String,
     thread_id: String,
     project_path: String,
+    thread_auth_token: String,
     action: ActionPayload,
 }
 
@@ -45,7 +47,19 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // cap-set is deny-all; a wildcard `*` short-circuits to allow.
     enforce_callback_caps(&params.action.item_id, &cap.effective_caps)?;
 
-    handle_execute(params, state).await
+    let thread_auth = state.thread_auth.validate(
+        &params.thread_auth_token,
+        &params.thread_id,
+    )?;
+
+    tracing::info!(
+        thread_id = %params.thread_id,
+        server_principal = %thread_auth.acting_principal,
+        body_principal = %params.project_path,
+        "thread auth token validated: using server-side principal",
+    );
+
+    handle_execute(params, state, &thread_auth).await
 }
 
 /// V5.5 P2: enforce the callback's composed `effective_caps` against
@@ -94,7 +108,11 @@ fn enforce_callback_caps(item_id: &str, effective_caps: &[String]) -> Result<()>
 /// daemon enforces them at the trust boundary in `handle()` via
 /// `enforce_callback_caps` BEFORE dispatch reaches this function.
 /// The runtime is no longer self-policing.
-async fn handle_execute(params: DispatchActionParams, state: &AppState) -> Result<Value> {
+async fn handle_execute(
+    params: DispatchActionParams,
+    state: &AppState,
+    thread_auth: &ThreadAuthState,
+) -> Result<Value> {
     // V5.4 P2 — strict typed callback contract requires every leaf
     // dispatcher reachable from a callback to emit
     // `CallbackDispatchResponse { thread, result }`. The subprocess
@@ -115,25 +133,8 @@ async fn handle_execute(params: DispatchActionParams, state: &AppState) -> Resul
     let project_path =
         crate::execution::project_source::normalize_project_path(&params.project_path);
 
-    let thread = state
-        .threads
-        .get_thread(&params.thread_id)
-        .with_context(|| format!("lookup parent thread '{}'", params.thread_id))?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "callback dispatch refers to unknown thread '{}'",
-                params.thread_id
-            )
-        })?;
-    let caller_principal_id = thread.requested_by.ok_or_else(|| {
-        anyhow::anyhow!(
-            "callback parent thread '{}' has no requested_by — refusing \
-             to fall back to daemon identity",
-            params.thread_id
-        )
-    })?;
-
-    let caller_scopes = vec!["execute".to_string()];
+    let caller_principal_id = thread_auth.acting_principal.clone();
+    let caller_scopes = thread_auth.caller_scopes.clone();
     let site_id = state.threads.site_id();
 
     let root_canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)

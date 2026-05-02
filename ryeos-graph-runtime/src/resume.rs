@@ -222,7 +222,7 @@ mod tests {
 
     fn make_callback(events: Vec<ReplayedEventRecord>) -> CallbackClient {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(ReplayMock { events });
-        CallbackClient::from_inner(inner, "T-test", "/tmp/test")
+        CallbackClient::from_inner(inner, "T-test", "/tmp/test", "tat-test")
     }
 
     #[tokio::test]

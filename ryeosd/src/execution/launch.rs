@@ -614,6 +614,15 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+
+    let thread_auth = state.thread_auth.mint(
+        thread_id,
+        acting_principal.to_string(),
+        vec!["execute".to_string()],
+        ttl,
+    );
+    let tat_owned = thread_auth.token.clone();
+
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(
             SpawnRuntimeParams {
@@ -625,6 +634,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
                 callback: &callback_owned,
                 thread_id: &thread_id_owned,
                 vault_bindings: &vault_owned,
+                thread_auth_token: &tat_owned,
             },
         )
     })
@@ -634,9 +644,12 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // 10. ALWAYS invalidate callback token (cleanup guard)
     state.callback_tokens.invalidate(&cap.token);
     state.callback_tokens.invalidate_for_thread(thread_id);
+    state.thread_auth.invalidate(&thread_auth.token);
+    state.thread_auth.invalidate_for_thread(thread_id);
 
     // Prune stale capabilities from other completed threads
     let pruned = state.callback_tokens.prune_expired();
+    state.thread_auth.prune_expired();
     if pruned > 0 {
         tracing::debug!(pruned, "cleaned up expired callback capabilities");
     }
@@ -700,6 +713,7 @@ struct SpawnRuntimeParams<'a> {
     callback: &'a EnvelopeCallback,
     thread_id: &'a str,
     vault_bindings: &'a [(String, String)],
+    thread_auth_token: &'a str,
 }
 
 fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
@@ -712,6 +726,7 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         callback,
         thread_id,
         vault_bindings,
+        thread_auth_token,
     } = params;
     // Build the base env: allowlisted parent vars + declared secrets.
     // The builder adds descriptor-declared injection env vars on top.
@@ -744,6 +759,7 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         acting_principal: "", // not needed for env injection in runtime path
         cas_root: Path::new("/"), // not needed for env injection in runtime path
         state_dir: Path::new("/"), // not needed for env injection in runtime path
+        thread_auth_token,
     };
 
     let mut spec = ryeos_engine::protocols::build_subprocess_spec(descriptor, &build_request)

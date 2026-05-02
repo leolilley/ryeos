@@ -8,7 +8,7 @@ use ryeos_engine::engine::Engine;
 
 use crate::config::Config;
 use crate::event_stream::ThreadEventHub;
-use crate::execution::callback_token::CallbackCapabilityStore;
+use crate::execution::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::identity::NodeIdentity;
 use crate::node_config::NodeConfigSnapshot;
 use crate::routes::RouteTable;
@@ -40,6 +40,7 @@ pub struct AppState {
     pub event_streams: Arc<ThreadEventHub>,
     pub commands: Arc<CommandService>,
     pub callback_tokens: Arc<CallbackCapabilityStore>,
+    pub thread_auth: Arc<ThreadAuthStore>,
     pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,

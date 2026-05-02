@@ -75,10 +75,13 @@ fn main() -> anyhow::Result<()> {
         "knowledge runtime launch"
     );
 
+    let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
+        .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     let callback = CallbackClient::new(
         &envelope.callback,
         &thread_id,
         project_root.to_str().unwrap_or(""),
+        &thread_auth_token,
     );
 
     let body = strip_frontmatter(&envelope.resolution.root.raw_content).to_string();

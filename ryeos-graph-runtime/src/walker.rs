@@ -1518,7 +1518,7 @@ mod tests {
 
     fn make_callback(results: Vec<Value>) -> CallbackClient {
         let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(MockClient::new(results));
-        CallbackClient::from_inner(inner, "thread-test", "/tmp/test-project")
+        CallbackClient::from_inner(inner, "thread-test", "/tmp/test-project", "tat-test")
     }
 
     fn make_graph(yaml: &str) -> GraphDefinition {
@@ -2043,7 +2043,7 @@ config:
 
     fn make_recording_callback(results: Vec<Value>) -> (CallbackClient, Arc<RecordingMockClient>) {
         let inner: Arc<RecordingMockClient> = Arc::new(RecordingMockClient::new(results));
-        let client = CallbackClient::from_inner(inner.clone(), "thread-test", "/tmp/test-project");
+        let client = CallbackClient::from_inner(inner.clone(), "thread-test", "/tmp/test-project", "tat-test");
         (client, inner)
     }
 

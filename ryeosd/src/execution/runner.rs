@@ -489,13 +489,22 @@ fn mint_callback_env(
     project_path: Option<&std::path::Path>,
     duration_seconds: Option<u64>,
     effective_caps: Vec<String>,
-) -> Result<(HashMap<String, String>, String)> {
+    acting_principal: &str,
+    caller_scopes: Vec<String>,
+) -> Result<(HashMap<String, String>, String, String)> {
     let ttl = compute_ttl(duration_seconds);
     let cap = state.callback_tokens.generate(
         thread_id,
         project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
         ttl,
         effective_caps,
+    );
+
+    let thread_auth = state.thread_auth.mint(
+        thread_id,
+        acting_principal.to_string(),
+        caller_scopes,
+        ttl,
     );
 
     let request = SubprocessBuildRequest {
@@ -509,12 +518,13 @@ fn mint_callback_env(
         project_path: project_path
             .map(|p| p.to_path_buf())
             .unwrap_or_default(),
-        acting_principal: String::new(),
+        acting_principal: acting_principal.to_string(),
         cas_root: state.config.state_dir.join("cas"),
         callback_token: Some(cap.token.clone()),
         callback_socket_path: Some(state.config.uds_path.to_string_lossy().to_string()),
         vault_handle: None,
         state_dir: state.config.state_dir.clone(),
+        thread_auth_token: Some(thread_auth.token.clone()),
         params: json!({}),
         resolution_output: None,
     };
@@ -524,6 +534,7 @@ fn mint_callback_env(
         (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN"),
         (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID"),
         (EnvInjectionSource::StateDir, "RYEOS_STATE_DIR"),
+        (EnvInjectionSource::ThreadAuthToken, "RYEOSD_THREAD_AUTH_TOKEN"),
     ];
 
     let mut bindings = HashMap::new();
@@ -538,7 +549,7 @@ fn mint_callback_env(
         bindings.insert("RYEOSD_PROJECT_PATH".to_string(), value);
     }
 
-    Ok((bindings, cap.token))
+    Ok((bindings, cap.token, thread_auth.token))
 }
 
 /// Run an execution inline (blocking until completion).
@@ -606,9 +617,11 @@ pub async fn run_inline(
     let vault = params.vault_bindings.clone();
 
     // Mint callback token for the spawned subprocess.
-    let (cb_bindings, _cb_token) = mint_callback_env(
+    let (cb_bindings, _cb_token, _tat) = mint_callback_env(
         &state, &tid, Some(&effective_path), None,
         params.effective_caps.clone(),
+        &params.acting_principal,
+        vec!["execute".to_string()],
     )?;
 
     // Daemon-owned per-thread state dir under config.state_dir — does
@@ -796,9 +809,11 @@ pub async fn run_detached(
 
     // Mint callback token for the spawned subprocess. Token lifetime is
     // owned by the background task (revoked on wait completion or error).
-    let (cb_bindings, cb_token) = mint_callback_env(
+    let (cb_bindings, cb_token, _tat) = mint_callback_env(
         &state, &running.thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
+        &params.acting_principal,
+        vec!["execute".to_string()],
     )?;
     guard.track_callback_token(cb_token);
 
@@ -1296,9 +1311,11 @@ pub async fn run_existing_detached(
 
     // Mint a FRESH callback token for the resumed subprocess (never reuse
     // the original — it was revoked when the prior process exited).
-    let (cb_bindings, cb_token) = mint_callback_env(
+    let (cb_bindings, cb_token, _tat) = mint_callback_env(
         &state, &thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
+        &params.acting_principal,
+        vec!["execute".to_string()],
     )?;
     guard.track_callback_token(cb_token);
 

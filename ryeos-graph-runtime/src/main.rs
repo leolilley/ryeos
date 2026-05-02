@@ -101,11 +101,14 @@ fn main() -> anyhow::Result<()> {
     // 1. RYE_RESUME=1 + local checkpoint → checkpoint wins
     // 2. RYE_RESUME=1 + no local checkpoint → explicit fallback to replay
     // 3. Both unavailable + resume requested → fail loud
+    let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
+        .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     let callback = match resolved.callback.as_ref() {
         Some(cb) => CallbackClient::new(
             cb,
             &resolved.thread_id,
             resolved.project_root.to_str().unwrap_or(""),
+            &thread_auth_token,
         ),
         None => {
             if let Some(ref socket) = cli.daemon_socket {
@@ -120,6 +123,7 @@ fn main() -> anyhow::Result<()> {
                 &cb_env,
                 &resolved.thread_id,
                 resolved.project_root.to_str().unwrap_or(""),
+                &thread_auth_token,
             )
         }
     };

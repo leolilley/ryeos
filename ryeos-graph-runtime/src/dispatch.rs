@@ -199,7 +199,7 @@ mod tests {
 
     fn make_mock_client(results: Vec<Value>) -> CallbackClient {
         let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(MockClient::new(results));
-        CallbackClient::from_inner(inner, "T-test", "/project")
+        CallbackClient::from_inner(inner, "T-test", "/project", "tat-test")
     }
 
     struct MockClient {

@@ -101,6 +101,10 @@ pub struct BuildRequest<'a> {
 
     /// Path to the daemon's state directory.
     pub state_dir: &'a Path,
+
+    /// Per-thread auth token injected into env for callback identity.
+    /// Required — no `Option` fallback.
+    pub thread_auth_token: &'a str,
 }
 
 /// Errors produced by the builder.
@@ -223,6 +227,7 @@ pub fn build_subprocess_spec(
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request.cas_root.to_string_lossy().to_string(),
             EnvInjectionSource::StateDir => request.state_dir.to_string_lossy().to_string(),
+            EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.to_string(),
             EnvInjectionSource::VaultHandle => {
                 // Look up the vault handle from vault_bindings.
                 // For now, vault_handle injection is not yet wired through
@@ -394,6 +399,7 @@ mod tests {
             acting_principal: "fp:abc123",
             cas_root: Path::new("/cas/root"),
             state_dir: Path::new("/var/lib/ryeos"),
+            thread_auth_token: "tat-test-123",
         }
     }
 

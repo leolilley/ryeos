@@ -27,6 +27,9 @@ pub enum EnvInjectionSource {
     VaultHandle,
     /// Daemon-wide state directory (e.g. `RYEOS_STATE_DIR`).
     StateDir,
+    /// Per-thread auth token proving subprocess identity on callbacks.
+    /// Required on every `runtime.dispatch_action` call.
+    ThreadAuthToken,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +90,13 @@ pub fn produce_env_value(
             })
         }
         EnvInjectionSource::StateDir => Ok(request.state_dir.to_string_lossy().to_string()),
+        EnvInjectionSource::ThreadAuthToken => {
+            request.thread_auth_token.clone().ok_or_else(|| {
+                EngineError::Internal(
+                    "thread_auth_token requested but no thread_auth_token available".into(),
+                )
+            })
+        }
     }
 }
 
@@ -124,6 +134,7 @@ mod tests {
             callback_socket_path: Some("/tmp/ryeos-callback.sock".to_string()),
             vault_handle: Some("vault-handle-1".to_string()),
             state_dir: PathBuf::from("/var/lib/ryeos"),
+            thread_auth_token: Some("tat-abc123".to_string()),
             params: serde_json::json!({}),
             resolution_output: None,
         }
@@ -141,6 +152,7 @@ mod tests {
             EnvInjectionSource::CasRoot,
             EnvInjectionSource::VaultHandle,
             EnvInjectionSource::StateDir,
+            EnvInjectionSource::ThreadAuthToken,
         ] {
             let yaml = serde_yaml::to_string(&src).unwrap();
             let parsed: EnvInjectionSource = serde_yaml::from_str(&yaml).unwrap();

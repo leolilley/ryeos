@@ -417,6 +417,7 @@ pub fn validate_protocol_builder(
             acting_principal: "boot-check",
             cas_root: dummy_path,
             state_dir: dummy_path,
+            thread_auth_token: "boot-check-tat",
         };
 
         match build_subprocess_spec(&verified.descriptor, &request) {
@@ -1310,6 +1311,7 @@ composed_value_contract:
             acting_principal: "test",
             cas_root: dummy,
             state_dir: dummy,
+            thread_auth_token: "test-tat",
         };
 
         let result = build_subprocess_spec(&desc, &request);
@@ -1366,6 +1368,7 @@ composed_value_contract:
             acting_principal: "test",
             cas_root: dummy,
             state_dir: dummy,
+            thread_auth_token: "test-tat",
         };
 
         match build_subprocess_spec(&desc, &request) {

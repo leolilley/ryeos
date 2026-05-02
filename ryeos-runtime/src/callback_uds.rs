@@ -9,13 +9,15 @@ use crate::daemon_rpc::{DaemonRpcClient, RpcError};
 pub struct UdsRuntimeClient {
     rpc: DaemonRpcClient,
     callback_token: String,
+    thread_auth_token: String,
 }
 
 impl UdsRuntimeClient {
-    pub fn new(socket_path: PathBuf, callback_token: String) -> Self {
+    pub fn new(socket_path: PathBuf, callback_token: String, thread_auth_token: String) -> Self {
         Self {
             rpc: DaemonRpcClient::new(socket_path),
             callback_token,
+            thread_auth_token,
         }
     }
 
@@ -25,7 +27,11 @@ impl UdsRuntimeClient {
             .map_err(|_| CallbackError::Transport(
                 anyhow::anyhow!("RYEOSD_CALLBACK_TOKEN must be set by daemon")
             ))?;
-        Ok(Self::new(path, token))
+        let tat = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
+            .map_err(|_| CallbackError::Transport(
+                anyhow::anyhow!("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon")
+            ))?;
+        Ok(Self::new(path, token, tat))
     }
 
     fn map_rpc_error(err: RpcError) -> CallbackError {
@@ -50,6 +56,12 @@ impl UdsRuntimeClient {
                 map.insert(
                     "callback_token".to_string(),
                     json!(self.callback_token),
+                );
+            }
+            if !map.contains_key("thread_auth_token") && !self.thread_auth_token.is_empty() {
+                map.insert(
+                    "thread_auth_token".to_string(),
+                    json!(self.thread_auth_token),
                 );
             }
         }
@@ -250,8 +262,10 @@ mod tests {
         let client = UdsRuntimeClient::new(
             std::path::PathBuf::from("/tmp/test"),
             "my-token".to_string(),
+            "my-tat".to_string(),
         );
         assert_eq!(client.callback_token, "my-token");
+        assert_eq!(client.thread_auth_token, "my-tat");
     }
 
     #[test]
@@ -259,10 +273,12 @@ mod tests {
         let client = UdsRuntimeClient::new(
             std::path::PathBuf::from("/tmp/test"),
             "cbt-test123".to_string(),
+            "tat-test456".to_string(),
         );
         let mut params = json!({"thread_id": "T-1"});
         client.inject_callback_token(&mut params);
         assert_eq!(params["callback_token"], "cbt-test123");
+        assert_eq!(params["thread_auth_token"], "tat-test456");
     }
 
     #[test]
@@ -270,9 +286,11 @@ mod tests {
         let client = UdsRuntimeClient::new(
             std::path::PathBuf::from("/tmp/test"),
             String::new(),
+            String::new(),
         );
         let mut params = json!({"thread_id": "T-1"});
         client.inject_callback_token(&mut params);
         assert!(params.get("callback_token").is_none());
+        assert!(params.get("thread_auth_token").is_none());
     }
 }

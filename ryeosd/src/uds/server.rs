@@ -60,7 +60,7 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
     }
 }
 
-const TRANSPORT_FIELDS: &[&str] = &["callback_token"];
+const TRANSPORT_FIELDS: &[&str] = &["callback_token", "thread_auth_token"];
 
 fn strip_transport_fields(params: &serde_json::Value) -> serde_json::Value {
     match params {
@@ -109,6 +109,16 @@ pub async fn dispatch_runtime_method(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         state.callback_tokens.validate_token_and_thread(token, thread_id)?;
+    } else {
+        // runtime.dispatch_action: validate thread_auth_token (per-request
+        // identity proof). Missing or invalid = hard fail, no fallback.
+        let tat = params.get("thread_auth_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.dispatch_action"))?;
+        let thread_id = params.get("thread_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_id"))?;
+        state.thread_auth.validate(tat, thread_id)?;
     }
 
     // Strip transport-level fields before typed deserialization so
@@ -411,6 +421,7 @@ mod tests {
             event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
+            thread_auth: Arc::new(crate::execution::callback_token::ThreadAuthStore::new()),
             write_barrier: Arc::new(WriteBarrier::new()),
             started_at: Instant::now(),
             started_at_iso: lillux::time::iso8601_now(),

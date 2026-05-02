@@ -139,6 +139,90 @@ pub fn compute_ttl(duration_seconds: Option<u64>) -> Duration {
     Duration::from_secs(secs.min(3600))
 }
 
+#[derive(Debug, Clone)]
+pub struct ThreadAuthState {
+    pub token: String,
+    pub thread_id: String,
+    pub acting_principal: String,
+    pub caller_scopes: Vec<String>,
+    pub expires_at: Instant,
+}
+
+pub struct ThreadAuthStore {
+    states: Mutex<HashMap<String, ThreadAuthState>>,
+}
+
+impl Default for ThreadAuthStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThreadAuthStore {
+    pub fn new() -> Self {
+        Self {
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn mint(
+        &self,
+        thread_id: &str,
+        acting_principal: String,
+        caller_scopes: Vec<String>,
+        ttl: Duration,
+    ) -> ThreadAuthState {
+        let random_bytes: [u8; 32] = rand::random();
+        let hex = lillux::cas::sha256_hex(&random_bytes);
+        let token = format!("tat-{hex}");
+
+        let state = ThreadAuthState {
+            token: token.clone(),
+            thread_id: thread_id.to_string(),
+            acting_principal,
+            caller_scopes,
+            expires_at: Instant::now() + ttl,
+        };
+
+        self.states.lock().unwrap().insert(token, state.clone());
+        state
+    }
+
+    pub fn validate(&self, token: &str, thread_id: &str) -> Result<ThreadAuthState> {
+        let map = self.states.lock().unwrap();
+        let state = map
+            .get(token)
+            .ok_or_else(|| anyhow::anyhow!("invalid thread auth token"))?;
+
+        if Instant::now() > state.expires_at {
+            bail!("thread auth token expired");
+        }
+
+        if state.thread_id != thread_id {
+            bail!("thread auth token does not match thread_id");
+        }
+
+        Ok(state.clone())
+    }
+
+    pub fn invalidate(&self, token: &str) {
+        self.states.lock().unwrap().remove(token);
+    }
+
+    pub fn invalidate_for_thread(&self, thread_id: &str) {
+        let mut map = self.states.lock().unwrap();
+        map.retain(|_, s| s.thread_id != thread_id);
+    }
+
+    pub fn prune_expired(&self) -> usize {
+        let mut map = self.states.lock().unwrap();
+        let now = Instant::now();
+        let before = map.len();
+        map.retain(|_, s| s.expires_at > now);
+        before - map.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +373,82 @@ mod tests {
     #[test]
     fn compute_ttl_uses_provided_value() {
         assert_eq!(compute_ttl(Some(600)), Duration::from_secs(600));
+    }
+
+    // ── ThreadAuthStore ──────────────────────────────────────────────
+
+    #[test]
+    fn thread_auth_mint_and_validate_round_trip() {
+        let store = ThreadAuthStore::new();
+        let state = store.mint(
+            "T-abc",
+            "fp:user123".to_string(),
+            vec!["execute".to_string()],
+            Duration::from_secs(300),
+        );
+        assert!(state.token.starts_with("tat-"));
+        assert_eq!(state.acting_principal, "fp:user123");
+
+        let validated = store.validate(&state.token, "T-abc").unwrap();
+        assert_eq!(validated.thread_id, "T-abc");
+        assert_eq!(validated.acting_principal, "fp:user123");
+        assert_eq!(validated.caller_scopes, vec!["execute"]);
+    }
+
+    #[test]
+    fn thread_auth_rejects_unknown_token() {
+        let store = ThreadAuthStore::new();
+        let err = store.validate("tat-nonexistent", "T-x").unwrap_err();
+        assert!(err.to_string().contains("invalid thread auth token"));
+    }
+
+    #[test]
+    fn thread_auth_rejects_wrong_thread() {
+        let store = ThreadAuthStore::new();
+        let state = store.mint(
+            "T-1",
+            "fp:u".to_string(),
+            vec![],
+            Duration::from_secs(300),
+        );
+        let err = store.validate(&state.token, "T-2").unwrap_err();
+        assert!(err.to_string().contains("thread_id"));
+    }
+
+    #[test]
+    fn thread_auth_rejects_expired() {
+        let store = ThreadAuthStore::new();
+        let state = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(0));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let err = store.validate(&state.token, "T-1").unwrap_err();
+        assert!(err.to_string().contains("expired"));
+    }
+
+    #[test]
+    fn thread_auth_invalidate_removes_token() {
+        let store = ThreadAuthStore::new();
+        let state = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        store.invalidate(&state.token);
+        assert!(store.validate(&state.token, "T-1").is_err());
+    }
+
+    #[test]
+    fn thread_auth_invalidate_for_thread() {
+        let store = ThreadAuthStore::new();
+        let s1 = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        let s2 = store.mint("T-2", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        store.invalidate_for_thread("T-1");
+        assert!(store.validate(&s1.token, "T-1").is_err());
+        assert!(store.validate(&s2.token, "T-2").is_ok());
+    }
+
+    #[test]
+    fn thread_auth_prune_expired() {
+        let store = ThreadAuthStore::new();
+        store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(0));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        store.mint("T-2", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        let pruned = store.prune_expired();
+        assert_eq!(pruned, 1);
     }
 }

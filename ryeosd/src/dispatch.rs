@@ -957,6 +957,7 @@ async fn dispatch_streaming_subprocess(
         acting_principal: request.acting_principal,
         cas_root: Path::new("/"),
         state_dir: Path::new("/"),
+        thread_auth_token: "",
     };
 
     let mut spec = ryeos_engine::protocols::build_subprocess_spec(

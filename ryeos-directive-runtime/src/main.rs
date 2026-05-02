@@ -94,10 +94,13 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         envelope.roots.system_roots.clone(),
     );
 
+    let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
+        .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     let callback = ryeos_runtime::callback_client::CallbackClient::new(
         &envelope.callback,
         &envelope.thread_id,
         envelope.roots.project_root.to_str().unwrap_or(""),
+        &thread_auth_token,
     );
 
     let bootstrap_output = bootstrap::bootstrap(

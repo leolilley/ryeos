@@ -73,7 +73,7 @@ mod tests {
 
     fn make_callback() -> (CallbackClient, Arc<MockCallback>) {
         let mock = Arc::new(MockCallback::new());
-        let client = CallbackClient::from_inner(mock.clone(), "T-test", "/tmp/test");
+        let client = CallbackClient::from_inner(mock.clone(), "T-test", "/tmp/test", "tat-test");
         (client, mock)
     }
 

@@ -116,9 +116,11 @@ pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
     let socket_path = crate::daemon_rpc::resolve_daemon_socket_path(None);
     let token = std::env::var("RYEOSD_CALLBACK_TOKEN")
         .expect("RYEOSD_CALLBACK_TOKEN must be set by daemon");
+    let tat = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
+        .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     if socket_path.exists() {
         Box::new(
-            crate::callback_uds::UdsRuntimeClient::new(socket_path, token),
+            crate::callback_uds::UdsRuntimeClient::new(socket_path, token, tat),
         )
     } else {
         panic!(

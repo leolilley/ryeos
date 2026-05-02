@@ -230,6 +230,7 @@ async fn main() -> Result<()> {
     ));
     let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
+    let thread_auth = Arc::new(execution::callback_token::ThreadAuthStore::new());
     // `services` already built above for self-check
 
     // Operator-secret store. Sealed-envelope (X25519 + XChaCha20-Poly1305)
@@ -254,6 +255,7 @@ async fn main() -> Result<()> {
         event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
         commands,
         callback_tokens,
+        thread_auth,
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
@@ -586,6 +588,7 @@ async fn run_service_standalone(
         event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
         commands,
         callback_tokens: Arc::new(execution::callback_token::CallbackCapabilityStore::new()),
+        thread_auth: Arc::new(execution::callback_token::ThreadAuthStore::new()),
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
