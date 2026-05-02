@@ -75,13 +75,55 @@ pub fn bootstrap(
     let context_positions: HashMap<String, Vec<String>> =
         composed_view.derived_string_seq_map(DERIVED_COMPOSED_CONTEXT);
 
-    // Strict context rendering: any declared knowledge item that fails
-    // to resolve / verify / load is a hard error. The previous code
-    // silently dropped unresolvable items and emitted a partial prompt,
-    // which masked typo'd refs and missing knowledge files.
-    let system_prompt = render_context_position(&context_positions, "system", loader)?;
-    let context_before = render_context_position(&context_positions, "before", loader)?;
-    let context_after = render_context_position(&context_positions, "after", loader)?;
+    // Context rendering: read pre-rendered strings from the daemon's
+    // compose_context_positions launch augmentation. The augmentation
+    // runs between resolution and parent runtime spawn, pre-resolves
+    // knowledge refs, dispatches a child knowledge-runtime thread, and
+    // writes rendered strings into the parent's composed view.
+    //
+    // Hard contract: if the directive declared a non-empty `context:`
+    // block, the daemon MUST have populated `rendered_contexts` in the
+    // derived map. Missing/malformed = daemon bug. No silent fallback
+    // — the user must see the error and fix the root cause.
+    let any_non_empty = context_positions.values().any(|v| !v.is_empty());
+
+    let rendered: HashMap<String, String> = if any_non_empty {
+        let obj = composed_view
+            .derived
+            .get("rendered_contexts")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "directive runtime: directive declares non-empty context positions \
+                     ({positions:?}) but composed view is missing `rendered_contexts` \
+                     — the daemon's compose_context_positions launch augmentation must \
+                     have failed silently or not run",
+                    positions = context_positions.keys().collect::<Vec<_>>()
+                )
+            })?
+            .as_object()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "directive runtime: `rendered_contexts` in composed view must be \
+                     an object"
+                )
+            })?;
+        obj.iter()
+            .map(|(k, v)| {
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "directive runtime: rendered_contexts[{k}] must be a string, got {v:?}"
+                    )
+                })?;
+                Ok((k.clone(), s.to_string()))
+            })
+            .collect::<Result<HashMap<_, _>>>()?
+    } else {
+        HashMap::new()
+    };
+
+    let system_prompt = rendered.get("system").cloned();
+    let context_before = rendered.get("before").cloned();
+    let context_after = rendered.get("after").cloned();
 
     let user_prompt = composed_view
         .derived_string(DERIVED_BODY)
@@ -123,38 +165,6 @@ fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
     serde_json::from_value(view.composed.clone()).map_err(|e| {
         anyhow!("deserialize composed view into DirectiveHeader: {e}")
     })
-}
-
-fn render_context_position(
-    positions: &HashMap<String, Vec<String>>,
-    position: &str,
-    loader: &VerifiedLoader,
-) -> Result<Option<String>> {
-    let Some(items) = positions.get(position) else {
-        return Ok(None);
-    };
-    let mut rendered = Vec::with_capacity(items.len());
-    for item_id in items {
-        let resolved = loader.resolve_item("knowledge", item_id).map_err(|e| {
-            anyhow::anyhow!(
-                "context[{position}]: cannot resolve knowledge `{item_id}`: {e}"
-            )
-        })?;
-        let verified = loader
-            .load_verified("knowledge", &resolved.path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "context[{position}]: cannot load knowledge `{item_id}` at {}: {e}",
-                    resolved.path.display()
-                )
-            })?;
-        rendered.push(verified.content);
-    }
-    if rendered.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(rendered.join("\n\n---\n\n")))
-    }
 }
 
 fn resolve_provider(
