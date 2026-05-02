@@ -65,7 +65,7 @@ impl ParserDispatcher {
         let handler = self
             .handlers
             .ensure_serves(&descriptor.handler, HandlerServes::Parser)
-            .map_err(EngineError::Handler)?;
+            .map_err(|e| EngineError::Handler(Box::new(e)))?;
 
         let stripped = lillux::signature::strip_signature_lines_with_envelope(
             content,
@@ -106,7 +106,7 @@ impl ParserDispatcher {
         let handler = self
             .handlers
             .ensure_serves(&descriptor.handler, HandlerServes::Parser)
-            .map_err(EngineError::Handler)?;
+            .map_err(|e| EngineError::Handler(Box::new(e)))?;
 
         let request =
             HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {

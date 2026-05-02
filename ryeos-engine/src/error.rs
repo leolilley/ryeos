@@ -104,7 +104,7 @@ pub enum EngineError {
     MetadataAnchoringFailed {
         canonical_ref: String,
         #[source]
-        source: crate::kind_registry::MetadataAnchoringError,
+        source: Box<crate::kind_registry::MetadataAnchoringError>,
     },
 
     #[error("unresolved nested ref `{nested_ref}` during planning of `{parent_ref}`: {reason}")]
@@ -346,7 +346,7 @@ pub enum EngineError {
     HandlerProtocolViolation { handler: String, detail: String },
 
     #[error("handler error: {0}")]
-    Handler(#[from] crate::handlers::HandlerError),
+    Handler(Box<crate::handlers::HandlerError>),
 
     // ── Protocol references ────────────────────────────────────────
 
@@ -355,8 +355,14 @@ pub enum EngineError {
         kind: String,
         protocol_ref: String,
         #[source]
-        source: crate::protocols::ProtocolError,
+        source: Box<crate::protocols::ProtocolError>,
     },
+}
+
+impl From<crate::handlers::HandlerError> for EngineError {
+    fn from(e: crate::handlers::HandlerError) -> Self {
+        Self::Handler(Box::new(e))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

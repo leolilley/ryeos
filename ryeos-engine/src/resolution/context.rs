@@ -336,7 +336,7 @@ pub(crate) fn load_item_at(
     .map_err(
         |source| ResolutionError::MetadataAnchoringFailed {
             item_ref: ref_.to_string(),
-            source,
+            source: Box::new(source),
         },
     )?;
 

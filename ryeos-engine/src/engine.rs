@@ -177,7 +177,7 @@ impl Engine {
         )
         .map_err(|source| EngineError::MetadataAnchoringFailed {
             canonical_ref: item_ref.to_string(),
-            source,
+            source: Box::new(source),
         })?;
 
         let metadata = crate::kind_registry::apply_extraction_rules(

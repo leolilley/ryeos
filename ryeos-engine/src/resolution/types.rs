@@ -268,7 +268,7 @@ pub enum ResolutionError {
     /// at the metadata.rules schema, not at the signature path.
     MetadataAnchoringFailed {
         item_ref: String,
-        source: crate::kind_registry::MetadataAnchoringError,
+        source: Box<crate::kind_registry::MetadataAnchoringError>,
     },
     /// Kind has no execution block (not executable).
     KindNotExecutable {
