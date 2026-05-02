@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T23:24:08Z:b9662e2dd5f4dbd5a2a1febb6286c7800ce57cd9cdcee680b78cb3f3c5af7058:XKCVTiMzmnkikRrjZ/csSo5B1eYl8JvLCTCQuKcUpR5q9l3aHxN/G3mXgac8X96unBZu2kcrldyxL3VVNQQQAw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-02T05:18:05Z:b9662e2dd5f4dbd5a2a1febb6286c7800ce57cd9cdcee680b78cb3f3c5af7058:XKCVTiMzmnkikRrjZ/csSo5B1eYl8JvLCTCQuKcUpR5q9l3aHxN/G3mXgac8X96unBZu2kcrldyxL3VVNQQQAw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 version: "1.0.0"
 category: "rye/core/markdown"
 description: "Directive parser: extracts YAML header (frontmatter or fenced block) and body from markdown"

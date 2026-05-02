@@ -8,9 +8,14 @@ pub fn write_knowledge_transcript(
     graph_run_id: &str,
     result_json: &str,
 ) -> Result<()> {
+    // Strip a leading slash so an upstream `graph_id` like "/flow"
+    // doesn't replace the base path on `Path::join` and write to
+    // the filesystem root. The model layer already normalizes empty
+    // category → no leading slash; this is defense-in-depth.
+    let safe_id = graph_id.trim_start_matches('/');
     let dir = Path::new(project_path)
         .join(".ai/knowledge/state/graphs")
-        .join(graph_id);
+        .join(safe_id);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{graph_run_id}.md"));
     let content = format!(

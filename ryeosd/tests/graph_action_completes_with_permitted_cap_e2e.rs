@@ -49,8 +49,16 @@ print(json.dumps({"msg": params.get("msg", "default")}))
 fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
+    // EdgeSpec is internally tagged as of wave-5 phase D; `next` must be
+    // an object with a `type` discriminator (was a bare scalar before).
+    //
+    // `permissions` populates the callback token's effective_caps via the
+    // graph_permissions composer; the cap shape mirrors `enforce_callback_caps`
+    // in runtime_dispatch.rs (rye.execute.<kind>.<bare_id_with_/_as_.>).
     let body = r#"category: ""
 version: "1.0.0"
+permissions:
+  - rye.execute.tool.echo.echo
 config:
   start: greet
   nodes:
@@ -61,7 +69,9 @@ config:
           msg: "hello"
       assign:
         greeting: "${result.msg}"
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -86,7 +96,9 @@ config:
           msg: "hello"
       assign:
         greeting: "${result.msg}"
-      next: done
+      next:
+        type: unconditional
+        to: done
     done:
       node_type: return
 "#;
@@ -156,11 +168,12 @@ async fn graph_action_completes_with_permitted_cap() {
         }
     };
 
-    assert_eq!(
-        result.get("success").and_then(|v| v.as_bool()),
-        Some(true),
-        "graph with permitted cap must succeed; body={body:#}"
-    );
+    if result.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!(
+            "graph with permitted cap must succeed; body={body:#}\n--- daemon stderr ---\n{stderr}"
+        );
+    }
     assert_eq!(
         result.get("status").and_then(|v| v.as_str()),
         Some("completed"),

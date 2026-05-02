@@ -115,6 +115,14 @@ struct GraphFile {
     version: String,
     category: String,
     config: GraphConfig,
+    /// Accepted but unused by the walker. The graph_permissions composer
+    /// (upstream, in the daemon's compose chain) reads this field from
+    /// the same YAML to populate effective_caps on the callback token.
+    /// Without acknowledging it here, deny_unknown_fields would reject
+    /// every YAML the composer needs to consume.
+    #[serde(default)]
+    #[allow(dead_code)]
+    permissions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +142,18 @@ impl GraphDefinition {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown");
-            format!("{}/{}", file.category, stem)
+            // Empty category is a legitimate value for top-level graphs;
+            // joining "/{stem}" produced ids like "/flow" which then
+            // broke `write_knowledge_transcript` because Path::join with
+            // an absolute-looking second segment replaces the base path
+            // entirely (writing to /flow/... and getting EACCES).
+            if file.category.is_empty() {
+                stem.to_string()
+            } else {
+                format!("{}/{}", file.category, stem)
+            }
+        } else if file.category.is_empty() {
+            "unknown".to_string()
         } else {
             file.category
         };
