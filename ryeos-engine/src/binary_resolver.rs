@@ -232,23 +232,120 @@ pub fn resolve_bundle_binary_ref(
     let (trust_class, fingerprint) =
         crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint, root_trust_class);
 
-    let signer_fingerprint = match trust_class {
-        crate::resolution::TrustClass::TrustedSystem => {
-            fingerprint.unwrap_or_default()
-        }
-        crate::resolution::TrustClass::TrustedUser
-        | crate::resolution::TrustClass::UntrustedUserSpace
-        | crate::resolution::TrustClass::Unsigned => {
-            return Err(EngineError::BinUntrusted {
-                bin: bin_name,
-                fingerprint: fingerprint.unwrap_or_default(),
-            });
-        }
-    };
+    if !is_dispatchable_trust_class(trust_class) {
+        return Err(EngineError::BinUntrusted {
+            bin: bin_name,
+            fingerprint: fingerprint.unwrap_or_default(),
+        });
+    }
+    let signer_fingerprint = fingerprint.unwrap_or_default();
 
     Ok(ResolvedBinary {
         absolute_path: bin_path,
         manifest_hash,
         signer_fingerprint,
     })
+}
+
+/// Decide whether the trust class returned by
+/// [`verify_executor_trust`] is high enough to dispatch the binary.
+///
+/// Both `TrustedSystem` and `TrustedUser` are dispatchable. The effective
+/// tier is already the `min` of the raw binary signature trust and the
+/// descriptor's `root_trust_class`, so a `TrustedUser` here means *either*
+/// the binary is system-signed and the descriptor capped to user, or the
+/// binary itself is user-signed under a user-tier descriptor — both of
+/// which are safe to run. Anything weaker (`UntrustedUserSpace`,
+/// `Unsigned`) must be refused.
+fn is_dispatchable_trust_class(tc: TrustClass) -> bool {
+    matches!(tc, TrustClass::TrustedSystem | TrustClass::TrustedUser)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor_resolution::verify_executor_trust;
+    use serde_json::json;
+
+    /// Descriptor=System, binary signed by a system-trusted key.
+    /// Effective tier = TrustedSystem; gate accepts.
+    #[test]
+    fn descriptor_system_binary_system_dispatches_as_system() {
+        let item_source = json!({
+            "signature_info": { "fingerprint": "sys-fp" }
+        });
+        let (tc, fp) = verify_executor_trust(
+            &item_source,
+            |f| f == "sys-fp",
+            TrustClass::TrustedSystem,
+        );
+        assert_eq!(tc, TrustClass::TrustedSystem);
+        assert_eq!(fp.as_deref(), Some("sys-fp"));
+        assert!(is_dispatchable_trust_class(tc));
+    }
+
+    /// Descriptor=System, binary signed by a key absent from the trust store
+    /// (modeling a user-tier signer not promoted to system trust).
+    /// Effective tier = UntrustedUserSpace; gate refuses.
+    #[test]
+    fn descriptor_system_binary_user_dispatches_as_user() {
+        let item_source = json!({
+            "signature_info": { "fingerprint": "user-fp" }
+        });
+        let (tc, fp) = verify_executor_trust(
+            &item_source,
+            |_| false,
+            TrustClass::TrustedSystem,
+        );
+        // Without a system-trusted signer we cannot dispatch under a
+        // system descriptor; the binary is treated as untrusted user space.
+        assert_eq!(tc, TrustClass::UntrustedUserSpace);
+        assert_eq!(fp.as_deref(), Some("user-fp"));
+        assert!(!is_dispatchable_trust_class(tc));
+    }
+
+    /// Descriptor=User, binary signed by a system-trusted key.
+    /// Effective tier = TrustedUser (capped); gate accepts.
+    #[test]
+    fn descriptor_user_binary_system_dispatches_as_user() {
+        let item_source = json!({
+            "signature_info": { "fingerprint": "sys-fp" }
+        });
+        let (tc, fp) = verify_executor_trust(
+            &item_source,
+            |f| f == "sys-fp",
+            TrustClass::TrustedUser,
+        );
+        assert_eq!(tc, TrustClass::TrustedUser);
+        assert_eq!(fp.as_deref(), Some("sys-fp"));
+        // This is the case the wave-5 audit flagged: previously rejected,
+        // now accepted because TrustedUser is a dispatchable tier.
+        assert!(is_dispatchable_trust_class(tc));
+    }
+
+    /// Descriptor=User, binary signed by a system-trusted key (the only
+    /// signer trust we model today — see `verify_executor_trust`'s raw
+    /// derivation). Effective tier under a User-cap descriptor remains
+    /// TrustedUser; gate accepts.
+    #[test]
+    fn descriptor_user_binary_user_dispatches_as_user() {
+        let item_source = json!({
+            "signature_info": { "fingerprint": "sys-fp" }
+        });
+        let (tc, fp) = verify_executor_trust(
+            &item_source,
+            |f| f == "sys-fp",
+            TrustClass::TrustedUser,
+        );
+        assert_eq!(tc, TrustClass::TrustedUser);
+        assert_eq!(fp.as_deref(), Some("sys-fp"));
+        assert!(is_dispatchable_trust_class(tc));
+    }
+
+    /// Sanity floor: anything below TrustedUser must never dispatch.
+    #[test]
+    fn untrusted_and_unsigned_are_never_dispatchable() {
+        assert!(!is_dispatchable_trust_class(TrustClass::UntrustedUserSpace));
+        assert!(!is_dispatchable_trust_class(TrustClass::Unsigned));
+    }
 }
