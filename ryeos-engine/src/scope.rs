@@ -57,7 +57,7 @@ mod tests {
     }
 
     fn delegated_principal(scopes: Vec<&str>) -> EffectivePrincipal {
-        EffectivePrincipal::Delegated(DelegatedPrincipal {
+        EffectivePrincipal::Delegated(Box::new(DelegatedPrincipal {
             protocol_version: "1".into(),
             delegation_id: "del:1".into(),
             caller_fingerprint: "fp:caller".into(),
@@ -71,7 +71,7 @@ mod tests {
             expires_at: "2026-12-31T23:59:59Z".into(),
             non_redelegable: false,
             origin_signature: "sig".into(),
-        })
+        }))
     }
 
     #[test]
