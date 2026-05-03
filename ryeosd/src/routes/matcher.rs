@@ -162,6 +162,7 @@ mod tests {
         let mode = StaticMode;
         let ctx = crate::routes::compile::ModeCompileContext {
             streaming_sources: &crate::routes::streaming_sources::StreamingSourceRegistry::new(),
+            read_sources: &crate::routes::read_sources::ReadSourceRegistry::new(),
         };
         let raw = RawRouteSpec {
             section: "routes".to_string(),

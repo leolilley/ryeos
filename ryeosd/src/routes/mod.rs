@@ -6,6 +6,7 @@ pub mod limits;
 pub mod matcher;
 pub mod parsed_ref;
 pub mod raw;
+pub mod read_sources;
 pub mod reload;
 pub mod response_modes;
 pub mod streaming_sources;
@@ -61,6 +62,7 @@ pub fn build_route_table(
     verifier_registry: &AuthVerifierRegistry,
     mode_registry: &ResponseModeRegistry,
     streaming_sources: &StreamingSourceRegistry,
+    read_sources: &crate::routes::read_sources::ReadSourceRegistry,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mut errors: Vec<RouteConfigError> = Vec::new();
     let mut compiled: Vec<Arc<CompiledRoute>> = Vec::new();
@@ -68,6 +70,7 @@ pub fn build_route_table(
 
     let ctx = ModeCompileContext {
         streaming_sources,
+        read_sources,
     };
 
     for raw in raw_routes {
@@ -221,7 +224,8 @@ pub fn build_route_table_from_snapshot(
     let verifier_registry = AuthVerifierRegistry::with_builtins();
     let mode_registry = ResponseModeRegistry::with_builtins();
     let streaming_sources = StreamingSourceRegistry::with_builtins();
-    build_route_table(&snapshot.routes, &verifier_registry, &mode_registry, &streaming_sources)
+    let read_sources = crate::routes::read_sources::ReadSourceRegistry::with_builtins();
+    build_route_table(&snapshot.routes, &verifier_registry, &mode_registry, &streaming_sources, &read_sources)
 }
 
 pub fn build_route_table_or_bail(
@@ -273,12 +277,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_routes_builds_empty_table() {
+    /// Convenience: calls `build_route_table` with all built-in registries.
+    fn build_table(raws: &[RawRouteSpec]) -> Result<RouteTable, Vec<RouteConfigError>> {
         let verifier_registry = AuthVerifierRegistry::with_builtins();
         let mode_registry = ResponseModeRegistry::with_builtins();
         let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let table = build_route_table(&[], &verifier_registry, &mode_registry, &streaming_sources).unwrap();
+        let read_sources = crate::routes::read_sources::ReadSourceRegistry::with_builtins();
+        build_route_table(raws, &verifier_registry, &mode_registry, &streaming_sources, &read_sources)
+    }
+
+    fn empty_routes_builds_empty_table() {
+        let table = build_table(&[]).unwrap();
         assert!(table.all.is_empty());
         assert!(table.match_request(&Method::GET, "/anything").is_none());
     }
@@ -286,10 +295,7 @@ mod tests {
     #[test]
     fn single_valid_route() {
         let raw = make_raw("r1", "/api/test", &["GET"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let table = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap();
+        let table = build_table(&[raw]).unwrap();
         assert_eq!(table.all.len(), 1);
         let (route, caps) = table.match_request(&Method::GET, "/api/test").unwrap();
         assert_eq!(route.id, "r1");
@@ -300,10 +306,7 @@ mod tests {
     fn duplicate_id_rejected() {
         let r1 = make_raw("r1", "/a", &["GET"], "none", "static");
         let r2 = make_raw("r1", "/b", &["GET"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let err = build_route_table(&[r1, r2], &verifier_registry, &mode_registry, &streaming_sources).unwrap_err();
+        let err = build_table(&[r1, r2]).unwrap_err();
         assert_eq!(err.len(), 1);
         let msg = format!("{}", err[0]);
         assert!(msg.contains("duplicate route id"), "got: {msg}");
@@ -312,10 +315,7 @@ mod tests {
     #[test]
     fn reserved_path_prefix_rejected() {
         let raw = make_raw("r1", "/health", &["GET"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let err = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap_err();
+        let err = build_table(&[raw]).unwrap_err();
         let msg = format!("{}", err[0]);
         assert!(msg.contains("reserved path"), "got: {msg}");
     }
@@ -323,10 +323,7 @@ mod tests {
     #[test]
     fn reserved_exact_execute_rejected() {
         let raw = make_raw("r1", "/execute", &["POST"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let err = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap_err();
+        let err = build_table(&[raw]).unwrap_err();
         let msg = format!("{}", err[0]);
         assert!(msg.contains("reserved path"), "got: {msg}");
     }
@@ -338,36 +335,22 @@ mod tests {
         // ordinary config routes that the loader admits without any
         // reservation check.
         let raw = make_raw("r1", "/hook/stripe", &["POST"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let table = build_route_table(
-            &[raw],
-            &verifier_registry,
-            &mode_registry,
-            &streaming_sources,
-        )
-        .expect("/hook/* must be admitted by the route table builder");
+        let table = build_table(&[raw])
+            .expect("/hook/* must be admitted by the route table builder");
         assert_eq!(table.all.len(), 1);
     }
 
     #[test]
     fn execute_stream_subpath_allowed() {
         let raw = make_raw("r1", "/execute/stream", &["GET"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let table = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources);
+        let table = build_table(&[raw]);
         assert!(table.is_ok(), "expected /execute/stream to be allowed");
     }
 
     #[test]
     fn status_not_reserved() {
         let raw = make_raw("r1", "/status", &["GET"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let table = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources);
+        let table = build_table(&[raw]);
         assert!(table.is_ok(), "expected /status to be allowed through route-config");
     }
 
@@ -375,10 +358,7 @@ mod tests {
     fn empty_methods_rejected() {
         let mut raw = make_raw("r1", "/a", &["GET"], "none", "static");
         raw.methods.clear();
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let err = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap_err();
+        let err = build_table(&[raw]).unwrap_err();
         let msg = format!("{}", err[0]);
         assert!(msg.contains("methods list is empty"), "got: {msg}");
     }
@@ -387,10 +367,7 @@ mod tests {
     fn http_allows_custom_methods() {
         let mut raw = make_raw("r1", "/a", &["GET"], "none", "static");
         raw.methods.insert("CUSTOM_METHOD".to_string());
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let table = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap();
+        let table = build_table(&[raw]).unwrap();
         let (route, _) = table.match_request(&"CUSTOM_METHOD".parse().unwrap(), "/a").unwrap();
         assert_eq!(route.id, "r1");
     }
@@ -398,11 +375,8 @@ mod tests {
     #[test]
     fn fingerprint_is_deterministic() {
         let raw = make_raw("r1", "/a", &["GET"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let t1 = build_route_table(std::slice::from_ref(&raw), &verifier_registry, &mode_registry, &streaming_sources).unwrap();
-        let t2 = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap();
+        let t1 = build_table(std::slice::from_ref(&raw)).unwrap();
+        let t2 = build_table(&[raw]).unwrap();
         assert_eq!(t1.fingerprint, t2.fingerprint);
     }
 
@@ -410,21 +384,15 @@ mod tests {
     fn multiple_errors_collected() {
         let r1 = make_raw("r1", "/health", &["GET"], "none", "static");
         let r2 = make_raw("r2", "/b", &["GET"], "nonexistent", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let err = build_route_table(&[r1, r2], &verifier_registry, &mode_registry, &streaming_sources).unwrap_err();
+        let err = build_table(&[r1, r2]).unwrap_err();
         assert!(err.len() >= 2, "expected >= 2 errors, got {}", err.len());
     }
 
     #[test]
     fn compiled_route_carries_semaphore_with_concurrent_max_permits() {
         let raw = make_raw("r1", "/api/test", &["GET"], "none", "static");
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
         let concurrent_max = raw.limits.concurrent_max;
-        let table = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap();
+        let table = build_table(&[raw]).unwrap();
         let route = &table.all[0];
         assert_eq!(route.semaphore.available_permits(), concurrent_max as usize);
     }
@@ -476,10 +444,7 @@ mod tests {
     fn zero_timeout_rejected_for_static_mode() {
         let mut raw = make_raw("r1", "/api/test", &["GET"], "none", "static");
         raw.limits.timeout_ms = 0;
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let err = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources).unwrap_err();
+        let err = build_table(&[raw]).unwrap_err();
         let msg = format!("{}", err[0]);
         assert!(msg.contains("timeout_ms = 0"), "got: {msg}");
     }
@@ -514,10 +479,7 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r1.yaml"),
         };
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
-        let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let result = build_route_table(&[raw], &verifier_registry, &mode_registry, &streaming_sources);
+        let result = build_table(&[raw]);
         assert!(result.is_ok(), "event_stream with timeout_ms=0 should be allowed");
     }
 }
