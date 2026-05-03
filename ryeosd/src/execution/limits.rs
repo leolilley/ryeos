@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use super::launch_envelope::HardLimits;
@@ -95,22 +96,37 @@ fn clamp_f64(value: f64, cap: f64) -> f64 {
     if value > cap { cap } else { value }
 }
 
-pub fn load_limits_config(project_root: &Path) -> LimitsConfig {
+/// Load limits config from the project's `.ai/config/rye-runtime/limits.yaml`.
+///
+/// Returns `Ok(None)` if the file doesn't exist (limits config is optional).
+/// Returns `Err` if the file exists but is malformed — no silent fallback.
+pub fn load_limits_config(project_root: &Path) -> anyhow::Result<Option<LimitsConfig>> {
     let config_path = project_root
         .join(".ai")
         .join("config")
         .join("rye-runtime")
         .join("limits.yaml");
 
-    if config_path.is_file() {
-        if let Ok(contents) = std::fs::read_to_string(&config_path) {
-            if let Ok(config) = serde_yaml::from_str(&contents) {
-                return config;
-            }
-        }
+    if !config_path.is_file() {
+        return Ok(None);
     }
 
-    LimitsConfig::default()
+    let contents = std::fs::read_to_string(&config_path).with_context(|| {
+        format!(
+            "limits config: cannot read {}",
+            config_path.display()
+        )
+    })?;
+
+    let config: LimitsConfig = serde_yaml::from_str(&contents).with_context(|| {
+        format!(
+            "limits config: malformed YAML in {} — fix the file or \
+             remove it to use built-in defaults",
+            config_path.display()
+        )
+    })?;
+
+    Ok(Some(config))
 }
 
 #[cfg(test)]
@@ -167,8 +183,8 @@ mod tests {
     }
 
     #[test]
-    fn load_limits_config_missing_file_returns_defaults() {
-        let config = load_limits_config(Path::new("/nonexistent"));
-        assert_eq!(config.defaults.turns, 25);
+    fn load_limits_config_missing_file_returns_none() {
+        let config = load_limits_config(Path::new("/nonexistent")).unwrap();
+        assert!(config.is_none(), "missing file should return Ok(None)");
     }
 }

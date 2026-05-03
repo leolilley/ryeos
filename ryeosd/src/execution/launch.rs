@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use serde_json::{json, Value};
 
 use super::arch_check;
@@ -366,7 +366,9 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     let thread_id = &thread.thread_id;
 
     // 2. Compute limits (root execution: depth = 0)
-    let limits_config = load_limits_config(project_path);
+    let limits_config = load_limits_config(project_path)
+        .with_context(|| format!("loading limits config for project {}", project_path.display()))?;
+    let limits_config = limits_config.unwrap_or_default();
     let hard_limits = compute_effective_limits(
         None,
         &limits_config.defaults,

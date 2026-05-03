@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::directive::*;
 use ryeos_engine::resolution::KindComposedView;
@@ -73,13 +73,15 @@ pub fn bootstrap(
         "directive runtime: typed config metadata"
     );
 
-    let provider = resolve_provider(&header, &model_routing, loader)?;
-    let (model_name, context_window) = resolve_model(&header, &model_routing)?;
+    let resolved = resolve_model_target(&header, &model_routing, loader)?;
 
     tracing::info!(
-        provider_category = ?provider.category.as_deref(),
-        model_name = %model_name,
-        "directive runtime: provider resolved"
+        provider_category = ?resolved.provider.category.as_deref(),
+        provider_id = %resolved.provider_id,
+        model_name = %resolved.model_name,
+        context_window = resolved.context_window,
+        source = %resolved.source,
+        "directive runtime: model target resolved"
     );
 
     // Tools come from the daemon-baked `LaunchEnvelope.inventory` —
@@ -129,7 +131,8 @@ pub fn bootstrap(
                      an object"
                 )
             })?;
-        obj.iter()
+        let rendered: HashMap<String, String> = obj
+            .iter()
             .map(|(k, v)| {
                 let s = v.as_str().ok_or_else(|| {
                     anyhow::anyhow!(
@@ -138,7 +141,33 @@ pub fn bootstrap(
                 })?;
                 Ok((k.clone(), s.to_string()))
             })
-            .collect::<Result<HashMap<_, _>>>()?
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        // Completeness check: every declared non-empty position MUST be
+        // present in the rendered output. Missing positions mean the
+        // daemon's augmentation failed for that slot — the directive
+        // would run without declared context, causing silent degradation.
+        let expected_keys: std::collections::HashSet<String> = context_positions
+            .iter()
+            .filter(|(_, items)| !items.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+        let rendered_keys: std::collections::HashSet<String> =
+            rendered.keys().cloned().collect();
+        let missing: Vec<&String> = expected_keys.difference(&rendered_keys).collect();
+        if !missing.is_empty() {
+            return Err(anyhow::anyhow!(
+                "directive runtime: context rendering incomplete — declared \
+                 non-empty positions {expected:?} but rendered only {rendered:?}; \
+                 missing: {missing:?}. The daemon's compose_context_positions \
+                 augmentation must populate every declared position",
+                expected = expected_keys,
+                rendered = rendered_keys,
+                missing = missing,
+            ));
+        }
+
+        rendered
     } else {
         HashMap::new()
     };
@@ -162,7 +191,7 @@ pub fn bootstrap(
         config: BootstrapConfig {
             execution,
             model_routing,
-            provider: Some(provider.clone()),
+            provider: Some(resolved.provider.clone()),
             tools,
             system_prompt,
             user_prompt,
@@ -172,9 +201,9 @@ pub fn bootstrap(
             hooks,
             risk_policy,
         },
-        provider,
-        model_name,
-        context_window,
+        provider: resolved.provider,
+        model_name: resolved.model_name,
+        context_window: resolved.context_window,
     })
 }
 
@@ -210,103 +239,134 @@ fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
     })
 }
 
-fn resolve_provider(
+/// Coherent provider + model pair resolved from a single source.
+/// Prevents mismatched pairs (e.g. Anthropic model sent to OpenAI)
+/// that arise when provider and model are resolved independently.
+#[derive(Debug)]
+pub struct ResolvedModelTarget {
+    pub provider: ProviderConfig,
+    pub provider_id: String,
+    pub model_name: String,
+    pub context_window: u64,
+    pub source: &'static str, // "directive" | "routing" for diagnostics
+}
+
+/// Intermediate resolution result — provider ID + model + context_window
+/// determined coherently from a single source, before loading the provider
+/// config from disk.
+#[derive(Debug)]
+struct ResolvedTargetInfo {
+    provider_id: String,
+    model_name: String,
+    context_window: u64,
+    source: &'static str,
+}
+
+/// Determine provider ID, model name, and context window coherently
+/// from a single source (directive or routing tier). Rejects mixed
+/// sources (e.g. directive.provider + routing.model) to prevent
+/// mismatched provider/model pairs.
+fn resolve_target_info(
     directive: &DirectiveHeader,
     routing: &Option<ModelRoutingConfig>,
-    loader: &VerifiedLoader,
-) -> Result<ProviderConfig> {
+) -> Result<ResolvedTargetInfo> {
     let tier = directive
         .model
         .as_ref()
         .and_then(|m| m.tier.as_deref())
         .unwrap_or("general");
 
-    // No silent fallback. Pre-V5.5 code defaulted to "anthropic" when
-    // neither the directive nor the routing supplied a provider id —
-    // that masked the routing-config regression P3b debug surfaced
-    // (model_routing.yaml not loading) for 30+ minutes by producing a
-    // misleading "provider config not found: model-providers/anthropic"
-    // error. The runtime MUST name the actual missing precondition.
-    let provider_id = directive
-        .model
-        .as_ref()
-        .and_then(|m| m.provider.as_deref())
-        .map(str::to_string)
-        .or_else(|| {
-            routing
-                .as_ref()
-                .and_then(|r| r.tiers.get(tier))
-                .map(|t| t.provider.clone())
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot resolve provider: directive specifies no `model.provider` \
-                 and no model_routing entry was available for tier `{tier}` \
-                 (load model_routing.yaml under .ai/config/rye-runtime/ in \
-                 system / user / project space, or set `model.provider` on the \
-                 directive)"
-            )
-        })?;
+    // ── Source 1: directive provides model name ──
+    if let Some(ref model_spec) = directive.model {
+        if model_spec.name.is_some() {
+            let name = model_spec.name.as_ref().unwrap();
 
-    let config_id = format!("model-providers/{provider_id}");
+            // Directive provides the model — it MUST also provide the
+            // provider and context_window so the pair is coherent.
+            let provider_id = model_spec.provider.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "directive specifies model.name `{name}` but omits \
+                     model.provider — when a directive names a model it \
+                     must also name the provider to ensure a coherent pair \
+                     (add `provider: <id>` under `model:` in the directive \
+                     frontmatter, or remove `model.name` and rely on \
+                     model_routing tier `{tier}`)"
+                )
+            })?;
+            let ctx = model_spec.context_window.ok_or_else(|| {
+                anyhow!(
+                    "directive specifies model.name `{name}` but omits \
+                     model.context_window — every model must declare its \
+                     context limit explicitly (add `context_window: <value>` \
+                     under `model:` in the directive frontmatter)"
+                )
+            })?;
 
-    loader
+            return Ok(ResolvedTargetInfo {
+                provider_id: provider_id.to_string(),
+                model_name: name.clone(),
+                context_window: ctx,
+                source: "directive",
+            });
+        }
+    }
+
+    // ── Source 2: routing tier provides provider + model ──
+    if let Some(ref routing_cfg) = routing {
+        if let Some(tier_cfg) = routing_cfg.tiers.get(tier) {
+            let ctx = tier_cfg.context_window.ok_or_else(|| {
+                anyhow!(
+                    "model_routing tier `{tier}`: missing `context_window` — \
+                     every tier must declare its context limit explicitly"
+                )
+            })?;
+
+            return Ok(ResolvedTargetInfo {
+                provider_id: tier_cfg.provider.clone(),
+                model_name: tier_cfg.model.clone(),
+                context_window: ctx,
+                source: "routing",
+            });
+        }
+    }
+
+    // ── Source 3: no resolution possible ──
+    anyhow::bail!(
+        "model target unresolvable: directive has no model.name and \
+         model_routing has no tier \"{tier}\". Set `model.name` (and \
+         `model.provider`, `model.context_window`) on the directive, \
+         or add tier \"{tier}\" to model_routing.yaml."
+    )
+}
+
+/// Full resolution: coherent target info + provider config loaded from disk.
+fn resolve_model_target(
+    directive: &DirectiveHeader,
+    routing: &Option<ModelRoutingConfig>,
+    loader: &VerifiedLoader,
+) -> Result<ResolvedModelTarget> {
+    let info = resolve_target_info(directive, routing)?;
+
+    let config_id = format!("model-providers/{}", info.provider_id);
+    let provider = loader
         .load_config_strict::<ProviderConfig>(&config_id)
         .map_err(|e| anyhow!("loading provider config `{config_id}`: {e}"))?
         .ok_or_else(|| {
             anyhow!(
                 "provider config not found: `{config_id}` — expected \
                  `.ai/config/rye-runtime/{config_id}.yaml` under one of \
-                 system / user / project roots (resolved provider id from \
-                 {source})",
-                source = if directive
-                    .model
-                    .as_ref()
-                    .and_then(|m| m.provider.as_deref())
-                    .is_some()
-                {
-                    "directive's `model.provider`"
-                } else {
-                    "model_routing tier"
-                }
+                 system / user / project roots (resolved from {})",
+                info.source
             )
-        })
-}
+        })?;
 
-fn resolve_model(
-    directive: &DirectiveHeader,
-    routing: &Option<ModelRoutingConfig>,
-) -> anyhow::Result<(String, u64)> {
-    if let Some(ref model) = directive.model {
-        if let Some(ref name) = model.name {
-            return Ok((name.clone(), 200_000));
-        }
-    }
-
-    let tier = directive
-        .model
-        .as_ref()
-        .and_then(|m| m.tier.as_deref())
-        .unwrap_or("general");
-
-    if let Some(ref routing) = routing {
-        if let Some(tier_cfg) = routing.tiers.get(tier) {
-            // The bare provider model id goes on the wire — the
-            // routing's `provider` field selects WHICH
-            // `model-providers/<id>.yaml` to load, not which prefix to
-            // prepend to the model name. Pre-V5.5 code emitted
-            // `<provider>/<model>` which only matched OpenRouter-style
-            // gateways and broke direct OpenAI / Anthropic / Zen.
-            let ctx = tier_cfg.context_window.unwrap_or(200_000);
-            return Ok((tier_cfg.model.clone(), ctx));
-        }
-    }
-
-    anyhow::bail!(
-        "model unresolvable: directive has no model.name and model_routing \
-         has no tier \"{tier}\". Set `model.name` on the directive or add \
-         tier \"{tier}\" to model_routing.yaml."
-    )
+    Ok(ResolvedModelTarget {
+        provider,
+        provider_id: info.provider_id,
+        model_name: info.model_name,
+        context_window: info.context_window,
+        source: info.source,
+    })
 }
 
 /// Project the daemon-baked inventory of `kind:tool` items shipped in
@@ -341,58 +401,41 @@ fn project_tool_inventory(
 }
 
 fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefinition>> {
+    // Use `load_config_strict` for correct project > user > system
+    // precedence with deep merge. The old code used `scan_kind` which
+    // gave system > user > project (first-found-wins), silently
+    // discarding project-level hook overrides.
+    let Some(config): Option<serde_yaml::Value> = loader
+        .load_config_strict("hook_conditions")
+        .map_err(|e| anyhow!("load_hooks: loading config `hook_conditions`: {e}"))?
+    else {
+        return Ok(Vec::new());
+    };
+
     let mut hooks = Vec::new();
 
-    // `hook_conditions` config is optional — its absence is fine. But
-    // *any* parse / verification failure is a hard error: silently
-    // dropping a malformed hooks file masked critical safety policy.
-    let items = loader
-        .scan_kind("config")
-        .map_err(|e| anyhow::anyhow!("load_hooks: cannot enumerate kind `config`: {e}"))?;
-
-    let hook_files = ["hook_conditions"];
-    for hook_name in &hook_files {
-        let Some(item) = items.iter().find(|i| i.name == *hook_name) else {
-            continue;
-        };
-        let verified = loader.load_verified("config", &item.path).map_err(|e| {
-            anyhow::anyhow!(
-                "load_hooks: cannot load `{hook_name}` at {}: {e}",
-                item.path.display()
-            )
-        })?;
-        let config: serde_yaml::Value =
-            serde_yaml::from_str(&verified.content).map_err(|e| {
-                anyhow::anyhow!(
-                    "load_hooks: parse YAML for `{hook_name}` at {}: {e}",
-                    item.path.display()
+    // `builtin_hooks` is optional, but if present it MUST be a YAML
+    // sequence. The previous `.and_then(as_sequence)` silently
+    // skipped a malformed file — masking critical safety policy.
+    let hooks_value = match config.get("builtin_hooks") {
+        None | Some(serde_yaml::Value::Null) => return Ok(hooks),
+        Some(v) => v,
+    };
+    let hooks_arr = hooks_value.as_sequence().ok_or_else(|| {
+        anyhow!(
+            "load_hooks: `builtin_hooks` in `hook_conditions` must be a YAML sequence, \
+             got {}",
+            yaml_kind(hooks_value)
+        )
+    })?;
+    for (idx, h) in hooks_arr.iter().enumerate() {
+        let hook = serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone())
+            .map_err(|e| {
+                anyhow!(
+                    "load_hooks: malformed hook[{idx}] in `hook_conditions`: {e}"
                 )
             })?;
-        // `builtin_hooks` is optional, but if present it MUST be a YAML
-        // sequence. The previous `.and_then(as_sequence)` silently
-        // skipped a malformed file — masking critical safety policy.
-        let hooks_value = match config.get("builtin_hooks") {
-            None | Some(serde_yaml::Value::Null) => continue,
-            Some(v) => v,
-        };
-        let hooks_arr = hooks_value.as_sequence().ok_or_else(|| {
-            anyhow::anyhow!(
-                "load_hooks: `builtin_hooks` in `{hook_name}` at {} must be a YAML sequence, \
-                 got {}",
-                item.path.display(),
-                yaml_kind(hooks_value)
-            )
-        })?;
-        for (idx, h) in hooks_arr.iter().enumerate() {
-            let hook = serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone())
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "load_hooks: malformed hook[{idx}] in `{hook_name}` at {}: {e}",
-                        item.path.display()
-                    )
-                })?;
-            hooks.push(hook);
-        }
+        hooks.push(hook);
     }
 
     Ok(hooks)
@@ -450,20 +493,20 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
             })?
             .to_string();
 
-        let level = entry_mapping
+        let level_str = entry_mapping
             .get(&serde_yaml::Value::String("level".into()))
             .ok_or_else(|| {
                 anyhow!(
                     "capability_risk config: policies[{idx}].level is required"
                 )
-            })?
-            .as_str()
-            .ok_or_else(|| {
-                anyhow!(
-                    "capability_risk config: policies[{idx}].level must be a string"
+            })?;
+        let level: crate::harness::RiskLevel =
+            serde_yaml::from_value(level_str.clone()).with_context(|| {
+                format!(
+                    "capability_risk config: policies[{idx}].level must be \
+                     one of: low, medium, high"
                 )
-            })?
-            .to_string();
+            })?;
 
         let requires_ack = entry_mapping
             .get(&serde_yaml::Value::String("requires_ack".into()))
@@ -508,26 +551,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_model_from_directive_name() {
+    fn resolve_target_from_directive() {
+        let header = DirectiveHeader {
+            model: Some(ModelSpec {
+                tier: None,
+                provider: Some("openai".to_string()),
+                name: Some("gpt-4".to_string()),
+                context_window: Some(128_000),
+            }),
+            ..Default::default()
+        };
+        let info = resolve_target_info(&header, &None).unwrap();
+        assert_eq!(info.provider_id, "openai");
+        assert_eq!(info.model_name, "gpt-4");
+        assert_eq!(info.context_window, 128_000);
+        assert_eq!(info.source, "directive");
+    }
+
+    #[test]
+    fn resolve_target_directive_name_without_provider_errors() {
         let header = DirectiveHeader {
             model: Some(ModelSpec {
                 tier: None,
                 provider: None,
                 name: Some("gpt-4".to_string()),
+                context_window: Some(128_000),
             }),
             ..Default::default()
         };
-        let (name, _) = resolve_model(&header, &None).unwrap();
-        assert_eq!(name, "gpt-4");
+        let result = resolve_target_info(&header, &None);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("model.provider"), "error should mention provider: {msg}");
     }
 
     #[test]
-    fn resolve_model_from_routing() {
+    fn resolve_target_directive_name_without_context_window_errors() {
+        let header = DirectiveHeader {
+            model: Some(ModelSpec {
+                tier: None,
+                provider: Some("openai".to_string()),
+                name: Some("gpt-4".to_string()),
+                context_window: None,  // <-- missing
+            }),
+            ..Default::default()
+        };
+        let result = resolve_target_info(&header, &None);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("context_window"), "error should mention context_window: {msg}");
+    }
+
+    #[test]
+    fn resolve_target_from_routing() {
         let header = DirectiveHeader {
             model: Some(ModelSpec {
                 tier: Some("fast".to_string()),
                 provider: None,
                 name: None,
+                context_window: None,
             }),
             ..Default::default()
         };
@@ -543,18 +625,61 @@ mod tests {
                 m
             },
         };
-        let (name, ctx) = resolve_model(&header, &Some(routing)).unwrap();
-        assert_eq!(name, "gpt-4o-mini");
-        assert_eq!(ctx, 128_000);
+        let info = resolve_target_info(&header, &Some(routing)).unwrap();
+        assert_eq!(info.provider_id, "openai");
+        assert_eq!(info.model_name, "gpt-4o-mini");
+        assert_eq!(info.context_window, 128_000);
+        assert_eq!(info.source, "routing");
     }
 
     #[test]
-    fn resolve_model_errors_when_unresolvable() {
+    fn resolve_target_errors_when_unresolvable() {
         let header = DirectiveHeader::default();
-        let result = resolve_model(&header, &None);
+        let result = resolve_target_info(&header, &None);
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("model unresolvable"), "error message: {msg}");
+        assert!(msg.contains("model target unresolvable"), "error message: {msg}");
         assert!(msg.contains("general"), "error should mention the default tier");
+    }
+
+    #[test]
+    fn resolve_target_rejects_mixed_sources() {
+        // directive.model.provider is set but directive.model.name is NOT.
+        // The directive doesn't provide a model name, so the resolver
+        // falls through to routing. The routing's tier provides BOTH
+        // provider and model coherently — this is fine.
+        //
+        // The real danger was the OLD code where resolve_provider() read
+        // directive.provider and resolve_model() read routing.model
+        // independently, producing a mismatch. Now, if directive.model.name
+        // is None, the resolver ignores directive.provider entirely and
+        // uses routing as a coherent source.
+        let header = DirectiveHeader {
+            model: Some(ModelSpec {
+                tier: Some("general".to_string()),
+                provider: Some("openai".to_string()),  // ignored — name is None
+                name: None,
+                context_window: None,
+            }),
+            ..Default::default()
+        };
+        let routing = ModelRoutingConfig {
+            category: None,
+            tiers: {
+                let mut m = HashMap::new();
+                m.insert("general".to_string(), TierConfig {
+                    provider: "anthropic".to_string(),
+                    model: "claude-sonnet".to_string(),
+                    context_window: Some(200_000),
+                });
+                m
+            },
+        };
+        let info = resolve_target_info(&header, &Some(routing)).unwrap();
+        // The routing tier is used as the coherent source, NOT the
+        // directive's provider. So provider comes from routing.
+        assert_eq!(info.provider_id, "anthropic");
+        assert_eq!(info.model_name, "claude-sonnet");
+        assert_eq!(info.source, "routing");
     }
 }

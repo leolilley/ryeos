@@ -4,7 +4,21 @@ use std::time::Instant;
 
 use serde_json::Value;
 
+use serde::{Deserialize, Serialize};
+
 use ryeos_runtime::envelope::{EnvelopePolicy, HardLimits};
+
+/// Typed risk level — serde rejects unknown values so typos like
+/// `"HIGH"` fail at config load time instead of silently being ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RiskLevel {
+    #[serde(rename = "low")]
+    Low,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "high")]
+    High,
+}
 
 pub struct Harness {
     limits: HardLimits,
@@ -199,20 +213,22 @@ pub struct RiskPolicy {
 #[derive(Debug, Clone)]
 pub struct RiskPattern {
     pub pattern: String,
-    pub level: String,
+    pub level: RiskLevel,
     pub requires_ack: bool,
 }
 
 impl RiskPolicy {
     pub fn assess(&self, cap: &str) -> RiskAssessment {
         let mut best: Option<&RiskPattern> = None;
-        let mut best_specificity = 0;
+        let mut best_specificity: usize = 0;
 
         for p in &self.patterns {
             if ryeos_runtime::cap_matches(&p.pattern, cap) {
-                let specificity = p.pattern.matches('*').count();
-                if specificity >= best_specificity {
-                    best_specificity = specificity;
+                // More literal (non-wildcard) chars = more specific.
+                // `directive:auth/*` (14 literal chars) beats `*` (0 literal chars).
+                let literal_chars = p.pattern.chars().filter(|c| *c != '*').count();
+                if literal_chars >= best_specificity {
+                    best_specificity = literal_chars;
                     best = Some(p);
                 }
             }
@@ -220,9 +236,13 @@ impl RiskPolicy {
 
         match best {
             Some(p) => RiskAssessment {
-                level: p.level.clone(),
+                level: match p.level {
+                    RiskLevel::Low => "low".to_string(),
+                    RiskLevel::Medium => "medium".to_string(),
+                    RiskLevel::High => "high".to_string(),
+                },
                 requires_ack: p.requires_ack,
-                blocked: p.level == "high" && p.requires_ack,
+                blocked: p.level == RiskLevel::High && p.requires_ack,
             },
             None => RiskAssessment {
                 level: "medium".to_string(),
@@ -351,7 +371,7 @@ mod tests {
         let policy = RiskPolicy {
             patterns: vec![RiskPattern {
                 pattern: "rye.execute.tool.*".to_string(),
-                level: "high".to_string(),
+                level: RiskLevel::High,
                 requires_ack: true,
             }],
         };
@@ -364,11 +384,42 @@ mod tests {
         let policy = RiskPolicy {
             patterns: vec![RiskPattern {
                 pattern: "rye.execute.tool.safe".to_string(),
-                level: "low".to_string(),
+                level: RiskLevel::Low,
                 requires_ack: false,
             }],
         };
         let assessment = policy.assess("rye.execute.tool.safe");
         assert!(!assessment.blocked);
+    }
+
+    #[test]
+    fn risk_assessment_most_specific_wins() {
+        // A wildcard `*` matches everything but is less specific than
+        // `directive:auth/*` which has more literal characters.
+        let policy = RiskPolicy {
+            patterns: vec![
+                RiskPattern {
+                    pattern: "*".to_string(),
+                    level: RiskLevel::High,
+                    requires_ack: true,
+                },
+                RiskPattern {
+                    pattern: "directive:auth/*".to_string(),
+                    level: RiskLevel::Low,
+                    requires_ack: false,
+                },
+            ],
+        };
+        // The specific pattern should win over the wildcard.
+        let assessment = policy.assess("directive:auth/login");
+        assert!(!assessment.blocked, "specific low-risk pattern should override wildcard high");
+        assert_eq!(assessment.level, "low");
+    }
+
+    #[test]
+    fn risk_level_rejects_unknown() {
+        let yaml = "HIGH";
+        let result: Result<RiskLevel, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "typo-cased 'HIGH' should be rejected");
     }
 }
