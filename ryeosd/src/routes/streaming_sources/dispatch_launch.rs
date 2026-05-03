@@ -235,7 +235,7 @@ impl BoundStreamingSource for CompiledDispatchLaunchSource {
             // (matching `thread_events`'s pattern). 0 is a safe
             // start — no event has chain_seq 0.
             let mut current_max: i64 = 0;
-            let replay_batch_size = 200usize;
+            let replay_batch_size = super::REPLAY_BATCH_SIZE;
 
             loop {
                 tokio::select! {

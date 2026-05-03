@@ -25,6 +25,11 @@ use std::sync::Arc;
 
 use std::time::Duration;
 
+/// Timeout for handler subprocess validation calls (parser config,
+/// composer config). Handlers that exceed this are treated as
+/// unusable and reported as boot issues.
+const VALIDATION_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
 use crate::contracts::ContractViolation;
@@ -205,7 +210,7 @@ pub fn validate_boot(
                         HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
                             parser_config: descriptor.parser_config.clone(),
                         });
-                    match run_handler_subprocess(h, &request, Duration::from_secs(30)) {
+                    match run_handler_subprocess(h, &request, VALIDATION_SUBPROCESS_TIMEOUT) {
                         Ok(HandlerResponse::ValidateOk) => {}
                         Ok(HandlerResponse::ValidateErr { message }) => {
                             issues.push(BootIssue::InvalidParserConfig {
@@ -305,7 +310,7 @@ pub fn validate_boot(
             HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
                 composer_config: schema.composer_config.clone(),
             });
-        match run_handler_subprocess(handler, &request, Duration::from_secs(30)) {
+        match run_handler_subprocess(handler, &request, VALIDATION_SUBPROCESS_TIMEOUT) {
             Ok(HandlerResponse::ValidateOk) => {}
             Ok(HandlerResponse::ValidateErr { message }) => {
                 issues.push(BootIssue::InvalidComposerConfig {

@@ -5,6 +5,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 
+/// Default TTL for callback tokens when no explicit duration is requested.
+const DEFAULT_CALLBACK_TTL_SECS: u64 = 300;
+
+/// Maximum allowed TTL — tokens requesting longer lifetimes are capped.
+const MAX_CALLBACK_TTL_SECS: u64 = 3600;
+
 #[derive(Debug, Clone)]
 pub struct CallbackCapability {
     pub token: String,
@@ -135,8 +141,8 @@ impl CallbackCapabilityStore {
 }
 
 pub fn compute_ttl(duration_seconds: Option<u64>) -> Duration {
-    let secs = duration_seconds.unwrap_or(300);
-    Duration::from_secs(secs.min(3600))
+    let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
+    Duration::from_secs(secs.min(MAX_CALLBACK_TTL_SECS))
 }
 
 #[derive(Debug, Clone)]

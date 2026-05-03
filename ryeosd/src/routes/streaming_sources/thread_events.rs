@@ -242,7 +242,7 @@ impl BoundStreamingSource for CompiledThreadEventsSource {
                     .data(serde_json::json!({"thread_id": thread_id}).to_string())
             );
 
-            let replay_batch_size = 200usize;
+            let replay_batch_size = super::REPLAY_BATCH_SIZE;
 
             let replay_result = events_svc
                 .replay(&EventReplayParams {

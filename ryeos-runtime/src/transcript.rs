@@ -7,6 +7,10 @@ use serde_json::Value;
 use crate::daemon_rpc::ThreadLifecycleClient;
 use crate::paths;
 
+/// Maximum characters retained per tool output in transcript files.
+/// Tool results exceeding this are truncated with a marker.
+const MAX_TRANSCRIPT_OUTPUT_CHARS: usize = 2000;
+
 fn truncate_str(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => &s[..idx],
@@ -347,13 +351,13 @@ fn clean_tool_output(payload: &Value) -> String {
         }
         Some(other) => {
             let s = other.to_string();
-            s.chars().take(2000).collect()
+            s.chars().take(MAX_TRANSCRIPT_OUTPUT_CHARS).collect()
         }
         None => String::new(),
     };
 
-    if text.len() > 2000 {
-        truncate_str(&text, 2000).to_string()
+    if text.len() > MAX_TRANSCRIPT_OUTPUT_CHARS {
+        truncate_str(&text, MAX_TRANSCRIPT_OUTPUT_CHARS).to_string()
     } else {
         text
     }

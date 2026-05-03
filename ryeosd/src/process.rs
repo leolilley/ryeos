@@ -3,6 +3,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+/// Poll interval (ms) when waiting for a process group to exit after SIGTERM.
+const KILL_POLL_INTERVAL_MS: u64 = 100;
+
+/// Wait time (ms) after SIGKILL before checking if the process group is dead.
+const POST_SIGKILL_WAIT_MS: u64 = 200;
+
 pub fn remove_stale_socket(path: &Path) -> Result<()> {
     if path.exists() {
         std::fs::remove_file(path)
@@ -44,7 +50,7 @@ pub fn kill_process_group(pgid: i64, grace: Duration) -> KillResult {
 
     // Poll for death within grace period
     let deadline = std::time::Instant::now() + grace;
-    let poll_interval = Duration::from_millis(100);
+    let poll_interval = Duration::from_millis(KILL_POLL_INTERVAL_MS);
     while std::time::Instant::now() < deadline {
         if !pgid_alive(pgid) {
             return KillResult {
@@ -61,7 +67,7 @@ pub fn kill_process_group(pgid: i64, grace: Duration) -> KillResult {
     }
 
     // Brief wait for SIGKILL to take effect
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(POST_SIGKILL_WAIT_MS));
 
     KillResult {
         success: !pgid_alive(pgid),
@@ -98,7 +104,7 @@ pub fn hard_kill_process_group(pgid: i64) -> KillResult {
     }
 
     // Brief wait for SIGKILL to take effect.
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(POST_SIGKILL_WAIT_MS));
 
     KillResult {
         success: !pgid_alive(pgid),

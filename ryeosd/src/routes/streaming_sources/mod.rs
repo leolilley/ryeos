@@ -1,6 +1,10 @@
 pub mod dispatch_launch;
 pub mod thread_events;
 
+/// Number of events to replay per batch when an SSE client reconnects
+/// with a `last_event_id`. Shared by dispatch_launch and thread_events.
+const REPLAY_BATCH_SIZE: usize = 200;
+
 use std::sync::Arc;
 
 use serde_json::Value;

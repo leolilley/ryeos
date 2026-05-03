@@ -39,6 +39,10 @@ use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 
+/// Default version for TrustedKeyDoc when none is declared in the
+/// TOML file, or when creating a new pin doc.
+const DEFAULT_KEY_DOC_VERSION: &str = "1.0.0";
+
 use crate::contracts::{
     ResolvedItem, SignatureEnvelope, SignatureHeader, SignerFingerprint, TrustClass, VerifiedItem,
 };
@@ -438,7 +442,7 @@ fn load_trusted_key_doc(
     Ok(TrustedKeyDoc {
         fingerprint: actual_fp,
         owner: parsed.owner,
-        version: parsed.version.unwrap_or_else(|| "1.0.0".to_string()),
+        version: parsed.version.unwrap_or_else(|| DEFAULT_KEY_DOC_VERSION.to_string()),
         attestation,
         verifying_key,
     })
@@ -649,7 +653,7 @@ pub fn pin_key(
     let doc = TrustedKeyDoc {
         fingerprint: fingerprint.clone(),
         owner: owner.to_string(),
-        version: "1.0.0".to_string(),
+        version: DEFAULT_KEY_DOC_VERSION.to_string(),
         attestation: None,
         verifying_key: *verifying_key,
     };
