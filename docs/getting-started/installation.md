@@ -1,180 +1,117 @@
-```yaml
-id: installation
-title: Installation
-description: Install and configure Rye OS — MCP server and terminal CLI for your AI agent
-category: getting-started
-tags: [install, setup, mcp, configuration]
-version: "1.0.0"
-```
-
 # Installation
 
-Rye OS is distributed as pip packages. Install to give your AI agent access to the `.ai/` directory system.
+Build the Rye OS daemon and CLI from source.
 
-## Install the packages
+## Prerequisites
 
-```bash
-pip install ryeos-mcp
-```
+- Rust toolchain (stable, 1.80+)
+- `cargo`
+- Linux (x86_64 or aarch64)
+- Ed25519 signing support (via `lillux` — bundled)
 
-This pulls in the full dependency chain:
-
-- **`ryeos-mcp`** — the MCP server that exposes Rye OS to any MCP-compatible AI agent.
-- **`ryeos`** — the standard bundle (~3MB) with agent, bash, file-system, MCP, primary, core, authoring, and guide items. Depends on `ryeos-core`.
-- **`ryeos-core`** — the core runtimes, primitives, and extractors (`rye/core/*` items). Depends on `ryeos-engine`.
-- **`ryeos-engine`** — the orchestration layer with the resolver, executor, signing, and metadata.
-- **`lillux`** — the unified Rust binary providing process execution, CAS operations, signing, verification, and integrity hashing.
-
-### Optional extras
+## Build
 
 ```bash
-# Add web tools (browser automation, fetch, search)
-pip install ryeos[web]    # or: pip install ryeos-web
-
-# Add code tools (git, npm, typescript, LSP, diagnostics)
-pip install ryeos[code]   # or: pip install ryeos-code
-
-# Everything
-pip install ryeos[all]
+cargo build
 ```
 
-> **Without MCP:** Install just `ryeos` to call the executor directly from Python — useful for scripting, CI, or wrapping in a CLI.
->
-> **Minimal install:** Install `ryeos-core` for the core runtimes, primitives, and extractors (`rye/core/*` items) without the full standard library. `ryeos` depends on `ryeos-core`, so you get core items either way.
->
-> **Engine only:** Install `ryeos-engine` for the engine with no `.ai/` data bundles at all. `ryeos-core` depends on `ryeos-engine`.
->
-> See [Packages and Bundles](../internals/packages-and-bundles.md) for the full breakdown.
+This produces:
 
-### Terminal CLI
+| Binary | Path | Purpose |
+|--------|------|---------|
+| `ryeosd` | `target/debug/ryeosd` | The daemon |
+| `rye` | `target/debug/rye` | The CLI |
+| `rye-bundle-tool` | `target/debug/rye-bundle-tool` | Bundle manifest tool |
+| `rye-sign` | `target/debug/rye-sign` | Item signing tool |
+| `rye-inspect` | `target/debug/rye-inspect` | Runtime inspection tool |
+
+Release builds: `cargo build --release`.
+
+## Initialize a node
+
+`rye init` creates the node identity, user signing key, trust store, and installs the core + standard bundles.
 
 ```bash
-pip install ryeos-cli
+# From the project root:
+cargo run -p ryeos-cli -- \
+  init \
+  --core-source ryeos-bundles/core \
+  --standard-source ryeos-bundles/standard
 ```
 
-The CLI maps shell verbs directly to the three primitives plus convenience verbs — no MCP transport, no JSON-RPC:
+This creates:
+
+| What | Where | Purpose |
+|------|-------|---------|
+| Node signing key | `$XDG_STATE_DIR/ryeosd/.ai/node/identity/` | Daemon's Ed25519 identity |
+| User signing key | `~/.ai/config/keys/signing/` | Operator's Ed25519 identity |
+| Vault keypair | `$XDG_STATE_DIR/ryeosd/.ai/node/vault/` | X25519 secret encryption |
+| Core bundle | `$XDG_DATA_DIR/ryeos/` | Kind schemas, parsers, handlers, runtimes |
+| Standard bundle | `$XDG_STATE_DIR/ryeosd/.ai/bundles/standard/` | Directives, tools, knowledge |
+| Trust store | `~/.ai/config/keys/trusted/` | Self-signed trust docs for node + user keys |
+
+### Init flags
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--core-source <PATH>` | Yes | Source tree to copy `core` bundle from |
+| `--standard-source <PATH>` | No | Source tree to copy `standard` bundle from. Omit with `--core-only` |
+| `--core-only` | No | Skip installing the standard bundle |
+| `--state-dir <PATH>` | No | Override daemon state root (default: `$XDG_STATE_DIR/ryeosd`) |
+| `--user-root <PATH>` | No | Override user space root (default: `$HOME`) |
+| `--system-data-dir <PATH>` | No | Override where the core bundle is installed (default: `$XDG_DATA_DIR/ryeos`) |
+| `--force-node-key` | No | Force-regenerate the node signing key |
+
+## Required environment variables
+
+The daemon **requires** `HOSTNAME` to be set. Most Linux desktops set this automatically; headless environments and containers may not.
 
 ```bash
-rye search directive "lead generation"
-echo '{"command": "ls"}' | rye execute tool rye/bash
-rye graph run my-project/graphs/pipeline
-rye test my-project/tools/scraper
-rye install my-bundle@1.0.0
-rye uninstall my-bundle
-rye registry bundle search "utilities"
+export HOSTNAME=$(hostname)
 ```
 
-See the [CLI documentation](../future/ryeos-cli.md) for the full verb reference.
+See [Environment Variables Reference](../reference/env-variables.md) for the full list.
 
-## Configure your MCP client
-
-Add `ryeos-mcp` as an MCP server in your AI client's configuration. The server runs over stdio.
-
-### OpenCode
-
-Add to your OpenCode MCP configuration (`.opencode/opencode.json` or via the UI):
-
-```json
-{
-  "mcp": {
-    "rye": {
-      "command": "ryeos-mcp",
-      "env": {
-        "USER_SPACE": "/home/you/my-ai-workspace"
-      }
-    }
-  }
-}
-```
-
-### Amp
-
-Add to your Amp MCP configuration:
-
-```json
-{
-  "amp.mcpServers": {
-    "rye": {
-      "command": "ryeos-mcp",
-      "env": {
-        "USER_SPACE": "/home/you"
-      }
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-Add to `~/.config/claude/claude_desktop_config.json` (Linux) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
-
-```json
-{
-  "mcpServers": {
-    "rye": {
-      "command": "ryeos-mcp",
-      "env": {
-        "USER_SPACE": "/home/you"
-      }
-    }
-  }
-}
-```
-
-> **Tip:** If you installed into a virtual environment, use the full path to the `ryeos-mcp` binary (e.g., `/home/you/.venv/bin/ryeos-mcp`) or activate the venv before launching your MCP client.
-
-## Exposed MCP tools
-
-Once connected, the server registers three tools that your AI agent can call:
-
-| MCP Tool      | Purpose                                                        |
-| ------------- | -------------------------------------------------------------- |
-| `rye_fetch`   | Find items by ID or discover by query                          |
-| `rye_execute` | Run a directive, tool, or knowledge item                       |
-| `rye_sign`    | Validate and cryptographically sign an item file               |
-
-These are the only three tools — every interaction with the `.ai/` directory goes through them.
-
-## Environment variables
-
-| Variable     | Default              | Description                                                                                                   |
-| ------------ | -------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `USER_SPACE` | `~` (home directory) | Base path for the user-level `.ai/` directory. The system looks for `$USER_SPACE/.ai/` for user-scoped items. |
-| `RYE_DEBUG`  | `false`              | Set to `true` to enable debug-level logging from the Rye OS server and core library.                          |
-
-### Example: custom user space
+## Start the daemon
 
 ```bash
-export USER_SPACE="/home/you/my-ai-config"
-# Rye OS will look for items in /home/you/my-ai-config/.ai/
+ryeosd
 ```
 
-### Example: enable debug logging
+Or with explicit paths:
 
 ```bash
-export RYE_DEBUG=true
-ryeos-mcp
+ryeosd \
+  --state-dir $XDG_STATE_DIR/ryeosd \
+  --system-data-dir $XDG_DATA_DIR/ryeos
 ```
 
-## Verify the installation
+The daemon writes `$STATE_DIR/daemon.json` with the bind address and socket path.
 
-After configuring your MCP client, verify that Rye OS is running by having your agent call `rye_fetch`:
+## Verify
 
-```
-rye_fetch(query="create", scope="directive", project_path="/path/to/your/project")
-```
+```bash
+# Health check
+curl http://127.0.0.1:7400/health
 
-If the installation is correct, this will return results from the system space — the built-in directives that ship with `ryeos`, such as `rye/core/create_directive`, `rye/core/create_tool`, and `rye/core/create_knowledge`.
-
-You can also search for tools:
-
-```
-rye_fetch(query="bash", scope="tool", project_path="/path/to/your/project")
+# Execute a tool (no LLM provider needed)
+rye execute tool:rye/core/identity/public_key
 ```
 
-This should find the built-in `rye/bash` tool, confirming that the system bundles are discoverable.
+## Development builds and binary hashes
+
+After `cargo build`, the binary hashes in the bundle manifest will be stale. The daemon rejects hash mismatches at runtime. Fix with:
+
+```bash
+rye-bundle-tool rebuild-manifest \
+  --source ryeos-bundles/core \
+  --key ~/.local/state/ryeosd/.ai/node/identity/private_key.pem
+```
+
+See [Dev Tree Caveats](../operations/dev-tree-caveats.md) for details.
 
 ## What's next
 
-- [Quickstart](quickstart.md) — Create your first directive, tool, and knowledge entry in under 5 minutes.
-- [The .ai/ Directory](ai-directory.md) — Understand the directory structure, item IDs, and the 3-tier space system.
+- [Quickstart](quickstart.md) — Execute your first directive and tool
+- [Daemon Bootstrap](../operations/daemon-bootstrap.md) — Full bootstrap sequence explained
+- [Environment Variables](../reference/env-variables.md) — Complete reference
