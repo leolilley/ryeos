@@ -3,28 +3,28 @@
     "blob_hash": "7073a2c40a56c542251161a4fa9247fbd86101ab516e327eeb2540e787de8561",
     "content_blob_hash": "7073a2c40a56c542251161a4fa9247fbd86101ab516e327eeb2540e787de8561",
     "item_source_hash": "ce501201d70ba3d0ac120e13abdd39eafcd04515a51325cae45ae3b83c20d988",
-    "manifest_hash": "0b3e4e6ae03860caaa48e2fbbc14fda1ccd3f8b0d1c39d809812cf9213c54035",
+    "manifest_hash": "6408f299f7e6ba9cc228755c023e5c927a881ba83444b4ebef5b8c67afe1eb9c",
     "source_checksum": "7073a2c40a56c542251161a4fa9247fbd86101ab516e327eeb2540e787de8561"
   },
   "ryeos-directive-runtime": {
-    "blob_hash": "0f5fa764b9b421bec04496d9dda69c0d91db5b66edc520cf22ca3d2ebce50114",
-    "content_blob_hash": "0f5fa764b9b421bec04496d9dda69c0d91db5b66edc520cf22ca3d2ebce50114",
-    "item_source_hash": "8daa11290dbbdd6d7322a296d13a516ace15ebe14643a28243bd3994aeda6a3b",
-    "manifest_hash": "0b3e4e6ae03860caaa48e2fbbc14fda1ccd3f8b0d1c39d809812cf9213c54035",
-    "source_checksum": "0f5fa764b9b421bec04496d9dda69c0d91db5b66edc520cf22ca3d2ebce50114"
+    "blob_hash": "255b2b48340c7ead8be9a25ed0bd7958625d4b3be1d65e0b99f4c10e3313ce07",
+    "content_blob_hash": "255b2b48340c7ead8be9a25ed0bd7958625d4b3be1d65e0b99f4c10e3313ce07",
+    "item_source_hash": "33d00f4da8e87d748b5a92da837ca8b4117f3a65b6c1e613f1b763b3abcbe212",
+    "manifest_hash": "6408f299f7e6ba9cc228755c023e5c927a881ba83444b4ebef5b8c67afe1eb9c",
+    "source_checksum": "255b2b48340c7ead8be9a25ed0bd7958625d4b3be1d65e0b99f4c10e3313ce07"
   },
   "ryeos-graph-runtime": {
     "blob_hash": "8d5dc8c84cdb5a6dfaecd1bcfd872b481cbebf152a1a73a6fc45c3bfbfa014b4",
     "content_blob_hash": "8d5dc8c84cdb5a6dfaecd1bcfd872b481cbebf152a1a73a6fc45c3bfbfa014b4",
     "item_source_hash": "15aa30d238fd9e8be1f870c8165f09d209af38af918b3503e5afcb8a5a2cdc05",
-    "manifest_hash": "0b3e4e6ae03860caaa48e2fbbc14fda1ccd3f8b0d1c39d809812cf9213c54035",
+    "manifest_hash": "6408f299f7e6ba9cc228755c023e5c927a881ba83444b4ebef5b8c67afe1eb9c",
     "source_checksum": "8d5dc8c84cdb5a6dfaecd1bcfd872b481cbebf152a1a73a6fc45c3bfbfa014b4"
   },
   "ryeos-knowledge-runtime": {
     "blob_hash": "bdc97e218740b8de38998e21ff2e79b66e64896e17bbaa14b11ac44908667233",
     "content_blob_hash": "bdc97e218740b8de38998e21ff2e79b66e64896e17bbaa14b11ac44908667233",
     "item_source_hash": "84a8a18e9b9833ff1fb8c365749a93ffec21cfd8b65f518d68fc71eef72c6055",
-    "manifest_hash": "0b3e4e6ae03860caaa48e2fbbc14fda1ccd3f8b0d1c39d809812cf9213c54035",
+    "manifest_hash": "6408f299f7e6ba9cc228755c023e5c927a881ba83444b4ebef5b8c67afe1eb9c",
     "source_checksum": "bdc97e218740b8de38998e21ff2e79b66e64896e17bbaa14b11ac44908667233"
   }
 }

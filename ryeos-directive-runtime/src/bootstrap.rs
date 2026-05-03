@@ -92,19 +92,7 @@ pub fn bootstrap(
     let tools = project_tool_inventory(inventory);
     let hooks = load_hooks(loader)?;
 
-    let risk_policy: Option<crate::harness::RiskPolicy> = loader
-        .load_config::<serde_yaml::Value>("capability_risk")
-        .and_then(|val| {
-            let patterns = val.get("policies").and_then(|p| p.as_sequence())?;
-            let mut risk_patterns = Vec::new();
-            for p in patterns {
-                let pattern = p.get("pattern").and_then(|pv| pv.as_str()).unwrap_or("").to_string();
-                let level = p.get("level").and_then(|pv| pv.as_str()).unwrap_or("medium").to_string();
-                let requires_ack = p.get("requires_ack").and_then(|pv| pv.as_bool()).unwrap_or(false);
-                risk_patterns.push(crate::harness::RiskPattern { pattern, level, requires_ack });
-            }
-            Some(crate::harness::RiskPolicy { patterns: risk_patterns })
-        });
+    let risk_policy = load_risk_policy(loader)?;
 
     let context_positions: HashMap<String, Vec<String>> =
         composed_view.derived_string_seq_map(DERIVED_COMPOSED_CONTEXT);
@@ -404,6 +392,99 @@ fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefiniti
     }
 
     Ok(hooks)
+}
+
+fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::RiskPolicy>> {
+    // Absence of capability_risk.yaml is fine (optional config).
+    // But if it exists and is broken, we fail loud with file path.
+    let Some(config) = loader
+        .load_config_strict::<serde_yaml::Value>("capability_risk")
+        .map_err(|e| anyhow!("loading config `capability_risk`: {e}"))?
+    else {
+        return Ok(None);
+    };
+
+    // Now we have a valid YAML value. Enforce structure.
+    let policies = config
+        .get("policies")
+        .ok_or_else(|| {
+            anyhow!(
+                "capability_risk config: missing required key `policies`"
+            )
+        })?
+        .as_sequence()
+        .ok_or_else(|| {
+            anyhow!(
+                "capability_risk config: `policies` must be a YAML sequence, got {}",
+                yaml_kind(config.get("policies").unwrap())
+            )
+        })?;
+
+    let mut risk_patterns = Vec::new();
+    for (idx, policy_entry) in policies.iter().enumerate() {
+        let entry_mapping = policy_entry.as_mapping().ok_or_else(|| {
+            anyhow!(
+                "capability_risk config: policies[{idx}] must be a mapping, got {}",
+                yaml_kind(policy_entry)
+            )
+        })?;
+
+        // Read required fields with typed errors, not silent defaults.
+        // Policy rules are safety-critical; silent defaults are risky.
+        let pattern = entry_mapping
+            .get(&serde_yaml::Value::String("pattern".into()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].pattern is required"
+                )
+            })?
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].pattern must be a string"
+                )
+            })?
+            .to_string();
+
+        let level = entry_mapping
+            .get(&serde_yaml::Value::String("level".into()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].level is required"
+                )
+            })?
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].level must be a string"
+                )
+            })?
+            .to_string();
+
+        let requires_ack = entry_mapping
+            .get(&serde_yaml::Value::String("requires_ack".into()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].requires_ack is required"
+                )
+            })?
+            .as_bool()
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].requires_ack must be a bool"
+                )
+            })?;
+
+        risk_patterns.push(crate::harness::RiskPattern {
+            pattern,
+            level,
+            requires_ack,
+        });
+    }
+
+    Ok(Some(crate::harness::RiskPolicy {
+        patterns: risk_patterns,
+    }))
 }
 
 fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
