@@ -33,11 +33,6 @@
 //! See V5.4-PLAN P3b.1 commentary for the env-injection gap that
 //! makes a real-provider test impossible to write without changing
 //! the daemon's runtime spawn env.
-//!
-//! NOTE: this module is `#[allow(dead_code)]` because not every
-//! integration test bin in this crate uses it. Mirrors the pattern in
-//! `common/mod.rs`.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

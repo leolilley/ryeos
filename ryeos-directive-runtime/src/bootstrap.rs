@@ -74,7 +74,7 @@ pub fn bootstrap(
     );
 
     let provider = resolve_provider(&header, &model_routing, loader)?;
-    let (model_name, context_window) = resolve_model(&header, &model_routing);
+    let (model_name, context_window) = resolve_model(&header, &model_routing)?;
 
     tracing::info!(
         provider_category = ?provider.category.as_deref(),
@@ -276,10 +276,10 @@ fn resolve_provider(
 fn resolve_model(
     directive: &DirectiveHeader,
     routing: &Option<ModelRoutingConfig>,
-) -> (String, u64) {
+) -> anyhow::Result<(String, u64)> {
     if let Some(ref model) = directive.model {
         if let Some(ref name) = model.name {
-            return (name.clone(), 200_000);
+            return Ok((name.clone(), 200_000));
         }
     }
 
@@ -298,11 +298,15 @@ fn resolve_model(
             // `<provider>/<model>` which only matched OpenRouter-style
             // gateways and broke direct OpenAI / Anthropic / Zen.
             let ctx = tier_cfg.context_window.unwrap_or(200_000);
-            return (tier_cfg.model.clone(), ctx);
+            return Ok((tier_cfg.model.clone(), ctx));
         }
     }
 
-    ("claude-sonnet-4-6".to_string(), 200_000)
+    anyhow::bail!(
+        "model unresolvable: directive has no model.name and model_routing \
+         has no tier \"{tier}\". Set `model.name` on the directive or add \
+         tier \"{tier}\" to model_routing.yaml."
+    )
 }
 
 /// Project the daemon-baked inventory of `kind:tool` items shipped in
@@ -513,7 +517,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (name, _) = resolve_model(&header, &None);
+        let (name, _) = resolve_model(&header, &None).unwrap();
         assert_eq!(name, "gpt-4");
     }
 
@@ -539,16 +543,18 @@ mod tests {
                 m
             },
         };
-        let (name, ctx) = resolve_model(&header, &Some(routing));
+        let (name, ctx) = resolve_model(&header, &Some(routing)).unwrap();
         assert_eq!(name, "gpt-4o-mini");
         assert_eq!(ctx, 128_000);
     }
 
     #[test]
-    fn resolve_model_default() {
+    fn resolve_model_errors_when_unresolvable() {
         let header = DirectiveHeader::default();
-        let (name, ctx) = resolve_model(&header, &None);
-        assert!(name.contains("claude"));
-        assert_eq!(ctx, 200_000);
+        let result = resolve_model(&header, &None);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("model unresolvable"), "error message: {msg}");
+        assert!(msg.contains("general"), "error should mention the default tier");
     }
 }

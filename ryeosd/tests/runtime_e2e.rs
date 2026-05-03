@@ -302,6 +302,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
         .arg(&bind)
         .arg("--uds-path")
         .arg(&uds_path)
+        .env("HOSTNAME", "testhost")
         .env("RYE_SYSTEM_SPACE", common::system_data_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())

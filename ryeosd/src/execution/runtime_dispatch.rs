@@ -21,12 +21,7 @@ struct ActionPayload {
     item_id: String,
     #[serde(default)]
     params: Value,
-    #[serde(default = "default_thread")]
-    thread: String,
-}
-
-fn default_thread() -> String {
-    "inline".to_string()
+    pub thread: String,
 }
 
 pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
@@ -202,11 +197,6 @@ async fn handle_execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_thread_is_inline() {
-        assert_eq!(default_thread(), "inline");
-    }
 
     // ── V5.5 P2: enforce_callback_caps ──────────────────────────────
 

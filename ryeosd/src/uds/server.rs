@@ -360,6 +360,7 @@ mod tests {
 
     /// Build a minimal AppState for UDS dispatch tests.
     fn setup_app_state() -> (TempDir, AppState) {
+        std::env::set_var("HOSTNAME", "testhost");
         let tmpdir = TempDir::new().unwrap();
         let state_root = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -394,7 +395,7 @@ mod tests {
             state_store.clone(),
             kind_profiles.clone(),
             events.clone(),
-        ));
+        ).expect("HOSTNAME not set in test environment"));
         let commands = Arc::new(CommandService::new(
             state_store.clone(),
             kind_profiles,

@@ -57,8 +57,6 @@
 //! Plus an X25519 vault keypair distinct from all Ed25519 keys (so node
 //! key rotation doesn't brick the vault) — see [`vault_secret_key`].
 
-#![allow(dead_code)] // helpers are only used by some integration test bins
-
 use std::fs;
 use std::path::Path;
 

@@ -6,18 +6,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliConfigError {
-    #[error("unsigned verb YAML: {path}")]
-    #[allow(dead_code)]
-    UnsignedYaml { path: PathBuf },
-
-    #[error("bad signature in {path}: {detail}")]
-    #[allow(dead_code)]
-    BadSignature { path: PathBuf, detail: String },
-
-    #[error("untrusted signer {fingerprint} in {path}")]
-    #[allow(dead_code)]
-    UntrustedSigner { path: PathBuf, fingerprint: String },
-
     #[error("wrong kind in {path}: expected \"config\", got \"{got}\"")]
     WrongKind { path: PathBuf, got: String },
 
@@ -27,21 +15,9 @@ pub enum CliConfigError {
     #[error("schema error in {path}: {detail}")]
     SchemaError { path: PathBuf, detail: String },
 
-    #[error("IO error reading {path}: {detail}")]
-    #[allow(dead_code)]
-    IoError { path: PathBuf, detail: String },
-
     #[error("duplicate verb_tokens {tokens:?} in {paths:?}")]
     DuplicateVerbTokens {
         tokens: Vec<String>,
-        paths: Vec<PathBuf>,
-    },
-
-    #[error("prefix-overlap: {a:?} vs {b:?} in {paths:?}")]
-    #[allow(dead_code)]
-    PrefixOverlap {
-        a: Vec<String>,
-        b: Vec<String>,
         paths: Vec<PathBuf>,
     },
 
@@ -60,10 +36,6 @@ pub enum CliConfigError {
 
     #[error("failed to load trust store: {detail}")]
     TrustStoreLoad { detail: String },
-
-    #[error("failed to load kind registry: {detail}")]
-    #[allow(dead_code)]
-    KindRegistryLoad { detail: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -100,16 +72,8 @@ pub enum CliTransportError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliDispatchError {
-    #[error("bad arguments: {0}")]
-    #[allow(dead_code)]
-    BadArgs(String),
-
     #[error(transparent)]
     Transport(#[from] CliTransportError),
-
-    #[error("internal error: {0}")]
-    #[allow(dead_code)]
-    Internal(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -129,10 +93,6 @@ pub enum CliError {
 
     #[error("unknown verb: {argv:?}")]
     UnknownVerb { argv: Vec<String> },
-
-    #[error("interrupted")]
-    #[allow(dead_code)]
-    Interrupted,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

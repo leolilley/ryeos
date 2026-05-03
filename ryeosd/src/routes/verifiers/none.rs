@@ -49,6 +49,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup_test_state() -> (TempDir, crate::state::AppState) {
+        std::env::set_var("HOSTNAME", "testhost");
         let tmpdir = TempDir::new().unwrap();
         let state_root = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -90,7 +91,7 @@ mod tests {
                 state_store.clone(),
                 kind_profiles.clone(),
                 events.clone(),
-            ),
+            ).expect("HOSTNAME not set in test environment"),
         );
         let commands = Arc::new(
             crate::services::command_service::CommandService::new(

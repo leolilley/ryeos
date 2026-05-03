@@ -159,18 +159,26 @@ impl ThreadLifecycleService {
         state_store: Arc<StateStore>,
         kind_profiles: Arc<KindProfileRegistry>,
         _events: Arc<EventStoreService>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let hostname = env::var("HOSTNAME")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
+            .map_err(|_| anyhow::anyhow!(
+                "required environment variable HOSTNAME is not set. \
+                 Set it to this node's identity (e.g. hostname or unique site ID). \
+                 This is used to construct the site_id for thread isolation."
+            ))?;
+        if hostname.trim().is_empty() {
+            anyhow::bail!(
+                "HOSTNAME environment variable is set but empty. \
+                 Set it to a non-empty value identifying this node."
+            );
+        }
 
-        Self {
+        Ok(Self {
             state_store,
             kind_profiles,
             _events,
             current_site_id: format!("site:{hostname}"),
-        }
+        })
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {

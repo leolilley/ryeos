@@ -418,15 +418,6 @@ impl VerifiedLoader {
         None
     }
 
-    /// Lossy-but-convenient: collapses every failure into `None`. Use
-    /// `load_config_strict` to distinguish "absent" from "broken" and
-    /// to surface the actual error path. New callers should prefer the
-    /// strict variant; this entry point is kept for legacy call sites
-    /// that don't propagate config errors yet.
-    pub fn load_config<T: DeserializeOwned>(&self, config_id: &str) -> Option<T> {
-        self.load_config_strict::<T>(config_id).ok().flatten()
-    }
-
     /// Strict, three-state config loader:
     ///
     /// - `Ok(None)`  — no candidate file exists at the expected path
@@ -772,7 +763,7 @@ pem = """
         );
 
         let loader = VerifiedLoader::new(project, Some(user), vec![system]);
-        let config: serde_yaml::Value = loader.load_config("test").unwrap();
+        let config: serde_yaml::Value = loader.load_config_strict("test").unwrap().unwrap();
 
         assert_eq!(config["name"], "project");
     }
@@ -783,13 +774,13 @@ pem = """
         let project = tmp.path().join("project");
 
         let loader = VerifiedLoader::new(project, None, vec![]);
-        let config: Option<serde_yaml::Value> = loader.load_config("nonexistent");
+        let config = loader.load_config_strict::<serde_yaml::Value>("nonexistent").unwrap();
 
         assert!(config.is_none());
     }
 
     #[test]
-    fn load_config_bad_yaml_returns_none() {
+    fn load_config_bad_yaml_returns_err() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
@@ -800,9 +791,9 @@ pem = """
         );
 
         let loader = VerifiedLoader::new(project, None, vec![]);
-        let config: Option<serde_yaml::Value> = loader.load_config("bad");
+        let result = loader.load_config_strict::<serde_yaml::Value>("bad");
 
-        assert!(config.is_none());
+        assert!(result.is_err(), "bad YAML should fail, not silently return None");
     }
 
     #[test]
@@ -818,7 +809,7 @@ pem = """
         );
 
         let loader = VerifiedLoader::new(project, None, vec![system]);
-        let config: serde_yaml::Value = loader.load_config("defaults").unwrap();
+        let config: serde_yaml::Value = loader.load_config_strict("defaults").unwrap().unwrap();
 
         assert_eq!(config["key"], "from_system");
     }

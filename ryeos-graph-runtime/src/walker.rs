@@ -134,6 +134,7 @@ struct RunNodeBodyContext<'a> {
     pub exec_ctx: &'a context::ExecutionContext,
     pub cache: &'a NodeCache,
     pub graph_run_id: &'a str,
+    pub suppressed_errors: &'a mut Vec<ErrorRecord>,
 }
 
 struct CommitStepInput<'a> {
@@ -399,6 +400,7 @@ impl Walker {
                     exec_ctx: &exec_ctx,
                     cache: &cache,
                     graph_run_id: &graph_run_id,
+                    suppressed_errors: &mut suppressed_errors,
                 },
             ).await;
 
@@ -462,6 +464,7 @@ impl Walker {
             exec_ctx,
             cache,
             graph_run_id,
+            suppressed_errors,
         } = ctx;
         let start = Instant::now();
 
@@ -486,11 +489,20 @@ impl Walker {
                     inputs: inputs.clone(),
                     result: None,
                 };
-                let over_val = ryeos_runtime::interpolate(
+                let over_val = match ryeos_runtime::interpolate(
                     &Value::String(over_expr.to_string()),
                     &ctx.as_context(),
-                )
-                .unwrap_or(Value::Array(vec![]));
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        suppressed_errors.push(ErrorRecord {
+                            step,
+                            node: current.to_string(),
+                            error: format!("interpolation error in `over`: {e:#}"),
+                        });
+                        Value::Array(vec![])
+                    }
+                };
 
                 let items = match over_val {
                     Value::Array(arr) => arr,
@@ -513,6 +525,8 @@ impl Walker {
                             items: &items, var: &var, node,
                             thread_id: &self.thread_id, project_path: &self.project_path,
                             client: &self.client, exec_ctx: Some(exec_ctx),
+                            suppressed_errors: &mut *suppressed_errors,
+                            step, current_node: &current,
                         },
                         state, inputs,
                         self.client.clone(), Arc::new(exec_ctx.clone()),
@@ -523,6 +537,8 @@ impl Walker {
                             items: &items, var: &var, node,
                             thread_id: &self.thread_id, project_path: &self.project_path,
                             client: &self.client, exec_ctx: Some(exec_ctx),
+                            suppressed_errors: &mut *suppressed_errors,
+                            step, current_node: &current,
                         },
                         &mut state.clone(), inputs,
                     ).await
@@ -539,7 +555,7 @@ impl Walker {
 
             NodeType::Action => {
                 self.run_action_body(RunNodeBodyContext {
-                    current, node, cfg, step, state, inputs, exec_ctx, cache, graph_run_id,
+                    current, node, cfg, step, state, inputs, exec_ctx, cache, graph_run_id, suppressed_errors,
                 }, start).await
             }
         }
@@ -559,6 +575,7 @@ impl Walker {
             exec_ctx,
             cache,
             graph_run_id: _graph_run_id,
+            suppressed_errors: _suppressed_errors,
         } = ctx;
         let action = match &node.action {
             Some(a) => a.clone(),
@@ -876,10 +893,19 @@ impl Walker {
                             inputs: inputs.clone(),
                             result: Some(result.clone()),
                         };
-                        let interpolated = ryeos_runtime::interpolate(
+                        let interpolated = match ryeos_runtime::interpolate(
                             assign, &assign_ctx.as_context(),
-                        )
-                            .unwrap_or(assign.clone());
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                suppressed_errors.push(ErrorRecord {
+                                    step,
+                                    node: current.to_string(),
+                                    error: format!("interpolation error in `assign`: {e:#}"),
+                                });
+                                assign.clone()
+                            }
+                        };
                         merge_into(state, &interpolated);
                     }
                 }
@@ -1164,11 +1190,24 @@ impl Walker {
                         inputs: Value::Object(Default::default()),
                         result: None,
                     };
-                    ryeos_runtime::interpolate(
+                    match ryeos_runtime::interpolate(
                         &Value::String(tpl.clone()),
                         &ctx.as_context(),
-                    )
-                        .unwrap_or(Value::String(tpl.clone()))
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Return-node output interpolation error —
+                            // push to suppressed_errors (available in
+                            // the outer scope) so the graph result
+                            // carries the diagnostic.
+                            suppressed_errors.push(ErrorRecord {
+                                step: steps,
+                                node: current_node_id.to_string(),
+                                error: format!("interpolation error in `output`: {e:#}"),
+                            });
+                            Value::String(tpl.clone())
+                        }
+                    }
                 })
         } else {
             None

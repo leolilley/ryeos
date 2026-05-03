@@ -41,12 +41,7 @@ pub struct ActionPayload {
     pub item_id: String,
     #[serde(default)]
     pub params: Value,
-    #[serde(default = "default_thread")]
     pub thread: String,
-}
-
-fn default_thread() -> String {
-    "inline".to_string()
 }
 
 #[async_trait]

@@ -73,8 +73,7 @@ pub struct AppendEventsInput<'a> {
 /// File lock for a chain.
 pub struct ChainLock {
     /// Held only for RAII; Drop releases the file lock via closed fd.
-    #[allow(dead_code)]
-    lock_file: File,
+    _lock_file: File,
     chain_root_id: String,
 }
 
@@ -114,7 +113,7 @@ impl ChainLock {
         }
 
         Ok(ChainLock {
-            lock_file,
+            _lock_file: lock_file,
             chain_root_id: chain_root_id.to_string(),
         })
     }

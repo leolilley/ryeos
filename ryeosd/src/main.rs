@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
-    ));
+    )?);
     let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
     let thread_auth = Arc::new(execution::callback_token::ThreadAuthStore::new());
@@ -571,7 +571,7 @@ async fn run_service_standalone(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
-    ));
+    )?);
     let commands = Arc::new(services::command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,

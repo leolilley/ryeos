@@ -4,7 +4,7 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use crate::context::ExecutionContext;
-use crate::model::{GraphNode, WalkContext};
+use crate::model::{ErrorRecord, GraphNode, WalkContext};
 use ryeos_runtime::callback_client::CallbackClient;
 
 pub struct ForeachContext<'a> {
@@ -15,6 +15,9 @@ pub struct ForeachContext<'a> {
     pub project_path: &'a str,
     pub client: &'a CallbackClient,
     pub exec_ctx: Option<&'a ExecutionContext>,
+    pub suppressed_errors: &'a mut Vec<ErrorRecord>,
+    pub step: u32,
+    pub current_node: &'a str,
 }
 
 pub async fn run_foreach_sequential(
@@ -30,23 +33,35 @@ pub async fn run_foreach_sequential(
         project_path,
         client,
         exec_ctx,
+        suppressed_errors,
+        step,
+        current_node,
     } = ctx;
     let mut results = Vec::new();
     for item in items {
-        let ctx = WalkContext {
+        let walk_ctx = WalkContext {
             state: state.clone(),
             inputs: inputs.clone(),
             result: None,
         };
-        let item_ctx_val = ctx.with_foreach_item(var, item);
+        let item_ctx_val = walk_ctx.with_foreach_item(var, item);
 
         let action = match &node.action {
             Some(a) => a.clone(),
             None => continue,
         };
 
-        let interpolated = ryeos_runtime::interpolate_action(&action, &item_ctx_val)
-            .unwrap_or(action.clone());
+        let interpolated = match ryeos_runtime::interpolate_action(&action, &item_ctx_val) {
+            Ok(v) => v,
+            Err(e) => {
+                suppressed_errors.push(ErrorRecord {
+                    step,
+                    node: current_node.to_string(),
+                    error: format!("interpolation error in foreach action: {e:#}"),
+                });
+                action.clone()
+            }
+        };
         let stripped = strip_none_values(&interpolated);
 
         if let Ok(val) = crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx).await {
@@ -58,8 +73,15 @@ pub async fn run_foreach_sequential(
                 let mut assign_ctx_map = item_ctx_val.as_object().cloned().unwrap_or_default();
                 assign_ctx_map.insert("result".into(), val);
                 let assign_ctx = Value::Object(assign_ctx_map);
-                if let Ok(interpolated) = ryeos_runtime::interpolate(assign, &assign_ctx) {
-                    merge_into(state, &interpolated);
+                match ryeos_runtime::interpolate(assign, &assign_ctx) {
+                    Ok(interpolated) => merge_into(state, &interpolated),
+                    Err(e) => {
+                        suppressed_errors.push(ErrorRecord {
+                            step,
+                            node: current_node.to_string(),
+                            error: format!("interpolation error in foreach assign: {e:#}"),
+                        });
+                    }
                 }
             }
         }
@@ -82,6 +104,9 @@ pub async fn run_foreach_parallel(
         project_path,
         client: _client_ref,
         exec_ctx: _exec_ctx_ref,
+        suppressed_errors,
+        step,
+        current_node,
     } = ctx;
     let max_conc = node.max_concurrency.unwrap_or(8);
     let sem = Arc::new(Semaphore::new(max_conc));
@@ -89,17 +114,31 @@ pub async fn run_foreach_parallel(
 
     for item in items {
         let permit = sem.clone().acquire_owned().await.unwrap();
-        let ctx = WalkContext {
+        let walk_ctx = WalkContext {
             state: state.clone(),
             inputs: inputs.clone(),
             result: None,
         };
-        let item_ctx_val = ctx.with_foreach_item(var, item);
+        let item_ctx_val = walk_ctx.with_foreach_item(var, item);
         let action = match &node.action {
             Some(a) => a.clone(),
             None => {
                 drop(permit);
                 continue;
+            }
+        };
+
+        // Interpolate before spawning — errors go to suppressed_errors
+        // rather than being silently swallowed inside the spawned task.
+        let interpolated = match ryeos_runtime::interpolate_action(&action, &item_ctx_val) {
+            Ok(v) => v,
+            Err(e) => {
+                suppressed_errors.push(ErrorRecord {
+                    step,
+                    node: current_node.to_string(),
+                    error: format!("interpolation error in foreach action: {e:#}"),
+                });
+                action.clone()
             }
         };
 
@@ -110,8 +149,6 @@ pub async fn run_foreach_parallel(
 
         let handle = tokio::spawn(async move {
             let _permit = permit;
-            let interpolated = ryeos_runtime::interpolate_action(&action, &item_ctx_val)
-                .unwrap_or(action.clone());
             let stripped = strip_none_values(&interpolated);
             // Typed contract: dispatch_action already returns the leaf
             // result directly; no `{status, data}` unwrap step.

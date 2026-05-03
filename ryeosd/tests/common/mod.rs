@@ -7,8 +7,6 @@
 //! Used by `cleanup_e2e.rs`. NOT used by `cleanup_invariants.rs`
 //! (those are pure in-process invariant checks).
 
-#![allow(dead_code)] // helpers are only used by some integration test bins
-
 pub mod fast_fixture;
 pub mod mock_provider;
 
@@ -177,6 +175,7 @@ impl DaemonHarness {
             .arg("--state-dir").arg(&state_path)
             .arg("--bind").arg(bind.to_string())
             .arg("--uds-path").arg(&uds_path)
+            .env("HOSTNAME", "testhost")
             .env("RYE_SYSTEM_SPACE", system_data_dir())
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
@@ -304,6 +303,7 @@ impl DaemonHarness {
         cmd.arg("--state-dir").arg(&state_path)
             .arg("--bind").arg(bind.to_string())
             .arg("--uds-path").arg(&uds_path)
+            .env("HOSTNAME", "testhost")
             .env("RYE_SYSTEM_SPACE", system_data_dir())
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
@@ -478,7 +478,8 @@ pub async fn run_service_standalone(
     if let Some(p) = params_json {
         cmd.arg("--params").arg(p);
     }
-    cmd.env("RYE_SYSTEM_SPACE", system_data_dir())
+    cmd.env("HOSTNAME", "testhost")
+        .env("RYE_SYSTEM_SPACE", system_data_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .stdout(Stdio::piped())

@@ -173,11 +173,22 @@ fn golden_chain_state_canonical_json() {
     }
 }
 
+/// Maintenance utility: regenerate test vector hashes from source objects.
+///
+/// **Not a behavioral test** — this rewrites `*_vectors.json` files in-place.
+/// Only meant to run when updating canonical hashes after a format change.
+///
+/// ```bash
+/// RYEOS_REGENERATE_VECTORS=1 cargo test --test golden -- --nocapture generate_vectors
+/// ```
 #[test]
-#[ignore]
 fn generate_vectors() {
-    // This test is used to generate/update test vectors.
-    // Run with: cargo test --test golden -- --nocapture --ignored generate_vectors
+    if std::env::var("RYEOS_REGENERATE_VECTORS").is_err() {
+        // No-op unless explicitly opted in — this is a maintenance tool,
+        // not a behavioral test. Removing the old #[ignore] because
+        // Wave-5 forbids it; env-var guard achieves the same safety.
+        return;
+    }
     println!("\nGenerating test vector hashes...\n");
 
     for file in ["thread_event_vectors.json", "thread_snapshot_vectors.json", "chain_state_vectors.json"] {

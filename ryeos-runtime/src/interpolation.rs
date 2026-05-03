@@ -35,48 +35,125 @@ pub fn interpolate(template: &Value, context: &Value) -> anyhow::Result<Value> {
 
 fn interpolate_string(template: &str, context: &Value) -> anyhow::Result<Value> {
     tracing::trace!(template = %template, "interpolating template");
+
+    // Whole-expression fast path: if the entire template is a single ${...},
+    // resolve it and preserve the native type (number, bool, etc.) instead
+    // of stringifying.
     if let Some(caps) = WHOLE_EXPR_RE.captures(template) {
         let expr = &caps[1];
-        let resolved = resolve_expression(expr, context);
-        if let Some(val) = resolved {
+        if let Some(val) = resolve_expression(expr, context) {
             return Ok(val);
         }
+        // Whole expression didn't resolve — fall through to error collection
+        // in the scanning loop below (will report "unresolved expression").
     }
 
+    // If nothing looks like an interpolation, return the template as-is.
     if !INTERP_RE.is_match(template) && !INPUT_RE.is_match(template) {
         return Ok(Value::String(template.to_string()));
     }
 
-    let mut result = template.to_string();
+    // Scan the template, resolving ${...} expressions and {input:...}
+    // references. Both must resolve — missing inputs and unresolved paths
+    // are errors unless the author explicitly opts out:
+    //   - ${a || b}  → explicit fallback (try a, use b if null)
+    //   - {input:x?} → optional input (empty if missing)
+    //   - {input:x:default} → default value if missing
+    //   - {input:x|default} → default value if missing
+    let mut result = String::new();
+    let mut remaining = template;
 
-    result = INTERP_RE
-        .replace_all(&result, |caps: &regex::Captures| {
+    while !remaining.is_empty() {
+        // Try ${...} expression
+        if let Some(caps) = INTERP_RE.captures(remaining) {
+            let full_match = caps.get(0).unwrap();
+            let match_start = full_match.start();
+
+            // Try {input:...} reference (takes precedence if it appears
+            // before or at the same position as the next ${...})
+            if let Some(input_caps) = INPUT_RE.captures(remaining) {
+                let input_start = input_caps.get(0).unwrap().start();
+                if input_start <= match_start {
+                    let input_match = input_caps.get(0).unwrap();
+                    let name = &input_caps[1];
+                    let modifier = input_caps.get(2).map(|m| m.as_str()).unwrap_or("");
+
+                    result.push_str(&remaining[..input_start]);
+                    result.push_str(&resolve_input(name, modifier, context)?);
+                    remaining = &remaining[input_match.end()..];
+                    continue;
+                }
+            }
+
             let expr = &caps[1];
-            resolve_expression(expr, context)
-                .and_then(|v| stringify_value(&v))
-                .unwrap_or_default()
-        })
-        .to_string();
+            result.push_str(&remaining[..match_start]);
+            match resolve_expression(expr, context) {
+                Some(val) => {
+                    match stringify_value(&val) {
+                        Some(s) => result.push_str(&s),
+                        None => {
+                            anyhow::bail!(
+                                "interpolation: ${{{}}} resolved to {} which cannot be stringified",
+                                expr, val
+                            );
+                        }
+                    }
+                }
+                None => {
+                    anyhow::bail!(
+                        "interpolation: ${{{}}} could not be resolved — \
+                         no matching path in context and no || fallback provided",
+                        expr
+                    );
+                }
+            }
+            remaining = &remaining[full_match.end()..];
+            continue;
+        }
 
-    result = INPUT_RE
-        .replace_all(&result, |caps: &regex::Captures| {
+        // Try {input:...} reference (only remaining pattern)
+        if let Some(caps) = INPUT_RE.captures(remaining) {
+            let full_match = caps.get(0).unwrap();
             let name = &caps[1];
             let modifier = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let inputs = context.get("inputs");
 
-            match inputs.and_then(|i| i.get(name)) {
-                Some(val) => val.as_str().unwrap_or("").to_string(),
-                None => match modifier {
-                    "?" => String::new(),
-                    m if m.starts_with(':') => m[1..].to_string(),
-                    m if m.starts_with('|') => m[1..].to_string(),
-                    _ => String::new(),
-                },
-            }
-        })
-        .to_string();
+            result.push_str(&remaining[..full_match.start()]);
+            result.push_str(&resolve_input(name, modifier, context)?);
+            remaining = &remaining[full_match.end()..];
+            continue;
+        }
+
+        // No more interpolation patterns — append the rest verbatim.
+        result.push_str(remaining);
+        break;
+    }
 
     Ok(Value::String(result))
+}
+
+/// Resolve an `{input:NAME}` or `{input:NAMEMODIFIER}` reference.
+///
+/// Modifier semantics:
+///   - `?`        → optional: return empty string if missing
+///   - `:default` → return `default` if missing
+///   - `|default` → return `default` if missing
+///   - (none)     → **required**: return error if missing
+fn resolve_input(name: &str, modifier: &str, context: &Value) -> anyhow::Result<String> {
+    let inputs = context.get("inputs");
+
+    match inputs.and_then(|i| i.get(name)) {
+        Some(val) => Ok(val.as_str().unwrap_or("").to_string()),
+        None => match modifier {
+            "?" => Ok(String::new()),
+            m if m.starts_with(':') => Ok(m[1..].to_string()),
+            m if m.starts_with('|') => Ok(m[1..].to_string()),
+            _ => anyhow::bail!(
+                "interpolation: {{input:{name}}} is missing from inputs and \
+                 has no fallback modifier. Use {{input:{name}?}} for optional \
+                 or {{input:{name}:default}} for a default value."
+            ),
+        },
+    }
 }
 
 fn resolve_expression(expr: &str, context: &Value) -> Option<Value> {
@@ -248,6 +325,57 @@ mod tests {
             )
             .unwrap(),
             json!("A=Rye;B=;C=default")
+        );
+    }
+
+    #[test]
+    fn missing_required_input_errors() {
+        let ctx = json!({"inputs": {"name": "Rye"}});
+        let result = interpolate(&json!("{input:nonexistent}"), &ctx);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("nonexistent") && msg.contains("missing from inputs"),
+            "error message should name the missing input: {msg}"
+        );
+    }
+
+    #[test]
+    fn unresolved_expression_errors() {
+        let ctx = json!({"inputs": {}});
+        let result = interpolate(&json!("Hello ${state.nonexistent}"), &ctx);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("state.nonexistent") && msg.contains("no || fallback"),
+            "error message should name the path and suggest fallback: {msg}"
+        );
+    }
+
+    #[test]
+    fn unresolved_expression_with_fallback_is_ok() {
+        let ctx = json!({"backup": {"name": "alice"}});
+        assert_eq!(
+            interpolate(&json!("${state.missing || backup.name}"), &ctx).unwrap(),
+            json!("alice")
+        );
+    }
+
+    #[test]
+    fn optional_input_with_question_mark_is_ok() {
+        let ctx = json!({"inputs": {}});
+        assert_eq!(
+            interpolate(&json!("Hello {input:name?}!"), &ctx).unwrap(),
+            json!("Hello !")
+        );
+    }
+
+    #[test]
+    fn optional_input_with_default_is_ok() {
+        let ctx = json!({"inputs": {}});
+        assert_eq!(
+            interpolate(&json!("Hello {input:name:World}!"), &ctx).unwrap(),
+            json!("Hello World!")
         );
     }
 
