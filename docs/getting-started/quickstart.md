@@ -1,422 +1,107 @@
-```yaml
-id: quickstart
-title: Quickstart
-description: Create your first directive, tool, and knowledge entry in under 5 minutes
-category: getting-started
-tags: [quickstart, tutorial, first-steps]
-version: "1.0.0"
-```
-
 # Quickstart
 
-This guide walks you through creating one of each item type — a directive, a tool, and a knowledge entry — in your project's `.ai/` directory.
+From source checkout to executing your first tool, step by step.
 
-**Prerequisites:** Rye OS is installed and configured as an MCP server ([Installation](installation.md)).
+## Prerequisites
 
-## 1. Initialize the `.ai/` directory
+- Rust stable (1.80+)
+- Linux (x86_64 or aarch64)
 
-Create the directory structure in your project root:
+## Step 1: Build
 
 ```bash
-mkdir -p .ai/directives .ai/tools .ai/knowledge
+cargo build
 ```
 
-This gives you:
+## Step 2: Initialize the node
 
-```
-your-project/
-└── .ai/
-    ├── directives/
-    ├── tools/
-    └── knowledge/
-```
+This creates signing keys, trust store, and installs the core + standard bundles.
 
-## 2. Create a directive
-
-Directives are Markdown files with embedded XML metadata that define multi-step workflows for your agent.
-
-Create `.ai/directives/greet_user.md`:
-
-````markdown
-<!-- rye:signed:placeholder:unsigned:unsigned -->
-
-# Greet User
-
-Greet the user by name and offer to help with their project.
-
-```xml
-<directive name="greet_user" version="1.0.0">
-<metadata>
-<description>Greet the user by name and offer assistance.</description>
-<category></category>
-<author>my-project</author>
-<model tier="haiku" />
-<limits max_turns="3" max_tokens="1024" />
-<permissions>
-<fetch>
-<knowledge>\*</knowledge>
-</fetch>
-</permissions>
-</metadata>
-
-  <inputs>
-    <input name="user_name" type="string" required="true">
-      The name of the user to greet
-    </input>
-  </inputs>
-
-  <outputs>
-    <output name="greeting">The greeting message delivered to the user</output>
-  </outputs>
-</directive>
+```bash
+cargo run -p ryeos-cli -- \
+  init \
+  --core-source ryeos-bundles/core \
+  --standard-source ryeos-bundles/standard
 ```
 
-<process>
-  <step name="greet">
-    Say hello to {input:user_name} and ask what they'd like help with today.
-  </step>
+What this creates:
+- Node identity key at `$XDG_STATE_DIR/ryeosd/.ai/node/identity/`
+- User signing key at `~/.ai/config/keys/signing/`
+- Core bundle (kind schemas, parsers, handlers) at `$XDG_DATA_DIR/ryeos/`
+- Standard bundle (directives, tools, knowledge) registered in state
+- Self-signed trust entries at `~/.ai/config/keys/trusted/`
 
-  <step name="suggest">
-    Based on the project context, suggest 2-3 things you could help with.
-  </step>
-</process>
-````
+## Step 3: Rebuild manifest (dev builds only)
 
-**Key parts of a directive:**
+After `cargo build`, binary hashes change. The daemon rejects hash mismatches. Fix:
 
-- **Signature comment** — the first line (`<!-- rye:signed:placeholder:unsigned:unsigned -->`) is a signing placeholder.
-- **Markdown title and description** — human-readable context above the XML fence.
-- **XML metadata block** — inside a fenced code block, declares name, version, model tier, resource limits, and permissions.
-- **Process steps** — after the XML fence, `<process>` defines the steps the agent follows.
-
-**Outside the XML fence is free form. We choose to express directive process steps as psudo xml**
-
-## 3. Create a tool
-
-Tools are executable scripts with metadata that declare which **runtime executor** to use. The Rye OS uses a **multi-layer execution chain**:
-
-1. **Tool** (your script) — declares `__executor_id__` pointing to a runtime
-2. **Runtime** (YAML config) — defines environment, interpreter, and command templates
-3. **Primitive** (built-in) — maps to system-level execution (e.g., subprocess)
-
-This chain allows tools to be language-agnostic while sharing infrastructure.
-
-### Python Tool Example
-
-Create `.ai/tools/word_count.py`:
-
-```python
-"""Count words in a file or string."""
-
-__version__ = "1.0.0"
-__tool_type__ = "python"
-__executor_id__ = "rye/core/runtimes/python/script"
-__category__ = ""
-__tool_description__ = "Count words in a given text or file"
-
-CONFIG_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "text": {
-            "type": "string",
-            "description": "Text to count words in",
-        },
-        "file_path": {
-            "type": "string",
-            "description": "Path to a file to count words in (relative to project root)",
-        },
-    },
-}
-
-
-def execute(params: dict, project_path: str) -> dict:
-    """Execute the word count tool.
-
-    The executor runs: echo '{"text":"..."}' | python word_count.py --project-path /path
-    """
-    text = params.get("text")
-    file_path = params.get("file_path")
-
-    if file_path:
-        from pathlib import Path
-        full_path = Path(project_path) / file_path
-        if not full_path.exists():
-            return {"error": f"File not found: {file_path}"}
-        text = full_path.read_text()
-
-    if not text:
-        return {"error": "Provide either 'text' or 'file_path'"}
-
-    words = text.split()
-    lines = text.splitlines()
-
-    return {
-        "word_count": len(words),
-        "line_count": len(lines),
-        "char_count": len(text),
-    }
+```bash
+cargo run -p rye-bundle-tool -- \
+  rebuild-manifest \
+  --source ryeos-bundles/core \
+  --key ~/.local/state/ryeosd/.ai/node/identity/private_key.pem
 ```
 
-**Key parts of a Python tool:**
+## Step 4: Start the daemon
 
-- **`__executor_id__`** — points to `rye/core/runtimes/python/script`, which resolves `.venv`, sets `PYTHONPATH`, and runs the script.
-- **`CONFIG_SCHEMA`** — JSON Schema declaring input parameters.
-- **`execute(params, project_path)`** — entry point called by the runtime. Receives validated params and project root.
-
-### JavaScript / Node Tool Example
-
-Create `.ai/tools/text_stats.js`:
-
-```javascript
-/**
- * Analyze text for length, reading time, and complexity metrics.
- */
-
-const __version__ = "1.0.0";
-const __tool_type__ = "javascript";
-const __executor_id__ = "rye/core/runtimes/node/node";
-const __category__ = "";
-const __tool_description__ = "Analyze text statistics and reading metrics";
-
-const CONFIG_SCHEMA = {
-  type: "object",
-  properties: {
-    text: {
-      type: "string",
-      description: "Text to analyze",
-    },
-    file_path: {
-      type: "string",
-      description: "Path to file to analyze (relative to project root)",
-    },
-  },
-};
-
-async function execute(params, projectPath) {
-  /**
-   * The executor runs: node text_stats.js
-   * (with params passed via stdin or env, depending on runtime config)
-   */
-  const text = params.text;
-  const filePath = params.file_path;
-
-  let content = text;
-  if (filePath) {
-    const fs = require("fs");
-    const path = require("path");
-    const fullPath = path.join(projectPath, filePath);
-    try {
-      content = fs.readFileSync(fullPath, "utf-8");
-    } catch (err) {
-      return { error: `File not found: ${filePath}` };
-    }
-  }
-
-  if (!content) {
-    return { error: "Provide either 'text' or 'file_path'" };
-  }
-
-  const words = content.trim().split(/\s+/).length;
-  const sentences = content
-    .split(/[.!?]+/)
-    .filter((s) => s.trim().length > 0).length;
-  const paragraphs = content
-    .split(/\n\n+/)
-    .filter((p) => p.trim().length > 0).length;
-  const readingTimeMinutes = Math.ceil(words / 200); // avg 200 words per minute
-
-  return {
-    word_count: words,
-    sentence_count: sentences,
-    paragraph_count: paragraphs,
-    reading_time_minutes: readingTimeMinutes,
-    character_count: content.length,
-  };
-}
-
-// Export for the runtime executor
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = { execute, CONFIG_SCHEMA };
-}
+```bash
+cargo run -p ryeosd --
 ```
 
-**Key parts of a JavaScript tool:**
+The daemon binds to `127.0.0.1:7400` by default. It writes a discovery file at
+`~/.local/state/ryeosd/daemon.json` with the bind address and socket path.
 
-- **`__executor_id__`** — points to `rye/core/runtimes/node/node`, which finds `node` or uses `.bin/node`, and runs the script.
-- **`CONFIG_SCHEMA`** — same JSON Schema format as Python.
-- **`execute(params, projectPath)`** — async function receiving validated params and project root.
+### Common startup issues
 
-### How Tool Execution Works
+| Symptom | Fix |
+|---------|-----|
+| `HOSTNAME not set` | `export HOSTNAME=$(hostname)` |
+| `no kind schema roots found` | Missing core bundle. Re-run `rye init --core-source` |
+| `hash mismatch` | Run `rebuild-manifest` (Step 3) |
+| `failed to acquire state lock` | Another `ryeosd` is running. Stop it first |
 
-When you call `rye_execute(item_type="tool", item_id="word_count", ...)`:
+## Step 5: Verify
 
-1. **Resolution** — Rye OS loads the tool script and reads `__executor_id__`.
-2. **Runtime Lookup** — Finds the runtime config (e.g., `python/script.yaml`).
-3. **Environment Setup** — Resolves interpreter (`.venv/bin/python` or `node`), sets env vars, prepends `PYTHONPATH` or `NODE_PATH`.
-4. **Execution** — Runs the command template, piping params via stdin: `echo '{"text":"..."}' | python word_count.py --project-path /path`.
-5. **Result** — Collects stdout/stderr, parses the returned dict, and returns to the agent.
+```bash
+# Health check
+curl http://127.0.0.1:7400/health
 
-## 4. Create a knowledge entry
-
-Knowledge entries are Markdown files with YAML frontmatter. They store domain information, patterns, and learnings that agents can search and reference.
-
-Create `.ai/knowledge/project_conventions.md`:
-
-```markdown
----
-name: project_conventions
-title: Project Conventions
-description: Coding conventions and standards for this project
-category: ""
-tags:
-  - conventions
-  - standards
-  - style
-entry_type: reference
-version: "1.0.0"
----
-
-# Project Conventions
-
-## File naming
-
-- Python files: `snake_case.py`
-- Markdown docs: `kebab-case.md`
-- Test files: `test_<module>.py`
-
-## Code style
-
-- Use type hints on all public functions
-- Docstrings on all public classes and functions
-- Maximum line length: 100 characters
-
-## Git workflow
-
-- Branch names: `feature/<description>`, `fix/<description>`
-- Commit messages: imperative mood, 72-char subject line
+# Execute a built-in tool (no LLM provider needed)
+cargo run -p ryeos-cli -- execute tool:rye/core/identity/public_key
 ```
 
-**Key parts of a knowledge entry:**
+## Step 6: Execute a directive
 
-- **YAML frontmatter** — `name`, `title`, `description`, `category`, `tags`, `entry_type`, and `version`.
-- **Markdown body** — the actual knowledge content. Can be as long as needed.
-- **`entry_type`** — classifies the entry (e.g., `reference`, `learning`, `pattern`, `guide`).
+Directives need an LLM provider. Set the provider's API key:
 
-## 5. Sign your items
-
-Before items can be executed or loaded, they must be signed. Signing validates the item's structure and records an integrity hash.
-
-**Prerequisite:** You need an Ed25519 keypair before signing. If you ran `rye execute directive init`, your key was created automatically. Otherwise, generate one explicitly:
-
-```
-rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "generate"})
-rye_execute(item_type="tool", item_id="rye/core/keys/keys", parameters={"action": "trust"})
+```bash
+export OPENAI_API_KEY=sk-...
+# or
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Then sign your items:
+Then execute:
 
-```
-rye_sign(item_type="directive", item_id="greet_user", project_path="/path/to/your/project")
-rye_sign(item_type="tool", item_id="word_count", project_path="/path/to/your/project")
-rye_sign(item_type="knowledge", item_id="project_conventions", project_path="/path/to/your/project")
+```bash
+cargo run -p ryeos-cli -- execute directive:rye/core/init
 ```
 
-The `item_id` is the relative path from `.ai/<type>/` without the file extension. For items in subdirectories, include the path: `"my-category/my-item"`.
+## Development shortcuts
 
-### Execute vs Load
+Add to your shell profile for convenience:
 
-**For knowledge entries, there's an important distinction:**
+```bash
+export PATH="$HOME/.local/share/cargo/bin:$PATH"
 
-- **`rye_execute(item_type="knowledge", ...)`** — Returns _only the content_ (the Markdown body). Keeps context tight. Use this when you want the knowledge to flow into the agent's reasoning without metadata overhead.
-
-- **`rye_fetch(item_type="knowledge", ...)`** — Returns the _entire file_ including YAML frontmatter and metadata. Use this for inspection, copying between spaces, or when you need the full context including tags, version, and entry type.
-
-## 6. Execute items
-
-Run your directive:
-
-```
-rye_execute(
-    item_type="directive",
-    item_id="greet_user",
-    project_path="/path/to/your/project",
-    parameters={"user_name": "Alice"}
-)
-```
-
-Run your tool:
-
-```
-rye_execute(
-    item_type="tool",
-    item_id="word_count",
-    project_path="/path/to/your/project",
-    parameters={"text": "Hello world, this is a test."}
-)
-```
-
-Run your knowledge (feed content into reasoning):
-
-```
-rye_execute(
-    item_type="knowledge",
-    item_id="project_conventions",
-    project_path="/path/to/your/project"
-)
-```
-
-This returns only the Markdown content:
-
-```
-# Project Conventions
-
-## File naming
-
-- Python files: `snake_case.py`
-- Markdown docs: `kebab-case.md`
-- Test files: `test_<module>.py`
-
-## Code style
-
-- Use type hints on all public functions
-- Docstrings on all public classes and functions
-- Maximum line length: 100 characters
-
-## Git workflow
-
-- Branch names: `feature/<description>`, `fix/<description>`
-- Commit messages: imperative mood, 72-char subject line
-```
-
-**Note:** If you need the full file with metadata (frontmatter), use `rye_fetch()` instead:
-
-```
-rye_fetch(
-    item_type="knowledge",
-    item_id="project_conventions",
-    project_path="/path/to/your/project"
-)
-```
-
-This returns the complete file including YAML frontmatter and metadata.
-
-## 7. Search for items
-
-Find items across all spaces (project, user, and system):
-
-```
-rye_fetch(query="greet", scope="directive", project_path="/path/to/your/project")
-rye_fetch(query="count", scope="tool", project_path="/path/to/your/project")
-rye_fetch(query="conventions", scope="knowledge", project_path="/path/to/your/project")
-```
-
-You can narrow the scope with namespace prefixes:
-
-```
-rye_fetch(query="create", scope="tool.rye.core.*", project_path="/path/to/your/project")
+# After cargo build, link binaries somewhere convenient:
+ln -sf $(pwd)/target/debug/ryeosd ~/.local/bin/
+ln -sf $(pwd)/target/debug/rye ~/.local/bin/
+ln -sf $(pwd)/target/debug/rye-bundle-tool ~/.local/bin/
 ```
 
 ## What's next
 
-- [The .ai/ Directory](ai-directory.md) — Learn about the full directory structure, namespaces, and the 3-tier space system.
-- Explore the system bundle: `rye_fetch(query="create", scope="directive", project_path=".")` to see the built-in directives for creating new items.
+- [Installation](installation.md) — Full build and init reference
+- [Daemon Bootstrap](../operations/daemon-bootstrap.md) — Every phase explained
+- [Environment Variables](../reference/env-variables.md) — Complete env var reference
+- [Dev Tree Caveats](../operations/dev-tree-caveats.md) — Working with dev builds
