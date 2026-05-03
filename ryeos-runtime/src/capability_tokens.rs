@@ -20,7 +20,13 @@ pub fn cap_matches(granted: &str, required: &str) -> bool {
     regex_str.push('$');
     Regex::new(&regex_str)
         .map(|re| re.is_match(required))
-        .unwrap_or(false)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                granted = %granted,
+                "capability pattern produced invalid regex: {e}"
+            );
+            false
+        })
 }
 
 pub fn expand_capabilities(caps: &[String]) -> BTreeSet<String> {

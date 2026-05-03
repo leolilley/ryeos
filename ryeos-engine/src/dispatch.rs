@@ -131,7 +131,16 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
     }
 
     let result_value = if result.success {
-        let parsed = serde_json::from_str::<Value>(&result.stdout).ok();
+        let parsed = match serde_json::from_str::<Value>(&result.stdout) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::trace!(
+                    stdout_len = result.stdout.len(),
+                    "subprocess stdout is not valid JSON, wrapping as string: {e}"
+                );
+                None
+            }
+        };
         Some(parsed.unwrap_or(Value::String(result.stdout.clone())))
     } else {
         None

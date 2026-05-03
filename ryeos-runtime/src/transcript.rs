@@ -340,7 +340,10 @@ fn clean_tool_output(payload: &Value) -> String {
                 .filter(|(k, _)| *k != "_artifact_ref" && *k != "_artifact_note")
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            serde_json::to_string(&Value::Object(cleaned)).unwrap_or_default()
+            serde_json::to_string(&Value::Object(cleaned)).unwrap_or_else(|e| {
+                tracing::warn!("failed to serialize tool output object for transcript: {e}");
+                String::new()
+            })
         }
         Some(other) => {
             let s = other.to_string();
@@ -369,10 +372,16 @@ fn condense_tool_input(tool: &str, payload: &Value) -> String {
                 }
             }
             return serde_json::to_string_pretty(&Value::Object(map))
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    tracing::warn!("failed to serialize truncated tool input for transcript: {e}");
+                    String::new()
+                });
         }
     }
-    serde_json::to_string_pretty(&input).unwrap_or_default()
+    serde_json::to_string_pretty(&input).unwrap_or_else(|e| {
+        tracing::warn!("failed to serialize tool input for transcript: {e}");
+        String::new()
+    })
 }
 
 #[cfg(test)]

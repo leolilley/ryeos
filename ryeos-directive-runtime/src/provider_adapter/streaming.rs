@@ -425,7 +425,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp.text().await.unwrap_or_else(|e| {
+            tracing::warn!("failed to read error response body: {e}");
+            String::new()
+        });
         bail!(
             "provider returned {} (streaming): {}",
             status,
@@ -660,7 +663,10 @@ fn harvest_chunk_meta(
         }
         let parsed: Value = match serde_json::from_str(rest) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::trace!("skipping malformed SSE data JSON: {e}; raw={}", &rest[..rest.len().min(120)]);
+                continue;
+            }
         };
 
         if let Some(u) = parsed.get("usage") {

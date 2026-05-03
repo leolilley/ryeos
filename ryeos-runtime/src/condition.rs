@@ -67,7 +67,9 @@ pub fn apply_operator(actual: Option<&Value>, op: &str, expected: &Value) -> any
                 Value::String(st) => Cow::Borrowed(st.as_str()),
                 _ => Cow::Owned(actual_val.to_string()),
             };
-            let needle = expected.as_str().unwrap_or("");
+            let needle = expected.as_str().ok_or_else(|| {
+                anyhow::anyhow!("'contains' operator requires string value, got {}", expected)
+            })?;
             Ok(s.contains(needle))
         }
         "regex" => {
@@ -75,7 +77,9 @@ pub fn apply_operator(actual: Option<&Value>, op: &str, expected: &Value) -> any
                 Value::String(st) => Cow::Borrowed(st.as_str()),
                 _ => Cow::Owned(actual_val.to_string()),
             };
-            let pattern = expected.as_str().unwrap_or("");
+            let pattern = expected.as_str().ok_or_else(|| {
+                anyhow::anyhow!("'regex' operator requires string value, got {}", expected)
+            })?;
             let re = Regex::new(pattern)?;
             Ok(re.is_match(&s))
         }

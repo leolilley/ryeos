@@ -18,7 +18,9 @@ impl NodeCache {
     pub fn lookup(&self, key: &str) -> Option<Value> {
         let path = self.cache_dir.join(format!("{key}.json"));
         let content = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&content).ok()
+        serde_json::from_str(&content).map_err(|e| {
+            tracing::warn!("cache file contains invalid JSON (key={key}): {e}");
+        }).ok()
     }
 
     pub fn store(&self, key: &str, value: &Value) {

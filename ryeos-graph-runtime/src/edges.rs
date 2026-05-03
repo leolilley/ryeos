@@ -42,8 +42,15 @@ fn evaluate_conditional_edges(edges: &[ConditionalEdge], context: &Value) -> Opt
     for edge in edges {
         match &edge.when {
             Some(condition) => {
-                if ryeos_runtime::condition::matches(context, condition).unwrap_or(false) {
-                    return Some(edge.to.clone());
+                match ryeos_runtime::condition::matches(context, condition) {
+                    Ok(true) => return Some(edge.to.clone()),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            edge_to = %edge.to,
+                            "edge condition evaluation failed, skipping branch: {e:#}"
+                        );
+                    }
                 }
             }
             None => {

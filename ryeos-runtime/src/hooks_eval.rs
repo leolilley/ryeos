@@ -26,14 +26,6 @@ pub async fn run_hooks(
         }
 
         let condition = hook.condition.as_ref().cloned().unwrap_or(Value::Null);
-        if let Err(e) = crate::condition::matches(context, &condition) {
-            tracing::warn!(
-                hook_idx = idx,
-                hook_id = %hook.id,
-                "hook condition evaluation failed, skipping hook: {e:#}"
-            );
-            continue;
-        }
         let condition_passes = match crate::condition::matches(context, &condition) {
             Ok(b) => b,
             Err(e) => return Err(format!(

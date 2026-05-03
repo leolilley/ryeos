@@ -521,7 +521,10 @@ impl Runner {
                                         // child-thread metadata leaked into
                                         // every tool-result message.
                                         let raw_bytes = serde_json::to_vec(&response.result)
-                                            .unwrap_or_default();
+                                            .unwrap_or_else(|e| {
+                                                tracing::warn!("failed to serialize dispatch result: {e}");
+                                                Vec::new()
+                                            });
                                         let processed_bytes = self.result_guard.process_bytes(&raw_bytes);
                                         String::from_utf8_lossy(&processed_bytes).to_string()
                                     }

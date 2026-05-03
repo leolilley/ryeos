@@ -628,6 +628,7 @@ impl Walker {
 
         // Dispatch
         let mut cache_hit = false;
+        let mut dispatch_err: Option<String> = None;
         let result = if node.is_cacheable() {
             let cache_key = compute_cache_key(
                 &self.graph.graph_id,
@@ -645,34 +646,50 @@ impl Walker {
                     &self.project_path,
                     Some(exec_ctx),
                 ).await;
-                if let Ok(ref val) = res {
-                    let is_error = val.get("status")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s == "error")
-                        .unwrap_or(false);
-                    if !is_error {
-                        cache.store(&cache_key, val);
+                match &res {
+                    Ok(val) => {
+                        let is_error = val.get("status")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s == "error")
+                            .unwrap_or_else(|| {
+                                let raw = val.get("status");
+                                if raw.is_some() {
+                                    tracing::trace!(status_val = %raw.unwrap(), "dispatch result status is not a string");
+                                }
+                                false
+                            });
+                        if !is_error {
+                            cache.store(&cache_key, val);
+                        }
+                    }
+                    Err(e) => {
+                        dispatch_err = Some(format!("{e:#}"));
                     }
                 }
                 res.ok()
             }
         } else {
-            dispatch::dispatch_action(
+            let res = dispatch::dispatch_action(
                 &self.client,
                 &stripped_action,
                 &self.thread_id,
                 &self.project_path,
                 Some(exec_ctx),
-            ).await.ok()
+            ).await;
+            if let Err(e) = &res {
+                dispatch_err = Some(format!("{e:#}"));
+            }
+            res.ok()
         };
 
         let elapsed = start.elapsed().as_millis() as u64;
 
         match result {
             None => {
+                let err_detail = dispatch_err.unwrap_or_else(|| "dispatch failed".to_string());
                 StepOutcome::DispatchHardError {
                     item_id: Some(item_id),
-                    error: "dispatch failed".to_string(),
+                    error: err_detail,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                 }
@@ -681,7 +698,13 @@ impl Walker {
                 let is_error = val.get("status")
                     .and_then(|s| s.as_str())
                     .map(|s| s == "error")
-                    .unwrap_or(false);
+                    .unwrap_or_else(|| {
+                        let raw = val.get("status");
+                        if raw.is_some() {
+                            tracing::trace!(status_val = %raw.unwrap(), "dispatch result status is not a string");
+                        }
+                        false
+                    });
 
                 if is_error {
                     let err_str = val.get("error")
