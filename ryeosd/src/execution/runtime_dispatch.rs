@@ -52,10 +52,14 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &params.thread_id,
     )?;
 
+    // Note: DispatchActionParams has `deny_unknown_fields` and no
+    // `principal` field — the request body cannot supply (and so
+    // cannot spoof) a principal. The principal logged here is read
+    // strictly from the validated server-side ThreadAuthState.
     tracing::info!(
         thread_id = %params.thread_id,
         server_principal = %thread_auth.acting_principal,
-        body_principal = %params.project_path,
+        project_path = %params.project_path,
         "thread auth token validated: using server-side principal",
     );
 

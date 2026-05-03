@@ -90,6 +90,8 @@ fn main() -> anyhow::Result<()> {
         invocation_id = ?resolved.invocation_id,
         user_root = ?resolved.user_root,
         system_roots = ?resolved.system_roots,
+        graph_id = %graph.graph_id,
+        declared_permissions = ?graph.declared_permissions,
         "launch resolved"
     );
 

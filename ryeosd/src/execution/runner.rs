@@ -4,9 +4,15 @@
 //! execution lifecycle: CAS context → snapshot → spawn →
 //! fold-back → finalize → cleanup.
 //!
-//! The `ExecutionGuard` struct tracks all state and ensures cleanup
-//! on every exit path (temp dir removal, thread finalization on
-//! pre-spawn failures).
+//! The `ExecutionGuard` struct tracks transient state (temp dir,
+//! thread row, callback + thread-auth tokens) and exposes
+//! `cleanup()` / `fail_thread()` for callers to invoke on their
+//! return paths. It is **not** a Drop guard — synchronous panics
+//! between resource acquisition and the explicit cleanup call will
+//! leak. The detached background path additionally installs
+//! `CbTokenGuard` and `TatTokenGuard` (real Drop guards) inside the
+//! spawned task so background-task panic, error, and success exits
+//! all revoke the per-thread tokens.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -60,10 +66,17 @@ pub struct ExecutionParams {
     pub effective_caps: Vec<String>,
 }
 
-/// Tracks execution state and ensures cleanup on all exit paths.
+/// Tracks execution state for explicit cleanup.
 ///
-/// Call `cleanup()` explicitly when done (or on error). The guard does NOT
-/// use Drop because cleanup is sync and we need access to AppState.
+/// Callers MUST invoke `cleanup()` (success/normal-error returns) or
+/// `fail_thread()` (pre-spawn errors) on every return path that owns
+/// the guard. The guard does NOT use Drop because cleanup is sync
+/// and needs access to AppState; a synchronous panic between
+/// resource acquisition and the explicit cleanup call will leak the
+/// temp dir and leave the tokens in their stores until TTL expiry.
+/// For panic-safe revocation of the callback + thread-auth tokens
+/// in the detached path, see the `CbTokenGuard` / `TatTokenGuard`
+/// installed inside the spawned task.
 struct ExecutionGuard {
     state: AppState,
     thread_id: Option<String>,
@@ -188,7 +201,8 @@ impl ExecutionGuard {
 /// Parts harvested from an `ExecutionGuard` before moving into a
 /// detached `tokio::spawn`. The background task re-installs deferred
 /// revocation guards (`CbTokenGuard`, `TatTokenGuard`) from the token
-/// fields so cleanup still runs on every exit path of the spawn.
+/// fields so the spawned task's success, error, and panic exits all
+/// revoke the per-thread tokens.
 ///
 /// `thread_id` is intentionally omitted — both detached call sites
 /// already keep an owned `bg_thread_id` from the `ThreadInsertResult`
@@ -597,8 +611,12 @@ fn mint_callback_env(
 /// Run an execution inline (blocking until completion).
 ///
 /// Handles the full lifecycle: CAS context, snapshot, spawn,
-/// fold-back, finalize, cleanup. On any error, the thread is finalized
-/// as failed and all resources are cleaned up.
+/// fold-back, finalize, cleanup. On any handled error, the thread
+/// is finalized as failed and `guard.cleanup()` is invoked
+/// explicitly. The guard is not Drop-based, so a synchronous panic
+/// outside of the spawn-task `join_err` branches will leak the
+/// temp dir and per-thread tokens until TTL expiry — see the
+/// module-level docs.
 #[tracing::instrument(
     name = "thread:execute",
     skip(state, params),
@@ -612,7 +630,9 @@ pub async fn run_inline(
     mut params: ExecutionParams,
 ) -> Result<InlineResult> {
     let mut guard = ExecutionGuard::new(state.clone());
-    // Track pre-existing temp dir immediately so cleanup covers all exit paths
+    // Track pre-existing temp dir immediately so the explicit
+    // cleanup() / fail_thread() calls below cover handled-error
+    // returns. Synchronous panic outside those branches still leaks.
     if let Some(ref d) = params.temp_dir {
         guard.track_temp_dir(d.clone());
     }
@@ -660,7 +680,10 @@ pub async fn run_inline(
 
     // Mint callback + thread-auth tokens for the spawned subprocess.
     // Track both on the guard so the inline cleanup path invalidates
-    // them whether the run succeeds, errors, or panics.
+    // them on handled-error returns. The spawn-task panic branches
+    // below catch panics inside the blocking task and run cleanup;
+    // a synchronous panic in run_inline itself between mint and the
+    // explicit cleanup call would leak both tokens until TTL expiry.
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state, &tid, Some(&effective_path), None,
         params.effective_caps.clone(),
@@ -798,9 +821,13 @@ pub async fn run_inline(
 
 /// Launch a detached execution (returns immediately, runs in background).
 ///
-/// Handles the full lifecycle in a background tokio task with the same
-/// guarantees as inline: CAS context, snapshot, spawn, fold-back,
-/// finalize, cleanup.
+/// Handles the full lifecycle in a background tokio task: CAS
+/// context, snapshot, spawn, fold-back, finalize, cleanup. The
+/// pre-spawn synchronous setup uses the same explicit-cleanup
+/// `ExecutionGuard` discipline as `run_inline` and is **not**
+/// panic-safe; once the background task is spawned, the deferred
+/// `CbTokenGuard` / `TatTokenGuard` inside it cover token revocation
+/// on success, error, and panic.
 #[tracing::instrument(
     name = "thread:execute",
     skip(state, params),
@@ -814,7 +841,10 @@ pub async fn run_detached(
     mut params: ExecutionParams,
 ) -> Result<DetachedResult> {
     let mut guard = ExecutionGuard::new(state.clone());
-    // Track pre-existing temp dir immediately so cleanup covers all exit paths
+    // Track pre-existing temp dir immediately so the explicit
+    // cleanup() / fail_thread() calls below cover handled-error
+    // returns. Pre-spawn synchronous panics still leak; once the
+    // background task is spawned, its deferred guards take over.
     if let Some(ref d) = params.temp_dir {
         guard.track_temp_dir(d.clone());
     }

@@ -109,19 +109,31 @@ pub struct ConditionalEdge {
     pub to: String,
 }
 
+/// Top-level graph YAML shape. Two consumers parse this document:
+///
+/// 1. The graph runtime (this crate) parses it as the strict typed
+///    `GraphFile` for walker execution.
+/// 2. The daemon-side `graph_permissions` composer parses the same
+///    YAML into a generic JSON `Value` to lift `permissions` into
+///    `effective_caps` on the callback token.
+///
+/// The `permissions` field therefore lives in two parsing paths. We
+/// keep it on the typed shape (rather than dropping
+/// `deny_unknown_fields`) so that:
+///   - the runtime is the strict gatekeeper: malformed entries
+///     (non-string, etc.) hard-error here before the composer's more
+///     permissive `filter_map` ever sees them.
+///   - the field is propagated to `GraphDefinition.declared_permissions`
+///     and surfaced by callers (logged at launch in `main.rs`), making
+///     it live and verifying the runtime received the same declared
+///     cap-set the daemon composed for the callback token.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GraphFile {
     version: String,
     category: String,
     config: GraphConfig,
-    /// Accepted but unused by the walker. The graph_permissions composer
-    /// (upstream, in the daemon's compose chain) reads this field from
-    /// the same YAML to populate effective_caps on the callback token.
-    /// Without acknowledging it here, deny_unknown_fields would reject
-    /// every YAML the composer needs to consume.
     #[serde(default)]
-    #[allow(dead_code)]
     permissions: Vec<String>,
 }
 
@@ -131,6 +143,12 @@ pub struct GraphDefinition {
     pub graph_id: String,
     pub file_path: Option<String>,
     pub config: GraphConfig,
+    /// Permissions the graph YAML declares for itself. The daemon's
+    /// `graph_permissions` composer also reads these from the same
+    /// YAML to populate `effective_caps` on the callback token; the
+    /// runtime side keeps them visible for traceability + parity
+    /// checks (see `main.rs` launch log).
+    pub declared_permissions: Vec<String>,
 }
 
 impl GraphDefinition {
@@ -162,6 +180,7 @@ impl GraphDefinition {
             graph_id,
             file_path: file_path.map(String::from),
             config: file.config,
+            declared_permissions: file.permissions,
         })
     }
 }
@@ -281,5 +300,67 @@ version: "1.0.0"
 category: test
 "#;
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
+    }
+
+    /// Closes the dual-parser concern: graph_permissions composer reads
+    /// `permissions` from the same YAML; the runtime must propagate
+    /// the declared list to GraphDefinition so callers can log/verify
+    /// parity, not silently drop it on the floor.
+    #[test]
+    fn permissions_propagate_to_definition() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+permissions:
+  - rye.execute.tool.echo
+  - rye.execute.tool.read
+config:
+  start: a
+"#;
+        let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+        assert_eq!(
+            def.declared_permissions,
+            vec![
+                "rye.execute.tool.echo".to_string(),
+                "rye.execute.tool.read".to_string(),
+            ]
+        );
+    }
+
+    /// Structural-shape check on `permissions`: the typed
+    /// `Vec<String>` rejects entries that aren't scalar (arrays,
+    /// mappings, etc.), so a graph YAML the runtime accepts cannot
+    /// hand the composer a structurally-broken permissions list.
+    /// (Note: serde_yaml will coerce bare YAML scalars like `42` /
+    /// `true` to their string form, so the composer's per-entry
+    /// `as_str` filter is still the cap-shape gate for those — the
+    /// runtime is the *structural* gatekeeper, not a string-only
+    /// gate.)
+    #[test]
+    fn structural_non_scalar_permissions_rejected_by_runtime() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+permissions:
+  - rye.execute.tool.echo
+  - [nested, array]
+config:
+  start: a
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
+    }
+
+    /// `permissions` is optional — graphs without a declared cap-set
+    /// still parse and yield an empty `declared_permissions`.
+    #[test]
+    fn missing_permissions_yields_empty_declared() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+"#;
+        let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+        assert!(def.declared_permissions.is_empty());
     }
 }

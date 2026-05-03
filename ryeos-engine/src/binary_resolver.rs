@@ -250,13 +250,15 @@ pub fn resolve_bundle_binary_ref(
 /// Decide whether the trust class returned by
 /// [`verify_executor_trust`] is high enough to dispatch the binary.
 ///
-/// Both `TrustedSystem` and `TrustedUser` are dispatchable. The effective
-/// tier is already the `min` of the raw binary signature trust and the
-/// descriptor's `root_trust_class`, so a `TrustedUser` here means *either*
-/// the binary is system-signed and the descriptor capped to user, or the
-/// binary itself is user-signed under a user-tier descriptor — both of
-/// which are safe to run. Anything weaker (`UntrustedUserSpace`,
-/// `Unsigned`) must be refused.
+/// Both `TrustedSystem` and `TrustedUser` are dispatchable. The
+/// effective tier is already the `min` of the raw binary signature
+/// trust (which `verify_executor_trust` produces only as
+/// `TrustedSystem` / `UntrustedUserSpace` / `Unsigned`) and the
+/// descriptor's `root_trust_class` (widened to `TrustedSystem` or
+/// `TrustedUser` by `plan_builder::widen_root_trust_class`).
+/// A `TrustedUser` here therefore means a system-signed binary
+/// reached through a user/project-tier descriptor — safe to run.
+/// Anything weaker (`UntrustedUserSpace`, `Unsigned`) must be refused.
 fn is_dispatchable_trust_class(tc: TrustClass) -> bool {
     matches!(tc, TrustClass::TrustedSystem | TrustClass::TrustedUser)
 }
