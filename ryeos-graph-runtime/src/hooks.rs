@@ -1,6 +1,9 @@
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 
+#[cfg(test)]
 pub struct HookContext<'a> {
     pub graph_id: &'a str,
     pub graph_run_id: &'a str,
@@ -10,6 +13,7 @@ pub struct HookContext<'a> {
     pub state: &'a Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookEvent {
@@ -21,6 +25,8 @@ pub struct HookEvent {
     pub node: String,
     pub state: Value,
 }
+
+#[cfg(test)]
 
 #[tracing::instrument(
     level = "debug",
@@ -66,8 +72,21 @@ pub fn fire_hook(
 
         let condition = hook.get("condition");
         if let Some(cond) = condition {
-            if !cond.is_null() && !ryeos_runtime::matches(cond, &context).unwrap_or(false) {
-                continue;
+            if !cond.is_null() {
+                match ryeos_runtime::matches(cond, &context) {
+                    Ok(passes) => {
+                        if !passes {
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            hook_event = %event,
+                            "graph hook condition evaluation failed, skipping: {e:#}"
+                        );
+                        continue;
+                    }
+                }
             }
         }
 

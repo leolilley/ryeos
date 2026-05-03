@@ -84,6 +84,16 @@ pub async fn run_foreach_sequential(
                     }
                 }
             }
+        } else {
+            // Dispatch failed — record error and push null placeholder
+            // to keep result indices aligned with input items (matching
+            // parallel path semantics).
+            suppressed_errors.push(ErrorRecord {
+                step,
+                node: current_node.to_string(),
+                error: format!("foreach sequential iteration dispatch failed"),
+            });
+            results.push(Value::Null);
         }
     }
     results
@@ -146,13 +156,38 @@ pub async fn run_foreach_parallel(
         let thread_id = thread_id.to_string();
         let project_path = project_path.to_string();
         let exec_ctx = exec_ctx.clone();
+        let assign = node.assign.clone();
+        let item_owned = item.clone();
+        let step_owned = step;
+        let current_node_owned = current_node.to_string();
 
         let handle = tokio::spawn(async move {
             let _permit = permit;
             let stripped = strip_none_values(&interpolated);
             // Typed contract: dispatch_action already returns the leaf
             // result directly; no `{status, data}` unwrap step.
-            crate::dispatch::dispatch_action(&client, &stripped, &thread_id, &project_path, Some(&exec_ctx)).await
+            match crate::dispatch::dispatch_action(&client, &stripped, &thread_id, &project_path, Some(&exec_ctx)).await {
+                Ok(val) => {
+                    // Perform node.assign (same as sequential path).
+                    if let Some(ref assign_expr) = assign {
+                        let mut assign_ctx_map = item_owned
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default();
+                        assign_ctx_map.insert("result".into(), val.clone());
+                        let assign_ctx = Value::Object(assign_ctx_map);
+                        if let Err(e) = ryeos_runtime::interpolate(assign_expr, &assign_ctx) {
+                            tracing::warn!(
+                                step = step_owned,
+                                node = %current_node_owned,
+                                "foreach parallel iteration assign interpolation failed: {e:#}"
+                            );
+                        }
+                    }
+                    Ok(val)
+                }
+                Err(e) => Err(e),
+            }
         });
         handles.push(handle);
     }
@@ -160,8 +195,28 @@ pub async fn run_foreach_parallel(
     let mut results = Vec::new();
     for handle in handles {
         match handle.await {
-            Ok(Ok(val)) => results.push(val),
-            _ => results.push(serde_json::json!({"error": "foreach iteration failed"})),
+            Ok(Ok(val)) => {
+                results.push(val);
+            }
+            Ok(Err(dispatch_err)) => {
+                // Dispatch failed — record in suppressed_errors (same
+                // semantics as sequential path) and push a null placeholder
+                // so result indices stay aligned with input items.
+                suppressed_errors.push(ErrorRecord {
+                    step,
+                    node: current_node.to_string(),
+                    error: format!("foreach parallel iteration dispatch failed: {dispatch_err:#}"),
+                });
+                results.push(Value::Null);
+            }
+            Err(join_err) => {
+                suppressed_errors.push(ErrorRecord {
+                    step,
+                    node: current_node.to_string(),
+                    error: format!("foreach parallel iteration task panicked: {join_err}"),
+                });
+                results.push(Value::Null);
+            }
         }
     }
     results

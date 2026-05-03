@@ -12,7 +12,6 @@ use crate::dispatch;
 use crate::edges;
 use crate::env_preflight;
 use crate::foreach;
-use crate::hooks;
 use crate::knowledge;
 use crate::model::*;
 use crate::persistence;
@@ -332,17 +331,8 @@ impl Walker {
             }
         }
 
-        // Emit graph_started event (before the loop — not per-step).
+        // Emit graph_started runtime event (before the loop — not per-step).
         {
-            let hook_ctx = hooks::HookContext {
-                graph_id: &self.graph.graph_id,
-                graph_run_id: &graph_run_id,
-                thread_id: &self.thread_id,
-                step: 0,
-                current_node: &cfg.start,
-                state: &state,
-            };
-            hooks::fire_hook(&hook_list, "graph_started", &hook_ctx);
             let r = self
                 .client
                 .append_runtime_event(
@@ -1152,7 +1142,7 @@ impl Walker {
             base_status,
             error,
             guard,
-            hook_list,
+            hook_list: _hook_list,
             current_node_id,
         } = input;
         let (success, status) = match base_status {
@@ -1236,15 +1226,6 @@ impl Walker {
 
         // Emit GraphCompleted event.
         {
-            let hook_ctx = hooks::HookContext {
-                graph_id: &self.graph.graph_id,
-                graph_run_id,
-                thread_id: &self.thread_id,
-                step: steps,
-                current_node: "",
-                state,
-            };
-            hooks::fire_hook(hook_list, "graph_completed", &hook_ctx);
             let r = self
                 .client
                 .append_runtime_event(
@@ -1391,21 +1372,6 @@ impl Walker {
     }
 
     async fn emit_graph_step_completed(&self, graph_run_id: &str, step: u32, current: &str, status: &str, error: Option<&str>) {
-        {
-            let hook_ctx = hooks::HookContext {
-                graph_id: &self.graph.graph_id,
-                graph_run_id,
-                thread_id: &self.thread_id,
-                step,
-                current_node: current,
-                state: &json!({}),
-            };
-            hooks::fire_hook(
-                &[],
-                "graph_step_completed",
-                &hook_ctx,
-            );
-        }
         let mut payload = json!({
             "graph_run_id": graph_run_id,
             "node": current,

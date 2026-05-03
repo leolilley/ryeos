@@ -93,14 +93,30 @@ pub fn matches(doc: &Value, condition: &Value) -> anyhow::Result<bool> {
         let arr = any
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("'any' must be an array"))?;
-        return Ok(arr.iter().any(|c| matches(doc, c).unwrap_or(false)));
+        for (idx, c) in arr.iter().enumerate() {
+            let result = matches(doc, c).map_err(|e| {
+                anyhow::anyhow!("'any' clause[{idx}] evaluation failed: {e:#}")
+            })?;
+            if result {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
     }
 
     if let Some(all) = condition.get("all") {
         let arr = all
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("'all' must be an array"))?;
-        return Ok(arr.iter().all(|c| matches(doc, c).unwrap_or(false)));
+        for (idx, c) in arr.iter().enumerate() {
+            let result = matches(doc, c).map_err(|e| {
+                anyhow::anyhow!("'all' clause[{idx}] evaluation failed: {e:#}")
+            })?;
+            if !result {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
     }
 
     if let Some(neg) = condition.get("not") {
@@ -196,5 +212,29 @@ mod tests {
         let doc = json!({"a": 1});
         assert!(matches(&doc, &json!({})).unwrap());
         assert!(matches(&doc, &Value::Null).unwrap());
+    }
+
+    #[test]
+    fn malformed_condition_in_any_propagates() {
+        let doc = json!({"status": "running"});
+        let cond = json!({"any": [
+            {"path": "status", "op": "unknown_op", "value": "x"},
+            {"path": "status", "op": "eq", "value": "running"}
+        ]});
+        let result = matches(&doc, &cond);
+        assert!(result.is_err(), "malformed operator in 'any' clause should propagate: {result:?}");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("unknown_op") || msg.contains("clause"), "error should mention the cause: {msg}");
+    }
+
+    #[test]
+    fn malformed_condition_in_all_propagates() {
+        let doc = json!({"status": "running"});
+        let cond = json!({"all": [
+            {"path": "status", "op": "eq", "value": "running"},
+            {"not_a_real_field": true}
+        ]});
+        let result = matches(&doc, &cond);
+        assert!(result.is_err(), "malformed clause in 'all' should propagate: {result:?}");
     }
 }

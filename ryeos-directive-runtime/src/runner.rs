@@ -593,13 +593,19 @@ impl Runner {
                         }
                     );
 
-                    let hook_result = ryeos_runtime::hooks_eval::run_hooks(
+                    let hook_result = match ryeos_runtime::hooks_eval::run_hooks(
                         &event,
                         &context,
                         &self.hooks,
                         &project_path,
                         &dispatcher,
-                    ).await;
+                    ).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::warn!(hook_event = %event, "hook evaluation error, skipping: {e}");
+                            None
+                        }
+                    };
 
                     // Hook events ("before_step", "after_step", …)
                     // are not in the daemon's event-vocabulary

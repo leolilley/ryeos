@@ -17,16 +17,31 @@ pub async fn run_hooks(
     hooks: &[HookDefinition],
     project_path: &str,
     dispatcher: &HookDispatcher,
-) -> Option<Value> {
+) -> Result<Option<Value>, String> {
     let mut control_result: Option<Value> = None;
 
-    for hook in hooks {
+    for (idx, hook) in hooks.iter().enumerate() {
         if hook.event != event {
             continue;
         }
 
         let condition = hook.condition.as_ref().cloned().unwrap_or(Value::Null);
-        if !crate::condition::matches(context, &condition).unwrap_or(false) {
+        if let Err(e) = crate::condition::matches(context, &condition) {
+            tracing::warn!(
+                hook_idx = idx,
+                hook_id = %hook.id,
+                "hook condition evaluation failed, skipping hook: {e:#}"
+            );
+            continue;
+        }
+        let condition_passes = match crate::condition::matches(context, &condition) {
+            Ok(b) => b,
+            Err(e) => return Err(format!(
+                "hook[{idx}] (id={}): condition evaluation failed: {e:#}",
+                hook.id
+            )),
+        };
+        if !condition_passes {
             continue;
         }
 
@@ -35,7 +50,10 @@ pub async fn run_hooks(
 
         let result = match dispatcher(interpolated, project_path.to_string()).await {
             Ok(val) => val,
-            Err(_) => continue,
+            Err(e) => return Err(format!(
+                "hook[{idx}] (id={}): dispatch failed: {e:#}",
+                hook.id
+            )),
         };
 
         let layer = hook.layer.unwrap_or(2);
@@ -49,7 +67,7 @@ pub async fn run_hooks(
             }
     }
 
-    control_result
+    Ok(control_result)
 }
 
 pub fn merge_hooks(
@@ -132,7 +150,7 @@ mod tests {
             Box::pin(async { Ok(json!({"dispatched": true})) })
         });
         let ctx = json!({"state": {}});
-        let result = run_hooks("error", &ctx, &hooks, "/tmp", &dispatcher).await;
+        let result = run_hooks("error", &ctx, &hooks, "/tmp", &dispatcher).await.unwrap();
         assert!(result.is_some());
     }
 
@@ -143,7 +161,23 @@ mod tests {
             Box::pin(async { Ok(json!({"should_be_ignored": true})) })
         });
         let ctx = json!({"state": {}});
-        let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher).await;
+        let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_hooks_propagates_dispatch_error() {
+        let hooks = vec![make_hook("h1", "step_complete", 1)];
+        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+            Box::pin(async { Err(CallbackError::ActionFailed {
+                code: "timeout".to_string(),
+                message: "simulated timeout".to_string(),
+                retryable: false,
+            }) })
+        });
+        let ctx = json!({"state": {}});
+        let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher).await;
+        assert!(result.is_err(), "dispatch failure should propagate as Err: {result:?}");
+        assert!(result.unwrap_err().contains("dispatch failed"));
     }
 }

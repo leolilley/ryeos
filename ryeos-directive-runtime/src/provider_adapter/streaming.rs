@@ -44,7 +44,13 @@ pub fn parse_sse_events_with_state(
 
         let parsed: Value = match serde_json::from_str(&payload) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    payload_preview = %payload.chars().take(80).collect::<String>(),
+                    "SSE: skipping malformed JSON payload: {e:#}"
+                );
+                continue;
+            }
         };
 
         match mode {
@@ -137,8 +143,16 @@ fn parse_event_typed(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    tool_call_state.insert("current_tool_id".to_string(), id);
-                    tool_call_state.insert("current_tool_name".to_string(), name);
+                    if id.is_empty() || name.is_empty() {
+                        tracing::warn!(
+                            id = id,
+                            name = name,
+                            "SSE event_typed: content_block_start tool_use missing id or name, skipping"
+                        );
+                    } else {
+                        tool_call_state.insert("current_tool_id".to_string(), id);
+                        tool_call_state.insert("current_tool_name".to_string(), name);
+                    }
                     tool_call_state.remove("current_tool_args");
                 }
             }
@@ -253,30 +267,48 @@ fn parse_delta_merge(
 fn parse_complete_chunks(parsed: &Value, events: &mut Vec<StreamEvent>) {
     if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
         if let Some(choice) = choices.first() {
-            if let Some(message) = choice.get("message") {
-                if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-                    events.push(StreamEvent::Delta(content.to_string()));
-                }
-                if let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
-                    for tc in tool_calls {
-                        let id = tc
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = tc
-                            .get("function")
-                            .and_then(|f| f.get("name").and_then(|v| v.as_str()))
-                            .unwrap_or("")
-                            .to_string();
-                        let arguments = tc
-                            .get("function")
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("{}")
-                            .to_string();
-                        events.push(StreamEvent::ToolUse { id, name, arguments });
+            if let Some(content) = choice.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
+                events.push(StreamEvent::Delta(content.to_string()));
+            }
+            if let Some(tool_calls) = choice.get("tool_calls").and_then(|tc| tc.as_array()) {
+                for tc in tool_calls {
+                    let id = tc
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let name = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let arguments = tc
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+
+                    // Log and skip tool calls with missing critical fields
+                    // rather than crashing the entire parse. Providers
+                    // may include tool calls in partial/non-final chunks.
+                    if id.is_empty() {
+                        tracing::warn!(
+                            name = name,
+                            "SSE complete_chunks: tool call missing 'id', skipping"
+                        );
+                        continue;
                     }
+                    if name.is_empty() {
+                        tracing::warn!(
+                            id = id,
+                            "SSE complete_chunks: tool call missing 'function.name', skipping"
+                        );
+                        continue;
+                    }
+                    events.push(StreamEvent::ToolUse {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        arguments: arguments.to_string(),
+                    });
                 }
             }
             if let Some("stop") = choice.get("finish_reason").and_then(|f| f.as_str()) {

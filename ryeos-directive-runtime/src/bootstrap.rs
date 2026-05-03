@@ -92,7 +92,32 @@ pub fn bootstrap(
     // from the inventory is treated as "no such tool" by the
     // dispatcher's per-call resolution.
     let tools = project_tool_inventory(inventory);
-    let hooks = load_hooks(loader)?;
+    let mut hooks = load_hooks(loader)?;
+
+    // Merge directive-declared hooks (header.hooks) into the config hooks.
+    // Directive hooks are appended after config hooks with layer 1 so they
+    // execute before builtin hooks (layer 2) but after graph hooks.
+    if let Some(ref header_hooks) = header.hooks {
+        if !header_hooks.is_empty() {
+            tracing::info!(
+                count = header_hooks.len(),
+                "directive runtime: merging directive-declared hooks"
+            );
+            for (idx, hv) in header_hooks.iter().enumerate() {
+                let mut def = serde_json::from_value::<ryeos_runtime::HookDefinition>(hv.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "directive header hooks[{idx}]: malformed hook definition: {e:#}"
+                        )
+                    })?;
+                // Directive hooks default to layer 1 (before builtin layer 2)
+                if def.layer.is_none() {
+                    def.layer = Some(1);
+                }
+                hooks.push(def);
+            }
+        }
+    }
 
     let risk_policy = load_risk_policy(loader)?;
 
