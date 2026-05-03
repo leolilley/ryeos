@@ -1,3 +1,25 @@
+//! `/execute/stream` SSE source — kind-agnostic streaming gateway.
+//!
+//! This source mints a thread id, dispatches the launch via the shared
+//! `spawn_dispatch_launch` helper, and tails events for that thread
+//! using the persistence-first `(broadcast + paged replay on lag)`
+//! pattern.
+//!
+//! The source does NOT pattern-match on the kind name in `item_ref`.
+//! Whether `<kind>:<id>` is root-executable is the engine's call,
+//! made inside `dispatch::dispatch` against the kind-schema registry.
+//! When the engine returns `DispatchError::NotRootExecutable`, the
+//! launch helper surfaces it as a typed `LaunchSpawnError::Dispatch`
+//! and this source emits a structured `stream_error` SSE event with
+//! `code = "not_root_executable"`.
+//!
+//! Required auth: `rye_signed` (TCP /execute/stream is publicly bound).
+//! Required body: the typed `LaunchRequest` (item_ref + project_path
+//! + parameters), all three required, no extras (deny_unknown_fields).
+//!
+//! `source_config` is also typed: `keep_alive_secs` (required, > 0),
+//! enforced with `deny_unknown_fields`. No silent defaults.
+
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -29,10 +51,12 @@ fn is_terminal(event_type: &str) -> bool {
     TERMINAL_EVENT_TYPES.contains(&event_type)
 }
 
-fn sse_error_event(message: &str) -> axum::response::sse::Event {
+fn sse_error_event(code: &str, message: &str) -> axum::response::sse::Event {
     axum::response::sse::Event::default()
         .event("stream_error")
-        .data(serde_json::json!({"error": message}).to_string())
+        .data(
+            serde_json::json!({"code": code, "error": message}).to_string(),
+        )
 }
 
 fn is_terminal_status(status: &str) -> bool {
@@ -42,7 +66,19 @@ fn is_terminal_status(status: &str) -> bool {
     )
 }
 
-/// Typed body shape for `POST /execute/stream`.
+/// Typed deserialization for the `source_config` object in a
+/// `dispatch_launch` route's `response.source_config`.
+///
+/// Required fields only; `deny_unknown_fields` rejects any extra
+/// keys at route-table load time.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDispatchLaunchSourceConfig {
+    keep_alive_secs: u64,
+}
+
+/// Typed body shape for `POST /execute/stream` (and any other route
+/// that wires a body-driven launch).
 ///
 /// Three required fields, no others. The verifier (`rye_signed`)
 /// commits to the body bytes, so a typed deserialization with
@@ -51,10 +87,13 @@ fn is_terminal_status(status: &str) -> bool {
 /// `Option<...>.unwrap_or(Value::Null)` silent fallbacks.
 ///
 /// `parameters: Value` is required (must be present in the body), but
-/// its inner shape is up to the directive's input schema.
+/// its inner shape is up to the launched item's input schema.
+/// `item_ref` is a canonical ref (`<kind>:<id>`); the engine's kind
+/// schema decides whether the kind is root-executable. The daemon
+/// does NOT pattern-match on the kind name.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExecuteStreamRequest {
+struct LaunchRequest {
     item_ref: String,
     project_path: String,
     parameters: Value,
@@ -74,7 +113,7 @@ impl StreamingSource for DispatchLaunchSource {
         if ctx.auth_verifier_key != REQUIRED_AUTH {
             return Err(RouteConfigError::SourceAuthRequirement {
                 id: raw_route.id.clone(),
-                src: "directive_launch".into(),
+                src: "dispatch_launch".into(),
                 required: REQUIRED_AUTH.into(),
                 got: ctx.auth_verifier_key.into(),
             });
@@ -83,128 +122,37 @@ impl StreamingSource for DispatchLaunchSource {
         if raw_route.request.body != crate::routes::raw::RawRequestBody::Json {
             return Err(RouteConfigError::InvalidSourceConfig {
                 id: raw_route.id.clone(),
-                src: "directive_launch".into(),
-                reason: "directive_launch requires request.body = json".into(),
+                src: "dispatch_launch".into(),
+                reason: "dispatch_launch requires request.body = json".into(),
             });
         }
 
-        let cfg = &raw_event_stream.source_config;
-
-        // Source_config is fixed: only `keep_alive_secs` is a knob.
-        // The request body shape is hard-coded to `ExecuteStreamRequest`
-        // (item_ref + project_path + parameters), so there is no
-        // template indirection to validate.
-        let keep_alive_secs = cfg
-            .get("keep_alive_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(15);
-        if keep_alive_secs == 0 {
+        let cfg: RawDispatchLaunchSourceConfig = serde_json::from_value(
+            raw_event_stream.source_config.clone(),
+        )
+        .map_err(|e| RouteConfigError::InvalidSourceConfig {
+            id: raw_route.id.clone(),
+            src: "dispatch_launch".into(),
+            reason: format!("invalid source_config: {e}"),
+        })?;
+        if cfg.keep_alive_secs == 0 {
             return Err(RouteConfigError::InvalidSourceConfig {
                 id: raw_route.id.clone(),
-                src: "directive_launch".into(),
+                src: "dispatch_launch".into(),
                 reason: "keep_alive_secs must be > 0".into(),
             });
         }
 
-        // Reject any unknown keys in source_config so misconfigured
-        // YAMLs surface at load time, not at first request.
-        if let Some(obj) = cfg.as_object() {
-            for k in obj.keys() {
-                if k != "keep_alive_secs" {
-                    return Err(RouteConfigError::InvalidSourceConfig {
-                        id: raw_route.id.clone(),
-                        src: "directive_launch".into(),
-                        reason: format!(
-                            "unknown source_config key '{k}'; allowed keys: [keep_alive_secs]"
-                        ),
-                    });
-                }
-            }
-        }
-
         Ok(Arc::new(CompiledDispatchLaunchSource {
-            keep_alive_secs,
+            route_id: raw_route.id.clone(),
+            keep_alive_secs: cfg.keep_alive_secs,
         }))
     }
 }
 
 struct CompiledDispatchLaunchSource {
+    route_id: String,
     keep_alive_secs: u64,
-}
-
-/// Spawn the dispatch task that turns a directive into a running
-/// thread.  Calls `dispatch::dispatch` with `pre_minted_thread_id =
-/// Some(thread_id)` so the resulting thread row uses the SSE-minted
-/// id — the SSE subscriber registered against that id receives every
-/// event from the very first lifecycle event onward.
-fn build_launch_task(
-    state: &AppState,
-    item_ref: String,
-    project_path: std::path::PathBuf,
-    parameters: Value,
-    principal_id: String,
-    principal_scopes: Vec<String>,
-    pre_minted_thread_id: String,
-) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-    let state_clone = state.clone();
-
-    tokio::spawn(async move {
-        use ryeos_engine::canonical_ref::CanonicalRef;
-        use ryeos_engine::contracts::{
-            EffectivePrincipal, PlanContext, Principal, ProjectContext,
-        };
-
-        let site_id = state_clone.threads.site_id().to_string();
-
-        let plan_ctx = PlanContext {
-            requested_by: EffectivePrincipal::Local(Principal {
-                fingerprint: principal_id.clone(),
-                scopes: principal_scopes.clone(),
-            }),
-            project_context: ProjectContext::LocalPath {
-                path: project_path.clone(),
-            },
-            current_site_id: site_id.clone(),
-            origin_site_id: site_id,
-            execution_hints: Default::default(),
-            validate_only: false,
-        };
-
-        let exec_ctx = crate::service_executor::ExecutionContext {
-            principal_fingerprint: principal_id.clone(),
-            caller_scopes: principal_scopes,
-            engine: state_clone.engine.clone(),
-            plan_ctx,
-            requested_op: None,
-            requested_inputs: None,
-        };
-
-        let root_canonical = CanonicalRef::parse(&item_ref).map_err(|e| {
-            anyhow::anyhow!("invalid item_ref '{item_ref}': {e}")
-        })?;
-
-        let dispatch_req = crate::dispatch::DispatchRequest {
-            launch_mode: "inline",
-            target_site_id: None,
-            project_source_is_pushed_head: false,
-            validate_only: false,
-            params: parameters,
-            acting_principal: principal_id.as_str(),
-            project_path: project_path.as_path(),
-            original_project_path: project_path.clone(),
-            snapshot_hash: None,
-            temp_dir: None,
-            original_root_kind: root_canonical.kind.as_str(),
-            pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
-            operation: None,
-            inputs: None,
-        };
-
-        match crate::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state_clone).await {
-            Ok(_) => Ok(()),
-            Err(e) => Err(anyhow::anyhow!(e.to_string())),
-        }
-    })
 }
 
 #[axum::async_trait]
@@ -217,38 +165,51 @@ impl BoundStreamingSource for CompiledDispatchLaunchSource {
     ) -> Result<SseEventStream, RouteDispatchError> {
         if last_event_id.is_some() {
             return Err(RouteDispatchError::BadRequest(
-                "directive_launch does not support Last-Event-ID".into(),
+                "dispatch_launch does not support Last-Event-ID".into(),
             ));
         }
 
         // Typed body deserialization: the three required fields
         // (item_ref, project_path, parameters) MUST be present, with
         // no unknown extras. Missing fields → 400.
-        let req: ExecuteStreamRequest = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
+        let req: LaunchRequest = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
             RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
         })?;
 
-        // `directive_launch` is the SSE source for *directive*
-        // execution. Other kinds (tools, services, runtimes) have
-        // their own dispatch paths; refusing them here keeps the
-        // semantic contract tight.
-        if !req.item_ref.starts_with("directive:") {
-            return Err(RouteDispatchError::BadRequest(format!(
-                "directive_launch only accepts 'directive:*' refs, got '{}'",
-                req.item_ref
-            )));
-        }
+        // Syntactic ref validation only. The engine's kind-schema
+        // registry decides which kinds are root-executable; if the
+        // ref's kind isn't, `dispatch::dispatch` returns a typed
+        // `NotRootExecutable` error which surfaces as a stream_error
+        // event. The daemon does not pattern-match the kind name.
+        let item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&req.item_ref).map_err(
+            |e| {
+                RouteDispatchError::BadRequest(format!(
+                    "invalid item_ref '{}': {}",
+                    req.item_ref, e
+                ))
+            },
+        )?;
 
-        let project_path = std::path::PathBuf::from(&req.project_path);
+        let project_path =
+            crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path).map_err(
+                |e| RouteDispatchError::BadRequest(format!("project_path: {e}")),
+            )?;
 
         let thread_id = crate::services::thread_lifecycle::new_thread_id();
+
+        let span = tracing::info_span!(
+            "dispatch_launch_sse",
+            route_id = self.route_id.as_str(),
+            thread_id = thread_id.as_str(),
+            item_ref_kind = item_ref.kind(),
+        );
 
         let hub = state.event_streams.clone();
         let mut rx = hub.subscribe(&thread_id);
 
-        let mut launch_handle = build_launch_task(
+        let mut launch_handle = crate::routes::launch::spawn_dispatch_launch(
             state,
-            req.item_ref,
+            item_ref,
             project_path,
             req.parameters,
             ctx.principal.id.clone(),
@@ -262,6 +223,7 @@ impl BoundStreamingSource for CompiledDispatchLaunchSource {
         let thread_id_for_stream = thread_id.clone();
 
         let stream = async_stream::stream! {
+            let _guard = span.enter();
             yield Ok(
                 axum::response::sse::Event::default()
                     .event("stream_started")
@@ -349,7 +311,7 @@ impl BoundStreamingSource for CompiledDispatchLaunchSource {
                                             return;
                                         }
                                     }
-                                    yield Ok(sse_error_event(&err_msg));
+                                    yield Ok(sse_error_event("replay_failed", &err_msg));
                                     return;
                                 }
 
@@ -358,7 +320,7 @@ impl BoundStreamingSource for CompiledDispatchLaunchSource {
                                 tracing::info!(
                                     thread_id = %thread_id_for_stream,
                                     lagged = n,
-                                    "directive_launch SSE subscriber lag recovery complete"
+                                    "dispatch_launch SSE subscriber lag recovery complete"
                                 );
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -416,7 +378,7 @@ impl BoundStreamingSource for CompiledDispatchLaunchSource {
                                             next_after = Some(current_max);
                                         }
                                         Err(e) => {
-                                            yield Ok(sse_error_event(&format!("post-launch replay failed: {e}")));
+                                            yield Ok(sse_error_event("post_launch_replay_failed", &format!("post-launch replay failed: {e}")));
                                             return;
                                         }
                                     }
@@ -433,15 +395,15 @@ impl BoundStreamingSource for CompiledDispatchLaunchSource {
                                         return;
                                     }
                                 }
-                                yield Ok(sse_error_event("launch completed but thread is not terminal"));
+                                yield Ok(sse_error_event("thread_not_terminal", "launch completed but thread is not terminal"));
                                 return;
                             }
                             Ok(Err(e)) => {
-                                yield Ok(sse_error_event(&format!("launch failed: {e}")));
+                                yield Ok(sse_error_event(e.code(), &format!("launch failed: {e}")));
                                 return;
                             }
                             Err(_) => {
-                                yield Ok(sse_error_event("launch task panicked"));
+                                yield Ok(sse_error_event("task_panicked", "launch task panicked"));
                                 return;
                             }
                         }
@@ -474,7 +436,7 @@ mod tests {
             limits: RawLimits::default(),
             response: RawResponseSpec {
                 mode: "event_stream".into(),
-                source: Some("directive_launch".into()),
+                source: Some("dispatch_launch".into()),
                 source_config: serde_json::json!({
                     "keep_alive_secs": 15,
                 }),
@@ -495,7 +457,7 @@ mod tests {
         let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
-            source: "directive_launch".into(),
+            source: "dispatch_launch".into(),
             source_config: serde_json::json!({"keep_alive_secs": 15}),
         };
         let ctx = SourceCompileContext {
@@ -515,7 +477,7 @@ mod tests {
         let mut raw = make_test_raw("r1", "/execute/stream");
         raw.request.body = RawRequestBody::Raw;
         let es = RawEventStreamResponse {
-            source: "directive_launch".into(),
+            source: "dispatch_launch".into(),
             source_config: serde_json::json!({"keep_alive_secs": 15}),
         };
         let ctx = SourceCompileContext {
@@ -534,7 +496,7 @@ mod tests {
         let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
-            source: "directive_launch".into(),
+            source: "dispatch_launch".into(),
             source_config: serde_json::json!({"keep_alive_secs": 0}),
         };
         let ctx = SourceCompileContext {
@@ -553,7 +515,7 @@ mod tests {
         let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
-            source: "directive_launch".into(),
+            source: "dispatch_launch".into(),
             source_config: serde_json::json!({
                 "keep_alive_secs": 15,
                 "item_ref": "${request.body_json.item_ref}",
@@ -567,10 +529,52 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
+        // deny_unknown_fields on the typed struct produces this message.
         assert!(
-            msg.contains("unknown source_config key 'item_ref'"),
+            msg.contains("unknown field") && msg.contains("item_ref"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn compile_rejects_missing_keep_alive_secs() {
+        let source = DispatchLaunchSource;
+        let raw = make_test_raw("r1", "/execute/stream");
+        let es = RawEventStreamResponse {
+            source: "dispatch_launch".into(),
+            source_config: serde_json::json!({}),
+        };
+        let ctx = SourceCompileContext {
+            auth_verifier_key: "rye_signed",
+        };
+        let err = match source.compile(&raw, &es, &ctx) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("missing field `keep_alive_secs`"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_rejects_non_object_source_config() {
+        let source = DispatchLaunchSource;
+        let raw = make_test_raw("r1", "/execute/stream");
+        let es = RawEventStreamResponse {
+            source: "dispatch_launch".into(),
+            source_config: serde_json::json!(123),
+        };
+        let ctx = SourceCompileContext {
+            auth_verifier_key: "rye_signed",
+        };
+        let err = match source.compile(&raw, &es, &ctx) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid source_config"), "got: {msg}");
     }
 
     #[test]
@@ -578,7 +582,7 @@ mod tests {
         let source = DispatchLaunchSource;
         let raw = make_test_raw("r1", "/execute/stream");
         let es = RawEventStreamResponse {
-            source: "directive_launch".into(),
+            source: "dispatch_launch".into(),
             source_config: serde_json::json!({"keep_alive_secs": 10}),
         };
         let ctx = SourceCompileContext {
@@ -592,7 +596,7 @@ mod tests {
         // No project_path, parameters
         let body = serde_json::json!({"item_ref": "directive:foo"});
         let bytes = serde_json::to_vec(&body).unwrap();
-        let err = serde_json::from_slice::<ExecuteStreamRequest>(&bytes)
+        let err = serde_json::from_slice::<LaunchRequest>(&bytes)
             .expect_err("must reject missing fields");
         let msg = err.to_string();
         assert!(
@@ -610,7 +614,7 @@ mod tests {
             "extra": "nope",
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let err = serde_json::from_slice::<ExecuteStreamRequest>(&bytes)
+        let err = serde_json::from_slice::<LaunchRequest>(&bytes)
             .expect_err("must reject unknown fields");
         let msg = err.to_string();
         assert!(
@@ -627,7 +631,7 @@ mod tests {
             "parameters": {"name": "World"},
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let req: ExecuteStreamRequest =
+        let req: LaunchRequest =
             serde_json::from_slice(&bytes).expect("valid body must parse");
         assert_eq!(req.item_ref, "directive:my/agent");
         assert_eq!(req.project_path, "/tmp/proj");

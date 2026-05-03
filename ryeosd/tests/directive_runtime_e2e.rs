@@ -23,12 +23,12 @@ use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
-/// Plant the `model_providers/mock` config under
-/// `<user>/.ai/config/rye-runtime/model_providers/mock.yaml`.
+/// Plant the `model-providers/mock` config under
+/// `<user>/.ai/config/rye-runtime/model-providers/mock.yaml`.
 /// `auth: {}` keeps the adapter's `Authorization` header skipped
 /// (see `ryeos-directive-runtime/src/adapter.rs:38-43`).
 fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime/model_providers");
+    let dir = user_space.join(".ai/config/rye-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"

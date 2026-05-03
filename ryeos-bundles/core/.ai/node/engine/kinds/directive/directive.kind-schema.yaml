@@ -1,4 +1,4 @@
-# rye:signed:2026-05-02T11:21:57Z:64d893fbeba148fd1fe6d87bcf90b8e10f4493474769dcd56b89251c1c7a021e:oqFcgUX9mgQQXj7HrvWXq2eEZu98XBCn1J64MdODRRtZXJ1c01z+XARAbUa8+i1Iduep6YjsER32w8tpVgfMBA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-03T02:08:26Z:18a8f10fbc62980cbbd1373770dceb5e3b39753de0453fa99fc2056201da4e01:dokzCBnzK65jwHE1yY7vj4EskV4EU1n/PFyk0gkeVh/CdSR0dfyiVl80vNmlTNcSAKHXG899BZeJ9XrAhjOwCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -23,7 +23,7 @@ execution:
   launch_augmentations:
     - step: compose_context_positions
       target_kind: knowledge
-      target_op: compose
+      target_op: compose_positions
       source_derived: composed_context
       output_derived: rendered_contexts
       meta_output_derived: rendered_contexts_meta

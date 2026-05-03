@@ -125,7 +125,7 @@ pub async fn run(
             &crate::services::thread_lifecycle::ThreadCreateParams {
                 thread_id: child_thread_id.clone(),
                 chain_root_id: parent_thread_id.to_string(),
-                kind: "augmentation_child".to_string(),
+                kind: "system_task".to_string(),
                 item_ref: format!("{target_kind}://{target_op}"),
                 executor_ref: executor_ref.clone(),
                 launch_mode: "inline".to_string(),
@@ -146,7 +146,16 @@ pub async fn run(
         Vec::new(), // augmentation children have no caps
     );
 
-    // 8. Build envelope.
+    // 8. Mint thread auth token (runtime expects RYEOSD_THREAD_AUTH_TOKEN).
+    let thread_auth = state.thread_auth.mint(
+        &child_thread_id,
+        principal_fingerprint.to_string(),
+        vec!["execute".to_string()],
+        ttl,
+    );
+    let tat_owned = thread_auth.token.clone();
+
+    // 9. Build envelope.
     let envelope = ryeos_runtime::op_wire::BatchOpEnvelope {
         schema_version: 1,
         kind: target_kind.clone(),
@@ -160,7 +169,7 @@ pub async fn run(
         payload,
     };
 
-    // 9. Resolve the native executor path and spawn.
+    // 10. Resolve the native executor path and spawn.
     let system_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
         .iter()
@@ -183,12 +192,15 @@ pub async fn run(
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
     let stdin_data = serde_json::to_string(&envelope)?;
+    let envs = vec![
+        ("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned),
+    ];
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
             cwd: None,
-            envs: vec![],
+            envs,
             stdin_data: Some(stdin_data),
             timeout: 60.0,
         })
@@ -196,9 +208,11 @@ pub async fn run(
     .await
     .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
 
-    // 10. Invalidate callback token.
+    // 11. Invalidate callback + thread auth tokens.
     state.callback_tokens.invalidate(&cap.token);
     state.callback_tokens.invalidate_for_thread(&child_thread_id);
+    state.thread_auth.invalidate(&thread_auth.token);
+    state.thread_auth.invalidate_for_thread(&child_thread_id);
 
     if !result.success {
         let _ = state.threads.finalize_thread(
@@ -212,7 +226,7 @@ pub async fn run(
         });
     }
 
-    // 11. Parse BatchOpResult.
+    // 12. Parse BatchOpResult.
     let batch_result: ryeos_runtime::op_wire::BatchOpResult =
         serde_json::from_str(&result.stdout)?;
     if !batch_result.success {
@@ -226,11 +240,11 @@ pub async fn run(
         });
     }
 
-    // 12. Extract rendered contexts from output.
+    // 13. Extract rendered contexts from output.
     let output = batch_result.output.clone().unwrap_or_default();
     let rendered_positions = extract_rendered_positions(&output);
 
-    // 13. Write into parent's composed view.
+    // 14. Write into parent's composed view.
     resolution.composed.derived.insert(
         output_derived.clone(),
         serde_json::to_value(&rendered_positions)?,

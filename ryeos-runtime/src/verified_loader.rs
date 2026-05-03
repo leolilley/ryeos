@@ -6,6 +6,47 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use serde::de::DeserializeOwned;
+use thiserror::Error;
+
+/// Strict, three-state error returned by [`VerifiedLoader::load_config_strict`].
+///
+/// Distinguishes "candidate file is absent" (`Ok(None)`) from "candidate
+/// file exists but is broken" (`Err(_)`). Each variant carries the
+/// offending file path so operators can act without re-running with
+/// debug logs.
+#[derive(Debug, Error)]
+pub enum ConfigLoadError {
+    #[error("config verify failed at {}: {source}", path.display())]
+    VerifyFailed {
+        path: PathBuf,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("config raw-YAML parse failed at {}: {source}", path.display())]
+    RawYamlParseFailed {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
+    #[error("config typed-parse failed at {}: {source}", path.display())]
+    TypedParseFailed {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
+}
+
+impl ConfigLoadError {
+    /// File path of the candidate that triggered the error. Useful for
+    /// callers wrapping the error in higher-level diagnostics.
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::VerifyFailed { path, .. }
+            | Self::RawYamlParseFailed { path, .. }
+            | Self::TypedParseFailed { path, .. } => path,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TrustedKey {
@@ -377,7 +418,28 @@ impl VerifiedLoader {
         None
     }
 
+    /// Lossy-but-convenient: collapses every failure into `None`. Use
+    /// `load_config_strict` to distinguish "absent" from "broken" and
+    /// to surface the actual error path. New callers should prefer the
+    /// strict variant; this entry point is kept for legacy call sites
+    /// that don't propagate config errors yet.
     pub fn load_config<T: DeserializeOwned>(&self, config_id: &str) -> Option<T> {
+        self.load_config_strict::<T>(config_id).ok().flatten()
+    }
+
+    /// Strict, three-state config loader:
+    ///
+    /// - `Ok(None)`  — no candidate file exists at the expected path
+    ///   under any space root. Truly absent.
+    /// - `Ok(Some(_))` — a candidate exists, verified, and parsed
+    ///   into the typed shape successfully.
+    /// - `Err(_)` — a candidate file exists but verification or
+    ///   parsing failed. The error names the file path and the
+    ///   underlying cause so callers can surface a loud diagnostic.
+    pub fn load_config_strict<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+    ) -> std::result::Result<Option<T>, ConfigLoadError> {
         let subdir = Self::kind_subdir("config");
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
@@ -403,28 +465,58 @@ impl VerifiedLoader {
         }
 
         if candidate_paths.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         if candidate_paths.len() == 1 {
-            if let Ok(verified) = self.load_verified("config", &candidate_paths[0]) {
-                if let Ok(value) = serde_yaml::from_str::<T>(&verified.content) {
-                    return Some(value);
+            let path = &candidate_paths[0];
+            let verified = self
+                .load_verified("config", path)
+                .map_err(|e| ConfigLoadError::VerifyFailed {
+                    path: path.clone(),
+                    source: e,
+                })?;
+            let value = serde_yaml::from_str::<T>(&verified.content).map_err(|e| {
+                ConfigLoadError::TypedParseFailed {
+                    path: path.clone(),
+                    source: e,
                 }
-            }
-            return None;
+            })?;
+            return Ok(Some(value));
         }
 
         let mut merged = serde_yaml::Value::Null;
         for path in &candidate_paths {
-            if let Ok(verified) = self.load_verified("config", path) {
-                if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&verified.content) {
-                    merged = deep_merge_yaml(merged, value);
-                }
-            }
+            let verified = self
+                .load_verified("config", path)
+                .map_err(|e| ConfigLoadError::VerifyFailed {
+                    path: path.clone(),
+                    source: e,
+                })?;
+            let value = serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(
+                |e| ConfigLoadError::RawYamlParseFailed {
+                    path: path.clone(),
+                    source: e,
+                },
+            )?;
+            merged = deep_merge_yaml(merged, value);
         }
 
-        serde_yaml::from_value::<T>(merged).ok()
+        // The merged value isn't tied to a single file; surface the
+        // last contributing file in the typed-parse error path so
+        // operators have *some* lead. This keeps the error variant
+        // shape stable (file path + underlying error).
+        let last_path = candidate_paths
+            .last()
+            .cloned()
+            .unwrap_or_else(|| item_path.clone());
+        let value = serde_yaml::from_value::<T>(merged).map_err(|e| {
+            ConfigLoadError::TypedParseFailed {
+                path: last_path,
+                source: e,
+            }
+        })?;
+        Ok(Some(value))
     }
 
     pub fn scan_kind(&self, kind: &str) -> Result<Vec<ScannedItem>> {

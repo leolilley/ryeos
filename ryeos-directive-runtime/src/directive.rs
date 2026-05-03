@@ -3,6 +3,25 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Typed runtime view of a directive's effective header *after* the
+/// daemon-side composer has produced
+/// `KindComposedView::ExtendsChain(...).composed`.
+///
+/// The runtime owns the typed shape of the fields it **consumes**
+/// (`model`, `permissions`, `limits`, `outputs`, `context`, `hooks`,
+/// `extends`, `name`).  `deny_unknown_fields` is mandatory — relaxing
+/// it once already masked a routing-config regression by accepting
+/// fields the runtime quietly ignored.
+///
+/// The composer ships extra frontmatter keys (`body`, `category`,
+/// `description`, `inputs`, `required_secrets`, …) that are owned by
+/// the engine / dispatcher (e.g. `required_secrets` is read on the
+/// daemon side by `dispatch.rs::vault_bindings`).  Those fields MUST
+/// be stripped *before* deserialising into `DirectiveHeader` —
+/// `bootstrap.rs::parse_effective_header` does the projection — so
+/// the typed shape stays narrow and `deny_unknown_fields` keeps
+/// catching real drift instead of being defeated by every new
+/// composer-emitted key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectiveHeader {
@@ -23,6 +42,22 @@ pub struct DirectiveHeader {
     #[serde(default)]
     pub hooks: Option<Vec<Value>>,
 }
+
+/// Allow-list of composed-view top-level keys the runtime decodes
+/// into [`DirectiveHeader`].  See the type's doc comment for the
+/// rationale: every other key is owned by the daemon (composer,
+/// dispatcher, augmentations) and is read directly off
+/// `KindComposedView` by the daemon, not by the runtime.
+pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
+    "name",
+    "extends",
+    "model",
+    "permissions",
+    "limits",
+    "outputs",
+    "context",
+    "hooks",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +122,12 @@ pub struct ToolSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
+    /// Kind-schema metadata header (e.g. `"rye-runtime/model-providers"`)
+    /// surfaced on the typed struct so `deny_unknown_fields` keeps
+    /// holding the line. Not consumed by the runtime; logged at
+    /// bootstrap for parity with the other config structs.
+    #[serde(default)]
+    pub category: Option<String>,
     pub base_url: String,
     #[serde(default)]
     pub auth: AuthConfig,
@@ -170,6 +211,11 @@ pub struct PricingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionConfig {
+    /// Kind-schema metadata header (e.g. `"rye-runtime"`) surfaced so
+    /// `deny_unknown_fields` keeps holding the line. Not consumed by
+    /// the runtime.
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default)]
     pub retries: u32,
     #[serde(default)]
@@ -191,6 +237,7 @@ fn default_timeout() -> u64 { 300 }
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
+            category: None,
             retries: 2,
             retry_status_codes: vec![429, 500, 502, 503],
             never_retry: vec![],
@@ -222,6 +269,11 @@ pub struct BootstrapConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRoutingConfig {
+    /// Kind-schema metadata header (e.g. `"rye-runtime"`) surfaced so
+    /// `deny_unknown_fields` keeps holding the line. Not consumed by
+    /// the runtime.
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default)]
     pub tiers: HashMap<String, TierConfig>,
 }

@@ -837,6 +837,7 @@ mod tests {
     #[test]
     fn compute_cost_with_pricing() {
         let provider = crate::directive::ProviderConfig {
+            category: None,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -870,6 +871,7 @@ mod tests {
     #[test]
     fn finalize_extracts_string() {
         let provider = crate::directive::ProviderConfig {
+            category: None,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -902,6 +904,7 @@ mod tests {
     #[test]
     fn system_prompt_prepended() {
         let provider = crate::directive::ProviderConfig {
+            category: None,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),

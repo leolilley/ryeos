@@ -43,7 +43,7 @@
 //!   alternatives so an operator can fix the schema/cap/registry
 //!   without spelunking the source.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -1105,8 +1105,8 @@ fn enforce_runtime_caps(
 pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> Result<Value, DispatchError> {
     let SubprocessDispatchContext {
         current_ref,
-        thread_profile: _,
-        verified: _,
+        thread_profile,
+        verified: hop_verified,
         request,
         ctx,
         state,
@@ -1170,8 +1170,8 @@ pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> 
             dispatch_managed_subprocess(
                 SubprocessDispatchContext {
                     current_ref,
-                    thread_profile: "",
-                    verified: None,
+                    thread_profile,
+                    verified: hop_verified,
                     request,
                     ctx,
                     state,
@@ -1186,8 +1186,8 @@ pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> 
         LifecycleMode::DetachedOk => {
             dispatch_tool_subprocess(
                 current_ref,
-                "",
-                None,
+                thread_profile,
+                hop_verified,
                 request,
                 ctx,
                 state,
@@ -1309,6 +1309,15 @@ async fn dispatch_managed_subprocess(
         plan_context: ctx.plan_ctx.clone(),
     };
 
+    let dotenv_dirs = crate::vault::dotenv_search_dirs(Some(project_path));
+    let vault_bindings = crate::vault::read_required_secrets(
+        state.vault.as_ref(),
+        acting_principal,
+        &resolved.resolved_item.metadata.required_secrets,
+        &dotenv_dirs,
+    )
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+
     let result = launch::build_and_launch(
         launch::BuildAndLaunchParams {
             state,
@@ -1317,7 +1326,7 @@ async fn dispatch_managed_subprocess(
             resolved: &resolved,
             project_path,
             parameters: &params,
-            vault_bindings: &HashMap::new(),
+            vault_bindings: &vault_bindings,
             pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         },
     ).await.map_err(|e| {
@@ -1343,7 +1352,7 @@ async fn dispatch_managed_subprocess(
 
 async fn dispatch_streaming_subprocess(
     current_ref: &CanonicalRef,
-    _verified: Option<&VerifiedItem>,
+    verified: Option<&VerifiedItem>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -1390,17 +1399,41 @@ async fn dispatch_streaming_subprocess(
     let stdin_data = serde_json::to_string(&single_root)
         .map_err(|e| DispatchError::Internal(e.into()))?;
 
-    let verified_runtime = state
-        .engine
-        .runtimes
-        .lookup_for(&current_ref.kind)
-        .map_err(|_| DispatchError::SchemaMisconfigured {
-            kind: current_ref.kind.clone(),
-            detail: format!("no runtime serves kind '{}'", current_ref.kind),
-        })?;
+    // Streaming tools are *items*, not runtime-hosted kinds — each
+    // tool ships its own binary in the bundle (e.g.
+    // `bin/<triple>/rye-tool-streaming-demo`) and the dispatcher
+    // resolves it from the verified item's `executor_id` metadata.
+    // Phase2's first cut wrongly routed this through
+    // `RuntimeRegistry::lookup_for(kind)` — which only finds runtimes
+    // declared via `kind: runtime` YAMLs (directive/graph/knowledge),
+    // never streaming tools — so every streaming dispatch hit
+    // `no runtime serves kind 'streaming_tool'`. The fix is to use the
+    // streaming tool's own binary, which is the `executor_id` field
+    // the kind-schema's `inventory_schema_keys` already surfaces on
+    // `ResolvedItem.metadata`.
+    let verified_item = verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
+        kind: current_ref.kind.clone(),
+        detail: format!(
+            "streaming tool '{item_ref_str}' dispatched without a verified item — \
+             the dispatch loop must resolve before reaching a streaming terminator"
+        ),
+    })?;
 
-    let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
-    let executor_ref = format!("native:{bare}");
+    let executor_id = verified_item
+        .resolved
+        .metadata
+        .executor_id
+        .as_ref()
+        .ok_or_else(|| DispatchError::SchemaMisconfigured {
+            kind: current_ref.kind.clone(),
+            detail: format!(
+                "streaming tool '{item_ref_str}' has no `executor_id` in its YAML \
+                 — every `kind: streaming_tool` item must declare \
+                 `executor_id: <bare-binary-name>` so the daemon can resolve the \
+                 binary against the system bundle's `bin/<triple>/` CAS"
+            ),
+        })?;
+    let executor_ref = format!("native:{executor_id}");
 
     let executor_path = crate::execution::launch::resolve_native_executor_path(
         &system_roots,
@@ -1524,11 +1557,20 @@ async fn dispatch_tool_subprocess(
         enforce_runtime_caps(&item_ref_for_error, &required_caps, &ctx.caller_scopes)?;
     }
 
+    let dotenv_dirs = crate::vault::dotenv_search_dirs(Some(&request.original_project_path));
+    let vault_bindings = crate::vault::read_required_secrets(
+        state.vault.as_ref(),
+        request.acting_principal,
+        &resolved.resolved_item.metadata.required_secrets,
+        &dotenv_dirs,
+    )
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
         project_path: Some(request.original_project_path.clone()),
-        vault_bindings: HashMap::new(),
+        vault_bindings,
         snapshot_hash: request.snapshot_hash.clone(),
         parameters: request.params.clone(),
         temp_dir: request.temp_dir.clone(),
