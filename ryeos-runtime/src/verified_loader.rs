@@ -476,7 +476,18 @@ impl VerifiedLoader {
                     path: path.clone(),
                     source: e,
                 })?;
-            let value = serde_yaml::from_str::<T>(&verified.content).map_err(|e| {
+            // Parse raw YAML first, then type-convert — same as the
+            // merged path. This ensures YAML syntax errors always surface
+            // as RawYamlParseFailed and type-shape errors as TypedParseFailed,
+            // giving consistent enum semantics regardless of candidate count.
+            let raw_value: serde_yaml::Value =
+                serde_yaml::from_str(&verified.content).map_err(|e| {
+                    ConfigLoadError::RawYamlParseFailed {
+                        path: path.clone(),
+                        source: e,
+                    }
+                })?;
+            let value = serde_yaml::from_value(raw_value).map_err(|e| {
                 ConfigLoadError::TypedParseFailed {
                     path: path.clone(),
                     source: e,
