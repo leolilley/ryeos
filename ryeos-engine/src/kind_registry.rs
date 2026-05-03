@@ -13,7 +13,7 @@
 //! and a hardcoded signature envelope (`#` prefix). Every kind schema must
 //! be signed by a trusted key. Unsigned or tampered schemas are rejected.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -469,6 +469,125 @@ pub struct DelegationSpec {
     pub via: DelegationVia,
 }
 
+// ── Op surface types ─────────────────────────────────────────────────
+
+/// Classification of side effects an op may have. Used by the daemon
+/// to route op results to the right state primitive (none, chain,
+/// projection, workspace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SideEffectClass {
+    None,
+    WritesChain,
+    WritesProjection,
+    WritesWorkspace,
+}
+
+/// How an op is dispatched. Phase 2 has exactly one variant; future
+/// phases may add `WarmService`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "via", rename_all = "snake_case")]
+pub enum OperationDispatch {
+    /// Op is dispatched by spawning the kind's runtime via lillux::run.
+    RuntimeRegistry,
+}
+
+/// Type declaration for a single op input parameter.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputDecl {
+    #[serde(rename = "type")]
+    pub ty: InputType,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    #[serde(default, rename = "enum")]
+    pub enum_values: Option<Vec<String>>,
+    #[serde(default)]
+    pub min: Option<i64>,
+    #[serde(default)]
+    pub items: Option<Box<InputDecl>>,
+}
+
+/// Scalar types accepted in op input declarations.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputType {
+    String,
+    Integer,
+    Boolean,
+    Array,
+    Object,
+}
+
+impl PartialEq for InputType {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+impl Eq for InputType {}
+
+/// A single operation declared on a kind's execution schema.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationDecl {
+    pub name: String,
+    pub side_effects: SideEffectClass,
+    pub dispatch: OperationDispatch,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, InputDecl>,
+}
+
+// ── Launch augmentation types ────────────────────────────────────────
+
+/// Schema-declared launch augmentations. Engine parses these as opaque
+/// data; daemon interprets each variant between resolution and parent
+/// runtime spawn. Order matters — augmentations run in declared order.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum LaunchAugmentationDecl {
+    /// Compose context positions by dispatching a multi-root compose
+    /// op on `target_kind`'s runtime as a child thread of the parent
+    /// launch. Daemon owns interpretation entirely.
+    ComposeContextPositions {
+        /// Which kind handles composition. Daemon's interpreter uses
+        /// this for prefix validation and runtime lookup.
+        target_kind: String,
+        /// Op name on `target_kind`'s schema to dispatch.
+        #[serde(default = "default_target_op")]
+        target_op: String,
+        /// Derived field on the consumer kind's KindComposedView
+        /// holding the position → refs map.
+        #[serde(default = "default_source_derived")]
+        source_derived: String,
+        /// Derived field where rendered strings will be written.
+        #[serde(default = "default_output_derived")]
+        output_derived: String,
+        /// Derived field where per-position composition metadata is
+        /// written.
+        #[serde(default = "default_meta_output_derived")]
+        meta_output_derived: String,
+        /// Per-position token budget. Defaults applied by daemon
+        /// interpreter when missing.
+        #[serde(default)]
+        per_position_budget: BTreeMap<String, usize>,
+    },
+}
+
+fn default_target_op() -> String {
+    "compose_positions".to_string()
+}
+fn default_source_derived() -> String {
+    "composed_context".to_string()
+}
+fn default_output_derived() -> String {
+    "rendered_contexts".to_string()
+}
+fn default_meta_output_derived() -> String {
+    "rendered_contexts_meta".to_string()
+}
+
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -514,6 +633,21 @@ pub struct ExecutionSchema {
     /// runtime profile by changing the schema, not the dispatch code.
     #[serde(default)]
     pub thread_profile: Option<String>,
+    /// Default operation for this kind. When a client sends
+    /// `/execute` without `operation`, the daemon resolves to this.
+    #[serde(default)]
+    pub default_operation: Option<String>,
+    /// Schema-declared operations for this kind. Non-empty `operations`
+    /// also serves as an executable signal (relaxed executable
+    /// invariant), so a kind with ops but no terminator/delegate/aliases
+    /// is still executable.
+    #[serde(default)]
+    pub operations: Vec<OperationDecl>,
+    /// Schema-declared launch augmentations. Engine parses these as
+    /// opaque data; daemon interprets them between resolution and
+    /// parent runtime spawn.
+    #[serde(default)]
+    pub launch_augmentations: Vec<LaunchAugmentationDecl>,
 }
 
 fn default_alias_depth() -> usize {
@@ -1430,6 +1564,76 @@ fn parse_execution_schema(
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
 
+    // Parse default_operation
+    let default_operation = execution_value
+        .get("default_operation")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+
+    // Parse operations
+    let mut operations = Vec::new();
+    if let Some(ops_value) = execution_value.get("operations") {
+        if let Some(ops_seq) = ops_value.as_sequence() {
+            for item in ops_seq {
+                let op: OperationDecl = serde_yaml::from_value(item.clone())
+                    .map_err(|e| EngineError::SchemaLoaderError {
+                        reason: format!("{display}: invalid operation declaration: {e}"),
+                    })?;
+                operations.push(op);
+            }
+        }
+    }
+
+    // Validate: op names unique within the kind
+    {
+        let mut seen = std::collections::HashSet::new();
+        for op in &operations {
+            if !seen.insert(&op.name) {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: duplicate operation name `{}` in kind schema",
+                        op.name
+                    ),
+                });
+            }
+        }
+    }
+
+    // Validate: default_operation must match a declared op
+    if let Some(ref default_op) = default_operation {
+        if !operations.iter().any(|op| op.name == *default_op) {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: default_operation `{default_op}` does not match any declared operation"
+                ),
+            });
+        }
+    }
+
+    // Parse launch_augmentations
+    let mut launch_augmentations = Vec::new();
+    if let Some(la_value) = execution_value.get("launch_augmentations") {
+        if let Some(la_seq) = la_value.as_sequence() {
+            for item in la_seq {
+                let aug: LaunchAugmentationDecl = serde_yaml::from_value(item.clone())
+                    .map_err(|e| EngineError::SchemaLoaderError {
+                        reason: format!("{display}: invalid launch_augmentations entry: {e}"),
+                    })?;
+                launch_augmentations.push(aug);
+            }
+        }
+    }
+
+    // Mixed-dispatch reject: operations + terminator or operations + delegate
+    if !operations.is_empty() && (terminator.is_some() || delegate.is_some()) {
+        let conflict = if terminator.is_some() { "terminator" } else { "delegate" };
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: kind declares operations and {conflict}; mixed dispatch is forbidden"
+            ),
+        });
+    }
+
     // S1: load-time non-actionable schema rejection. A kind that
     // declares `execution:` MUST declare at least one routing
     // primitive the dispatcher can act on:
@@ -1440,6 +1644,8 @@ fn parse_execution_schema(
     //     `executor_id` resolution — both are legitimate uses of the
     //     same field)
     //   * a `delegate` block (explicit registry/etc. routing)
+    //   * non-empty `operations` (schema-declared op surface —
+    //     relaxed executable invariant: operations alone qualifies)
     //
     // Pre-V5.4 the dispatcher silently consulted
     // `RuntimeRegistry::lookup_for` when a schema had a
@@ -1457,14 +1663,15 @@ fn parse_execution_schema(
     // not creating dispatcher ambiguity.
     let has_routing_primitive = terminator.is_some()
         || !aliases.is_empty()
-        || delegate.is_some();
+        || delegate.is_some()
+        || !operations.is_empty();
     if !has_routing_primitive {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
                 "{display}: kind declares `execution:` block but none of \
-                 `terminator`, `aliases`, or `delegate` — schema cannot be \
-                 dispatched. Add a terminator, an `@<kind>` alias chain, or \
-                 `delegate: {{ via: runtime_registry }}`."
+                 `terminator`, `aliases`, `delegate`, or `operations` — schema cannot be \
+                 dispatched. Add a terminator, an `@<kind>` alias chain, \
+                 `delegate: {{ via: runtime_registry }}`, or an `operations:` block."
             ),
         });
     }
@@ -1476,6 +1683,9 @@ fn parse_execution_schema(
         terminator,
         delegate,
         thread_profile,
+        default_operation,
+        operations,
+        launch_augmentations,
     }))
 }
 
@@ -2182,9 +2392,9 @@ execution:
         let err = parse_exec(yaml).expect_err("non-actionable schema must reject");
         let msg = err.to_string();
         assert!(
-            msg.contains("none of") && msg.contains("delegate"),
+            msg.contains("none of") && msg.contains("delegate") && msg.contains("operations"),
             "error must enumerate the missing routing primitives \
-             (terminator/aliases/delegate), got: {msg}"
+             (terminator/aliases/delegate/operations), got: {msg}"
         );
     }
 
@@ -2310,6 +2520,294 @@ execution:
     fn infer_node_id_no_ai_node_prefix() {
         let path = Path::new("/tmp/test_123/tool/tool.kind-schema.yaml");
         assert_eq!(infer_node_id(path), "engine/kinds/tool/tool");
+    }
+
+    // ── Op surface tests ────────────────────────────────────────────────
+
+    #[test]
+    fn operations_parsed_from_schema() {
+        let yaml = "\
+execution:
+  thread_profile: knowledge_run
+  default_operation: compose
+  operations:
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+      inputs:
+        token_budget:
+          type: integer
+          required: true
+          min: 1
+    - name: query
+      side_effects: none
+      dispatch: { via: runtime_registry }
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert_eq!(exec.operations.len(), 2);
+        assert_eq!(exec.operations[0].name, "compose");
+        assert_eq!(exec.operations[1].name, "query");
+        assert_eq!(exec.default_operation.as_deref(), Some("compose"));
+        assert!(exec.terminator.is_none());
+        assert!(exec.delegate.is_none());
+        assert!(exec.launch_augmentations.is_empty());
+    }
+
+    #[test]
+    fn operations_with_inputs_types() {
+        let yaml = "\
+execution:
+  operations:
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+      inputs:
+        token_budget:
+          type: integer
+          required: true
+          min: 1
+        exclude_refs:
+          type: array
+          required: false
+          default: []
+          items:
+            type: string
+        position:
+          type: string
+          required: false
+          enum: [system, before, after]
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        let compose = &exec.operations[0];
+        let tb = compose.inputs.get("token_budget").unwrap();
+        assert_eq!(tb.ty, InputType::Integer);
+        assert!(tb.required);
+        assert_eq!(tb.min, Some(1));
+
+        let er = compose.inputs.get("exclude_refs").unwrap();
+        assert_eq!(er.ty, InputType::Array);
+        assert!(!er.required);
+        assert!(er.items.is_some());
+
+        let pos = compose.inputs.get("position").unwrap();
+        assert_eq!(pos.ty, InputType::String);
+        let expected_enum: Vec<String> = vec!["system".into(), "before".into(), "after".into()];
+        assert_eq!(
+            pos.enum_values.as_deref(),
+            Some(expected_enum.as_slice())
+        );
+    }
+
+    #[test]
+    fn reject_duplicate_op_names() {
+        let yaml = "\
+execution:
+  operations:
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+";
+        let err = parse_exec(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate operation name") && msg.contains("compose"),
+            "expected duplicate op error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn reject_default_operation_not_matching_any_op() {
+        let yaml = "\
+execution:
+  default_operation: query
+  operations:
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+";
+        let err = parse_exec(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("default_operation") && msg.contains("query"),
+            "expected default_operation mismatch error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn reject_mixed_dispatch_operations_and_terminator() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
+  operations:
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+";
+        let err = parse_exec(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mixed dispatch is forbidden"),
+            "expected mixed dispatch error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn reject_mixed_dispatch_operations_and_delegate() {
+        let yaml = "\
+execution:
+  delegate:
+    via: runtime_registry
+  operations:
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+";
+        let err = parse_exec(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mixed dispatch is forbidden"),
+            "expected mixed dispatch error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn relaxed_executable_invariant_operations_only() {
+        // A kind with non-empty operations but no terminator/delegate/aliases
+        // is executable.
+        let yaml = "\
+execution:
+  thread_profile: knowledge_run
+  default_operation: compose
+  operations:
+    - name: compose
+      side_effects: none
+      dispatch: { via: runtime_registry }
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert_eq!(exec.operations.len(), 1);
+        assert!(exec.terminator.is_none());
+        assert!(exec.delegate.is_none());
+        assert!(exec.aliases.is_empty());
+    }
+
+    #[test]
+    fn operations_default_to_empty() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert!(exec.operations.is_empty());
+        assert!(exec.default_operation.is_none());
+        assert!(exec.launch_augmentations.is_empty());
+    }
+
+    // ── Launch augmentation tests ───────────────────────────────────────
+
+    #[test]
+    fn launch_augmentations_parsed() {
+        let yaml = "\
+execution:
+  delegate:
+    via: runtime_registry
+  launch_augmentations:
+    - step: compose_context_positions
+      target_kind: knowledge
+      target_op: compose_positions
+      source_derived: composed_context
+      output_derived: rendered_contexts
+      meta_output_derived: rendered_contexts_meta
+      per_position_budget:
+        system: 4000
+        before: 2000
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert_eq!(exec.launch_augmentations.len(), 1);
+        match &exec.launch_augmentations[0] {
+            LaunchAugmentationDecl::ComposeContextPositions {
+                target_kind,
+                target_op,
+                source_derived,
+                output_derived,
+                meta_output_derived,
+                per_position_budget,
+            } => {
+                assert_eq!(target_kind, "knowledge");
+                assert_eq!(target_op, "compose_positions");
+                assert_eq!(source_derived, "composed_context");
+                assert_eq!(output_derived, "rendered_contexts");
+                assert_eq!(meta_output_derived, "rendered_contexts_meta");
+                assert_eq!(per_position_budget.get("system"), Some(&4000));
+                assert_eq!(per_position_budget.get("before"), Some(&2000));
+            }
+        }
+    }
+
+    #[test]
+    fn launch_augmentations_defaults_applied() {
+        let yaml = "\
+execution:
+  delegate:
+    via: runtime_registry
+  launch_augmentations:
+    - step: compose_context_positions
+      target_kind: knowledge
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        match &exec.launch_augmentations[0] {
+            LaunchAugmentationDecl::ComposeContextPositions {
+                target_kind,
+                target_op,
+                source_derived,
+                output_derived,
+                meta_output_derived,
+                per_position_budget,
+            } => {
+                assert_eq!(target_kind, "knowledge");
+                assert_eq!(target_op, "compose_positions");
+                assert_eq!(source_derived, "composed_context");
+                assert_eq!(output_derived, "rendered_contexts");
+                assert_eq!(meta_output_derived, "rendered_contexts_meta");
+                assert!(per_position_budget.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn launch_augmentations_default_to_empty() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:rye/core/runtime_v1
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert!(exec.launch_augmentations.is_empty());
+    }
+
+    #[test]
+    fn reject_unknown_launch_augmentation_step() {
+        let yaml = "\
+execution:
+  delegate:
+    via: runtime_registry
+  launch_augmentations:
+    - step: not_a_real_step
+      target_kind: knowledge
+";
+        let err = parse_exec(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("launch_augmentations") || msg.contains("step"),
+            "expected augmentation parse error, got: {msg}"
+        );
     }
 
     fn tempdir() -> PathBuf {

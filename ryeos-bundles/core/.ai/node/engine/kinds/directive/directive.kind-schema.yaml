@@ -1,4 +1,4 @@
-# rye:signed:2026-05-02T05:18:06Z:4da62cd3011b0c8b9f60801ea2828ed80f5fdc0598b6414b9cbe3380eec58dfd:Vrn05F0UPASXej0UsgMJzB8Om/ouUwhMafIiL0Q6QV4zcfBfVCmUpGQLEtshFguaIV8AhIYplYLUp4HZQkfoCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-03T02:08:26Z:18a8f10fbc62980cbbd1373770dceb5e3b39753de0453fa99fc2056201da4e01:dokzCBnzK65jwHE1yY7vj4EskV4EU1n/PFyk0gkeVh/CdSR0dfyiVl80vNmlTNcSAKHXG899BZeJ9XrAhjOwCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -14,6 +14,23 @@ execution:
   thread_profile: directive_run
   resolution:
     - step: resolve_extends_chain
+  # Launch augmentation: before the directive runtime is spawned, the
+  # daemon pre-resolves knowledge refs declared in the directive's
+  # `context:` block, dispatches a child knowledge-runtime compose
+  # op, and writes the rendered strings into `rendered_contexts`.
+  # If `composed_context` is missing or empty, the augmentation is a
+  # no-op — directives without context blocks are unaffected.
+  launch_augmentations:
+    - step: compose_context_positions
+      target_kind: knowledge
+      target_op: compose_positions
+      source_derived: composed_context
+      output_derived: rendered_contexts
+      meta_output_derived: rendered_contexts_meta
+      per_position_budget:
+        system: 4000
+        before: 2000
+        after: 2000
 formats:
   - extensions: [".md"]
     parser: parser:rye/core/markdown/directive

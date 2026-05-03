@@ -225,6 +225,7 @@ mod tests {
                 composed: crate::resolution::KindComposedView::identity(
                     serde_json::json!({}),
                 ),
+                referenced_items: vec![],
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();

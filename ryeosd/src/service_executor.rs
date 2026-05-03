@@ -64,6 +64,12 @@ pub struct ExecutionContext {
     pub engine: Arc<ryeos_engine::engine::Engine>,
     /// Plan context for engine operations.
     pub plan_ctx: ryeos_engine::contracts::PlanContext,
+    /// **Op dispatch**: the operation name from the `/execute` request.
+    /// Used by `resolve_dispatch_hop` when the kind schema declares
+    /// `operations`. Ignored for terminator/delegate paths.
+    pub requested_op: Option<String>,
+    /// **Op dispatch**: op-specific inputs from the `/execute` request.
+    pub requested_inputs: Option<serde_json::Value>,
 }
 
 /// Result of a service execution, including metadata for audit.
@@ -371,6 +377,8 @@ mod tests {
                 execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
                 validate_only: true,
             },
+            requested_op: None,
+            requested_inputs: None,
         };
 
         // Direct availability check without needing a full AppState

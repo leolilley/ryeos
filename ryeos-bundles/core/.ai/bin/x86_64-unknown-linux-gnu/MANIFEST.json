@@ -3,56 +3,56 @@
     "blob_hash": "b8bff4f6ed1bf15a4f3cfe26cc3ca6fd762426545c31b7f18799157e073d592b",
     "content_blob_hash": "b8bff4f6ed1bf15a4f3cfe26cc3ca6fd762426545c31b7f18799157e073d592b",
     "item_source_hash": "160c72cfdacc943b541601232d99b07b525e22ae07d427a52e70c47fd8e9e5cf",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
     "source_checksum": "b8bff4f6ed1bf15a4f3cfe26cc3ca6fd762426545c31b7f18799157e073d592b"
   },
   "rye-composer-graph-permissions": {
     "blob_hash": "186e3426e106f64025149d1a390cf78b2093278201fea638cbeaaed14c96e9fa",
     "content_blob_hash": "186e3426e106f64025149d1a390cf78b2093278201fea638cbeaaed14c96e9fa",
     "item_source_hash": "80028b391be47dca3c9eef0a46786c631cc717b02e5e537bb8a200d567e7c7d3",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
     "source_checksum": "186e3426e106f64025149d1a390cf78b2093278201fea638cbeaaed14c96e9fa"
   },
   "rye-composer-identity": {
     "blob_hash": "f045f648da92ada835d64b5a2f3999cb20eafe52ef6907712906730c7eb3cdf3",
     "content_blob_hash": "f045f648da92ada835d64b5a2f3999cb20eafe52ef6907712906730c7eb3cdf3",
     "item_source_hash": "1525cf164cdf53f165fd1e902a70b31c8dee9a4df292cae1c184884d4b1e3138",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
     "source_checksum": "f045f648da92ada835d64b5a2f3999cb20eafe52ef6907712906730c7eb3cdf3"
   },
   "rye-inspect": {
-    "blob_hash": "dbfb80e89b54ab023a6c211160c22164397e9a22e3427e6d5564ab49912e7eaf",
-    "content_blob_hash": "dbfb80e89b54ab023a6c211160c22164397e9a22e3427e6d5564ab49912e7eaf",
-    "item_source_hash": "4e7f20200a84bd745ab761d76e5232bab13e591a7cece2cd80c8e1d94ac6e415",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
-    "source_checksum": "dbfb80e89b54ab023a6c211160c22164397e9a22e3427e6d5564ab49912e7eaf"
+    "blob_hash": "4ae20a209d7935dba6282de0ab9f0b651893ae9f8a46aa793d52f45960617f1c",
+    "content_blob_hash": "4ae20a209d7935dba6282de0ab9f0b651893ae9f8a46aa793d52f45960617f1c",
+    "item_source_hash": "5cc664fdb87e4d515ded454e89085970cd1c2547b5dc981c50aca43921ae9300",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
+    "source_checksum": "4ae20a209d7935dba6282de0ab9f0b651893ae9f8a46aa793d52f45960617f1c"
   },
   "rye-parser-regex-kv": {
     "blob_hash": "46afa6e04f7db5ad8396dbf84d4e98fbb14583b01e4c4a464f866549e57dc724",
     "content_blob_hash": "46afa6e04f7db5ad8396dbf84d4e98fbb14583b01e4c4a464f866549e57dc724",
     "item_source_hash": "2a6400348e26eb465b9baa3e8836f3ebe9f87527be96f87414ed115ddcd58024",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
     "source_checksum": "46afa6e04f7db5ad8396dbf84d4e98fbb14583b01e4c4a464f866549e57dc724"
   },
   "rye-parser-yaml-document": {
     "blob_hash": "c65138740f19ae8c912c3f367aeddb113b0245cf26e5831f301a406751bf489a",
     "content_blob_hash": "c65138740f19ae8c912c3f367aeddb113b0245cf26e5831f301a406751bf489a",
     "item_source_hash": "e73f712ca670879a26fe4fd66edb4687f5b408c9b57674109efdb3efd6537484",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
     "source_checksum": "c65138740f19ae8c912c3f367aeddb113b0245cf26e5831f301a406751bf489a"
   },
   "rye-parser-yaml-header-document": {
     "blob_hash": "9ec1dd680a7c141aa9d0ec69c0543b21beaab5c6f7f7fe556fcc6dae761361a8",
     "content_blob_hash": "9ec1dd680a7c141aa9d0ec69c0543b21beaab5c6f7f7fe556fcc6dae761361a8",
     "item_source_hash": "1098629c997f4d2df209e3042ae3fe855daf8ab6dd70a58e67bb72960793f099",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
     "source_checksum": "9ec1dd680a7c141aa9d0ec69c0543b21beaab5c6f7f7fe556fcc6dae761361a8"
   },
   "rye-tool-streaming-demo": {
     "blob_hash": "16235511d91f756fcb5b025256b3276e434192df3ed3250373f045f039daa05a",
     "content_blob_hash": "16235511d91f756fcb5b025256b3276e434192df3ed3250373f045f039daa05a",
     "item_source_hash": "5f86a9bb76acf0f335ca5fc142b7b036cff5db12cebf0456188d7caf4157264a",
-    "manifest_hash": "a2c1e15450058a8263e6792276252649e1b88b5d71dfb951a7f70fd722a1402f",
+    "manifest_hash": "463189c8760238ef53c0161c6b6a55d227ca2f58e141e7c06c9eba3d999e4c58",
     "source_checksum": "16235511d91f756fcb5b025256b3276e434192df3ed3250373f045f039daa05a"
   }
 }

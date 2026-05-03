@@ -28,7 +28,7 @@
 //! ```
 //!
 //! Auth is disabled — the harness expects directives under test to
-//! configure `model_providers/mock.yaml` with `auth: {}` so the
+//! configure `model-providers/mock.yaml` with `auth: {}` so the
 //! adapter at `adapter.rs:38-43` skips its `Authorization` header.
 //! See V5.4-PLAN P3b.1 commentary for the env-injection gap that
 //! makes a real-provider test impossible to write without changing
@@ -43,9 +43,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Json;
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::post;
 use axum::Router;
 use serde_json::{json, Value};
@@ -189,24 +190,106 @@ fn flatten_headers(headers: &HeaderMap) -> HashMap<String, String> {
 async fn handle_chat_completions(
     State(state): State<Arc<Mutex<MockState>>>,
     headers: HeaderMap,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+    Json(body): Json<Value>,
+) -> Response {
     let mut g = state.lock().await;
     g.captured_headers.push(flatten_headers(&headers));
     if g.queue.is_empty() {
-        return Err((
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "mock_provider: canned response queue exhausted".to_string(),
-        ));
+        )
+            .into_response();
     }
     let next = g.queue.remove(0);
-    let choice = next.into_choice();
-    let resp = json!({
-        "choices": [choice],
+    let streaming = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if streaming {
+        // OpenAI-compatible SSE chunked response. The directive
+        // runtime defaults to `delta_merge` mode (see
+        // streaming.rs::stream_mode), which expects
+        // `choices[0].delta.{content,tool_calls}` per chunk and
+        // optional `usage` on the final chunk. The runtime's tool-use
+        // accumulator threads tool-call args across chunks via index;
+        // for the mock we emit the whole tool-call in a single chunk
+        // (id + name + arguments together) to keep the harness
+        // minimal.
+        sse_response(next).into_response()
+    } else {
+        let choice = next.into_choice();
+        let resp = json!({
+            "choices": [choice],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+            }
+        });
+        Json(resp).into_response()
+    }
+}
+
+/// Build an OpenAI-style streaming SSE response from a single
+/// canned mock response. Two `data:` events: the assistant content
+/// (or tool call) chunk, then the final chunk carrying `usage` +
+/// `finish_reason`. Closes with `data: [DONE]`.
+fn sse_response(resp: MockResponse) -> Response {
+    let (delta_payload, finish_reason) = match resp {
+        MockResponse::Text(text) => (
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": text,
+                    },
+                    "finish_reason": null,
+                }]
+            }),
+            "stop",
+        ),
+        MockResponse::ToolCall { id, name, arguments } => (
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": arguments,
+                            }
+                        }]
+                    },
+                    "finish_reason": null,
+                }]
+            }),
+            "tool_calls",
+        ),
+    };
+    let final_payload = json!({
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": finish_reason,
+        }],
         "usage": {
             "prompt_tokens": 10,
             "completion_tokens": 5,
         }
     });
-    Ok(Json(resp))
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        delta_payload, final_payload
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(Body::from(body))
+        .expect("build sse response")
 }

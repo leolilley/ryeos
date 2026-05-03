@@ -1,18 +1,46 @@
-# rye:signed:2026-05-02T05:18:05Z:93095f4408501fcd52bc13ffc00f17a02a234e64435eead4db155ebe99b36073:deunwcAXcv02fJJgGRezshQhq7zJdr/h3M1dRbtXu7EqLPfnr5j5lV3Ia+SphQNWMgjNN5tZyEzehsSLAdQ6Cg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-03T02:08:26Z:c25adc37ef5baa06450e5dd2c71f98231315d1a5ceeb086eee46697784124b65:3WxTGgaXGTWitTUEeL6XmQz7dW5xjw8pV1AfvBsSa42XRGcJ+dJNisOBynSv/6CReHjgdjRiZHySb9LllMC0AQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
   directory: knowledge
 execution:
-  # Explicit delegation to the runtime registry. The dispatcher will
-  # call `RuntimeRegistry::lookup_for("knowledge")` to find the default
-  # runtime serving this kind (today: `runtime:knowledge-runtime`).
-  # Without this `delegate` block the dispatcher refuses to consult
-  # the registry — there is no implicit fallback.
-  delegate:
-    via: runtime_registry
+  # Op-dispatch execution model. The daemon resolves the requested op
+  # (default: `compose`) against the declared operations, validates
+  # inputs, then spawns the kind's runtime with a BatchOpEnvelope.
+  # Mixed-dispatch reject forbids `operations` + `delegate`/`terminator`.
+  operations:
+    - name: compose
+      side_effects: writes_chain
+      dispatch: { via: runtime_registry }
+      inputs:
+        token_budget:
+          type: integer
+          required: false
+          default: 4000
+        exclude_refs:
+          type: array
+          items:
+            type: string
+          required: false
+          default: []
+    - name: compose_positions
+      side_effects: writes_projection
+      dispatch: { via: runtime_registry }
+      inputs:
+        roots_by_position:
+          type: object
+          required: true
+        per_position_budget:
+          type: object
+          required: false
+        default_budget:
+          type: integer
+          required: false
+          default: 2000
+  default_operation: compose
   thread_profile: knowledge_run
-  resolution: []
+  resolution:
+    - step: resolve_references
 formats:
   - extensions: [".md"]
     parser: parser:rye/core/markdown/frontmatter

@@ -163,6 +163,8 @@ async fn handle_execute(
         caller_scopes,
         engine: state.engine.clone(),
         plan_ctx,
+        requested_op: None,
+        requested_inputs: None,
     };
 
     let dispatch_req = crate::dispatch::DispatchRequest {
@@ -178,6 +180,8 @@ async fn handle_execute(
         temp_dir: None,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
+        operation: None,
+        inputs: None,
     };
 
     // V5.4 P2.3 cleanup — async end-to-end: the UDS dispatcher is

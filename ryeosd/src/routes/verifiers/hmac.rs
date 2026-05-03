@@ -236,15 +236,15 @@ impl AuthVerifier for HmacVerifier {
         route_id: &str,
         auth_config: Option<&Value>,
     ) -> Result<Arc<dyn CompiledAuthVerifier>, RouteConfigError> {
-        let raw = auth_config.ok_or_else(|| RouteConfigError::InvalidAuthConfig {
+        let raw = auth_config.ok_or_else(|| RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
-            verifier: VERIFIER_KEY.into(),
+            src: "hmac_verifier".into(),
             reason: "auth_config is required".into(),
         })?;
         let cfg: RawHmacConfig = serde_json::from_value(raw.clone()).map_err(|e| {
-            RouteConfigError::InvalidAuthConfig {
+            RouteConfigError::InvalidSourceConfig {
                 id: route_id.into(),
-                verifier: VERIFIER_KEY.into(),
+                src: "hmac_verifier".into(),
                 reason: format!("{e}"),
             }
         })?;
@@ -331,9 +331,9 @@ impl AuthVerifier for HmacVerifier {
 }
 
 fn cfg_err(route_id: &str, reason: &str) -> RouteConfigError {
-    RouteConfigError::InvalidAuthConfig {
+    RouteConfigError::InvalidSourceConfig {
         id: route_id.into(),
-        verifier: VERIFIER_KEY.into(),
+        src: "hmac_verifier".into(),
         reason: reason.into(),
     }
 }

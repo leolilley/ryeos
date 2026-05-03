@@ -1,4 +1,4 @@
-# rye:signed:2026-05-01T13:29:30Z:a740910b4be12b6af0b3a4babf3e6a94abd326769d908c1d9ebd74412b64bc95:u6IDqAl9r3dnu0yZat3SdWJlq2XShwVS5wEjKNZ5QBETcteKl1lvn1u/U5S/Sg5mKDoqudDJ6VkyO3/OVlaKCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-02T11:12:22Z:a740910b4be12b6af0b3a4babf3e6a94abd326769d908c1d9ebd74412b64bc95:u6IDqAl9r3dnu0yZat3SdWJlq2XShwVS5wEjKNZ5QBETcteKl1lvn1u/U5S/Sg5mKDoqudDJ6VkyO3/OVlaKCw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "rye-runtime/model-providers"
 base_url: "https://openrouter.ai/api/v1"
 auth:

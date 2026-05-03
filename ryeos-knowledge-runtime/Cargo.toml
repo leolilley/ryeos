@@ -1,9 +1,9 @@
 [package]
 name = "ryeos-knowledge-runtime"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Minimal native knowledge runtime stub for Rye OS — emits frontmatter-stripped body. Future: graph-aware context composition (see docs/future/knowledge-runtime.md)."
+description = "Native Rust runtime for the knowledge kind. Spawned via lillux::run by ryeosd. Single-mode op dispatcher over verified knowledge graphs."
 
 [[bin]]
 name = "ryeos-knowledge-runtime"
@@ -11,9 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-lillux = { path = "../lillux" }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-tracing = { path = "../ryeos-tracing" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_yaml = "0.9"
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tracing = "0.1"

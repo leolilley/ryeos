@@ -109,6 +109,8 @@ pub(crate) fn spawn_dispatch_launch(
             caller_scopes: principal_scopes,
             engine: state_clone.engine.clone(),
             plan_ctx,
+            requested_op: None,
+            requested_inputs: None,
         };
 
         let dispatch_req = crate::dispatch::DispatchRequest {
@@ -124,6 +126,8 @@ pub(crate) fn spawn_dispatch_launch(
             temp_dir: None,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
+            operation: None,
+            inputs: None,
         };
 
         match crate::dispatch::dispatch(item_ref.as_str(), &dispatch_req, &exec_ctx, &state_clone).await {

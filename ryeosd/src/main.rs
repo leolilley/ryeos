@@ -631,6 +631,8 @@ async fn run_service_standalone(
             execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
             validate_only: false,
         },
+        requested_op: None,
+        requested_inputs: None,
     };
 
     let result = service_executor::execute_service(

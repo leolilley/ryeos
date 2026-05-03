@@ -43,10 +43,44 @@ pub fn bootstrap(
     // directive kind's `composer_config` is supposed to populate.
     let header = parse_effective_header(composed_view)?;
 
-    let execution = loader.load_config::<ExecutionConfig>("execution").unwrap_or_default();
-    let model_routing = loader.load_config::<ModelRoutingConfig>("model_routing");
+    tracing::info!(
+        directive_name = ?header.name.as_deref(),
+        has_model = header.model.is_some(),
+        has_permissions = header.permissions.is_some(),
+        has_limits = header.limits.is_some(),
+        context_position_count = header.context.as_ref().map(|c| c.len()).unwrap_or(0),
+        hooks_count = header.hooks.as_ref().map(|h| h.len()).unwrap_or(0),
+        "directive runtime: typed header surface"
+    );
+
+    let execution = loader
+        .load_config_strict::<ExecutionConfig>("execution")
+        .map_err(|e| anyhow!("loading config `execution`: {e}"))?
+        .unwrap_or_default();
+
+    let model_routing = loader
+        .load_config_strict::<ModelRoutingConfig>("model_routing")
+        .map_err(|e| anyhow!("loading config `model_routing`: {e}"))?;
+
+    // Consumer for the `category` round-trip fields on each typed
+    // config — keeps `pub category: Option<String>` from being dead
+    // code while making operators see a parity signal between bundle
+    // and overlay configs at every launch.
+    tracing::info!(
+        execution_category = ?execution.category.as_deref(),
+        model_routing_category = ?model_routing.as_ref().and_then(|r| r.category.as_deref()),
+        model_routing_tier_count = model_routing.as_ref().map(|r| r.tiers.len()).unwrap_or(0),
+        "directive runtime: typed config metadata"
+    );
+
     let provider = resolve_provider(&header, &model_routing, loader)?;
     let (model_name, context_window) = resolve_model(&header, &model_routing);
+
+    tracing::info!(
+        provider_category = ?provider.category.as_deref(),
+        model_name = %model_name,
+        "directive runtime: provider resolved"
+    );
 
     // Tools come from the daemon-baked `LaunchEnvelope.inventory` —
     // the directive-runtime never re-scans, re-parses, or extracts
@@ -58,30 +92,60 @@ pub fn bootstrap(
     let tools = project_tool_inventory(inventory);
     let hooks = load_hooks(loader)?;
 
-    let risk_policy: Option<crate::harness::RiskPolicy> = loader
-        .load_config::<serde_yaml::Value>("capability_risk")
-        .and_then(|val| {
-            let patterns = val.get("policies").and_then(|p| p.as_sequence())?;
-            let mut risk_patterns = Vec::new();
-            for p in patterns {
-                let pattern = p.get("pattern").and_then(|pv| pv.as_str()).unwrap_or("").to_string();
-                let level = p.get("level").and_then(|pv| pv.as_str()).unwrap_or("medium").to_string();
-                let requires_ack = p.get("requires_ack").and_then(|pv| pv.as_bool()).unwrap_or(false);
-                risk_patterns.push(crate::harness::RiskPattern { pattern, level, requires_ack });
-            }
-            Some(crate::harness::RiskPolicy { patterns: risk_patterns })
-        });
+    let risk_policy = load_risk_policy(loader)?;
 
     let context_positions: HashMap<String, Vec<String>> =
         composed_view.derived_string_seq_map(DERIVED_COMPOSED_CONTEXT);
 
-    // Strict context rendering: any declared knowledge item that fails
-    // to resolve / verify / load is a hard error. The previous code
-    // silently dropped unresolvable items and emitted a partial prompt,
-    // which masked typo'd refs and missing knowledge files.
-    let system_prompt = render_context_position(&context_positions, "system", loader)?;
-    let context_before = render_context_position(&context_positions, "before", loader)?;
-    let context_after = render_context_position(&context_positions, "after", loader)?;
+    // Context rendering: read pre-rendered strings from the daemon's
+    // compose_context_positions launch augmentation. The augmentation
+    // runs between resolution and parent runtime spawn, pre-resolves
+    // knowledge refs, dispatches a child knowledge-runtime thread, and
+    // writes rendered strings into the parent's composed view.
+    //
+    // Hard contract: if the directive declared a non-empty `context:`
+    // block, the daemon MUST have populated `rendered_contexts` in the
+    // derived map. Missing/malformed = daemon bug. No silent fallback
+    // — the user must see the error and fix the root cause.
+    let any_non_empty = context_positions.values().any(|v| !v.is_empty());
+
+    let rendered: HashMap<String, String> = if any_non_empty {
+        let obj = composed_view
+            .derived
+            .get("rendered_contexts")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "directive runtime: directive declares non-empty context positions \
+                     ({positions:?}) but composed view is missing `rendered_contexts` \
+                     — the daemon's compose_context_positions launch augmentation must \
+                     have failed silently or not run",
+                    positions = context_positions.keys().collect::<Vec<_>>()
+                )
+            })?
+            .as_object()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "directive runtime: `rendered_contexts` in composed view must be \
+                     an object"
+                )
+            })?;
+        obj.iter()
+            .map(|(k, v)| {
+                let s = v.as_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "directive runtime: rendered_contexts[{k}] must be a string, got {v:?}"
+                    )
+                })?;
+                Ok((k.clone(), s.to_string()))
+            })
+            .collect::<Result<HashMap<_, _>>>()?
+    } else {
+        HashMap::new()
+    };
+
+    let system_prompt = rendered.get("system").cloned();
+    let context_before = rendered.get("before").cloned();
+    let context_after = rendered.get("after").cloned();
 
     let user_prompt = composed_view
         .derived_string(DERIVED_BODY)
@@ -114,47 +178,36 @@ pub fn bootstrap(
     })
 }
 
-/// Deserialize the engine-supplied effective header back into the
-/// runtime's typed `DirectiveHeader`. The engine ships JSON because it
-/// doesn't (and shouldn't) know every directive header field; the
-/// runtime owns the typed view of fields it actually consumes
-/// (model, hooks, etc.).
+/// Project the engine-supplied composed view down to the keys the
+/// runtime actually consumes, then deserialise into the typed
+/// `DirectiveHeader`.
+///
+/// The composer ships every frontmatter key it preserved (e.g.
+/// `body`, `category`, `description`, `inputs`, `required_secrets`)
+/// in `view.composed`. Most of those are owned by the daemon — the
+/// dispatcher reads `required_secrets` to populate vault bindings,
+/// the engine reads `category` for kind routing, etc. The runtime
+/// only needs the model/permissions/limits/outputs/context/hooks
+/// surface, so we project explicitly and let `deny_unknown_fields`
+/// keep catching drift in the keys we *do* own.
 fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
-    serde_json::from_value(view.composed.clone()).map_err(|e| {
+    let projected = match view.composed.as_object() {
+        Some(map) => {
+            let mut out = serde_json::Map::with_capacity(DIRECTIVE_HEADER_RUNTIME_KEYS.len());
+            for &key in DIRECTIVE_HEADER_RUNTIME_KEYS {
+                if let Some(v) = map.get(key) {
+                    out.insert(key.to_string(), v.clone());
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        // Non-object composed views are unexpected — fall through to
+        // the typed deserialise so the error names the actual cause.
+        None => view.composed.clone(),
+    };
+    serde_json::from_value(projected).map_err(|e| {
         anyhow!("deserialize composed view into DirectiveHeader: {e}")
     })
-}
-
-fn render_context_position(
-    positions: &HashMap<String, Vec<String>>,
-    position: &str,
-    loader: &VerifiedLoader,
-) -> Result<Option<String>> {
-    let Some(items) = positions.get(position) else {
-        return Ok(None);
-    };
-    let mut rendered = Vec::with_capacity(items.len());
-    for item_id in items {
-        let resolved = loader.resolve_item("knowledge", item_id).map_err(|e| {
-            anyhow::anyhow!(
-                "context[{position}]: cannot resolve knowledge `{item_id}`: {e}"
-            )
-        })?;
-        let verified = loader
-            .load_verified("knowledge", &resolved.path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "context[{position}]: cannot load knowledge `{item_id}` at {}: {e}",
-                    resolved.path.display()
-                )
-            })?;
-        rendered.push(verified.content);
-    }
-    if rendered.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(rendered.join("\n\n---\n\n")))
-    }
 }
 
 fn resolve_provider(
@@ -162,28 +215,62 @@ fn resolve_provider(
     routing: &Option<ModelRoutingConfig>,
     loader: &VerifiedLoader,
 ) -> Result<ProviderConfig> {
+    let tier = directive
+        .model
+        .as_ref()
+        .and_then(|m| m.tier.as_deref())
+        .unwrap_or("general");
+
+    // No silent fallback. Pre-V5.5 code defaulted to "anthropic" when
+    // neither the directive nor the routing supplied a provider id —
+    // that masked the routing-config regression P3b debug surfaced
+    // (model_routing.yaml not loading) for 30+ minutes by producing a
+    // misleading "provider config not found: model-providers/anthropic"
+    // error. The runtime MUST name the actual missing precondition.
     let provider_id = directive
         .model
         .as_ref()
         .and_then(|m| m.provider.as_deref())
+        .map(str::to_string)
         .or_else(|| {
             routing
                 .as_ref()
-                .and_then(|r| {
-                    let tier = directive
-                        .model
-                        .as_ref()
-                        .and_then(|m| m.tier.as_deref())
-                        .unwrap_or("general");
-                    r.tiers.get(tier).map(|t| t.provider.as_str())
-                })
+                .and_then(|r| r.tiers.get(tier))
+                .map(|t| t.provider.clone())
         })
-        .unwrap_or("anthropic");
+        .ok_or_else(|| {
+            anyhow!(
+                "cannot resolve provider: directive specifies no `model.provider` \
+                 and no model_routing entry was available for tier `{tier}` \
+                 (load model_routing.yaml under .ai/config/rye-runtime/ in \
+                 system / user / project space, or set `model.provider` on the \
+                 directive)"
+            )
+        })?;
 
     let config_id = format!("model-providers/{provider_id}");
 
-    loader.load_config::<ProviderConfig>(&config_id)
-        .ok_or_else(|| anyhow::anyhow!("provider config not found: {}", config_id))
+    loader
+        .load_config_strict::<ProviderConfig>(&config_id)
+        .map_err(|e| anyhow!("loading provider config `{config_id}`: {e}"))?
+        .ok_or_else(|| {
+            anyhow!(
+                "provider config not found: `{config_id}` — expected \
+                 `.ai/config/rye-runtime/{config_id}.yaml` under one of \
+                 system / user / project roots (resolved provider id from \
+                 {source})",
+                source = if directive
+                    .model
+                    .as_ref()
+                    .and_then(|m| m.provider.as_deref())
+                    .is_some()
+                {
+                    "directive's `model.provider`"
+                } else {
+                    "model_routing tier"
+                }
+            )
+        })
 }
 
 fn resolve_model(
@@ -307,6 +394,99 @@ fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefiniti
     Ok(hooks)
 }
 
+fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::RiskPolicy>> {
+    // Absence of capability_risk.yaml is fine (optional config).
+    // But if it exists and is broken, we fail loud with file path.
+    let Some(config) = loader
+        .load_config_strict::<serde_yaml::Value>("capability_risk")
+        .map_err(|e| anyhow!("loading config `capability_risk`: {e}"))?
+    else {
+        return Ok(None);
+    };
+
+    // Now we have a valid YAML value. Enforce structure.
+    let policies = config
+        .get("policies")
+        .ok_or_else(|| {
+            anyhow!(
+                "capability_risk config: missing required key `policies`"
+            )
+        })?
+        .as_sequence()
+        .ok_or_else(|| {
+            anyhow!(
+                "capability_risk config: `policies` must be a YAML sequence, got {}",
+                yaml_kind(config.get("policies").unwrap())
+            )
+        })?;
+
+    let mut risk_patterns = Vec::new();
+    for (idx, policy_entry) in policies.iter().enumerate() {
+        let entry_mapping = policy_entry.as_mapping().ok_or_else(|| {
+            anyhow!(
+                "capability_risk config: policies[{idx}] must be a mapping, got {}",
+                yaml_kind(policy_entry)
+            )
+        })?;
+
+        // Read required fields with typed errors, not silent defaults.
+        // Policy rules are safety-critical; silent defaults are risky.
+        let pattern = entry_mapping
+            .get(&serde_yaml::Value::String("pattern".into()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].pattern is required"
+                )
+            })?
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].pattern must be a string"
+                )
+            })?
+            .to_string();
+
+        let level = entry_mapping
+            .get(&serde_yaml::Value::String("level".into()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].level is required"
+                )
+            })?
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].level must be a string"
+                )
+            })?
+            .to_string();
+
+        let requires_ack = entry_mapping
+            .get(&serde_yaml::Value::String("requires_ack".into()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].requires_ack is required"
+                )
+            })?
+            .as_bool()
+            .ok_or_else(|| {
+                anyhow!(
+                    "capability_risk config: policies[{idx}].requires_ack must be a bool"
+                )
+            })?;
+
+        risk_patterns.push(crate::harness::RiskPattern {
+            pattern,
+            level,
+            requires_ack,
+        });
+    }
+
+    Ok(Some(crate::harness::RiskPolicy {
+        patterns: risk_patterns,
+    }))
+}
+
 fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
     match v {
         serde_yaml::Value::Null => "null",
@@ -348,6 +528,7 @@ mod tests {
             ..Default::default()
         };
         let routing = ModelRoutingConfig {
+            category: None,
             tiers: {
                 let mut m = HashMap::new();
                 m.insert("fast".to_string(), TierConfig {
