@@ -1,4 +1,4 @@
-# rye:signed:2026-05-03T02:08:26Z:89e62ca704311c56cd16bd9fb91f1f5ff9586327d7610727c7a33a9ac472f2a2:ewaNHmMnmTZH+5EWwRAL9p6+az30iIH7AMX3huWGoIlivkWLTWEPsy4ncdJvbmmmix15MENgiv0YlEHvNfBHBA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-03T14:38:31Z:89e62ca704311c56cd16bd9fb91f1f5ff9586327d7610727c7a33a9ac472f2a2:ewaNHmMnmTZH+5EWwRAL9p6+az30iIH7AMX3huWGoIlivkWLTWEPsy4ncdJvbmmmix15MENgiv0YlEHvNfBHBA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 """Python AST parser for extracting metadata from Python tools.
 
 Extracts module-level variables and docstring using AST parsing.

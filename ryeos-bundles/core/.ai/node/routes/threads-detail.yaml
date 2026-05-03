@@ -1,0 +1,17 @@
+# rye:signed:2026-05-03T14:38:31Z:4cee93d7b28db4e8c2d05759061d2ba0da5c9efc56a5892d4c468680a94cfb1a:ilebtTXAiJRSPgW7SAulCnZrOwYIkvs8ZcX1yHg+BIeJMrvUW66nIJ3QO1LTHRbu/GpjLneSdQAEhSjQP3AEAQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "routes"
+section: routes
+id: threads/detail
+path: /threads/{thread_id}
+methods:
+  - GET
+auth: rye_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: read
+  source: thread_detail
+  source_config:
+    thread_id: "${path.thread_id}"
