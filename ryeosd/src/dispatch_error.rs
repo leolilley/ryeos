@@ -186,6 +186,8 @@ pub enum RouteConfigError {
     InvalidResponseSpec { id: String, mode: String, reason: String },
     #[error("unknown streaming source '{src}' for route '{id}'")]
     UnknownStreamingSource { id: String, src: String },
+    #[error("unknown read source '{src}' for route '{id}'")]
+    UnknownReadSource { id: String, src: String },
     #[error("{0}")]
     Other(String),
 }

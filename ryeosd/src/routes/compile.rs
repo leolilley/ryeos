@@ -109,6 +109,7 @@ pub trait ResponseMode: Send + Sync {
 
 pub struct ModeCompileContext<'a> {
     pub streaming_sources: &'a StreamingSourceRegistry,
+    pub read_sources: &'a crate::routes::read_sources::ReadSourceRegistry,
 }
 
 #[axum::async_trait]

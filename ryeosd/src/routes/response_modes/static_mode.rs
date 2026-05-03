@@ -129,12 +129,14 @@ mod tests {
     }
 
     fn compile_ctx() -> ModeCompileContext<'static> {
+        use crate::routes::read_sources::ReadSourceRegistry;
         use crate::routes::streaming_sources::StreamingSourceRegistry;
         use std::sync::OnceLock;
-        static REGISTRY: OnceLock<StreamingSourceRegistry> = OnceLock::new();
-        let registry = REGISTRY.get_or_init(StreamingSourceRegistry::new);
+        static STREAMING: OnceLock<StreamingSourceRegistry> = OnceLock::new();
+        static READ: OnceLock<ReadSourceRegistry> = OnceLock::new();
         ModeCompileContext {
-            streaming_sources: registry,
+            streaming_sources: STREAMING.get_or_init(StreamingSourceRegistry::new),
+            read_sources: READ.get_or_init(ReadSourceRegistry::new),
         }
     }
 

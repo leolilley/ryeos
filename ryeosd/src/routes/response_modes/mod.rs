@@ -1,5 +1,6 @@
 pub mod event_stream_mode;
 pub mod launch_mode;
+pub mod read_mode;
 pub mod static_mode;
 
 use std::sync::Arc;
@@ -41,6 +42,7 @@ impl ResponseModeRegistry {
         r.register(Arc::new(static_mode::StaticMode));
         r.register(Arc::new(event_stream_mode::EventStreamMode));
         r.register(Arc::new(launch_mode::LaunchMode));
+        r.register(Arc::new(read_mode::ReadMode));
         r
     }
 }
