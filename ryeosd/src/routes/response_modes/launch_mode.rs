@@ -50,6 +50,9 @@ use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
+use crate::routes::invocation::{
+    InvocationCheck, RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
+};
 use crate::routes::raw::{RawRequestBody, RawRouteSpec};
 
 pub struct LaunchMode;
@@ -65,6 +68,7 @@ pub struct CompiledLaunchMode {
     item_ref: crate::routes::parsed_ref::ParsedItemRef,
     project_path: crate::routes::abs_path::AbsolutePathBuf,
     body: RawRequestBody,
+    invoker: crate::routes::invokers::launch_invocation::CompiledLaunchInvocation,
 }
 
 impl ResponseMode for LaunchMode {
@@ -166,6 +170,7 @@ impl ResponseMode for LaunchMode {
             item_ref,
             project_path,
             body: raw.request.body.clone(),
+            invoker: crate::routes::invokers::launch_invocation::CompiledLaunchInvocation,
         }))
     }
 }
@@ -211,11 +216,7 @@ impl CompiledResponseMode for CompiledLaunchMode {
                 RouteDispatchError::Internal(format!("system clock failure: {e}"))
             })?;
 
-        // Build the launch envelope. `meta` is a stable kind-agnostic
-        // shape (`delivery_id`, `headers`, `route_id`, `verifier`,
-        // `principal_id`, `received_at_unix`); directives that don't
-        // care about meta just read `body`. No vendor names appear
-        // here — the daemon never tags requests by vendor.
+        // Build the launch envelope.
         let envelope = build_launch_envelope(
             body_value,
             compiled.id.as_str(),
@@ -223,74 +224,45 @@ impl CompiledResponseMode for CompiledLaunchMode {
             received_at,
         );
 
-        let thread_id = crate::services::thread_lifecycle::new_thread_id();
-
-        let span = tracing::info_span!(
-            "launch_mode",
-            route_id = compiled.id.as_str(),
-            thread_id = thread_id.as_str(),
-            verifier = ctx.principal.verifier_key,
-            principal_id = ctx.principal.id.as_str(),
-            delivery_id = ctx
-                .principal
-                .metadata
-                .get("delivery_id")
-                .map(String::as_str)
-                .unwrap_or(""),
-        );
-        let _enter = span.enter();
-
-        let handle = crate::routes::launch::spawn_dispatch_launch(
-            &ctx.state,
-            self.item_ref.clone(),
-            self.project_path.clone(),
-            envelope,
-            ctx.principal.id.clone(),
-            ctx.principal.scopes.clone(),
-            thread_id.clone(),
-        );
-
-        // Detached watcher: do not silently drop the JoinHandle.
-        // Awaits the handle and logs the outcome at warn (dispatch
-        // error) or error (panic) level. Tracing alone is the
-        // observability surface for now — see roadmap E.2 for
-        // metric integration.
-        let watch_route_id = compiled.id.clone();
-        let watch_thread_id = thread_id.clone();
-        tokio::spawn(async move {
-            match handle.await {
-                Ok(Ok(())) => {
-                    tracing::debug!(
-                        route_id = %watch_route_id,
-                        thread_id = %watch_thread_id,
-                        "launch mode background dispatch completed"
-                    );
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        route_id = %watch_route_id,
-                        thread_id = %watch_thread_id,
-                        code = %e.code(),
-                        error = %e,
-                        "launch mode background dispatch failed"
-                    );
-                }
-                Err(join_err) => {
-                    tracing::error!(
-                        route_id = %watch_route_id,
-                        thread_id = %watch_thread_id,
-                        error = %join_err,
-                        "launch mode background dispatch panicked"
-                    );
-                }
-            }
+        // Prepare invoker input.
+        let input = serde_json::json!({
+            "item_ref": self.item_ref.as_str(),
+            "project_path": self.project_path.as_path().display().to_string(),
+            "parameters": envelope,
         });
 
-        let body =
-            axum::Json(serde_json::json!({ "thread_id": thread_id })).into_response();
-        let mut resp = body;
-        *resp.status_mut() = StatusCode::ACCEPTED;
-        Ok(resp)
+        let inv_ctx = RouteInvocationContext {
+            route_id: compiled.id.clone().into(),
+            method: ctx.request_parts.method,
+            uri: ctx.request_parts.uri,
+            captures: std::collections::BTreeMap::from_iter(ctx.captures),
+            headers: ctx.request_parts.headers,
+            body_raw: ctx.body_raw,
+            input,
+            principal: Some(ctx.principal),
+            state: ctx.state,
+        };
+
+        let result = crate::routes::invocation::invoke_checked(
+            &self.invoker,
+            InvocationCheck {
+                expected_output: RouteInvocationOutput::Accepted,
+            },
+            inv_ctx,
+        )
+        .await?;
+
+        match result {
+            RouteInvocationResult::Accepted { thread_id } => {
+                let body =
+                    axum::Json(serde_json::json!({ "thread_id": thread_id })).into_response();
+                let mut resp = body;
+                *resp.status_mut() = StatusCode::ACCEPTED;
+                Ok(resp)
+            }
+            // invoke_checked guarantees Accepted.
+            _ => unreachable!("invoke_checked enforces Accepted"),
+        }
     }
 }
 

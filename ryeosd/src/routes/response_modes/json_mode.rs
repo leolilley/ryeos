@@ -13,7 +13,8 @@ use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext};
 use crate::routes::interpolation;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, RouteInvocationContext, RouteInvocationResult,
+    CompiledRouteInvocation, InvocationCheck, RouteInvocationContext,
+    RouteInvocationOutput, RouteInvocationResult,
 };
 use crate::routes::raw::RawRouteSpec;
 
@@ -122,7 +123,14 @@ impl CompiledResponseMode for CompiledJsonMode {
             state: ctx.state,
         };
 
-        let result = self.invoker.invoke(inv_ctx).await?;
+        let result = crate::routes::invocation::invoke_checked(
+            self.invoker.as_ref(),
+            InvocationCheck {
+                expected_output: RouteInvocationOutput::Json,
+            },
+            inv_ctx,
+        )
+        .await?;
 
         match result {
             RouteInvocationResult::Json(value) => {
@@ -136,10 +144,9 @@ impl CompiledResponseMode for CompiledJsonMode {
                     Ok(axum::Json(value).into_response())
                 }
             }
-            other => Err(RouteDispatchError::Internal(format!(
-                "json mode invoker contract violation: expected Json, got {}",
-                other.variant_name()
-            ))),
+            // invoke_checked guarantees Json; any other variant is already
+            // caught as an Internal error by the enforcement layer.
+            _ => unreachable!("invoke_checked enforces Json"),
         }
     }
 }
