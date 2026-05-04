@@ -13,7 +13,7 @@
 //! reject non-root-executable kinds with a typed error.
 //!
 //! Consumers today:
-//!   - [`crate::routes::streaming_sources::dispatch_launch`] — SSE
+//!   - [`crate::routes::response_modes::event_stream_mode`] — SSE
 //!     subscriber tails events for the minted thread (one-call
 //!     fire-and-observe pattern used by `POST /execute/stream`).
 //!   - [`crate::routes::response_modes::launch_mode`] — unary 202

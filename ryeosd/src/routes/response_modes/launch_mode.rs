@@ -356,7 +356,6 @@ mod tests {
     use super::*;
     use crate::routes::compile::RoutePrincipal;
     use crate::routes::raw::{RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
-    use crate::routes::streaming_sources::StreamingSourceRegistry;
 
     fn make_raw(id: &str) -> RawRouteSpec {
         RawRouteSpec {
@@ -387,13 +386,8 @@ mod tests {
     }
 
     fn ctx() -> ModeCompileContext<'static> {
-        // Leak a registry for the static lifetime of the test; tests
-        // don't run long enough for this to matter and the registry
-        // doesn't reach across tests.
-        let streaming: &'static StreamingSourceRegistry =
-            Box::leak(Box::new(StreamingSourceRegistry::with_builtins()));
         ModeCompileContext {
-            streaming_sources: streaming,
+            _phantom: std::marker::PhantomData,
         }
     }
 

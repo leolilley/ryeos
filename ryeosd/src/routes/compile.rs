@@ -6,7 +6,6 @@ use serde_json::Value;
 
 use super::raw::RawRouteSpec;
 use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
-use crate::routes::streaming_sources::StreamingSourceRegistry;
 
 pub struct CompiledRoute {
     pub id: String,
@@ -108,7 +107,7 @@ pub trait ResponseMode: Send + Sync {
 }
 
 pub struct ModeCompileContext<'a> {
-    pub streaming_sources: &'a StreamingSourceRegistry,
+    pub _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 #[axum::async_trait]

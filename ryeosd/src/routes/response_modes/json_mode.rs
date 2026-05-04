@@ -252,12 +252,8 @@ mod tests {
     use super::*;
 
     fn compile_ctx() -> ModeCompileContext<'static> {
-        use std::sync::OnceLock;
-        static STREAMING: OnceLock<crate::routes::streaming_sources::StreamingSourceRegistry> =
-            OnceLock::new();
         ModeCompileContext {
-            streaming_sources: STREAMING
-                .get_or_init(crate::routes::streaming_sources::StreamingSourceRegistry::new),
+            _phantom: std::marker::PhantomData,
         }
     }
 

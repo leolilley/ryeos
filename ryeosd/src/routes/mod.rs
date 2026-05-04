@@ -10,7 +10,6 @@ pub mod parsed_ref;
 pub mod raw;
 pub mod reload;
 pub mod response_modes;
-pub mod streaming_sources;
 pub mod verifiers;
 pub mod webhook_dedupe;
 
@@ -26,7 +25,6 @@ use crate::dispatch_error::RouteConfigError;
 use matcher::PathMatcher;
 use raw::RawRouteSpec;
 use response_modes::ResponseModeRegistry;
-use streaming_sources::StreamingSourceRegistry;
 use verifiers::AuthVerifierRegistry;
 
 pub struct RouteTable {
@@ -62,14 +60,13 @@ pub fn build_route_table(
     raw_routes: &[RawRouteSpec],
     verifier_registry: &AuthVerifierRegistry,
     mode_registry: &ResponseModeRegistry,
-    streaming_sources: &StreamingSourceRegistry,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mut errors: Vec<RouteConfigError> = Vec::new();
     let mut compiled: Vec<Arc<CompiledRoute>> = Vec::new();
     let mut seen_ids: HashMap<String, String> = HashMap::new();
 
     let ctx = ModeCompileContext {
-        streaming_sources,
+        _phantom: std::marker::PhantomData,
     };
 
     for raw in raw_routes {
@@ -222,8 +219,7 @@ pub fn build_route_table_from_snapshot(
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let verifier_registry = AuthVerifierRegistry::with_builtins();
     let mode_registry = ResponseModeRegistry::with_builtins();
-    let streaming_sources = StreamingSourceRegistry::with_builtins();
-    build_route_table(&snapshot.routes, &verifier_registry, &mode_registry, &streaming_sources)
+    build_route_table(&snapshot.routes, &verifier_registry, &mode_registry)
 }
 
 pub fn build_route_table_or_bail(
@@ -279,8 +275,7 @@ mod tests {
     fn build_table(raws: &[RawRouteSpec]) -> Result<RouteTable, Vec<RouteConfigError>> {
         let verifier_registry = AuthVerifierRegistry::with_builtins();
         let mode_registry = ResponseModeRegistry::with_builtins();
-        let streaming_sources = StreamingSourceRegistry::with_builtins();
-        build_route_table(raws, &verifier_registry, &mode_registry, &streaming_sources)
+        build_route_table(raws, &verifier_registry, &mode_registry)
     }
 
     fn empty_routes_builds_empty_table() {
@@ -451,8 +446,8 @@ mod tests {
         let raw = RawRouteSpec {
             section: "routes".to_string(),
             id: "r1".to_string(),
-            path: "/threads/{id}/stream".to_string(),
-            methods: ["GET".to_string()].into_iter().collect(),
+            path: "/execute/stream".to_string(),
+            methods: ["POST".to_string()].into_iter().collect(),
             auth: "rye_signed".to_string(),
             auth_config: Some(serde_json::json!({"public_key": "dummy"})),
             limits: RawLimits {
@@ -461,9 +456,8 @@ mod tests {
             },
             response: RawResponseSpec {
                 mode: "event_stream".to_string(),
-                source: Some("thread_events".to_string()),
+                source: Some("dispatch_launch".to_string()),
                 source_config: serde_json::json!({
-                    "thread_id": "${path.id}",
                     "keep_alive_secs": 15,
                 }),
                 status: None,
@@ -472,7 +466,7 @@ mod tests {
             },
             execute: None,
             request: RawRequest {
-                body: RawRequestBody::None,
+                body: RawRequestBody::Json,
             },
             source_file: std::path::PathBuf::from("/test/r1.yaml"),
         };
