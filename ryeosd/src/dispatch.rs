@@ -1078,28 +1078,27 @@ pub(crate) fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, Dispat
 }
 
 /// **B1**: cap gate factored out for unit testing.
+/// Uses the unified `Authorizer` for wildcard + implication expansion.
 fn enforce_runtime_caps(
+    verb_registry: &std::sync::Arc<ryeos_runtime::verb_registry::VerbRegistry>,
     item_ref: &str,
     required_caps: &[String],
     caller_scopes: &[String],
 ) -> Result<(), DispatchError> {
-    if caller_scopes.iter().any(|s| s == "*") {
+    if required_caps.is_empty() {
         return Ok(());
     }
-    let missing: Vec<String> = required_caps
-        .iter()
-        .filter(|cap| !caller_scopes.contains(cap))
-        .cloned()
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(DispatchError::InsufficientCaps {
+    let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require_all(
+        &required_caps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    );
+    let authorizer = ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone());
+    authorizer
+        .authorize(caller_scopes, &policy)
+        .map_err(|_| DispatchError::InsufficientCaps {
             runtime: item_ref.to_string(),
             required: required_caps.to_vec(),
             caller_scopes: caller_scopes.to_vec(),
         })
-    }
 }
 
 pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> Result<Value, DispatchError> {
@@ -1262,6 +1261,7 @@ async fn dispatch_managed_subprocess(
 
     if request.original_root_kind == ROOT_KIND_RUNTIME {
         enforce_runtime_caps(
+            &state.verb_registry,
             &runtime_ref,
             &verified_runtime.yaml.required_caps,
             &ctx.caller_scopes,
@@ -1554,7 +1554,7 @@ async fn dispatch_tool_subprocess(
         &resolved.resolved_item.metadata.extra,
     );
     if !required_caps.is_empty() {
-        enforce_runtime_caps(&item_ref_for_error, &required_caps, &ctx.caller_scopes)?;
+        enforce_runtime_caps(&state.verb_registry, &item_ref_for_error, &required_caps, &ctx.caller_scopes)?;
     }
 
     let dotenv_dirs = crate::vault::dotenv_search_dirs(Some(&request.original_project_path));
@@ -1967,6 +1967,10 @@ metadata:
         assert!(msg.contains("unexpected shape"), "got: {msg}");
     }
 
+    fn test_verb_registry() -> std::sync::Arc<ryeos_runtime::verb_registry::VerbRegistry> {
+        std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins())
+    }
+
     /// **B1 unit test**: `enforce_runtime_caps` itself is unconditional
     /// (it always checks). The CALLER (`dispatch_native_runtime`) is
     /// what gates the call on `original_root_kind == "runtime"`. This
@@ -1980,6 +1984,7 @@ metadata:
     /// this fully covers B1.
     #[test]
     fn enforce_runtime_caps_skipped_for_indirect_alias_chain() {
+        let vr = test_verb_registry();
         // If `dispatch_native_runtime` skips the call entirely (B1
         // gate), then a missing cap does NOT translate to an error.
         // We model this by simply never calling `enforce_runtime_caps`
@@ -1990,7 +1995,7 @@ metadata:
         // SIMULATED indirect path — gate skips the call.
         let original_root_kind = "directive";
         let outcome: Result<(), DispatchError> = if original_root_kind == "runtime" {
-            enforce_runtime_caps("runtime:directive-runtime", &required, &caller_scopes)
+            enforce_runtime_caps(&vr, "runtime:directive-runtime", &required, &caller_scopes)
         } else {
             Ok(())
         };
@@ -2003,7 +2008,7 @@ metadata:
         // SIMULATED direct path — gate fires.
         let original_root_kind = "runtime";
         let outcome: Result<(), DispatchError> = if original_root_kind == "runtime" {
-            enforce_runtime_caps("runtime:directive-runtime", &required, &caller_scopes)
+            enforce_runtime_caps(&vr, "runtime:directive-runtime", &required, &caller_scopes)
         } else {
             Ok(())
         };
@@ -2016,23 +2021,26 @@ metadata:
 
     #[test]
     fn enforce_runtime_caps_allows_when_caller_has_required_cap() {
+        let vr = test_verb_registry();
         let req = vec!["runtime.execute".to_string()];
         let caller = vec!["runtime.execute".to_string(), "execute".to_string()];
-        assert!(enforce_runtime_caps("runtime:directive-runtime", &req, &caller).is_ok());
+        assert!(enforce_runtime_caps(&vr, "runtime:directive-runtime", &req, &caller).is_ok());
     }
 
     #[test]
     fn enforce_runtime_caps_allows_wildcard_scope() {
+        let vr = test_verb_registry();
         let req = vec!["runtime.execute".to_string()];
         let caller = vec!["*".to_string()];
-        assert!(enforce_runtime_caps("runtime:directive-runtime", &req, &caller).is_ok());
+        assert!(enforce_runtime_caps(&vr, "runtime:directive-runtime", &req, &caller).is_ok());
     }
 
     #[test]
     fn enforce_runtime_caps_denies_when_caller_lacks_required_cap() {
+        let vr = test_verb_registry();
         let req = vec!["runtime.execute".to_string()];
         let caller = vec!["execute".to_string()];
-        let err = enforce_runtime_caps("runtime:directive-runtime", &req, &caller)
+        let err = enforce_runtime_caps(&vr, "runtime:directive-runtime", &req, &caller)
             .expect_err("missing cap must error");
         // DispatchError::InsufficientCaps maps to 403 via http_status();
         // its Display also contains "insufficient capabilities".
@@ -2053,9 +2061,10 @@ metadata:
 
     #[test]
     fn enforce_runtime_caps_no_op_when_runtime_yaml_declares_no_required_caps() {
+        let vr = test_verb_registry();
         let req: Vec<String> = vec![];
         let caller = vec!["execute".to_string()];
-        assert!(enforce_runtime_caps("runtime:test", &req, &caller).is_ok());
+        assert!(enforce_runtime_caps(&vr, "runtime:test", &req, &caller).is_ok());
     }
 
     // ── B2 unit test ────────────────────────────────────────────────────

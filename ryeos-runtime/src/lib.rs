@@ -1,3 +1,4 @@
+pub mod authorizer;
 pub mod callback;
 pub mod callback_client;
 pub mod callback_contract;
@@ -5,7 +6,6 @@ pub mod checkpoint;
 pub mod callback_uds;
 pub mod envelope;
 pub mod events;
-pub mod capability_tokens;
 pub mod condition;
 pub mod daemon_rpc;
 pub mod framing;
@@ -16,14 +16,19 @@ pub mod op_wire;
 pub mod paths;
 pub mod progress;
 pub mod transcript;
+pub mod verb_registry;
 pub mod verified_loader;
 
+pub use authorizer::{
+    cap_matches, check_capability, expand_capabilities, canonical_cap,
+    Authorizer, AuthorizationError, AuthorizationPolicy, Capability, CapabilityClause,
+    CapabilityParseError,
+};
 pub use callback::{
     client_from_env, ActionPayload, CallbackError, DispatchActionRequest, ReplayResponse,
     ReplayedEventRecord, RuntimeCallbackAPI,
 };
 pub use checkpoint::CheckpointWriter;
-pub use capability_tokens::{cap_matches, check_capability, expand_capabilities};
 pub use condition::{apply_operator, matches, resolve_path};
 pub use daemon_rpc::{
     resolve_daemon_socket_path, DaemonRpcClient, RpcError, ThreadLifecycleClient,
@@ -39,3 +44,4 @@ pub use paths::{
 };
 pub use progress::{ProgressEvent, StatusEvent};
 pub use transcript::{KnowledgeRenderOptions, Transcript};
+pub use verb_registry::{VerbDef, VerbRegistry};
