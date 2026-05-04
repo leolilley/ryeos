@@ -437,6 +437,7 @@ mod tests {
             )),
             webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
             vault: Arc::new(crate::vault::EmptyVault),
+            verb_registry: Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins()),
         };
 
         (tmpdir, state)

@@ -1,9 +1,9 @@
-# rye:signed:2026-05-04T02:40:31Z:8b55eeeddf55aa50a6cf0a4abf9befee3ecc8f0264455ebc52a2ed35f553f8a2:UQyDrA+H59l8yhQg8kB0u7zlf78e+Z6Igr/RLGexXmLbexavb1TH3gTYeLDitFiGyqbX/l3I9V0uVL0syV78Bg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-04T23:23:42Z:e269e78c684ce8287e18e6dd8d82a845e0e31ed5d0ce98bc47bff83581451e41:QxY4D3rknX0xsLbxn0B5sls0xcW1sDSXrCTMw4lvyGuZvOvgbTHcf9thmtoMe5pMpDgPDRKPIXCklBg9Dbz8Ag==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "maintenance"
 name: "gc"
 kind: service
 endpoint: maintenance.gc
-required_caps: ["node.maintenance"]
+required_caps: ["rye.execute.service.maintenance/gc"]
 schema:
   dry_run: boolean?
   compact: boolean?

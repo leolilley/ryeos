@@ -1348,6 +1348,7 @@ mod tests {
                 crate::routes::webhook_dedupe::WebhookDedupeStore::new(),
             ),
             vault: std::sync::Arc::new(crate::vault::EmptyVault),
+            verb_registry: std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins()),
         };
         (tmpdir, state)
     }

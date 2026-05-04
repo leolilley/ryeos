@@ -5,6 +5,7 @@ use arc_swap::ArcSwap;
 use serde::Serialize;
 
 use ryeos_engine::engine::Engine;
+use ryeos_runtime::verb_registry::VerbRegistry;
 
 use crate::config::Config;
 use crate::event_stream::ThreadEventHub;
@@ -61,6 +62,9 @@ pub struct AppState {
     /// daemon stays vendor-agnostic — this trait moves opaque
     /// `String -> String` pairs and never enumerates provider names.
     pub vault: Arc<dyn crate::vault::NodeVault>,
+    /// Verb registry for capability implication expansion (execute → fetch,
+    /// sign → fetch). Built once at startup with `VerbRegistry::with_builtins()`.
+    pub verb_registry: Arc<VerbRegistry>,
 }
 
 #[derive(Debug, Serialize)]

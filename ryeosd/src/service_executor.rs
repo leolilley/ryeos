@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use ryeos_runtime::authorizer::{Authorizer, AuthorizationPolicy};
 use serde_json::Value;
 
 use crate::state::AppState;
@@ -190,24 +191,18 @@ pub async fn execute_service_verified(
 
     // 5. Cap enforcement (live mode only)
     let effective_caps = if mode == ExecutionMode::Live {
-        // Wildcard scope ("*") satisfies all requirements — matches the
-        // behaviour of dispatch_role::enforce_runtime_target_caps.
-        if ctx.caller_scopes.iter().any(|s| s == "*") {
-            required_caps.clone()
-        } else {
-            let eff: Vec<String> = required_caps
-                .iter()
-                .filter(|cap| ctx.caller_scopes.contains(cap))
-                .cloned()
-                .collect();
-            let all_satisfied = required_caps.is_empty() || eff.len() == required_caps.len();
-            if !all_satisfied {
+        let policy = AuthorizationPolicy::require_all(
+            &required_caps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
+        let authorizer = Authorizer::new(state.verb_registry.clone());
+        match authorizer.authorize(&ctx.caller_scopes, &policy) {
+            Ok(()) => required_caps.clone(),
+            Err(_) => {
                 bail!(
-                    "insufficient capabilities: required {:?}, effective {:?}",
-                    required_caps, eff
+                    "insufficient capabilities: required {:?}, caller has {:?}",
+                    required_caps, ctx.caller_scopes
                 );
             }
-            eff
         }
     } else {
         Vec::new()

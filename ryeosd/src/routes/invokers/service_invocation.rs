@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use ryeos_runtime::authorizer::{Authorizer, AuthorizationPolicy};
+
 use crate::dispatch_error::RouteDispatchError;
 use crate::routes::invocation::{
     CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContract, RouteInvocationContext,
@@ -39,19 +41,20 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
         &self,
         ctx: RouteInvocationContext,
     ) -> Result<RouteInvocationResult, RouteDispatchError> {
-        // Cap enforcement: check required_caps against principal scopes.
+        // Cap enforcement: check required_caps against principal scopes
+        // using the unified Authorizer (wildcards, implication expansion).
         if !self.required_caps.is_empty() {
-            let scopes = ctx
+            let principal = ctx
                 .principal
                 .as_ref()
-                .map(|p| &p.scopes)
-                .map(|s| s as &[_])
-                .unwrap_or(&[]);
-            for cap in &self.required_caps {
-                if !scopes.contains(cap) {
-                    return Err(RouteDispatchError::Unauthorized);
-                }
-            }
+                .ok_or(RouteDispatchError::Unauthorized)?;
+            let policy = AuthorizationPolicy::require_all(
+                &self.required_caps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            );
+            let authorizer = Authorizer::new(ctx.state.verb_registry.clone());
+            authorizer
+                .authorize(&principal.scopes, &policy)
+                .map_err(|_| RouteDispatchError::Unauthorized)?;
         }
 
         // Look up the handler by endpoint.

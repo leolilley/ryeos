@@ -1,9 +1,9 @@
-# rye:signed:2026-05-04T02:40:31Z:afbdfab3c9d1cd0a10a250820ed6ff3c1b78d0fb9f46ddcca88bb984631f1a52:ev6tqc5lrlSHnKhbpbcFNf85wdyxlRnXK3C7JbROgzFjEDijzVwhMPN0okEe5vK6iPqBdXxYDEVgYay2hSBjAQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-04T23:23:42Z:8f6cd1d900c771bf8e19281d58715e3801c1cde2e1054a09fde204b5e3a61967:GtaRDvzbHa63RJb0WzPGKPuLpxQOBser5wlExSs/s5ok0L+4kLHDqriDOWMmt/7924jLrfeFd+Pnux6yTU69CQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: ""
 name: "fetch"
 kind: service
 endpoint: fetch
-required_caps: ["bundle.read"]
+required_caps: ["rye.execute.service.fetch"]
 schema:
   item_ref: string
   with_content: boolean?

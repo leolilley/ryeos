@@ -265,6 +265,7 @@ async fn main() -> Result<()> {
         route_table,
         webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         vault,
+        verb_registry: Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins()),
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -606,6 +607,7 @@ async fn run_service_standalone(
             ryeosd::vault::SealedEnvelopeVault::load(&config.state_dir)
                 .context("load sealed-envelope vault — did `rye init` run?")?,
         ),
+        verb_registry: Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins()),
     };
 
     let params: serde_json::Value = match params_json {
