@@ -5,8 +5,14 @@
 //! invokers (background task), this calls `dispatch::dispatch` synchronously
 //! and returns the result value directly as `RouteInvocationResult::Json`.
 //!
-//! The caller (json mode) provides `project_path` in `ctx.input` so the
-//! engine can resolve items against the correct project root.
+//! Input contract: `ctx.input` must be a JSON object with:
+//! - `project_path` (string, required) — absolute path for engine resolution
+//! - `parameters` (object, optional) — business params passed to dispatch
+//!
+//! This separates execution metadata from business parameters so route
+//! authors see a clear, typed structure in source_config.
+
+use serde::Deserialize;
 
 use crate::dispatch_error::RouteDispatchError;
 use crate::routes::invocation::{
@@ -14,12 +20,26 @@ use crate::routes::invocation::{
     RouteInvocationOutput, RouteInvocationResult,
 };
 
+/// Typed input shape for non-service dispatch invokers.
+///
+/// Parsed from the interpolated `source_config`. `project_path` is required;
+/// `parameters` defaults to an empty object.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DispatchSourceConfig {
+    /// Absolute path to the project root for engine resolution.
+    pub project_path: String,
+    /// Business parameters forwarded to `dispatch::dispatch` as `params`.
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+}
+
 /// Synchronous dispatch invoker for `tool:` / `directive:` / `graph:` sources.
 ///
-/// At compile time the `item_ref` is stored. At runtime the invoker constructs
-/// a `DispatchRequest` and `ExecutionContext` from the route context and calls
-/// `dispatch::dispatch` inline, blocking until the execution completes and
-/// returning the JSON result.
+/// At compile time the `item_ref` is stored. At runtime the invoker parses
+/// a typed `DispatchSourceConfig` from `ctx.input`, constructs a
+/// `DispatchRequest` and `ExecutionContext`, and calls `dispatch::dispatch`
+/// inline, blocking until execution completes.
 pub struct CompiledDispatchInvoker {
     /// The canonical ref to dispatch (e.g., `"directive:webhooks/ingest"`).
     pub item_ref: String,
@@ -50,15 +70,16 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
                 ))
             })?;
 
-        // project_path is required for non-service dispatch — the engine
-        // needs it for resolution. Extract from input; fall back to the
-        // daemon's state dir if not provided.
-        let project_path: std::path::PathBuf = ctx
-            .input
-            .get("project_path")
-            .and_then(|v| v.as_str())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| ctx.state.config.state_dir.clone());
+        // Parse typed dispatch config — project_path is required, no fallback.
+        let config: DispatchSourceConfig = serde_json::from_value(ctx.input.clone()).map_err(
+            |e| {
+                RouteDispatchError::BadRequest(format!(
+                    "non-service dispatch requires {{ project_path, parameters }} in source_config: {e}"
+                ))
+            },
+        )?;
+
+        let project_path = std::path::PathBuf::from(&config.project_path);
 
         let principal_id = ctx
             .principal
@@ -102,7 +123,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             target_site_id: None,
             project_source_is_pushed_head: false,
             validate_only: false,
-            params: ctx.input.clone(),
+            params: config.parameters,
             acting_principal: principal_id.as_str(),
             project_path: &project_path,
             original_project_path: project_path.clone(),

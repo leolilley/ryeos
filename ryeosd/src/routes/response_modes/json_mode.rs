@@ -1,8 +1,13 @@
-//! `json` response mode — synchronous JSON from a service canonical ref.
+//! `json` response mode — synchronous JSON from any canonical ref.
 //!
 //! The mode holds a compiled `CompiledRouteInvocation` that resolves to a
 //! `Json` result. At dispatch time it interpolates `source_config`, calls
 //! the invoker, and frames the result as HTTP JSON (200 or 404).
+//!
+//! Supported source kinds:
+//! - `service:` — in-process handler (flat source_config as params)
+//! - `tool:` / `directive:` / `graph:` — engine dispatch
+//!   (source_config must have `{ project_path, parameters }`)
 
 use std::sync::Arc;
 
@@ -68,8 +73,40 @@ impl ResponseMode for JsonMode {
             }
         })?;
 
-        // Compile the service invoker via the shared function.
-        let invoker = crate::routes::invokers::compile_service_invoker(source_str, &raw.id)?;
+        // Compile the invoker via the universal canonical-ref compiler.
+        let invoker = crate::routes::invokers::compile_canonical_ref_invoker(
+            source_str, &raw.id,
+        )?;
+
+        // Non-service sources require typed { project_path, parameters } config.
+        let parsed_kind = crate::routes::parsed_ref::ParsedItemRef::parse(source_str)
+            .map(|r| r.kind().to_string())
+            .unwrap_or_default();
+        if parsed_kind != "service" {
+            let config_obj = raw.response.source_config.as_object();
+            match config_obj {
+                None => {
+                    return Err(RouteConfigError::InvalidSourceConfig {
+                        id: raw.id.clone(),
+                        src: source_str.into(),
+                        reason: "non-service json source requires source_config with \
+                            { project_path: \"...\", parameters: { ... } }"
+                            .into(),
+                    });
+                }
+                Some(obj) => {
+                    if !obj.contains_key("project_path") {
+                        return Err(RouteConfigError::InvalidSourceConfig {
+                            id: raw.id.clone(),
+                            src: source_str.into(),
+                            reason: "non-service json source requires \
+                                'project_path' in source_config"
+                                .into(),
+                        });
+                    }
+                }
+            }
+        }
 
         // Validate source_config path templates against declared captures.
         if !raw.response.source_config.is_null() {
@@ -232,19 +269,60 @@ mod tests {
     }
 
     #[test]
-    fn compile_accepts_tool_kind() {
+    fn compile_accepts_tool_kind_with_project_path() {
         let mode = JsonMode;
         let raw = make_raw(
             "/test",
             Some("tool:rye/core/execute"),
-            serde_json::Value::Null,
+            serde_json::json!({ "project_path": "/tmp/test", "parameters": {} }),
         );
         let result = mode.compile(&raw);
-        assert!(result.is_ok(), "tool: should be accepted, got: {:?}", result.err());
+        assert!(result.is_ok(), "tool: with project_path should be accepted, got: {:?}", result.err());
     }
 
     #[test]
-    fn compile_accepts_directive_kind() {
+    fn compile_accepts_directive_kind_with_project_path() {
+        let mode = JsonMode;
+        let raw = make_raw(
+            "/test",
+            Some("directive:my/agent"),
+            serde_json::json!({ "project_path": "/tmp/test", "parameters": { "input": "val" } }),
+        );
+        let result = mode.compile(&raw);
+        assert!(result.is_ok(), "directive: with project_path should be accepted, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn compile_accepts_graph_kind_with_project_path() {
+        let mode = JsonMode;
+        let raw = make_raw(
+            "/test",
+            Some("graph:workflows/approval"),
+            serde_json::json!({ "project_path": "/tmp/test", "parameters": {} }),
+        );
+        let result = mode.compile(&raw);
+        assert!(result.is_ok(), "graph: with project_path should be accepted, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn compile_rejects_tool_without_project_path() {
+        let mode = JsonMode;
+        let raw = make_raw(
+            "/test",
+            Some("tool:rye/core/execute"),
+            serde_json::json!({ "parameters": {} }),
+        );
+        let result = mode.compile(&raw);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for missing project_path"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("project_path"), "got: {msg}");
+    }
+
+    #[test]
+    fn compile_rejects_directive_with_null_source_config() {
         let mode = JsonMode;
         let raw = make_raw(
             "/test",
@@ -252,7 +330,12 @@ mod tests {
             serde_json::Value::Null,
         );
         let result = mode.compile(&raw);
-        assert!(result.is_ok(), "directive: should be accepted, got: {:?}", result.err());
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for null source_config"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("project_path"), "got: {msg}");
     }
 
     #[test]
