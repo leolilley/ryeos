@@ -1,4 +1,4 @@
-# rye:signed:2026-05-04T02:27:22Z:c099b7a311941de9b41a2c47cf07a3ff1f7260fd6d8269f72f7dbfd461c6b189:cv4GNkrhpclTxappIhH1D+ugwhvTQVzaG5TcAw6sij8c1+XbpGLG3HIN83OGbQYOT9SoxcOtKQD/ogJAKww2CQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-04T02:40:31Z:c099b7a311941de9b41a2c47cf07a3ff1f7260fd6d8269f72f7dbfd461c6b189:cv4GNkrhpclTxappIhH1D+ugwhvTQVzaG5TcAw6sij8c1+XbpGLG3HIN83OGbQYOT9SoxcOtKQD/ogJAKww2CQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "rye/core/runtimes/bash"
 # rye:unsigned
 version: "1.0.0"

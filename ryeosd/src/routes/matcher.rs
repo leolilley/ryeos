@@ -161,7 +161,7 @@ mod tests {
         // dispatches the route — so the response body is irrelevant.
         let mode = StaticMode;
         let ctx = crate::routes::compile::ModeCompileContext {
-            streaming_sources: &crate::routes::streaming_sources::StreamingSourceRegistry::new(),
+            _phantom: std::marker::PhantomData,
         };
         let raw = RawRouteSpec {
             section: "routes".to_string(),
