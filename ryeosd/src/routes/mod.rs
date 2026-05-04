@@ -1,12 +1,13 @@
 pub mod abs_path;
 pub mod compile;
 pub mod dispatcher;
+pub mod interpolation;
+pub mod invocation;
 pub mod launch;
 pub mod limits;
 pub mod matcher;
 pub mod parsed_ref;
 pub mod raw;
-pub mod read_sources;
 pub mod reload;
 pub mod response_modes;
 pub mod streaming_sources;
@@ -62,7 +63,6 @@ pub fn build_route_table(
     verifier_registry: &AuthVerifierRegistry,
     mode_registry: &ResponseModeRegistry,
     streaming_sources: &StreamingSourceRegistry,
-    read_sources: &crate::routes::read_sources::ReadSourceRegistry,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mut errors: Vec<RouteConfigError> = Vec::new();
     let mut compiled: Vec<Arc<CompiledRoute>> = Vec::new();
@@ -70,7 +70,6 @@ pub fn build_route_table(
 
     let ctx = ModeCompileContext {
         streaming_sources,
-        read_sources,
     };
 
     for raw in raw_routes {
@@ -224,8 +223,7 @@ pub fn build_route_table_from_snapshot(
     let verifier_registry = AuthVerifierRegistry::with_builtins();
     let mode_registry = ResponseModeRegistry::with_builtins();
     let streaming_sources = StreamingSourceRegistry::with_builtins();
-    let read_sources = crate::routes::read_sources::ReadSourceRegistry::with_builtins();
-    build_route_table(&snapshot.routes, &verifier_registry, &mode_registry, &streaming_sources, &read_sources)
+    build_route_table(&snapshot.routes, &verifier_registry, &mode_registry, &streaming_sources)
 }
 
 pub fn build_route_table_or_bail(
@@ -282,8 +280,7 @@ mod tests {
         let verifier_registry = AuthVerifierRegistry::with_builtins();
         let mode_registry = ResponseModeRegistry::with_builtins();
         let streaming_sources = StreamingSourceRegistry::with_builtins();
-        let read_sources = crate::routes::read_sources::ReadSourceRegistry::with_builtins();
-        build_route_table(raws, &verifier_registry, &mode_registry, &streaming_sources, &read_sources)
+        build_route_table(raws, &verifier_registry, &mode_registry, &streaming_sources)
     }
 
     fn empty_routes_builds_empty_table() {

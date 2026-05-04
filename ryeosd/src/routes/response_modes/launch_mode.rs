@@ -387,16 +387,13 @@ mod tests {
     }
 
     fn ctx() -> ModeCompileContext<'static> {
-        // Leak registries for the static lifetime of the test; tests
-        // don't run long enough for this to matter and the registries
-        // don't reach across tests.
+        // Leak a registry for the static lifetime of the test; tests
+        // don't run long enough for this to matter and the registry
+        // doesn't reach across tests.
         let streaming: &'static StreamingSourceRegistry =
             Box::leak(Box::new(StreamingSourceRegistry::with_builtins()));
-        let read: &'static crate::routes::read_sources::ReadSourceRegistry =
-            Box::leak(Box::new(crate::routes::read_sources::ReadSourceRegistry::with_builtins()));
         ModeCompileContext {
             streaming_sources: streaming,
-            read_sources: read,
         }
     }
 

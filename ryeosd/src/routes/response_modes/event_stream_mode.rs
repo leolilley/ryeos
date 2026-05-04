@@ -218,7 +218,6 @@ mod tests {
         let raw = make_raw_with_execute();
         let ctx = ModeCompileContext {
             streaming_sources: &StreamingSourceRegistry::with_builtins(),
-            read_sources: &crate::routes::read_sources::ReadSourceRegistry::with_builtins(),
         };
         let result = mode.compile(&raw, &ctx);
         let err = match result {
@@ -260,7 +259,6 @@ mod tests {
         };
         let ctx = ModeCompileContext {
             streaming_sources: &StreamingSourceRegistry::with_builtins(),
-            read_sources: &crate::routes::read_sources::ReadSourceRegistry::with_builtins(),
         };
         let result = mode.compile(&raw, &ctx);
         let err = match result {
@@ -302,7 +300,6 @@ mod tests {
         };
         let ctx = ModeCompileContext {
             streaming_sources: &StreamingSourceRegistry::with_builtins(),
-            read_sources: &crate::routes::read_sources::ReadSourceRegistry::with_builtins(),
         };
         let result = mode.compile(&raw, &ctx);
         let err = match result {
