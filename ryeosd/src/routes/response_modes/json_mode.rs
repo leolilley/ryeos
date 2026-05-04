@@ -1,17 +1,8 @@
 //! `json` response mode — synchronous JSON from a service canonical ref.
 //!
-//! Wire shape: HTTP request → verify auth → resolve service canonical ref →
-//! call service handler in-process → return `200 JSON` or `404`/`500`.
-//!
-//! The `source` field in route YAML is a canonical ref (e.g.
-//! `service:threads/get`), not a hardcoded name. At compile time the mode
-//! validates the ref parses, is a `service:` kind, and maps to a registered
-//! service descriptor. At dispatch time it interpolates `source_config`,
-//! enforces caps, calls the handler, and returns the result.
-//!
-//! No parallel registry. The engine's service descriptor list (`handlers::ALL`)
-//! is the compile-time source of truth. The `ServiceRegistry` in `AppState`
-//! handles runtime dispatch.
+//! The mode holds a compiled `CompiledRouteInvocation` that resolves to a
+//! `Json` result. At dispatch time it interpolates `source_config`, calls
+//! the invoker, and frames the result as HTTP JSON (200 or 404).
 
 use std::sync::Arc;
 
@@ -19,23 +10,21 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
-use crate::routes::compile::{
-    CompiledResponseMode, CompiledRoute, ModeCompileContext, ResponseMode, RouteDispatchContext,
-};
+use crate::routes::compile::{CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext};
 use crate::routes::interpolation;
+use crate::routes::invocation::{
+    CompiledRouteInvocation, RouteInvocationContext, RouteInvocationResult,
+};
 use crate::routes::raw::RawRouteSpec;
 
 pub struct JsonMode;
 
 /// Compiled state for a `json` mode route.
-struct CompiledJsonMode {
-    /// Service endpoint string (e.g., `"threads.get"`), looked up from the
-    /// descriptor at compile time and used for runtime dispatch.
-    endpoint: String,
-    /// The source_config template, kept as-is for runtime interpolation.
+pub struct CompiledJsonMode {
+    /// The compiled service invoker.
+    invoker: Arc<dyn CompiledRouteInvocation>,
+    /// The source_config template for runtime interpolation.
     source_config_template: serde_json::Value,
-    /// Capability scopes required by the service (from descriptor).
-    required_caps: Vec<String>,
 }
 
 impl ResponseMode for JsonMode {
@@ -46,7 +35,6 @@ impl ResponseMode for JsonMode {
     fn compile(
         &self,
         raw: &RawRouteSpec,
-        _ctx: &ModeCompileContext,
     ) -> Result<Arc<dyn CompiledResponseMode>, RouteConfigError> {
         if raw.execute.is_some() {
             return Err(RouteConfigError::InvalidResponseSpec {
@@ -56,7 +44,6 @@ impl ResponseMode for JsonMode {
             });
         }
 
-        // Reject static-mode fields
         if raw.response.status.is_some()
             || raw.response.content_type.is_some()
             || raw.response.body_b64.is_some()
@@ -80,62 +67,8 @@ impl ResponseMode for JsonMode {
             }
         })?;
 
-        // Parse and validate the canonical ref.
-        let parsed = crate::routes::parsed_ref::ParsedItemRef::parse(source_str).map_err(|e| {
-            RouteConfigError::InvalidSourceConfig {
-                id: raw.id.clone(),
-                src: "json".into(),
-                reason: format!(
-                    "source '{}' is not a valid canonical ref: {e}",
-                    source_str
-                ),
-            }
-        })?;
-
-        // json mode only supports service: kind.
-        if parsed.kind() != "service" {
-            return Err(RouteConfigError::InvalidSourceConfig {
-                id: raw.id.clone(),
-                src: "json".into(),
-                reason: format!(
-                    "json mode source must be 'service:' kind, got '{}' kind in '{}'",
-                    parsed.kind(),
-                    source_str
-                ),
-            });
-        }
-
-        // Look up the service descriptor by canonical ref.
-        let descriptor = crate::service_handlers::ALL
-            .iter()
-            .find(|d| d.service_ref == source_str)
-            .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
-                id: raw.id.clone(),
-                src: "json".into(),
-                reason: format!(
-                    "no service descriptor found for ref '{}'; \
-                     available services: [{}]",
-                    source_str,
-                    crate::service_handlers::ALL
-                        .iter()
-                        .map(|d| d.service_ref)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            })?;
-
-        // Reject OfflineOnly services.
-        if descriptor.availability == crate::service_executor::ServiceAvailability::OfflineOnly {
-            return Err(RouteConfigError::InvalidSourceConfig {
-                id: raw.id.clone(),
-                src: "json".into(),
-                reason: format!(
-                    "service '{}' is OfflineOnly (only available when daemon is down); \
-                     json mode requires live-available services",
-                    source_str
-                ),
-            });
-        }
+        // Compile the service invoker via the shared function.
+        let invoker = crate::routes::invokers::compile_service_invoker(source_str, &raw.id)?;
 
         // Validate source_config path templates against declared captures.
         if !raw.response.source_config.is_null() {
@@ -149,9 +82,8 @@ impl ResponseMode for JsonMode {
         }
 
         Ok(Arc::new(CompiledJsonMode {
-            endpoint: descriptor.endpoint.to_string(),
+            invoker,
             source_config_template: raw.response.source_config.clone(),
-            required_caps: Vec::new(), // Extracted from descriptor metadata if available
         }))
     }
 }
@@ -168,60 +100,46 @@ impl CompiledResponseMode for CompiledJsonMode {
 
     async fn handle(
         &self,
-        _compiled: &CompiledRoute,
+        compiled: &CompiledRoute,
         ctx: RouteDispatchContext,
     ) -> Result<axum::response::Response, RouteDispatchError> {
         // Interpolate source_config templates with actual capture values.
-        let params = if self.source_config_template.is_null() {
+        let input = if self.source_config_template.is_null() {
             serde_json::Value::Object(serde_json::Map::new())
         } else {
             interpolation::interpolate_path(&self.source_config_template, &ctx.captures)?
         };
 
-        // Enforce required_caps against principal scopes.
-        if !self.required_caps.is_empty() {
-            let scopes = &ctx.principal.scopes;
-            for cap in &self.required_caps {
-                if !scopes.contains(cap) {
-                    return Ok((
-                        StatusCode::FORBIDDEN,
-                        axum::Json(serde_json::json!({
-                            "error": "insufficient capabilities",
-                            "required": self.required_caps,
-                            "granted": scopes,
-                        })),
+        let inv_ctx = RouteInvocationContext {
+            route_id: compiled.id.clone().into(),
+            method: ctx.request_parts.method,
+            uri: ctx.request_parts.uri,
+            captures: std::collections::BTreeMap::from_iter(ctx.captures),
+            headers: ctx.request_parts.headers,
+            body_raw: ctx.body_raw,
+            input,
+            principal: Some(ctx.principal),
+            state: ctx.state,
+        };
+
+        let result = self.invoker.invoke(inv_ctx).await?;
+
+        match result {
+            RouteInvocationResult::Json(value) => {
+                if value.is_null() {
+                    Ok((
+                        StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({ "error": "not found" })),
                     )
-                        .into_response());
+                        .into_response())
+                } else {
+                    Ok(axum::Json(value).into_response())
                 }
             }
-        }
-
-        // Look up the handler by endpoint. Clone the Arc<HandlerFn> so we
-        // can move state into Arc without borrow conflict.
-        let handler = ctx.state.services.get(&self.endpoint)
-            .cloned()
-            .ok_or_else(|| {
-                RouteDispatchError::Internal(format!(
-                    "service endpoint '{}' not found in registry (json mode dispatch)",
-                    self.endpoint
-                ))
-            })?;
-
-        // Call the service handler in-process.
-        let state_arc = Arc::new(ctx.state);
-        let result = handler(params, state_arc)
-            .await
-            .map_err(|e| RouteDispatchError::Internal(format!("service error: {e}")))?;
-
-        // Null result → 404. Some result → 200 JSON.
-        if result.is_null() {
-            Ok((
-                StatusCode::NOT_FOUND,
-                axum::Json(serde_json::json!({ "error": "not found" })),
-            )
-                .into_response())
-        } else {
-            Ok(axum::Json(result).into_response())
+            other => Err(RouteDispatchError::Internal(format!(
+                "json mode invoker contract violation: expected Json, got {}",
+                other.variant_name()
+            ))),
         }
     }
 }
@@ -250,19 +168,13 @@ fn extract_path_captures(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn compile_ctx() -> ModeCompileContext<'static> {
-        ModeCompileContext {
-            _phantom: std::marker::PhantomData,
-        }
-    }
+    use crate::routes::raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
 
     fn make_raw(
         path: &str,
         source: Option<&str>,
         source_config: serde_json::Value,
     ) -> RawRouteSpec {
-        use crate::routes::raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
         RawRouteSpec {
             section: "routes".into(),
             id: "test-route".into(),
@@ -295,7 +207,7 @@ mod tests {
             Some("service:threads/get"),
             serde_json::json!({ "thread_id": "${path.thread_id}" }),
         );
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     }
 
@@ -303,16 +215,13 @@ mod tests {
     fn compile_rejects_missing_source() {
         let mode = JsonMode;
         let raw = make_raw("/test", None, serde_json::Value::Null);
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("requires `response.source`"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("requires `response.source`"), "got: {msg}");
     }
 
     #[test]
@@ -323,16 +232,13 @@ mod tests {
             Some("tool:rye/core/execute"),
             serde_json::Value::Null,
         );
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("must be 'service:' kind"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("must be 'service:' kind"), "got: {msg}");
     }
 
     #[test]
@@ -343,16 +249,13 @@ mod tests {
             Some("service:nonexistent/handler"),
             serde_json::Value::Null,
         );
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("no service descriptor found"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("no service descriptor found"), "got: {msg}");
     }
 
     #[test]
@@ -381,16 +284,13 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
         };
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("must not set static-mode fields"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("must not set static-mode fields"), "got: {msg}");
     }
 
     #[test]
@@ -422,16 +322,13 @@ mod tests {
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
         };
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("must not have a top-level 'execute' block"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("must not have a top-level 'execute' block"), "got: {msg}");
     }
 
     #[test]
@@ -442,16 +339,13 @@ mod tests {
             Some("service:threads/get"),
             serde_json::json!({ "thread_id": "${path.unknown}" }),
         );
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("undeclared path capture 'unknown'"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("undeclared path capture 'unknown'"), "got: {msg}");
     }
 
     #[test]

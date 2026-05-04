@@ -1,10 +1,15 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use crate::routes::compile::{RouteDispatchContext, VerifierRequestContext};
+use crate::dispatch_error::RouteDispatchError;
+use crate::routes::compile::RouteDispatchContext;
+use crate::routes::invocation::{
+    RouteInvocationContext, RouteInvocationResult,
+};
 use crate::routes::limits::RouteLimiter;
 use crate::state::AppState;
 
@@ -54,16 +59,36 @@ pub async fn custom_route_dispatcher(
     };
     let body_raw = body_bytes.to_vec();
 
-    let verifier_ctx = VerifierRequestContext {
-        method: &method,
-        path: &path,
-        headers: &parts.headers,
-        body_raw: &body_raw,
+    // Build invocation context for auth.
+    let auth_ctx = RouteInvocationContext {
+        route_id: route.id.clone().into(),
+        method: method.clone(),
+        uri: parts.uri.clone(),
+        captures: BTreeMap::from_iter(captures.clone()),
+        headers: parts.headers.clone(),
+        body_raw: body_raw.clone(),
+        input: serde_json::Value::Null,
+        principal: None,
+        state: state.clone(),
     };
 
-    let principal = match route.auth.verify(&route.id, &verifier_ctx, &state) {
-        Ok(p) => p,
+    // Invoke auth invoker.
+    let auth_result = match route.auth_invoker.invoke(auth_ctx).await {
+        Ok(r) => r,
         Err(e) => return e.into_response(),
+    };
+
+    let principal = match auth_result {
+        RouteInvocationResult::Principal(p) => p,
+        other => {
+            let contract = route.auth_invoker.contract();
+            return RouteDispatchError::Internal(format!(
+                "auth invoker contract violation: expected {:?}, got {}",
+                contract.output,
+                other.variant_name()
+            ))
+            .into_response();
+        }
     };
 
     let dispatch_ctx = RouteDispatchContext {

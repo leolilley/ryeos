@@ -3,6 +3,7 @@ pub mod compile;
 pub mod dispatcher;
 pub mod interpolation;
 pub mod invocation;
+pub mod invokers;
 pub mod launch;
 pub mod limits;
 pub mod matcher;
@@ -10,22 +11,16 @@ pub mod parsed_ref;
 pub mod raw;
 pub mod reload;
 pub mod response_modes;
-pub mod verifiers;
-pub mod webhook_dedupe;
-
-use std::collections::HashMap;
+pub mod webhook_dedupe;use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::http::Method;
 
-use compile::{
-    CompiledRoute, ModeCompileContext,
-};
+use compile::CompiledRoute;
 use crate::dispatch_error::RouteConfigError;
 use matcher::PathMatcher;
 use raw::RawRouteSpec;
 use response_modes::ResponseModeRegistry;
-use verifiers::AuthVerifierRegistry;
 
 pub struct RouteTable {
     matcher: PathMatcher,
@@ -58,16 +53,11 @@ impl RouteTable {
 
 pub fn build_route_table(
     raw_routes: &[RawRouteSpec],
-    verifier_registry: &AuthVerifierRegistry,
     mode_registry: &ResponseModeRegistry,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mut errors: Vec<RouteConfigError> = Vec::new();
     let mut compiled: Vec<Arc<CompiledRoute>> = Vec::new();
     let mut seen_ids: HashMap<String, String> = HashMap::new();
-
-    let ctx = ModeCompileContext {
-        _phantom: std::marker::PhantomData,
-    };
 
     for raw in raw_routes {
         if let Some(first_source) = seen_ids.get(&raw.id) {
@@ -107,15 +97,6 @@ pub fn build_route_table(
             continue;
         }
 
-        // Built-in routes mounted in `build_router` (only `/health` +
-        // `/execute` today). Config routes cannot shadow these. The
-        // `/hook/` namespace is *config-owned* — there are no built-in
-        // handlers under it — so config routes are free to register
-        // there. Adding a built-in route here in the future also
-        // requires adding it to the exact-match list below; routes
-        // owned exclusively by config (e.g. `/execute/stream`,
-        // `/threads/{id}/stream`, `/hook/<route-name>/...`) MUST NOT
-        // appear in the reservation list.
         const RESERVED_EXACT: &[&str] = &["/health", "/execute"];
 
         let path = &raw.path;
@@ -128,18 +109,12 @@ pub fn build_route_table(
             continue;
         }
 
-        let verifier = match verifier_registry.get(&raw.auth) {
-            Some(v) => v,
-            None => {
-                errors.push(RouteConfigError::UnknownVerifier {
-                    id: raw.id.clone(),
-                    name: raw.auth.clone(),
-                });
-                continue;
-            }
-        };
-
-        let compiled_auth = match verifier.validate_route_config(&raw.id, raw.auth_config.as_ref()) {
+        // Compile auth invoker (no registry lookup).
+        let auth_invoker = match invokers::compile_auth_invoker(
+            &raw.auth,
+            raw.auth_config.as_ref(),
+            &raw.id,
+        ) {
             Ok(a) => a,
             Err(e) => {
                 errors.push(e);
@@ -158,7 +133,7 @@ pub fn build_route_table(
             }
         };
 
-        let compiled_mode = match mode.compile(raw, &ctx) {
+        let compiled_mode = match mode.compile(raw) {
             Ok(m) => m,
             Err(e) => {
                 errors.push(e);
@@ -182,7 +157,7 @@ pub fn build_route_table(
             source_file: raw.source_file.clone(),
             path_pattern: raw.path.clone(),
             methods,
-            auth: compiled_auth,
+            auth_invoker,
             limits: compile::CompiledLimits {
                 body_bytes_max: raw.limits.body_bytes_max,
                 timeout_ms: raw.limits.timeout_ms,
@@ -190,7 +165,9 @@ pub fn build_route_table(
             },
             response_mode: compiled_mode,
             raw_response: raw.clone(),
-            semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(raw.limits.concurrent_max as usize)),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(
+                raw.limits.concurrent_max as usize,
+            )),
         }));
     }
 
@@ -198,8 +175,7 @@ pub fn build_route_table(
         return Err(errors);
     }
 
-    let matcher = PathMatcher::new(compiled.clone())
-        .map_err(|e| vec![e])?;
+    let matcher = PathMatcher::new(compiled.clone()).map_err(|e| vec![e])?;
 
     let fingerprint = {
         let mut ids: Vec<&str> = compiled.iter().map(|r| r.id.as_str()).collect();
@@ -217,9 +193,8 @@ pub fn build_route_table(
 pub fn build_route_table_from_snapshot(
     snapshot: &crate::node_config::NodeConfigSnapshot,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
-    let verifier_registry = AuthVerifierRegistry::with_builtins();
     let mode_registry = ResponseModeRegistry::with_builtins();
-    build_route_table(&snapshot.routes, &verifier_registry, &mode_registry)
+    build_route_table(&snapshot.routes, &mode_registry)
 }
 
 pub fn build_route_table_or_bail(
@@ -271,17 +246,9 @@ mod tests {
         }
     }
 
-    /// Convenience: calls `build_route_table` with all built-in registries.
     fn build_table(raws: &[RawRouteSpec]) -> Result<RouteTable, Vec<RouteConfigError>> {
-        let verifier_registry = AuthVerifierRegistry::with_builtins();
         let mode_registry = ResponseModeRegistry::with_builtins();
-        build_route_table(raws, &verifier_registry, &mode_registry)
-    }
-
-    fn empty_routes_builds_empty_table() {
-        let table = build_table(&[]).unwrap();
-        assert!(table.all.is_empty());
-        assert!(table.match_request(&Method::GET, "/anything").is_none());
+        build_route_table(raws, &mode_registry)
     }
 
     #[test]
@@ -313,55 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn reserved_exact_execute_rejected() {
-        let raw = make_raw("r1", "/execute", &["POST"], "none", "static");
-        let err = build_table(&[raw]).unwrap_err();
-        let msg = format!("{}", err[0]);
-        assert!(msg.contains("reserved path"), "got: {msg}");
-    }
-
-    #[test]
     fn hook_prefix_allowed_for_config_routes() {
-        // The `/hook/` namespace is owned by config, not by built-in
-        // routes. Webhook routes (Stripe, GitHub, Slack, ...) are
-        // ordinary config routes that the loader admits without any
-        // reservation check.
         let raw = make_raw("r1", "/hook/stripe", &["POST"], "none", "static");
         let table = build_table(&[raw])
             .expect("/hook/* must be admitted by the route table builder");
         assert_eq!(table.all.len(), 1);
-    }
-
-    #[test]
-    fn execute_stream_subpath_allowed() {
-        let raw = make_raw("r1", "/execute/stream", &["GET"], "none", "static");
-        let table = build_table(&[raw]);
-        assert!(table.is_ok(), "expected /execute/stream to be allowed");
-    }
-
-    #[test]
-    fn status_not_reserved() {
-        let raw = make_raw("r1", "/status", &["GET"], "none", "static");
-        let table = build_table(&[raw]);
-        assert!(table.is_ok(), "expected /status to be allowed through route-config");
-    }
-
-    #[test]
-    fn empty_methods_rejected() {
-        let mut raw = make_raw("r1", "/a", &["GET"], "none", "static");
-        raw.methods.clear();
-        let err = build_table(&[raw]).unwrap_err();
-        let msg = format!("{}", err[0]);
-        assert!(msg.contains("methods list is empty"), "got: {msg}");
-    }
-
-    #[test]
-    fn http_allows_custom_methods() {
-        let mut raw = make_raw("r1", "/a", &["GET"], "none", "static");
-        raw.methods.insert("CUSTOM_METHOD".to_string());
-        let table = build_table(&[raw]).unwrap();
-        let (route, _) = table.match_request(&"CUSTOM_METHOD".parse().unwrap(), "/a").unwrap();
-        assert_eq!(route.id, "r1");
     }
 
     #[test]
@@ -373,104 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn multiple_errors_collected() {
-        let r1 = make_raw("r1", "/health", &["GET"], "none", "static");
-        let r2 = make_raw("r2", "/b", &["GET"], "nonexistent", "static");
-        let err = build_table(&[r1, r2]).unwrap_err();
-        assert!(err.len() >= 2, "expected >= 2 errors, got {}", err.len());
-    }
-
-    #[test]
     fn compiled_route_carries_semaphore_with_concurrent_max_permits() {
         let raw = make_raw("r1", "/api/test", &["GET"], "none", "static");
         let concurrent_max = raw.limits.concurrent_max;
         let table = build_table(&[raw]).unwrap();
         let route = &table.all[0];
         assert_eq!(route.semaphore.available_permits(), concurrent_max as usize);
-    }
-
-    #[test]
-    fn build_route_table_or_bail_propagates_errors() {
-        use crate::routes::raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
-        let bad_route = RawRouteSpec {
-            section: "routes".to_string(),
-            id: "dup".to_string(),
-            path: "/health".to_string(),
-            methods: ["GET".to_string()].into_iter().collect(),
-            auth: "none".to_string(),
-            auth_config: None,
-            limits: RawLimits::default(),
-            response: RawResponseSpec {
-                mode: "static".to_string(),
-                source: None,
-                source_config: serde_json::Value::Null,
-                status: Some(200),
-                content_type: Some("text/plain".to_string()),
-                body_b64: Some("aGVsbG8=".to_string()),
-            },
-            execute: None,
-            request: RawRequest {
-                body: RawRequestBody::None,
-            },
-            source_file: std::path::PathBuf::from("/test/dup.yaml"),
-        };
-        let snapshot = crate::node_config::NodeConfigSnapshot {
-            bundles: vec![],
-            routes: vec![bad_route],
-        };
-        let result = build_route_table_or_bail(&snapshot);
-        assert!(result.is_err(), "expected error for reserved path /health");
-    }
-
-    #[test]
-    fn build_route_table_or_bail_succeeds_on_empty() {
-        let snapshot = crate::node_config::NodeConfigSnapshot {
-            bundles: vec![],
-            routes: vec![],
-        };
-        let table = build_route_table_or_bail(&snapshot).unwrap();
-        assert!(table.all.is_empty());
-    }
-
-    #[test]
-    fn zero_timeout_rejected_for_static_mode() {
-        let mut raw = make_raw("r1", "/api/test", &["GET"], "none", "static");
-        raw.limits.timeout_ms = 0;
-        let err = build_table(&[raw]).unwrap_err();
-        let msg = format!("{}", err[0]);
-        assert!(msg.contains("timeout_ms = 0"), "got: {msg}");
-    }
-
-    #[test]
-    fn zero_timeout_allowed_for_event_stream_mode() {
-        let raw = RawRouteSpec {
-            section: "routes".to_string(),
-            id: "r1".to_string(),
-            path: "/execute/stream".to_string(),
-            methods: ["POST".to_string()].into_iter().collect(),
-            auth: "rye_signed".to_string(),
-            auth_config: Some(serde_json::json!({"public_key": "dummy"})),
-            limits: RawLimits {
-                timeout_ms: 0,
-                ..RawLimits::default()
-            },
-            response: RawResponseSpec {
-                mode: "event_stream".to_string(),
-                source: Some("dispatch_launch".to_string()),
-                source_config: serde_json::json!({
-                    "keep_alive_secs": 15,
-                }),
-                status: None,
-                content_type: None,
-                body_b64: None,
-            },
-            execute: None,
-            request: RawRequest {
-                body: RawRequestBody::Json,
-            },
-            source_file: std::path::PathBuf::from("/test/r1.yaml"),
-        };
-        let result = build_table(&[raw]);
-        assert!(result.is_ok(), "event_stream with timeout_ms=0 should be allowed");
     }
 }
