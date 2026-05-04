@@ -53,6 +53,11 @@ pub struct ServiceDescriptor {
     pub endpoint: &'static str,
     /// Live / standalone availability.
     pub availability: ServiceAvailability,
+    /// Capability scopes required to invoke this service.
+    /// Empty `&[]` for unrestricted services; non-empty for protected ones.
+    /// Enforced at route compile time (stored in `CompiledServiceInvocation`)
+    /// and at `/execute` dispatch time (from item metadata).
+    pub required_caps: &'static [&'static str],
     /// Type-erased async handler.
     pub handler: RawHandlerFn,
 }

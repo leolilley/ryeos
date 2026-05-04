@@ -90,6 +90,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/remove",
     endpoint: "bundle.remove",
     availability: ServiceAvailability::OfflineOnly,
+    required_caps: &["node.maintenance"],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)

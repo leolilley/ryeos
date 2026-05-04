@@ -28,6 +28,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/list",
     endpoint: "bundle.list",
     availability: ServiceAvailability::Both,
+    required_caps: &[],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = if params.is_null() {
