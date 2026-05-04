@@ -150,19 +150,11 @@ mod tests {
     use super::*;
 
     fn make_route(id: &str, path: &str, methods: &[&str]) -> Arc<CompiledRoute> {
-        use crate::routes::compile::{AuthVerifier, ResponseMode};
+        use crate::routes::compile::ResponseMode;
         use crate::routes::raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec};
         use crate::routes::response_modes::static_mode::StaticMode;
 
-        // Use `static` mode for the matcher's unit tests: it's the
-        // simplest registered mode whose compile-path produces a
-        // valid `CompiledResponseMode` from a minimal `RawRouteSpec`.
-        // The test only exercises path/method matching — it never
-        // dispatches the route — so the response body is irrelevant.
         let mode = StaticMode;
-        let ctx = crate::routes::compile::ModeCompileContext {
-            _phantom: std::marker::PhantomData,
-        };
         let raw = RawRouteSpec {
             section: "routes".to_string(),
             id: id.to_string(),
@@ -188,15 +180,13 @@ mod tests {
             source_file: raw.source_file.clone(),
             path_pattern: path.to_string(),
             methods: methods.iter().map(|s| s.parse().unwrap()).collect(),
-            auth: crate::routes::verifiers::none::NoneVerifier
-                .validate_route_config(id, None)
-                .unwrap(),
+            auth_invoker: crate::routes::invokers::compile_auth_invoker("none", None, id).unwrap(),
             limits: crate::routes::compile::CompiledLimits {
                 body_bytes_max: 1048576,
                 timeout_ms: 30000,
                 concurrent_max: 100,
             },
-            response_mode: mode.compile(&raw, &ctx).unwrap(),
+            response_mode: mode.compile(&raw).unwrap(),
             raw_response: raw,
             semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(100)),
         })

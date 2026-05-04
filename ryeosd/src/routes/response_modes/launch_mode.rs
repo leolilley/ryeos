@@ -48,7 +48,7 @@ use serde_json::Value;
 
 use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
-    CompiledResponseMode, CompiledRoute, ModeCompileContext, ResponseMode, RouteDispatchContext,
+    CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
 use crate::routes::raw::{RawRequestBody, RawRouteSpec};
 
@@ -75,7 +75,6 @@ impl ResponseMode for LaunchMode {
     fn compile(
         &self,
         raw: &RawRouteSpec,
-        _ctx: &ModeCompileContext,
     ) -> Result<Arc<dyn CompiledResponseMode>, RouteConfigError> {
         if raw.execute.is_some() {
             return Err(RouteConfigError::InvalidResponseSpec {
@@ -319,7 +318,7 @@ impl CompiledResponseMode for CompiledLaunchMode {
 fn build_launch_envelope(
     body: Value,
     route_id: &str,
-    principal: &crate::routes::compile::RoutePrincipal,
+    principal: &crate::routes::invocation::RoutePrincipal,
     received_at_unix: u64,
 ) -> Value {
     let mut headers = serde_json::Map::new();
@@ -354,7 +353,7 @@ fn build_launch_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::compile::RoutePrincipal;
+    use crate::routes::invocation::RoutePrincipal;
     use crate::routes::raw::{RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
 
     fn make_raw(id: &str) -> RawRouteSpec {
@@ -385,16 +384,12 @@ mod tests {
         }
     }
 
-    fn ctx() -> ModeCompileContext<'static> {
-        ModeCompileContext {
-            _phantom: std::marker::PhantomData,
-        }
-    }
+    fn ctx() {}
 
     #[test]
     fn compile_succeeds_on_valid_route() {
         let raw = make_raw("r1");
-        let _ = LaunchMode.compile(&raw, &ctx()).expect("valid launch route compiles");
+        let _ = LaunchMode.compile(&raw).expect("valid launch route compiles");
     }
 
     #[test]
@@ -404,7 +399,7 @@ mod tests {
             item_ref: "directive:x".into(),
             params: Value::Null,
         });
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -416,7 +411,7 @@ mod tests {
     fn compile_rejects_response_source() {
         let mut raw = make_raw("r1");
         raw.response.source = Some("dispatch_launch".into());
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -428,7 +423,7 @@ mod tests {
     fn compile_rejects_static_mode_fields() {
         let mut raw = make_raw("r1");
         raw.response.status = Some(204);
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -440,7 +435,7 @@ mod tests {
     fn compile_rejects_body_none() {
         let mut raw = make_raw("r1");
         raw.request.body = RawRequestBody::None;
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -452,7 +447,7 @@ mod tests {
     fn compile_rejects_body_raw() {
         let mut raw = make_raw("r1");
         raw.request.body = RawRequestBody::Raw;
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -464,14 +459,14 @@ mod tests {
     fn compile_accepts_body_text() {
         let mut raw = make_raw("r1");
         raw.request.body = RawRequestBody::Text;
-        let _ = LaunchMode.compile(&raw, &ctx()).expect("text body must be accepted");
+        let _ = LaunchMode.compile(&raw).expect("text body must be accepted");
     }
 
     #[test]
     fn compile_rejects_missing_source_config() {
         let mut raw = make_raw("r1");
         raw.response.source_config = Value::Null;
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -487,7 +482,7 @@ mod tests {
             "project_path": "/opt/p",
             "stranger": "danger",
         });
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -502,7 +497,7 @@ mod tests {
             "item_ref": "no-colon-here",
             "project_path": "/opt/p",
         });
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -528,7 +523,7 @@ mod tests {
                 "item_ref": ref_str,
                 "project_path": "/opt/p",
             });
-            let r = LaunchMode.compile(&raw, &ctx());
+            let r = LaunchMode.compile(&raw);
             assert!(r.is_ok(), "ref '{}' should compile, got: {:?}", ref_str, r.err());
         }
     }
@@ -540,7 +535,7 @@ mod tests {
             "item_ref": "directive:x",
             "project_path": "relative/path",
         });
-        let err = match LaunchMode.compile(&raw, &ctx()) {
+        let err = match LaunchMode.compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };

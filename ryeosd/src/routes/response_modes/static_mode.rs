@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
-    CompiledResponseMode, CompiledRoute, ModeCompileContext, ResponseMode, RouteDispatchContext,
+    CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
 use crate::routes::raw::RawRouteSpec;
 
@@ -25,7 +25,6 @@ impl ResponseMode for StaticMode {
     fn compile(
         &self,
         raw: &RawRouteSpec,
-        _ctx: &ModeCompileContext,
     ) -> Result<Arc<dyn CompiledResponseMode>, RouteConfigError> {
         let status_raw = raw.response.status.ok_or_else(|| RouteConfigError::InvalidResponseSpec {
             id: raw.id.clone(),
@@ -128,17 +127,11 @@ mod tests {
         }
     }
 
-    fn compile_ctx() -> ModeCompileContext<'static> {
-        ModeCompileContext {
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
     #[test]
     fn valid_static_compiles() {
         let mode = StaticMode;
         let raw = make_raw(Some(200), Some("text/plain"), Some("aGVsbG8="));
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         assert!(result.is_ok());
         let compiled = match result {
             Ok(c) => c,
@@ -157,7 +150,7 @@ mod tests {
     fn bad_base64_rejected() {
         let mode = StaticMode;
         let raw = make_raw(Some(200), Some("text/plain"), Some("not-valid-base64!!!"));
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         match result {
             Ok(_) => panic!("expected error"),
             Err(e) => {
@@ -171,7 +164,7 @@ mod tests {
     fn bad_status_code_rejected() {
         let mode = StaticMode;
         let raw = make_raw(Some(99), Some("text/plain"), Some("aGVsbG8="));
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         match result {
             Ok(_) => panic!("expected error"),
             Err(e) => {
@@ -185,7 +178,7 @@ mod tests {
     fn missing_status_rejected() {
         let mode = StaticMode;
         let raw = make_raw(None, Some("text/plain"), Some("aGVsbG8="));
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         match result {
             Ok(_) => panic!("expected error"),
             Err(e) => {
@@ -199,7 +192,7 @@ mod tests {
     fn missing_content_type_rejected() {
         let mode = StaticMode;
         let raw = make_raw(Some(200), None, Some("aGVsbG8="));
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         match result {
             Ok(_) => panic!("expected error"),
             Err(e) => {
@@ -213,7 +206,7 @@ mod tests {
     fn missing_body_b64_rejected() {
         let mode = StaticMode;
         let raw = make_raw(Some(200), Some("text/plain"), None);
-        let result = mode.compile(&raw, &compile_ctx());
+        let result = mode.compile(&raw);
         match result {
             Ok(_) => panic!("expected error"),
             Err(e) => {
