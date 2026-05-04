@@ -23,64 +23,28 @@ use crate::dispatch_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
+use crate::routes::invocation::{
+    CompiledRouteInvocation, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
+    RouteInvocationResult,
+};
 use crate::routes::raw::{RawRequestBody, RawRouteSpec};
-use crate::services::event_store::EventReplayParams;
-use crate::state_store::PersistedEventRecord;
 
 // ── Shared constants ────────────────────────────────────────────────────
-
-/// Number of events to replay per batch during lag recovery.
-const REPLAY_BATCH_SIZE: usize = 200;
-
-const TERMINAL_EVENT_TYPES: &[&str] = &[
-    "thread_completed",
-    "thread_failed",
-    "thread_cancelled",
-    "thread_killed",
-    "thread_timed_out",
-];
-
-fn is_terminal(event_type: &str) -> bool {
-    TERMINAL_EVENT_TYPES.contains(&event_type)
-}
-
-fn is_terminal_status(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out"
-    )
-}
-
-fn sse_error_event(code: &str, message: &str) -> axum::response::sse::Event {
-    axum::response::sse::Event::default()
-        .event("stream_error")
-        .data(
-            serde_json::json!({"code": code, "error": message}).to_string(),
-        )
-}
-
-fn sse_event_for_persisted(ev: &PersistedEventRecord) -> axum::response::sse::Event {
-    axum::response::sse::Event::default()
-        .event(ev.event_type.clone())
-        .id(ev.chain_seq.to_string())
-        .data(serde_json::to_string(ev).expect("PersistedEventRecord serializes"))
-}
+// (Constants used by compile functions are defined near their usage.)
 
 // ── Compile-time strategy selection ─────────────────────────────────────
 
 /// The compiled strategy selected at route-table build time.
 enum EventStreamStrategy {
-    /// Body-driven launch: parse item_ref from request body, mint thread,
-    /// dispatch via engine, tail events.
+    /// Body-driven launch: mode parses body, invoker spawns dispatch + tails events.
     Gateway {
-        route_id: String,
-        keep_alive_secs: u64,
+        invoker: Arc<dyn CompiledRouteInvocation>,
     },
-    /// Path-driven subscription: extract thread_id from path capture,
-    /// check principal ownership, subscribe to existing thread.
+    /// Path-driven subscription: mode extracts thread_id from captures,
+    /// invoker checks ownership + subscribes to events.
     Subscription {
+        invoker: Arc<dyn CompiledRouteInvocation>,
         thread_id_capture: String,
-        keep_alive_secs: u64,
     },
 }
 
@@ -186,10 +150,13 @@ fn compile_gateway(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfi
         });
     }
 
-    Ok(EventStreamStrategy::Gateway {
-        route_id: raw.id.clone(),
-        keep_alive_secs: cfg.keep_alive_secs,
-    })
+    let invoker = Arc::new(
+        crate::routes::invokers::gateway_stream_invocation::CompiledGatewayStreamInvocation {
+            keep_alive_secs: cfg.keep_alive_secs,
+        },
+    );
+
+    Ok(EventStreamStrategy::Gateway { invoker })
 }
 
 // ── Subscription compile ────────────────────────────────────────────────
@@ -252,9 +219,15 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
         });
     }
 
+    let invoker = Arc::new(
+        crate::routes::invokers::subscription_stream_invocation::CompiledSubscriptionStreamInvocation {
+            keep_alive_secs,
+        },
+    );
+
     Ok(EventStreamStrategy::Subscription {
+        invoker,
         thread_id_capture: capture_name,
-        keep_alive_secs,
     })
 }
 
@@ -345,521 +318,72 @@ impl CompiledResponseMode for CompiledEventStreamMode {
 
     async fn handle(
         &self,
-        _compiled: &CompiledRoute,
+        compiled: &CompiledRoute,
         ctx: RouteDispatchContext,
     ) -> Result<axum::response::Response, RouteDispatchError> {
-        let last_event_id = parse_last_event_id(&ctx.request_parts.headers)?;
-
-        let sse_result = match &self.strategy {
-            EventStreamStrategy::Gateway {
-                route_id,
-                keep_alive_secs,
-            } => dispatch_gateway(&ctx, route_id, *keep_alive_secs).await?,
+        // Prepare invocation input depending on strategy.
+        let (invoker, input): (&Arc<dyn CompiledRouteInvocation>, Value) = match &self.strategy {
+            EventStreamStrategy::Gateway { invoker } => {
+                // Gateway: pass the raw body as input for the invoker to parse.
+                let input = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
+                    RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
+                })?;
+                (invoker, input)
+            }
             EventStreamStrategy::Subscription {
+                invoker,
                 thread_id_capture,
-                keep_alive_secs,
-            } => dispatch_subscription(&ctx, thread_id_capture, last_event_id, *keep_alive_secs)
-                .await?,
+            } => {
+                // Subscription: extract thread_id from path captures.
+                let thread_id = ctx
+                    .captures
+                    .get(thread_id_capture)
+                    .ok_or_else(|| {
+                        RouteDispatchError::Internal(format!(
+                            "path capture '{}' not found in request",
+                            thread_id_capture
+                        ))
+                    })?
+                    .clone();
+                let input = serde_json::json!({ "thread_id": thread_id });
+                (invoker, input)
+            }
         };
 
-        let body_stream = sse_result.stream;
-        let keep_alive_secs = sse_result.keep_alive_secs.max(1);
+        let inv_ctx = RouteInvocationContext {
+            route_id: compiled.id.clone().into(),
+            method: ctx.request_parts.method,
+            uri: ctx.request_parts.uri,
+            captures: std::collections::BTreeMap::from_iter(ctx.captures),
+            headers: ctx.request_parts.headers,
+            body_raw: ctx.body_raw,
+            input,
+            principal: Some(ctx.principal),
+            state: ctx.state,
+        };
 
-        let keep_alive = KeepAlive::new()
-            .interval(Duration::from_secs(keep_alive_secs))
-            .text(":");
+        let result = crate::routes::invocation::invoke_checked(
+            invoker.as_ref(),
+            InvocationCheck {
+                expected_output: RouteInvocationOutput::Stream,
+            },
+            inv_ctx,
+        )
+        .await?;
 
-        let sse = Sse::new(body_stream).keep_alive(keep_alive);
-
-        Ok(sse.into_response())
-    }
-}
-
-/// SSE event stream returned by both strategies.
-struct SseEventStream {
-    stream: std::pin::Pin<
-        Box<
-            dyn tokio_stream::Stream<
-                    Item = Result<axum::response::sse::Event, std::convert::Infallible>,
-                > + Send,
-        >,
-    >,
-    keep_alive_secs: u64,
-}
-
-// ── Gateway dispatch ────────────────────────────────────────────────────
-
-/// Typed body shape for `POST /execute/stream`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LaunchRequest {
-    item_ref: String,
-    project_path: String,
-    parameters: Value,
-}
-
-async fn dispatch_gateway(
-    ctx: &RouteDispatchContext,
-    route_id: &str,
-    keep_alive_secs: u64,
-) -> Result<SseEventStream, RouteDispatchError> {
-    // Gateway does not support Last-Event-ID (it mints a new thread).
-    // The caller must start from the beginning of the new thread's events.
-
-    let req: LaunchRequest = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
-        RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
-    })?;
-
-    let item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&req.item_ref).map_err(|e| {
-        RouteDispatchError::BadRequest(format!(
-            "invalid item_ref '{}': {}",
-            req.item_ref, e
-        ))
-    })?;
-
-    let project_path =
-        crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path).map_err(
-            |e| RouteDispatchError::BadRequest(format!("project_path: {e}")),
-        )?;
-
-    let thread_id = crate::services::thread_lifecycle::new_thread_id();
-
-    let span = tracing::info_span!(
-        "dispatch_launch_sse",
-        route_id = route_id,
-        thread_id = thread_id.as_str(),
-        item_ref_kind = item_ref.kind(),
-    );
-
-    let hub = ctx.state.event_streams.clone();
-    let mut rx = hub.subscribe(&thread_id);
-
-    let mut launch_handle = crate::routes::launch::spawn_dispatch_launch(
-        &ctx.state,
-        item_ref,
-        project_path,
-        req.parameters,
-        ctx.principal.id.clone(),
-        ctx.principal.scopes.clone(),
-        thread_id.clone(),
-    );
-
-    let events_svc = ctx.state.events.clone();
-    let state_store_clone = ctx.state.state_store.clone();
-    let thread_id_for_stream = thread_id.clone();
-
-    let stream = async_stream::stream! {
-        let _guard = span.enter();
-        yield Ok(
-            axum::response::sse::Event::default()
-                .event("stream_started")
-                .data(serde_json::json!({"thread_id": thread_id_for_stream}).to_string())
-        );
-
-        let mut current_max: i64 = 0;
-        let replay_batch_size = REPLAY_BATCH_SIZE;
-
-        loop {
-            tokio::select! {
-                recv_result = rx.recv() => {
-                    match recv_result {
-                        Ok(ev) => {
-                            let event_type = ev.event_type.clone();
-                            if ev.chain_seq > current_max {
-                                current_max = ev.chain_seq;
-                                yield Ok(
-                                    axum::response::sse::Event::default()
-                                        .event(ev.event_type.clone())
-                                        .id(ev.chain_seq.to_string())
-                                        .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                );
-                            }
-                            if is_terminal(&event_type) {
-                                return;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            let mut lag_max = current_max;
-                            let mut lag_error: Option<String> = None;
-                            let mut next_after: Option<i64> =
-                                if current_max > 0 { Some(current_max) } else { None };
-                            loop {
-                                let page = events_svc.replay(&EventReplayParams {
-                                    chain_root_id: None,
-                                    thread_id: Some(thread_id_for_stream.clone()),
-                                    after_chain_seq: next_after,
-                                    limit: replay_batch_size,
-                                });
-                                match page {
-                                    Ok(page_result) => {
-                                        if page_result.events.is_empty() {
-                                            break;
-                                        }
-                                        for ev in &page_result.events {
-                                            if ev.chain_seq > lag_max {
-                                                lag_max = ev.chain_seq;
-                                                yield Ok(
-                                                    axum::response::sse::Event::default()
-                                                        .event(ev.event_type.clone())
-                                                        .id(ev.chain_seq.to_string())
-                                                        .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                                );
-                                                if is_terminal(&ev.event_type) {
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        if page_result.next_cursor.is_none() {
-                                            break;
-                                        }
-                                        next_after = Some(lag_max);
-                                    }
-                                    Err(e) => {
-                                        lag_error = Some(format!("lag replay failed: {e}"));
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if let Some(err_msg) = lag_error {
-                                let thread = state_store_clone.get_thread(&thread_id_for_stream);
-                                if let Ok(Some(detail)) = thread {
-                                    if is_terminal_status(&detail.status) {
-                                        return;
-                                    }
-                                }
-                                yield Ok(sse_error_event("replay_failed", &err_msg));
-                                return;
-                            }
-
-                            current_max = lag_max;
-
-                            tracing::info!(
-                                thread_id = %thread_id_for_stream,
-                                lagged = n,
-                                "dispatch_launch SSE subscriber lag recovery complete"
-                            );
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return;
-                        }
-                    }
-                }
-                join_result = &mut launch_handle => {
-                    match join_result {
-                        Ok(Ok(())) => {
-                            // Post-launch drain: replay any events the broadcast
-                            // didn't deliver from the durable store.
-                            let mut next_after: Option<i64> =
-                                if current_max > 0 { Some(current_max) } else { None };
-                            let mut saw_terminal = false;
-                            loop {
-                                let page = events_svc.replay(&EventReplayParams {
-                                    chain_root_id: None,
-                                    thread_id: Some(thread_id_for_stream.clone()),
-                                    after_chain_seq: next_after,
-                                    limit: replay_batch_size,
-                                });
-                                match page {
-                                    Ok(page_result) => {
-                                        if page_result.events.is_empty() {
-                                            break;
-                                        }
-                                        for ev in &page_result.events {
-                                            if ev.chain_seq > current_max {
-                                                current_max = ev.chain_seq;
-                                                yield Ok(
-                                                    axum::response::sse::Event::default()
-                                                        .event(ev.event_type.clone())
-                                                        .id(ev.chain_seq.to_string())
-                                                        .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                                );
-                                                if is_terminal(&ev.event_type) {
-                                                    saw_terminal = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if saw_terminal {
-                                            return;
-                                        }
-                                        if page_result.next_cursor.is_none() {
-                                            break;
-                                        }
-                                        next_after = Some(current_max);
-                                    }
-                                    Err(e) => {
-                                        yield Ok(sse_error_event("post_launch_replay_failed", &format!("post-launch replay failed: {e}")));
-                                        return;
-                                    }
-                                }
-                            }
-                            let detail = state_store_clone.get_thread(&thread_id_for_stream);
-                            if let Ok(Some(d)) = detail {
-                                if is_terminal_status(&d.status) {
-                                    return;
-                                }
-                            }
-                            yield Ok(sse_error_event("thread_not_terminal", "launch completed but thread is not terminal"));
-                            return;
-                        }
-                        Ok(Err(e)) => {
-                            yield Ok(sse_error_event(e.code(), &format!("launch failed: {e}")));
-                            return;
-                        }
-                        Err(_) => {
-                            yield Ok(sse_error_event("task_panicked", "launch task panicked"));
-                            return;
-                        }
-                    }
-                }
+        match result {
+            RouteInvocationResult::Stream(stream) => {
+                let keep_alive_secs = stream.keep_alive_secs.max(1);
+                let keep_alive = KeepAlive::new()
+                    .interval(Duration::from_secs(keep_alive_secs))
+                    .text(":");
+                let sse = Sse::new(stream.events).keep_alive(keep_alive);
+                Ok(sse.into_response())
             }
+            // invoke_checked guarantees Stream.
+            _ => unreachable!("invoke_checked enforces Stream"),
         }
-    };
-
-    Ok(SseEventStream {
-        stream: Box::pin(stream),
-        keep_alive_secs,
-    })
-}
-
-// ── Subscription dispatch ───────────────────────────────────────────────
-
-async fn dispatch_subscription(
-    ctx: &RouteDispatchContext,
-    thread_id_capture: &str,
-    last_event_id: Option<i64>,
-    keep_alive_secs: u64,
-) -> Result<SseEventStream, RouteDispatchError> {
-    let thread_id = ctx
-        .captures
-        .get(thread_id_capture)
-        .ok_or_else(|| {
-            RouteDispatchError::Internal(format!(
-                "path capture '{}' not found in request",
-                thread_id_capture
-            ))
-        })?
-        .clone();
-
-    let thread_detail = ctx
-        .state
-        .state_store
-        .get_thread(&thread_id)
-        .map_err(|e| RouteDispatchError::Internal(e.to_string()))?
-        .ok_or(RouteDispatchError::NotFound)?;
-
-    // Principal ownership check: only the thread creator can subscribe.
-    let principal_id = &ctx.principal.id;
-    let requested_by = match &thread_detail.requested_by {
-        Some(r) => r,
-        None => return Err(RouteDispatchError::NotFound),
-    };
-
-    if principal_id != requested_by {
-        return Err(RouteDispatchError::NotFound);
     }
-
-    let hub = ctx.state.event_streams.clone();
-    let mut rx = hub.subscribe(&thread_id);
-
-    let last_seen = last_event_id;
-
-    let events_svc = ctx.state.events.clone();
-    let state_store_clone = ctx.state.state_store.clone();
-
-    let stream = async_stream::stream! {
-        yield Ok(
-            axum::response::sse::Event::default()
-                .event("stream_started")
-                .data(serde_json::json!({"thread_id": thread_id}).to_string())
-        );
-
-        let replay_batch_size = REPLAY_BATCH_SIZE;
-
-        let replay_result = events_svc
-            .replay(&EventReplayParams {
-                chain_root_id: None,
-                thread_id: Some(thread_id.clone()),
-                after_chain_seq: last_seen,
-                limit: replay_batch_size,
-            })
-            .map_err(|e| RouteDispatchError::Internal(e.to_string()));
-
-        match replay_result {
-            Ok(result) => {
-                let mut max_seq = last_seen.unwrap_or(0);
-                let mut saw_terminal = false;
-                let mut yielded_any_replay_event = false;
-
-                for ev in &result.events {
-                    max_seq = max_seq.max(ev.chain_seq);
-                    yield Ok(sse_event_for_persisted(ev));
-                    yielded_any_replay_event = true;
-                    if is_terminal(&ev.event_type) {
-                        saw_terminal = true;
-                    }
-                }
-
-                if saw_terminal {
-                    return;
-                }
-
-                let mut cursor = result.next_cursor;
-                while let Some(_c) = cursor {
-                    let page = events_svc
-                        .replay(&EventReplayParams {
-                            chain_root_id: None,
-                            thread_id: Some(thread_id.clone()),
-                            after_chain_seq: Some(max_seq),
-                            limit: replay_batch_size,
-                        });
-
-                    match page {
-                        Ok(page_result) => {
-                            if page_result.events.is_empty() {
-                                break;
-                            }
-                            for ev in &page_result.events {
-                                max_seq = max_seq.max(ev.chain_seq);
-                                yield Ok(sse_event_for_persisted(ev));
-                                yielded_any_replay_event = true;
-                                if is_terminal(&ev.event_type) {
-                                    return;
-                                }
-                            }
-                            cursor = page_result.next_cursor;
-                        }
-                        Err(e) => {
-                            yield Ok(sse_error_event("replay_paging_failed", &format!("replay paging failed: {e}")));
-                            return;
-                        }
-                    }
-                }
-
-                if !yielded_any_replay_event {
-                    let detail = state_store_clone.get_thread(&thread_id);
-                    if let Ok(Some(d)) = &detail {
-                        if is_terminal_status(&d.status) {
-                            return;
-                        }
-                    }
-                }
-
-                let mut current_max = max_seq;
-                loop {
-                    match rx.recv().await {
-                        Ok(ev) => {
-                            if ev.chain_seq <= current_max {
-                                continue;
-                            }
-                            current_max = ev.chain_seq;
-                            yield Ok(sse_event_for_persisted(&ev));
-                            if is_terminal(&ev.event_type) {
-                                return;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            let lag_cursor = current_max;
-                            let mut lag_max = current_max;
-                            let mut lag_error: Option<String> = None;
-
-                            loop {
-                                let page_result = events_svc
-                                    .replay(&EventReplayParams {
-                                        chain_root_id: None,
-                                        thread_id: Some(thread_id.clone()),
-                                        after_chain_seq: if lag_max > lag_cursor {
-                                            Some(lag_max)
-                                        } else {
-                                            Some(lag_cursor)
-                                        },
-                                        limit: replay_batch_size,
-                                    });
-
-                                match page_result {
-                                    Ok(page) => {
-                                        if page.events.is_empty() {
-                                            break;
-                                        }
-                                        for ev in &page.events {
-                                            lag_max = lag_max.max(ev.chain_seq);
-                                            if ev.chain_seq > current_max {
-                                                yield Ok(sse_event_for_persisted(ev));
-                                                if is_terminal(&ev.event_type) {
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        if page.next_cursor.is_none() {
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        lag_error = Some(format!("replay failed: {e}"));
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if let Some(err_msg) = lag_error {
-                                let thread = state_store_clone.get_thread(&thread_id);
-                                if let Ok(Some(detail)) = thread {
-                                    if is_terminal_status(&detail.status) {
-                                        return;
-                                    }
-                                }
-                                yield Ok(sse_error_event("replay_failed", &err_msg));
-                                return;
-                            }
-
-                            current_max = lag_max;
-
-                            tracing::info!(
-                                thread_id = %thread_id,
-                                lagged = n,
-                                "SSE subscriber lag recovery complete"
-                            );
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            return;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                yield Ok(sse_error_event("initial_replay_failed", &format!("replay failed: {e}")));
-                return;
-            }
-        }
-    };
-
-    Ok(SseEventStream {
-        stream: Box::pin(stream),
-        keep_alive_secs,
-    })
-}
-
-// ── Last-Event-ID parsing ───────────────────────────────────────────────
-
-fn parse_last_event_id(
-    headers: &axum::http::HeaderMap,
-) -> Result<Option<i64>, RouteDispatchError> {
-    let raw = match headers.get("last-event-id") {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-
-    let s = raw.to_str().map_err(|_| RouteDispatchError::BadLastEventId)?;
-    let n = s
-        .parse::<i64>()
-        .map_err(|_| RouteDispatchError::BadLastEventId)?;
-
-    if n < 0 {
-        return Err(RouteDispatchError::BadLastEventId);
-    }
-
-    Ok(Some(n))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -867,6 +391,9 @@ fn parse_last_event_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::invokers::gateway_stream_invocation::LaunchRequest;
+    use crate::routes::invokers::stream_helpers::is_terminal_status;
+    use crate::routes::invokers::subscription_stream_invocation::parse_last_event_id;
     use crate::routes::raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
 
     fn compile_ctx() {}

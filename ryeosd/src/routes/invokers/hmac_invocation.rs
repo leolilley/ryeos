@@ -1548,6 +1548,510 @@ mod tests {
         });
     }
 
+    // ── Stale timestamp ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn stripe_style_stale_timestamp_rejected() {
+        with_secret_env("RYEOSD_TEST_HMAC_STRIPE_STALE", "stripe-secret", |env| async move {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [
+                    { "from": "header_pair", "header": "stripe-signature", "key": "t" },
+                    { "literal": "." },
+                    { "from": "body" },
+                ],
+                "signature": {
+                    "header": "stripe-signature",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "pair_values", "key": "v1" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header_pair", "header": "stripe-signature", "key": "t" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let compiled = compile_hmac_verifier("r1", &cfg).unwrap();
+            let now = now_unix();
+            let stale = now.saturating_sub(600);
+            let body = b"{}";
+            let mut sp = Vec::new();
+            sp.extend_from_slice(stale.to_string().as_bytes());
+            sp.push(b'.');
+            sp.extend_from_slice(body);
+            let sig = hex_encode(&hmac_sha256(b"stripe-secret", &sp), false);
+            let header = format!("t={stale},v1={sig}");
+            let headers = header_map(&[("stripe-signature", &header)]);
+            let (_tmp, state) = build_test_state();
+            let ctx = make_invocation_ctx(state, headers, body);
+            let err = expect_dispatch_err(compiled.invoke(ctx).await);
+            assert!(matches!(err, RouteDispatchError::Unauthorized));
+        }).await;
+    }
+
+    // ── Slack-style end-to-end ──────────────────────────────
+
+    #[tokio::test]
+    async fn slack_style_valid_signature_with_synthesized_delivery_id() {
+        with_secret_env("RYEOSD_TEST_HMAC_SLACK_OK", "slack-secret", |env| async move {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [
+                    { "literal": "v0:" },
+                    { "from": "header", "header": "x-slack-request-timestamp" },
+                    { "literal": ":" },
+                    { "from": "body" },
+                ],
+                "signature": {
+                    "header": "x-slack-signature",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "prefix", "prefix": "v0=" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-slack-request-timestamp" },
+                    "tolerance_secs": 300,
+                },
+                "delivery_id": {
+                    "extract": {
+                        "from": "synthesized",
+                        "template": "${header.x-slack-request-timestamp}:${signature_prefix:20}",
+                    },
+                },
+            });
+            let compiled = compile_hmac_verifier("r1", &cfg).unwrap();
+            let now = now_unix();
+            let body = b"token=xxx&team_id=T1";
+            let mut sp = Vec::new();
+            sp.extend_from_slice(b"v0:");
+            sp.extend_from_slice(now.to_string().as_bytes());
+            sp.push(b':');
+            sp.extend_from_slice(body);
+            let sig = hex_encode(&hmac_sha256(b"slack-secret", &sp), false);
+            let sig_header = format!("v0={sig}");
+            let headers = header_map(&[
+                ("x-slack-request-timestamp", &now.to_string()),
+                ("x-slack-signature", &sig_header),
+            ]);
+            let (_tmp, state) = build_test_state();
+            let ctx = make_invocation_ctx(state, headers, body);
+            let result = compiled.invoke(ctx).await.unwrap();
+            match result {
+                RouteInvocationResult::Principal(p) => {
+                    let did = p
+                        .metadata
+                        .get("delivery_id")
+                        .map(String::as_str)
+                        .expect("delivery_id present");
+                    let expected_prefix: String = sig_header.chars().take(20).collect();
+                    assert_eq!(did, format!("{}:{}", now, expected_prefix));
+                }
+                other => panic!("expected Principal, got {:?}", other.variant_name()),
+            }
+        }).await;
+    }
+
+    // ── More compile-time validation ────────────────────────
+
+    #[test]
+    fn compile_rejects_unset_env() {
+        std::env::remove_var("RYEOSD_TEST_HMAC_UNSET_VAR");
+        let cfg = serde_json::json!({
+            "secret_env": "RYEOSD_TEST_HMAC_UNSET_VAR",
+            "signed_payload": [{ "from": "body" }],
+            "signature": {
+                "header": "x-sig",
+                "encoding": "hex_lower",
+                "select": { "kind": "exact" },
+            },
+            "timestamp": {
+                "extract": { "from": "header", "header": "x-ts" },
+                "tolerance_secs": 30,
+            },
+        });
+        let err = expect_err(compile_hmac_verifier("r1", &cfg));
+        assert!(format!("{err}").contains("is not set"), "got: {err}");
+    }
+
+    #[test]
+    fn compile_rejects_empty_signed_payload() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_EMPTY_PAYLOAD", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(
+                format!("{err}").contains("signed_payload must not be empty"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_rejects_uppercase_header_name() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_UC_HEADER", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [
+                    { "from": "header", "header": "X-Sig" },
+                ],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("must be lowercase ASCII"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn compile_rejects_forbidden_header_name() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_FORBID", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "authorization",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("forbidden list"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn compile_rejects_bad_encoding() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_BAD_ENC", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "rot13",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("encoding 'rot13'"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn compile_rejects_select_kind_pair_values_without_key() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_SELECT_NO_KEY", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "pair_values" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("requires `key`"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn compile_rejects_select_kind_prefix_without_prefix() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_SELECT_NO_PREFIX", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "prefix" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("requires `prefix`"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn compile_rejects_select_kind_unknown() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_SELECT_UNK", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "magic" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("select.kind 'magic'"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn compile_rejects_zero_tolerance() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_ZERO_TOL", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 0,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(
+                format!("{err}").contains("tolerance_secs must be > 0"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_rejects_zero_dedupe_ttl() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_ZERO_TTL", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "delivery_id": {
+                    "extract": { "from": "header", "header": "x-id" },
+                },
+                "dedupe": { "ttl_secs": 0, "max_entries": 10 },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(
+                format!("{err}").contains("dedupe.ttl_secs must be > 0"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_rejects_zero_dedupe_capacity() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_ZERO_CAP", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "delivery_id": {
+                    "extract": { "from": "header", "header": "x-id" },
+                },
+                "dedupe": { "ttl_secs": 60, "max_entries": 0 },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(
+                format!("{err}").contains("dedupe.max_entries must be > 0"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_rejects_dedupe_without_delivery_id() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_DEDUP_NO_DID", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "dedupe": { "ttl_secs": 60, "max_entries": 10 },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(
+                format!("{err}").contains("requires `delivery_id`"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_rejects_synthesized_in_signed_payload() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_SYN_PAYLOAD", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [
+                    { "from": "synthesized", "template": "${header.x-foo}" },
+                ],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(
+                format!("{err}").contains("from=synthesized is not allowed in signed_payload"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_rejects_nested_json_path() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_NESTED_PATH", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+                "delivery_id": {
+                    "extract": { "from": "body_json_path", "path": "data.id" },
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(
+                format!("{err}").contains("nested paths are not supported"),
+                "got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_rejects_unknown_template_variable() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_BAD_TEMPLATE", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+                "delivery_id": {
+                    "extract": {
+                        "from": "synthesized",
+                        "template": "${request.body}",
+                    },
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("unknown variable"), "got: {err}");
+        });
+    }
+
+    #[test]
+    fn compile_rejects_unterminated_template() {
+        with_secret_env_sync("RYEOSD_TEST_HMAC_UNTERM_TEMPL", "x", |env| {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "timestamp": {
+                    "extract": { "from": "header", "header": "x-ts" },
+                    "tolerance_secs": 30,
+                },
+                "delivery_id": {
+                    "extract": {
+                        "from": "synthesized",
+                        "template": "${header.x-foo",
+                    },
+                },
+            });
+            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            assert!(format!("{err}").contains("unterminated"), "got: {err}");
+        });
+    }
+
+    // ── Template parser ─────────────────────────────────────
+
+    #[test]
+    fn template_parser_accepts_known_variables() {
+        let parts =
+            parse_synthesized_template("r1", "test", "${header.x-foo}-${signature_prefix:8}-tail")
+                .unwrap();
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(parts[0], TemplatePart::Header(_)));
+        assert!(matches!(parts[1], TemplatePart::Literal(ref s) if s == "-"));
+        assert!(matches!(parts[2], TemplatePart::SignaturePrefix(8)));
+        assert!(matches!(parts[3], TemplatePart::Literal(ref s) if s == "-tail"));
+    }
+
+    #[test]
+    fn template_parser_accepts_header_pair() {
+        let parts = parse_synthesized_template("r1", "test", "${header_pair.x-foo.k}").unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            TemplatePart::HeaderPair { header, key } => {
+                assert_eq!(header.as_str(), "x-foo");
+                assert_eq!(key, "k");
+            }
+            _ => panic!("expected header_pair"),
+        }
+    }
+
+    // ── Helper function tests ───────────────────────────────
+
     #[test]
     fn helper_check_timestamp_window() {
         assert!(check_timestamp_window(100, 200, 300).is_ok());
@@ -1564,18 +2068,68 @@ mod tests {
     #[test]
     fn helper_extract_pair_value() {
         assert_eq!(extract_pair_value("a=1,b=2,c=3", "b"), Some("2"));
+        assert_eq!(extract_pair_value(" a=1 , b=2 ", "b"), Some("2"));
         assert_eq!(extract_pair_value("a=1", "z"), None);
     }
 
     #[test]
-    fn template_parser_accepts_known_variables() {
-        let parts =
-            parse_synthesized_template("r1", "test", "${header.x-foo}-${signature_prefix:8}-tail")
-                .unwrap();
-        assert_eq!(parts.len(), 4);
-        assert!(matches!(parts[0], TemplatePart::Header(_)));
-        assert!(matches!(parts[1], TemplatePart::Literal(ref s) if s == "-"));
-        assert!(matches!(parts[2], TemplatePart::SignaturePrefix(8)));
-        assert!(matches!(parts[3], TemplatePart::Literal(ref s) if s == "-tail"));
+    fn helper_extract_body_json_string_ok() {
+        let s = extract_body_json_string(b"{\"id\":\"x\"}", "id").unwrap();
+        assert_eq!(s, "x");
+    }
+
+    #[test]
+    fn helper_extract_body_json_string_missing() {
+        let err = extract_body_json_string(b"{\"other\":1}", "id").unwrap_err();
+        assert!(err.contains("missing top-level key"), "got: {err}");
+    }
+
+    // ── Principal / dedupe integration ──────────────────────
+
+    #[test]
+    fn anonymous_principal_uses_btreemap() {
+        let p = RoutePrincipal::anonymous("x".into(), "test");
+        assert_eq!(p.metadata, BTreeMap::new());
+    }
+
+    #[tokio::test]
+    async fn dedupe_isolated_per_route() {
+        with_secret_env("RYEOSD_TEST_HMAC_DEDUP_ISO", "secret", |env| async move {
+            let cfg = serde_json::json!({
+                "secret_env": env,
+                "signed_payload": [{ "from": "body" }],
+                "signature": {
+                    "header": "x-sig",
+                    "encoding": "hex_lower",
+                    "select": { "kind": "exact" },
+                },
+                "delivery_id": { "extract": { "from": "header", "header": "x-id" } },
+                "dedupe": { "ttl_secs": 600, "max_entries": 64 },
+            });
+            let compiled_a = compile_hmac_verifier("route_a", &cfg).unwrap();
+            let compiled_b = compile_hmac_verifier("route_b", &cfg).unwrap();
+            let body = b"";
+            let sig = hex_encode(&hmac_sha256(b"secret", body), false);
+            let headers = header_map(&[("x-sig", &sig), ("x-id", "evt_1")]);
+            let (_tmp, state) = build_test_state();
+
+            // Same delivery_id on two unrelated routes — both fresh.
+            // Each context uses the correct route_id so dedupe is isolated.
+            let mut ctx_a = make_invocation_ctx(state.clone(), headers.clone(), body);
+            ctx_a.route_id = "route_a".into();
+            let result_a = compiled_a.invoke(ctx_a).await.unwrap();
+            assert!(matches!(result_a, RouteInvocationResult::Principal(_)));
+
+            let mut ctx_b = make_invocation_ctx(state.clone(), headers.clone(), body);
+            ctx_b.route_id = "route_b".into();
+            let result_b = compiled_b.invoke(ctx_b).await.unwrap();
+            assert!(matches!(result_b, RouteInvocationResult::Principal(_)));
+
+            // Second hit on route_a → replay.
+            let mut ctx_a2 = make_invocation_ctx(state, headers, body);
+            ctx_a2.route_id = "route_a".into();
+            let err = expect_dispatch_err(compiled_a.invoke(ctx_a2).await);
+            assert!(matches!(err, RouteDispatchError::Unauthorized));
+        }).await;
     }
 }

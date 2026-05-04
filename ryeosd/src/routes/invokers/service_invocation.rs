@@ -49,11 +49,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                 .unwrap_or(&[]);
             for cap in &self.required_caps {
                 if !scopes.contains(cap) {
-                    return Ok(RouteInvocationResult::Json(serde_json::json!({
-                        "error": "insufficient capabilities",
-                        "required": self.required_caps,
-                        "granted": scopes,
-                    })));
+                    return Err(RouteDispatchError::Unauthorized);
                 }
             }
         }

@@ -6,10 +6,14 @@
 //! - Streaming sources → `CompiledGatewayLaunch`, `CompiledThreadsEventsStream`
 //! - Launch mode → `CompiledLaunchInvocation`
 
+pub mod gateway_stream_invocation;
 pub mod hmac_invocation;
+pub mod launch_invocation;
 pub mod none_invocation;
 pub mod rye_signed_invocation;
 pub mod service_invocation;
+pub mod stream_helpers;
+pub mod subscription_stream_invocation;
 
 use std::sync::Arc;
 
@@ -108,4 +112,56 @@ pub fn compile_service_invoker(
         endpoint: descriptor.endpoint.to_string(),
         required_caps: Vec::new(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_auth_invoker_unknown_verifier_rejected() {
+        let result = compile_auth_invoker("unknown_key", None, "r1");
+        match result {
+            Err(RouteConfigError::UnknownVerifier { id, name }) => {
+                assert_eq!(id, "r1");
+                assert_eq!(name, "unknown_key");
+            }
+            Err(other) => panic!("expected UnknownVerifier, got: {other}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn compile_auth_invoker_none_succeeds() {
+        let invoker = compile_auth_invoker("none", None, "r1").unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Principal
+        ));
+    }
+
+    #[test]
+    fn compile_auth_invoker_rye_signed_succeeds() {
+        let invoker = compile_auth_invoker("rye_signed", None, "r1").unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Principal
+        ));
+    }
+
+    #[test]
+    fn compile_auth_invoker_hmac_requires_config() {
+        let result = compile_auth_invoker("hmac", None, "r1");
+        match result {
+            Err(RouteConfigError::InvalidSourceConfig { id, src, reason }) => {
+                assert_eq!(id, "r1");
+                assert_eq!(src, "hmac_verifier");
+                assert!(reason.contains("auth_config is required"), "got: {reason}");
+            }
+            Err(other) => panic!("expected InvalidSourceConfig, got: {other}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
 }

@@ -184,3 +184,79 @@ pub trait CompiledRouteInvocation: Send + Sync {
         ctx: RouteInvocationContext,
     ) -> Result<RouteInvocationResult, RouteDispatchError>;
 }
+
+// ── Contract enforcement ──────────────────────────────────────────────────
+
+/// Expected contract for an invocation call.
+///
+/// Modes pass this to `invoke_checked` so the enforcement layer can verify
+/// the invoker's declared contract matches what the mode expects before
+/// calling it, and verify the result type matches after.
+pub struct InvocationCheck {
+    /// What `RouteInvocationOutput` the mode expects the invoker to produce.
+    pub expected_output: RouteInvocationOutput,
+}
+
+/// Central contract enforcement for all route invocation.
+///
+/// 1. Verifies the invoker's declared output matches what the mode expects.
+/// 2. Enforces `PrincipalPolicy` against the context's principal.
+/// 3. Calls the invoker.
+/// 4. Verifies the returned result type matches the declared contract.
+///
+/// Every mode should use this instead of calling `invoker.invoke()` directly.
+pub async fn invoke_checked(
+    invoker: &dyn CompiledRouteInvocation,
+    check: InvocationCheck,
+    ctx: RouteInvocationContext,
+) -> Result<RouteInvocationResult, RouteDispatchError> {
+    let contract = invoker.contract();
+
+    // 1. Verify output contract matches mode expectation.
+    if contract.output != check.expected_output {
+        return Err(RouteDispatchError::Internal(format!(
+            "contract mismatch: mode expects {:?}, invoker declares {:?}",
+            check.expected_output, contract.output
+        )));
+    }
+
+    // 2. Enforce principal policy.
+    let has_principal = ctx.principal.is_some();
+    match contract.principal {
+        PrincipalPolicy::Forbidden => {
+            if has_principal {
+                return Err(RouteDispatchError::Internal(
+                    "invoker forbids principal but context has one".into(),
+                ));
+            }
+        }
+        PrincipalPolicy::Optional => { /* no requirement */ }
+        PrincipalPolicy::Required => {
+            if !has_principal {
+                return Err(RouteDispatchError::Unauthorized);
+            }
+        }
+    }
+
+    // 3. Call invoker.
+    let result = invoker.invoke(ctx).await?;
+
+    // 4. Verify result type matches declared contract.
+    let result_matches = match (&result, contract.output) {
+        (RouteInvocationResult::Json(_), RouteInvocationOutput::Json) => true,
+        (RouteInvocationResult::Stream(_), RouteInvocationOutput::Stream) => true,
+        (RouteInvocationResult::Principal(_), RouteInvocationOutput::Principal) => true,
+        (RouteInvocationResult::Accepted { .. }, RouteInvocationOutput::Accepted) => true,
+        _ => false,
+    };
+
+    if !result_matches {
+        return Err(RouteDispatchError::Internal(format!(
+            "invoker returned {} but contract declares {:?}",
+            result.variant_name(),
+            contract.output
+        )));
+    }
+
+    Ok(result)
+}
