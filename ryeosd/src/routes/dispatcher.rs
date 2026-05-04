@@ -8,7 +8,8 @@ use axum::response::{IntoResponse, Response};
 use crate::dispatch_error::RouteDispatchError;
 use crate::routes::compile::RouteDispatchContext;
 use crate::routes::invocation::{
-    RouteInvocationContext, RouteInvocationResult,
+    RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
+    InvocationCheck,
 };
 use crate::routes::limits::RouteLimiter;
 use crate::state::AppState;
@@ -72,23 +73,25 @@ pub async fn custom_route_dispatcher(
         state: state.clone(),
     };
 
-    // Invoke auth invoker.
-    let auth_result = match route.auth_invoker.invoke(auth_ctx).await {
+    // Invoke auth invoker through the central contract enforcement layer.
+    let auth_result = match crate::routes::invocation::invoke_checked(
+        route.auth_invoker.as_ref(),
+        InvocationCheck {
+            expected_output: RouteInvocationOutput::Principal,
+        },
+        auth_ctx,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
 
     let principal = match auth_result {
         RouteInvocationResult::Principal(p) => p,
-        other => {
-            let contract = route.auth_invoker.contract();
-            return RouteDispatchError::Internal(format!(
-                "auth invoker contract violation: expected {:?}, got {}",
-                contract.output,
-                other.variant_name()
-            ))
-            .into_response();
-        }
+        // invoke_checked guarantees Principal; any other variant is already
+        // caught as an Internal error by the enforcement layer.
+        _ => unreachable!("invoke_checked enforces Principal for auth"),
     };
 
     let dispatch_ctx = RouteDispatchContext {

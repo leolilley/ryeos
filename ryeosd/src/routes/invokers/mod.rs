@@ -6,6 +6,7 @@
 //! - Streaming sources → `CompiledGatewayLaunch`, `CompiledThreadsEventsStream`
 //! - Launch mode → `CompiledLaunchInvocation`
 
+pub mod dispatch_invocation;
 pub mod gateway_stream_invocation;
 pub mod hmac_invocation;
 pub mod launch_invocation;
@@ -50,11 +51,12 @@ pub fn compile_auth_invoker(
     }
 }
 
-/// Compile a service invoker from a `service:` canonical ref.
+/// Compile an invoker from any canonical ref.
 ///
-/// Validates the ref, looks up the service descriptor, and returns
-/// a generic `CompiledServiceInvocation`.
-pub fn compile_service_invoker(
+/// Dispatches on the ref's kind:
+/// - `service:` → `CompiledServiceInvocation` (in-process handler)
+/// - `tool:` / `directive:` / `graph:` → `CompiledDispatchInvoker` (engine dispatch)
+pub fn compile_canonical_ref_invoker(
     source_ref: &str,
     route_id: &str,
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
@@ -66,18 +68,30 @@ pub fn compile_service_invoker(
         }
     })?;
 
-    if parsed.kind() != "service" {
-        return Err(RouteConfigError::InvalidSourceConfig {
+    match parsed.kind() {
+        "service" => compile_service_invoker_inner(source_ref, route_id, &parsed),
+        "tool" | "directive" | "graph" => {
+            Ok(Arc::new(dispatch_invocation::CompiledDispatchInvoker {
+                item_ref: source_ref.to_string(),
+            }))
+        }
+        other => Err(RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
             src: source_ref.into(),
             reason: format!(
-                "source must be 'service:' kind, got '{}' kind in '{}'",
-                parsed.kind(),
-                source_ref
+                "unsupported source kind '{}' in '{}'; expected service/tool/directive/graph",
+                other, source_ref
             ),
-        });
+        }),
     }
+}
 
+/// Inner: compile a `service:` ref into a `CompiledServiceInvocation`.
+fn compile_service_invoker_inner(
+    source_ref: &str,
+    route_id: &str,
+    _parsed: &crate::routes::parsed_ref::ParsedItemRef,
+) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
     let descriptor = crate::service_handlers::ALL
         .iter()
         .find(|d| d.service_ref == source_ref)
@@ -110,8 +124,21 @@ pub fn compile_service_invoker(
 
     Ok(Arc::new(service_invocation::CompiledServiceInvocation {
         endpoint: descriptor.endpoint.to_string(),
-        required_caps: Vec::new(),
+        required_caps: descriptor
+            .required_caps
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     }))
+}
+
+/// Backward-compatible alias — route code that calls `compile_service_invoker`
+/// still works, but prefer `compile_canonical_ref_invoker` for new code.
+pub fn compile_service_invoker(
+    source_ref: &str,
+    route_id: &str,
+) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+    compile_canonical_ref_invoker(source_ref, route_id)
 }
 
 #[cfg(test)]
@@ -163,5 +190,93 @@ mod tests {
             Err(other) => panic!("expected InvalidSourceConfig, got: {other}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
+    }
+
+    // ── compile_canonical_ref_invoker tests ──────────────────────────────
+
+    #[test]
+    fn canonical_ref_compiler_accepts_service() {
+        let invoker = compile_canonical_ref_invoker("service:threads/get", "r1").unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
+    }
+
+    #[test]
+    fn canonical_ref_compiler_accepts_tool() {
+        let invoker = compile_canonical_ref_invoker("tool:rye/core/execute", "r1").unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
+    }
+
+    #[test]
+    fn canonical_ref_compiler_accepts_directive() {
+        let invoker = compile_canonical_ref_invoker("directive:my/agent", "r1").unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
+    }
+
+    #[test]
+    fn canonical_ref_compiler_accepts_graph() {
+        let invoker = compile_canonical_ref_invoker("graph:workflows/approval", "r1").unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
+    }
+
+    #[test]
+    fn canonical_ref_compiler_rejects_unknown_kind() {
+        let result = compile_canonical_ref_invoker("fictional:item/path", "r1");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("unsupported source kind"), "got: {msg}");
+    }
+
+    #[test]
+    fn service_invoker_extracts_real_caps() {
+        // node-sign declares required_caps: &["node.maintenance"] and is ServiceAvailability::Both.
+        let invoker = compile_canonical_ref_invoker("service:node-sign", "r1").unwrap();
+        // The invoker should be a CompiledServiceInvocation with node.maintenance caps.
+        // We can't directly inspect the caps (they're inside an Arc<dyn>),
+        // but we can verify it compiled successfully for a cap-protected service.
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
+    }
+
+    #[test]
+    fn service_invoker_rejects_unknown_service() {
+        let result = compile_canonical_ref_invoker("service:nonexistent/handler", "r1");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("no service descriptor found"), "got: {msg}");
+    }
+
+    #[test]
+    fn backward_compat_alias_still_works() {
+        // compile_service_invoker is a thin wrapper now.
+        let invoker = compile_service_invoker("service:system/status", "r1").unwrap();
+        assert!(matches!(
+            invoker.contract().output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
     }
 }

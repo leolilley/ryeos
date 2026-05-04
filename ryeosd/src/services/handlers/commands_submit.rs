@@ -35,6 +35,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:commands/submit",
     endpoint: "commands.submit",
     availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["commands.submit"],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)?;

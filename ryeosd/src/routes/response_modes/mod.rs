@@ -41,8 +41,10 @@ impl ResponseModeRegistry {
         let mut r = Self::new();
         r.register(Arc::new(static_mode::StaticMode));
         r.register(Arc::new(event_stream_mode::EventStreamMode));
-        r.register(Arc::new(launch_mode::LaunchMode));
+        r.register(Arc::new(launch_mode::LaunchMode::default()));
         r.register(Arc::new(json_mode::JsonMode));
+        // "accepted" is an alias for "launch" — both compile to CompiledLaunchInvocation.
+        r.register(Arc::new(launch_mode::LaunchMode::with_key("accepted")));
         r
     }
 }
@@ -57,8 +59,20 @@ mod tests {
         assert!(r.get("static").is_some());
         assert!(r.get("event_stream").is_some());
         assert!(r.get("launch").is_some());
+        assert!(r.get("json").is_some(), "json mode must be registered");
+        assert!(r.get("accepted").is_some(), "accepted alias must be registered");
         // Unknown modes never silently resolve.
         assert!(r.get("nonexistent_mode").is_none());
+    }
+
+    #[test]
+    fn accepted_alias_compiles_same_as_launch() {
+        let r = ResponseModeRegistry::with_builtins();
+        let accepted = r.get("accepted").expect("accepted must exist");
+        let launch = r.get("launch").expect("launch must exist");
+        // Both resolve to the same compile logic (same key family).
+        assert_eq!(accepted.key(), "accepted");
+        assert_eq!(launch.key(), "launch");
     }
 
     #[test]

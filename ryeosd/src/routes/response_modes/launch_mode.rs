@@ -55,7 +55,25 @@ use crate::routes::invocation::{
 };
 use crate::routes::raw::{RawRequestBody, RawRouteSpec};
 
-pub struct LaunchMode;
+pub struct LaunchMode {
+    /// Allows the same compile logic to register under a different mode key
+    /// (e.g., "accepted" as an alias for "launch").
+    key_override: Option<&'static str>,
+}
+
+impl LaunchMode {
+    pub fn with_key(key: &'static str) -> Self {
+        Self {
+            key_override: Some(key),
+        }
+    }
+}
+
+impl Default for LaunchMode {
+    fn default() -> Self {
+        Self { key_override: None }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +91,7 @@ pub struct CompiledLaunchMode {
 
 impl ResponseMode for LaunchMode {
     fn key(&self) -> &'static str {
-        "launch"
+        self.key_override.unwrap_or("launch")
     }
 
     fn compile(
@@ -361,7 +379,7 @@ mod tests {
     #[test]
     fn compile_succeeds_on_valid_route() {
         let raw = make_raw("r1");
-        let _ = LaunchMode.compile(&raw).expect("valid launch route compiles");
+        let _ = LaunchMode::default().compile(&raw).expect("valid launch route compiles");
     }
 
     #[test]
@@ -371,7 +389,7 @@ mod tests {
             item_ref: "directive:x".into(),
             params: Value::Null,
         });
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -383,7 +401,7 @@ mod tests {
     fn compile_rejects_response_source() {
         let mut raw = make_raw("r1");
         raw.response.source = Some("dispatch_launch".into());
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -395,7 +413,7 @@ mod tests {
     fn compile_rejects_static_mode_fields() {
         let mut raw = make_raw("r1");
         raw.response.status = Some(204);
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -407,7 +425,7 @@ mod tests {
     fn compile_rejects_body_none() {
         let mut raw = make_raw("r1");
         raw.request.body = RawRequestBody::None;
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -419,7 +437,7 @@ mod tests {
     fn compile_rejects_body_raw() {
         let mut raw = make_raw("r1");
         raw.request.body = RawRequestBody::Raw;
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -431,14 +449,14 @@ mod tests {
     fn compile_accepts_body_text() {
         let mut raw = make_raw("r1");
         raw.request.body = RawRequestBody::Text;
-        let _ = LaunchMode.compile(&raw).expect("text body must be accepted");
+        let _ = LaunchMode::default().compile(&raw).expect("text body must be accepted");
     }
 
     #[test]
     fn compile_rejects_missing_source_config() {
         let mut raw = make_raw("r1");
         raw.response.source_config = Value::Null;
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -454,7 +472,7 @@ mod tests {
             "project_path": "/opt/p",
             "stranger": "danger",
         });
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -469,7 +487,7 @@ mod tests {
             "item_ref": "no-colon-here",
             "project_path": "/opt/p",
         });
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };
@@ -495,7 +513,7 @@ mod tests {
                 "item_ref": ref_str,
                 "project_path": "/opt/p",
             });
-            let r = LaunchMode.compile(&raw);
+            let r = LaunchMode::default().compile(&raw);
             assert!(r.is_ok(), "ref '{}' should compile, got: {:?}", ref_str, r.err());
         }
     }
@@ -507,7 +525,7 @@ mod tests {
             "item_ref": "directive:x",
             "project_path": "relative/path",
         });
-        let err = match LaunchMode.compile(&raw) {
+        let err = match LaunchMode::default().compile(&raw) {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
         };

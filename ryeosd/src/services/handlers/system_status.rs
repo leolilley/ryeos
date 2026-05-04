@@ -21,6 +21,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:system/status",
     endpoint: "system.status",
     availability: ServiceAvailability::Both,
+    required_caps: &[],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = if params.is_null() {

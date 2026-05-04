@@ -232,11 +232,35 @@ mod tests {
     }
 
     #[test]
-    fn compile_rejects_non_service_kind() {
+    fn compile_accepts_tool_kind() {
         let mode = JsonMode;
         let raw = make_raw(
             "/test",
             Some("tool:rye/core/execute"),
+            serde_json::Value::Null,
+        );
+        let result = mode.compile(&raw);
+        assert!(result.is_ok(), "tool: should be accepted, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn compile_accepts_directive_kind() {
+        let mode = JsonMode;
+        let raw = make_raw(
+            "/test",
+            Some("directive:my/agent"),
+            serde_json::Value::Null,
+        );
+        let result = mode.compile(&raw);
+        assert!(result.is_ok(), "directive: should be accepted, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn compile_rejects_unknown_kind() {
+        let mode = JsonMode;
+        let raw = make_raw(
+            "/test",
+            Some("fictional:item/path"),
             serde_json::Value::Null,
         );
         let result = mode.compile(&raw);
@@ -245,7 +269,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must be 'service:' kind"), "got: {msg}");
+        assert!(msg.contains("unsupported source kind"), "got: {msg}");
     }
 
     #[test]
