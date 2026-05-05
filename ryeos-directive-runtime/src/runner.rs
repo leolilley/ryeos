@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::budget::BudgetTracker;
 use ryeos_runtime::callback_client::CallbackClient;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{ExecutionConfig, ProviderMessage, StreamEvent, ToolSchema};
+use crate::directive::{ExecutionConfig, OutputSpec, ProviderMessage, StreamEvent, ToolSchema};
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{HookAction, Harness};
 use ryeos_runtime::envelope::RuntimeResult;
@@ -36,6 +36,16 @@ pub enum State {
         raw_args: String,
         pending: Vec<crate::directive::ToolCall>,
         index: usize,
+    },
+    /// directive_return lifecycle signal: the LLM invoked
+    /// `directive_return` (a provider-API tool-call convention, not
+    /// a real dispatchable tool). The runner intercepts by name in
+    /// `DispatchingTools`, validates declared outputs, fires both
+    /// `tool_call_start`/`tool_call_result` events for chain
+    /// visibility, publishes the artifact, and finalizes the thread.
+    ProcessingDirectiveReturn {
+        call_id: String,
+        raw_args: String,
     },
     FiringHooks {
         event: String,
@@ -69,6 +79,10 @@ pub struct Runner {
     thread_id: String,
     initial_turn: u32,
     hooks: Vec<ryeos_runtime::HookDefinition>,
+    /// Declared directive outputs — used to validate `directive_return`
+    /// arguments before finalization. `None` = no outputs declared,
+    /// any arguments accepted.
+    directive_outputs: Option<Vec<OutputSpec>>,
 }
 
 struct RunGuard {
@@ -109,6 +123,7 @@ pub struct RunnerConfig {
     pub model_name: String,
     pub thread_id: String,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
+    pub outputs: Option<Vec<OutputSpec>>,
 }
 
 impl Runner {
@@ -126,6 +141,7 @@ impl Runner {
             model_name,
             thread_id,
             hooks,
+            outputs,
         } = config;
         let mut initial_messages = Vec::new();
 
@@ -141,7 +157,7 @@ impl Runner {
         initial_messages.extend(messages);
 
         let effective_caps = harness.effective_caps().to_vec();
-        let dispatcher = Dispatcher::new(tools.clone(), None, effective_caps);
+        let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
 
         Self {
             messages: initial_messages,
@@ -158,6 +174,7 @@ impl Runner {
             thread_id,
             initial_turn: 0,
             hooks,
+            directive_outputs: outputs,
         }
     }
 
@@ -405,22 +422,33 @@ impl Runner {
                             continue;
                         }
 
-                        let required_cap = format!("rye.execute.tool.{}", tc.name);
-                        if !self.harness.check_permission(&required_cap) {
-                            self.messages.push(ProviderMessage {
-                                role: "tool".to_string(),
-                                content: Some(json!({"error": format!("permission denied: {}", tc.name)})),
-                                tool_calls: None,
-                                tool_call_id: tc.id.clone(),
-                            });
-                            State::DispatchingTools { pending, index: index + 1 }
-                        } else {
-                            State::ProcessingToolResult {
+                        // directive_return: lifecycle signal, not a tool.
+                        // Bypass permission check and dispatch entirely;
+                        // the runner handles output validation,
+                        // event emission, and finalization inline.
+                        if tc.name == "directive_return" {
+                            State::ProcessingDirectiveReturn {
                                 call_id: tc.id.clone().unwrap_or_default(),
-                                tool_name: tc.name.clone(),
                                 raw_args: tc.arguments.to_string(),
-                                pending,
-                                index,
+                            }
+                        } else {
+                            let required_cap = format!("rye.execute.tool.{}", tc.name);
+                            if !self.harness.check_permission(&required_cap) {
+                                self.messages.push(ProviderMessage {
+                                    role: "tool".to_string(),
+                                    content: Some(json!({"error": format!("permission denied: {}", tc.name)})),
+                                    tool_calls: None,
+                                    tool_call_id: tc.id.clone(),
+                                });
+                                State::DispatchingTools { pending, index: index + 1 }
+                            } else {
+                                State::ProcessingToolResult {
+                                    call_id: tc.id.clone().unwrap_or_default(),
+                                    tool_name: tc.name.clone(),
+                                    raw_args: tc.arguments.to_string(),
+                                    pending,
+                                    index,
+                                }
                             }
                         }
                     }
@@ -429,43 +457,12 @@ impl Runner {
                 State::ProcessingToolResult { call_id, tool_name, raw_args, pending, index } => {
                     let tool_result_content = match self.dispatcher.resolve(&tool_name, &raw_args, Some(call_id.clone())) {
                         Ok(dispatch_result) => {
-                            if dispatch_result.dispatch_kind == DispatchKind::Internal && self.dispatcher.is_directive_return(&dispatch_result.tool_name) {
-                                let outputs = dispatch_result.arguments;
-                                // Publish outputs as artifact
-                                record_callback_warning(
-                                    &mut warnings,
-                                    "publish_artifact(directive_outputs)",
-                                    self.callback.publish_artifact(json!({
-                                        "artifact_type": "directive_outputs",
-                                        "uri": format!("thread://{}/outputs", self.thread_id),
-                                        "content": &outputs,
-                                    })).await,
-                                );
-                                let mut result = self.finalize(json!("directive_return"));
-                                result.outputs = outputs;
-                                if let Err(e) = self.callback.finalize_thread("completed").await {
-                                    // Finalize failed — return errored result
-                                    guard.finalized = true;
-                                    return Self::attach_warnings(RuntimeResult {
-                                        success: false,
-                                        status: "errored".to_string(),
-                                        thread_id: self.thread_id.clone(),
-                                        result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
-                                        outputs: json!({}),
-                                        cost: Some(self.budget.cost()),
-                                        warnings: std::mem::take(&mut warnings),
-                                    }, &mut warnings);
-                                }
-                                guard.finalized = true;
-                                return Self::attach_warnings(result, &mut warnings);
-                            }
-
                             // Record spawn for child executions (directive/graph)
                             match dispatch_result.dispatch_kind {
                                 DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
                                     self.harness.record_spawn();
                                 }
-                                DispatchKind::Tool | DispatchKind::Internal => {}
+                                DispatchKind::Tool => {}
                             }
 
                             // Risk assessment before dispatch
@@ -560,6 +557,92 @@ impl Runner {
                             resume_to: Box::new(State::CheckingContinuation),
                         }
                     }
+                }
+
+                State::ProcessingDirectiveReturn { call_id, raw_args } => {
+                    // directive_return is a lifecycle signal, not a
+                    // dispatchable tool. The LLM calls it using the
+                    // provider's tool-call convention; the runtime
+                    // recognizes it by name and handles inline:
+                    //   1. Parse arguments (typed-fail-loud)
+                    //   2. Validate against declared outputs
+                    //   3. Fire tool_call_result for chain visibility
+                    //   4. Publish directive_outputs artifact
+                    //   5. Finalize thread
+                    let tool_result_content = match crate::adapter::parse_tool_arguments(&raw_args) {
+                        Ok(args) => {
+                            // Validate declared outputs
+                            let mut validation_error = None;
+                            if let Some(ref outputs) = self.directive_outputs {
+                                for output in outputs {
+                                    if args.get(&output.name).is_none_or(|v| v.is_null()) {
+                                        validation_error = Some(format!(
+                                            "directive_return: missing required output '{}'",
+                                            output.name
+                                        ));
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if let Some(err) = validation_error {
+                                serde_json::to_string(&json!({"error": err}))
+                                    .unwrap_or_else(|_| "{\"error\":\"output validation failed\"}".to_string())
+                            } else {
+                                // Publish outputs as artifact (non-fatal)
+                                record_callback_warning(
+                                    &mut warnings,
+                                    "publish_artifact(directive_outputs)",
+                                    self.callback.publish_artifact(json!({
+                                        "artifact_type": "directive_outputs",
+                                        "uri": format!("thread://{}/outputs", self.thread_id),
+                                        "content": &args,
+                                    })).await,
+                                );
+
+                                // Fire tool_call_result for chain visibility
+                                if let Err(e) = self.callback.emit_tool_result(&call_id, false).await {
+                                    state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
+                                    continue;
+                                }
+
+                                // Finalize thread
+                                if let Err(e) = self.callback.finalize_thread("completed").await {
+                                    guard.finalized = true;
+                                    return Self::attach_warnings(RuntimeResult {
+                                        success: false,
+                                        status: "errored".to_string(),
+                                        thread_id: self.thread_id.clone(),
+                                        result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
+                                        outputs: json!({}),
+                                        cost: Some(self.budget.cost()),
+                                        warnings: std::mem::take(&mut warnings),
+                                    }, &mut warnings);
+                                }
+                                let mut result = self.finalize(json!("directive_return"));
+                                result.outputs = args;
+                                guard.finalized = true;
+                                return Self::attach_warnings(result, &mut warnings);
+                            }
+                        }
+                        Err(e) => serde_json::to_string(&json!({"error": e}))
+                            .unwrap_or_else(|_| "{\"error\":\"malformed arguments\"}".to_string()),
+                    };
+
+                    // Validation or parse failure: fire tool_call_result,
+                    // push error as tool message, and let the LLM retry.
+                    // (Non-fatal — the LLM can correct its outputs.)
+                    if let Err(e) = self.callback.emit_tool_result(&call_id, false).await {
+                        state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
+                        continue;
+                    }
+                    self.messages.push(ProviderMessage {
+                        role: "tool".to_string(),
+                        content: Some(json!(tool_result_content)),
+                        tool_calls: None,
+                        tool_call_id: Some(call_id),
+                    });
+                    State::CheckingContinuation
                 }
 
                 State::FiringHooks { event, context, resume_to } => {
@@ -871,6 +954,7 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             hooks: vec![],
+            outputs: None,
         });
 
         let cost = runner.compute_cost(1_000_000, 500_000);
@@ -902,6 +986,7 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             hooks: vec![],
+            outputs: None,
         });
 
         let result = runner.finalize(json!("Hello world"));
@@ -940,10 +1025,48 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             hooks: vec![],
+            outputs: None,
         });
 
         assert_eq!(runner.messages.len(), 2);
         assert_eq!(runner.messages[0].role, "system");
         assert_eq!(runner.messages[1].role, "user");
+    }
+
+    #[test]
+    fn directive_outputs_stored_from_config() {
+        let provider = crate::directive::ProviderConfig {
+            category: None,
+            base_url: "http://localhost".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+        };
+        let outputs = Some(vec![OutputSpec {
+            name: "answer".to_string(),
+            description: None,
+            r#type: None,
+        }]);
+
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            budget: BudgetTracker::new(1.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            provider_config: provider,
+            execution: ExecutionConfig::default(),
+            model_name: "test-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+            outputs,
+        });
+
+        assert!(runner.directive_outputs.is_some());
+        assert_eq!(runner.directive_outputs.unwrap().len(), 1);
     }
 }

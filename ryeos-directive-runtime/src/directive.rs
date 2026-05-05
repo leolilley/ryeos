@@ -264,6 +264,7 @@ pub struct BootstrapConfig {
     pub context_after: Option<String>,
     pub context_positions: HashMap<String, Vec<String>>,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
+    pub outputs: Option<Vec<OutputSpec>>,
     #[serde(skip)]
     pub risk_policy: Option<crate::harness::RiskPolicy>,
 }

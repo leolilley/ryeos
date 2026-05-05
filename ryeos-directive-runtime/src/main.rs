@@ -183,6 +183,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 model_name,
                 thread_id: envelope.thread_id.clone(),
                 hooks,
+                outputs: bootstrap_output.config.outputs,
             },
         )
     } else {
@@ -262,6 +263,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             model_name,
             thread_id: envelope.thread_id.clone(),
             hooks,
+            outputs: bootstrap_output.config.outputs,
         })
     };
 
