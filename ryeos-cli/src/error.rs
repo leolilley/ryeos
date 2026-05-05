@@ -1,41 +1,17 @@
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
-// Config errors — verb loading failures (exit 78)
+// Config errors — config parsing failures (exit 78)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliConfigError {
-    #[error("wrong kind in {path}: expected \"config\", got \"{got}\"")]
-    WrongKind { path: PathBuf, got: String },
-
-    #[error("wrong category in {path}: expected \"cli\", got \"{got}\"")]
-    WrongCategory { path: PathBuf, got: String },
-
-    #[error("schema error in {path}: {detail}")]
-    SchemaError { path: PathBuf, detail: String },
-
-    #[error("duplicate verb_tokens {tokens:?} in {paths:?}")]
-    DuplicateVerbTokens {
-        tokens: Vec<String>,
-        paths: Vec<PathBuf>,
-    },
-
-    #[error("empty verb_tokens in {path}")]
-    EmptyVerbTokens { path: String },
-
-    #[error("missing `execute` field in {path}")]
-    MissingExecute { path: String },
-
     #[error("invalid `execute` ref \"{item_ref}\" in {path}: {detail}")]
     InvalidExecuteRef {
         path: String,
         item_ref: String,
         detail: String,
     },
-
-    #[error("failed to load trust store: {detail}")]
-    TrustStoreLoad { detail: String },
 }
 
 // ---------------------------------------------------------------------------

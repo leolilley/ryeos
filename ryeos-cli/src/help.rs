@@ -1,53 +1,73 @@
+//! Hardcoded CLI help — no daemon dependency for top-level help.
+//!
+//! `rye help` prints a static overview of built-in verbs + hints.
+//! `rye help <verb>` queries the daemon for alias info via the same
+//! token dispatch path.
+
 use std::io::Write;
 
-use crate::verbs::VerbTable;
+use crate::error::CliError;
 
-pub fn print_table_help(table: &VerbTable, mut out: impl Write) -> std::io::Result<()> {
+/// Print top-level help. No daemon round-trip.
+pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(out, "rye — CLI for Rye OS")?;
     writeln!(out)?;
     writeln!(out, "USAGE:")?;
     writeln!(out, "  rye [-p PROJECT] [--debug] <verb...> [args...]")?;
     writeln!(out)?;
-    writeln!(out, "COMMANDS:")?;
-    let mut sorted: Vec<_> = table.all().iter().collect();
-    sorted.sort_by(|a, b| a.verb_tokens.cmp(&b.verb_tokens));
-    for e in sorted {
-        writeln!(
-            out,
-            "  {:<30} {}",
-            e.verb_tokens.join(" "),
-            e.description
-        )?;
-    }
+    writeln!(out, "LOCAL COMMANDS (no daemon required):")?;
+    writeln!(out, "  {:<30} {}", "init", "Bootstrap operator keys and core bundle")?;
+    writeln!(out, "  {:<30} {}", "trust pin <fp>", "Pin a publisher's Ed25519 public key")?;
+    writeln!(out, "  {:<30} {}", "publish <src>", "Sign and publish a bundle")?;
+    writeln!(out, "  {:<30} {}", "vault put <K=V>...", "Add entries to sealed secret store")?;
+    writeln!(out, "  {:<30} {}", "vault list", "List sealed secret keys")?;
+    writeln!(out, "  {:<30} {}", "vault remove <K>...", "Remove sealed secret keys")?;
+    writeln!(out, "  {:<30} {}", "vault rewrap", "Rotate vault keypair")?;
+    writeln!(out)?;
+    writeln!(out, "UNIVERSAL ESCAPE HATCH:")?;
+    writeln!(out, "  {:<30} {}", "execute <item_ref>", "Execute any canonical item ref directly")?;
+    writeln!(out)?;
+    writeln!(out, "DAEMON COMMANDS (require running daemon):")?;
+    writeln!(out, "  {:<30} {}", "status", "Show daemon status")?;
+    writeln!(out, "  {:<30} {}", "sign", "Sign a bundle item")?;
+    writeln!(out, "  {:<30} {}", "verify", "Verify a bundle item")?;
+    writeln!(out, "  {:<30} {}", "fetch", "Fetch an item")?;
+    writeln!(out, "  {:<30} {}", "rebuild", "Rebuild the bundle manifest")?;
+    writeln!(out, "  {:<30} {}", "bundle install", "Install a bundle")?;
+    writeln!(out, "  {:<30} {}", "bundle list", "List installed bundles")?;
+    writeln!(out, "  {:<30} {}", "bundle remove", "Remove a bundle")?;
     writeln!(out)?;
     writeln!(out, "Run `rye help <verb>` for verb-specific help.")?;
     Ok(())
 }
 
-pub fn print_verb_help(
-    table: &VerbTable,
+/// Print verb-specific help by querying the daemon.
+pub async fn print_verb_help(
     verb_tokens: &[String],
-    mut out: impl Write,
-) -> Result<(), crate::error::CliError> {
-    let entry = table.all().iter().find(|e| e.verb_tokens == verb_tokens);
-    match entry {
-        Some(e) => {
-            writeln!(out, "rye {} — {}", e.verb_tokens.join(" "), e.description)
-                .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
-            writeln!(out)
-                .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
-            writeln!(out, "  Execute: {}", e.execute)
-                .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
-            writeln!(out, "  Cap:     {}", e.required_cap)
-                .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
-            writeln!(out, "  Source:  {}", e.source_file.display())
-                .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
-            writeln!(out, "  Signer:  {}", e.signer_fingerprint)
-                .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
-            Ok(())
-        }
-        None => Err(crate::error::CliError::UnknownVerb {
-            argv: verb_tokens.to_vec(),
-        }),
-    }
+    state_dir: &std::path::Path,
+    project_path: &str,
+) -> Result<(), CliError> {
+    // We send the tokens to the daemon — if it resolves, we get back
+    // the execution result which shows what the verb does. If not,
+    // we get an error with the unmatched tokens.
+    let bind = crate::transport::http::read_daemon_bind(state_dir).await?;
+    let signer = crate::transport::signing::Signer::resolve(state_dir)?;
+
+    let body = serde_json::json!({
+        "tokens": verb_tokens,
+        "project_path": project_path,
+        "parameters": {},
+        "validate_only": true,
+    });
+
+    let body_bytes = serde_json::to_vec(&body).expect("infallible: Value serialization");
+    let headers = signer.sign("POST", "/execute", &body_bytes)?;
+    let payload = crate::transport::http::post_json(&bind, &headers, &body_bytes).await?;
+
+    // If the daemon resolved it, show the result
+    let pretty = serde_json::to_string_pretty(&payload)
+        .unwrap_or_else(|_| payload.to_string());
+    println!("{pretty}");
+
+    Ok(())
 }
