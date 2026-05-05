@@ -1,6 +1,0 @@
-# rye:signed:2026-05-02T11:12:22Z:19a8ebd1872e6fdec3475d850dd4bc875f26566b757ac9fba3fe3adb03352f04:tS9doLVqyF5/EwwY2dfsjhO+umf0yGpqLpJ2QZWuw5hpG8gaY++iWkTil85FGMimqg6qwaTa62Itv7BplShnCA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
-kind: config
-category: "cli"
-tokens: ["fetch"]
-description: "Resolve and read an item via the engine."
-execute: service:fetch
