@@ -261,7 +261,6 @@ async fn main() -> Result<()> {
             .aliases
             .iter()
             .map(|r| ryeos_runtime::alias_registry::AliasDef {
-                surface: r.surface.clone(),
                 tokens: r.tokens.clone(),
                 verb: r.verb.clone(),
                 deprecated: r.deprecated.unwrap_or(false),
@@ -275,6 +274,20 @@ async fn main() -> Result<()> {
     alias_registry
         .validate_all_verbs_known(&verb_registry)
         .context("alias registry validation failed")?;
+
+    // Validate: aliases must target verbs with execute refs
+    // (non-executable verbs like "execute" can't be dispatched via tokens)
+    for alias in alias_registry.active_aliases() {
+        if let Some(verb) = verb_registry.get_verb(&alias.verb) {
+            if verb.execute.is_none() {
+                anyhow::bail!(
+                    "alias {:?} → verb '{}' has no execute ref (abstract verbs cannot be dispatched via tokens)",
+                    alias.tokens,
+                    alias.verb,
+                );
+            }
+        }
+    }
 
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone()));
 
@@ -630,7 +643,6 @@ async fn run_service_standalone(
             .aliases
             .iter()
             .map(|r| ryeos_runtime::alias_registry::AliasDef {
-                surface: r.surface.clone(),
                 tokens: r.tokens.clone(),
                 verb: r.verb.clone(),
                 deprecated: r.deprecated.unwrap_or(false),
@@ -644,6 +656,19 @@ async fn run_service_standalone(
     standalone_ar
         .validate_all_verbs_known(&standalone_vr)
         .context("alias registry validation failed")?;
+
+    // Validate: aliases must target verbs with execute refs
+    for alias in standalone_ar.active_aliases() {
+        if let Some(verb) = standalone_vr.get_verb(&alias.verb) {
+            if verb.execute.is_none() {
+                anyhow::bail!(
+                    "alias {:?} → verb '{}' has no execute ref (abstract verbs cannot be dispatched via tokens)",
+                    alias.tokens,
+                    alias.verb,
+                );
+            }
+        }
+    }
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(standalone_vr.clone()));
 

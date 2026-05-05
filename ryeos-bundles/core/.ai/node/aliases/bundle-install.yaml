@@ -1,7 +1,6 @@
-# rye:signed:2026-05-05T07:56:52Z:e7720f02ae34cc610dab003025167bac876602a79ddd8cf556ec2eebf6ee83e3:s2+nfiyB8C63ujDs2kzI6C3X0w09D2o2l71NWDX5YwxHG6182/a1KEdgGxaRDuyRgiHK0so3muvKkMueqi4MAg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-05T08:31:45Z:cf119b7140c106845c2d58ec07d61987da6f8666097a974e0cfc6bfe70810015:zW2jwAekauuZ8BG+CYaXk7W1pXs4dvXnQ1PcihMwPS+gRw+ijCoI7zBAmdYzrga/lt14Ap+AQOvstt3b2Ga0CQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "aliases"
 section: aliases
-surface: cli
 tokens: ["bundle", "install"]
 verb: bundle-install
 description: "Install a bundle into the daemon's state"

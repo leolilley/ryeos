@@ -93,12 +93,10 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     }
 
     // 6. Token dispatch — send tokens to daemon, it resolves via alias
-    //    registry and dispatches the verb's execute ref.
-    let parameters = crate::arg_bind::bind_tail(&cli.rest)?;
+    //    registry and binds tail parameters server-side.
     let body = serde_json::json!({
         "tokens": cli.rest,
         "project_path": body_project_path,
-        "parameters": parameters,
     });
 
     let result = post_to_daemon(&state_dir, &body).await?;

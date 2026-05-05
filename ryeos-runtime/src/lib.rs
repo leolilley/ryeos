@@ -16,6 +16,7 @@ pub mod interpolation;
 pub mod op_wire;
 pub mod paths;
 pub mod progress;
+pub mod resolver;
 pub mod transcript;
 pub mod verb_registry;
 pub mod verified_loader;
@@ -46,4 +47,5 @@ pub use paths::{
 pub use progress::{ProgressEvent, StatusEvent};
 pub use transcript::{KnowledgeRenderOptions, Transcript};
 pub use alias_registry::{AliasDef, AliasRegistry, AliasRegistryError};
+pub use resolver::{ResolvedCommand, ResolveError, bind_argv_tail, resolve_command};
 pub use verb_registry::{UnknownVerbInCap, VerbDef, VerbRegistry, VerbRegistryError};
