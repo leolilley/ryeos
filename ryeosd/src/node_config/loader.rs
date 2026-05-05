@@ -43,8 +43,14 @@ impl<'a> BootstrapLoader<'a> {
 
         let mut records: Vec<BundleRecord> = Vec::new();
 
-        // Scan system_data_dir + state_dir only (bundle section policy)
-        let scan_roots = [self.system_data_dir, self.state_dir];
+        // Scan system_data_dir + state_dir only (bundle section policy).
+        // Deduplicate: when state_dir == system_data_dir (unified tree),
+        // the same directory must not be scanned twice or bundle collision
+        // detection will flag duplicates.
+        let mut scan_roots = vec![self.system_data_dir];
+        if self.state_dir != self.system_data_dir {
+            scan_roots.push(self.state_dir);
+        }
         for root in &scan_roots {
             let node_dir = root.join(".ai").join("node").join("bundles");
             if !node_dir.is_dir() {
@@ -180,11 +186,19 @@ impl<'a> BootstrapLoader<'a> {
 
             let scan_roots = match section.source_policy() {
                 SectionSourcePolicy::SystemAndState => {
-                    vec![self.system_data_dir.to_path_buf(), self.state_dir.to_path_buf()]
+                    let mut roots = vec![self.system_data_dir.to_path_buf()];
+                    if self.state_dir != self.system_data_dir {
+                        roots.push(self.state_dir.to_path_buf());
+                    }
+                    roots
                 }
                 SectionSourcePolicy::EffectiveBundleRootsAndState => {
                     let mut roots = vec![self.state_dir.to_path_buf()];
-                    roots.extend(bundles.iter().map(|b| b.path.clone()));
+                    for b in bundles {
+                        if !roots.iter().any(|r| r == &b.path) {
+                            roots.push(b.path.clone());
+                        }
+                    }
                     roots
                 }
             };
