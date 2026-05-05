@@ -95,6 +95,22 @@ pub async fn execute(
         _ => {}
     }
 
+    // In token mode, parameters must be empty — the daemon owns binding.
+    if request.tokens.is_some()
+        && !request.parameters.is_null()
+        && !request
+            .parameters
+            .as_object()
+            .map_or(true, |m| m.is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "in tokens mode, parameters are computed server-side; client must not supply them"
+            })),
+        ));
+    }
+
     // ── Token resolution ─────────────────────────────────────────────
     //
     // If `tokens` is provided, use the shared resolver to resolve
@@ -148,19 +164,7 @@ pub async fn execute(
         }
 
         request.item_ref = Some(resolved.execute_ref);
-        // Merge: tail-bound params win over client-supplied params on conflict
-        let tail_params = resolved.parameters;
-        match (request.parameters.take(), tail_params) {
-            (serde_json::Value::Object(mut client), serde_json::Value::Object(tail)) => {
-                for (k, v) in tail {
-                    client.insert(k, v);
-                }
-                request.parameters = serde_json::Value::Object(client);
-            }
-            (_, tail) => {
-                request.parameters = tail;
-            }
-        }
+        request.parameters = resolved.parameters;
     }
 
     let item_ref = request.item_ref.as_ref().unwrap();

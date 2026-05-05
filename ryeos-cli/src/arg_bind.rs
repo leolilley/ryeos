@@ -1,10 +1,9 @@
 //! Argument binding — parse remaining argv into a JSON parameters object.
 //!
-//! The CLI does not declare params in verb YAMLs. Instead, it parses the
-//! tail of argv as key=value pairs and passes them through as a JSON object.
-//! Positional args (anything without `=`) become `_args: [...]`.
-//!
-//! The daemon validates params against the item's schema.
+//! Delegates to the shared `ryeos_runtime::arg_binder` for consistency
+//! between CLI and daemon. The CLI only uses this for the `execute`
+//! escape-hatch path (item_ref direct mode). Token mode sends raw
+//! tokens to the daemon, which binds them server-side.
 
 use serde_json::Value;
 
@@ -12,39 +11,11 @@ use crate::error::CliDispatchError;
 
 /// Bind tail argv tokens into a JSON parameters object.
 ///
-/// `--key value` and `--key=value` become `{ "key": "value" }`.
-/// Remaining positional tokens become `{ "_args": [...] }`.
+/// Thin wrapper around the shared binder. Returns `Result` for API
+/// compatibility with callers that expect it (no fallibility today,
+/// but the return type keeps the seam clean).
 pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
-    let mut params = serde_json::Map::new();
-    let mut positional = Vec::new();
-    let mut i = 0;
-
-    while i < tail.len() {
-        let token = &tail[i];
-        if let Some(key) = token.strip_prefix("--") {
-            if key.contains('=') {
-                // --key=value
-                let (k, v) = key.split_once('=').unwrap();
-                params.insert(k.to_string(), Value::String(v.to_string()));
-            } else if i + 1 < tail.len() {
-                // --key value
-                i += 1;
-                params.insert(key.to_string(), Value::String(tail[i].clone()));
-            } else {
-                // --key (no value) → treat as boolean true
-                params.insert(key.to_string(), Value::Bool(true));
-            }
-        } else {
-            positional.push(Value::String(token.clone()));
-        }
-        i += 1;
-    }
-
-    if !positional.is_empty() {
-        params.insert("_args".to_string(), Value::Array(positional));
-    }
-
-    Ok(Value::Object(params))
+    Ok(ryeos_runtime::bind_argv(tail))
 }
 
 #[cfg(test)]

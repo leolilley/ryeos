@@ -87,6 +87,9 @@ impl NodeConfigSection for AliasSection {
             if token == "init" {
                 bail!("alias '{}' uses reserved token 'init' (local-only)", name);
             }
+            if token == "execute" {
+                bail!("alias '{}' uses reserved token 'execute' (local escape hatch, uses item_ref directly)", name);
+            }
         }
 
         Ok(Box::new(record))
@@ -227,6 +230,16 @@ mod tests {
         let result = section.parse("help-alias", &body);
         assert!(result.is_err());
         assert!(format!("{:#}", result.unwrap_err()).contains("reserved token 'help'"));
+    }
+
+    #[test]
+    fn reserved_token_execute_rejected() {
+        let section = AliasSection;
+        let mut body = valid_body();
+        body["tokens"] = serde_json::json!(["execute"]);
+        let result = section.parse("execute-alias", &body);
+        assert!(result.is_err());
+        assert!(format!("{:#}", result.unwrap_err()).contains("reserved token 'execute'"));
     }
 
     #[test]

@@ -276,8 +276,9 @@ async fn main() -> Result<()> {
         .context("alias registry validation failed")?;
 
     // Validate: aliases must target verbs with execute refs
-    // (non-executable verbs like "execute" can't be dispatched via tokens)
-    for alias in alias_registry.active_aliases() {
+    // (non-executable verbs can't be dispatched via tokens)
+    // Check ALL aliases, including deprecated ones.
+    for alias in alias_registry.all_aliases() {
         if let Some(verb) = verb_registry.get_verb(&alias.verb) {
             if verb.execute.is_none() {
                 anyhow::bail!(
@@ -658,7 +659,8 @@ async fn run_service_standalone(
         .context("alias registry validation failed")?;
 
     // Validate: aliases must target verbs with execute refs
-    for alias in standalone_ar.active_aliases() {
+    // Check ALL aliases, including deprecated ones.
+    for alias in standalone_ar.all_aliases() {
         if let Some(verb) = standalone_vr.get_verb(&alias.verb) {
             if verb.execute.is_none() {
                 anyhow::bail!(
