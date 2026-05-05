@@ -245,7 +245,37 @@ async fn main() -> Result<()> {
             .context("load sealed-envelope vault — did `rye init` (or daemon bootstrap) run?")?,
     );
 
-    let verb_registry = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
+    let verb_registry = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(
+        &node_config_snapshot
+            .verbs
+            .iter()
+            .map(|r| ryeos_runtime::verb_registry::VerbDef {
+                name: r.name.clone(),
+                execute: r.execute.clone(),
+            })
+            .collect::<Vec<_>>(),
+    ).context("failed to build verb registry from node-config records")?);
+
+    let alias_registry = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(
+        &node_config_snapshot
+            .aliases
+            .iter()
+            .map(|r| ryeos_runtime::alias_registry::AliasDef {
+                surface: r.surface.clone(),
+                tokens: r.tokens.clone(),
+                verb: r.verb.clone(),
+                deprecated: r.deprecated.unwrap_or(false),
+                replacement_tokens: r.replacement_tokens.clone(),
+                removed_in: r.removed_in.clone(),
+            })
+            .collect::<Vec<_>>(),
+    ).context("failed to build alias registry from node-config records")?);
+
+    // Validate: all aliases reference known verbs
+    alias_registry
+        .validate_all_verbs_known(&verb_registry)
+        .context("alias registry validation failed")?;
+
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone()));
 
     let app_state = AppState {
@@ -269,6 +299,7 @@ async fn main() -> Result<()> {
         webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         vault,
         verb_registry,
+        alias_registry,
         authorizer,
     };
 
@@ -583,7 +614,37 @@ async fn run_service_standalone(
         events.clone(),
     ));
 
-    let standalone_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
+    let standalone_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(
+        &node_config_snapshot
+            .verbs
+            .iter()
+            .map(|r| ryeos_runtime::verb_registry::VerbDef {
+                name: r.name.clone(),
+                execute: r.execute.clone(),
+            })
+            .collect::<Vec<_>>(),
+    ).context("failed to build verb registry from node-config records")?);
+
+    let standalone_ar = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(
+        &node_config_snapshot
+            .aliases
+            .iter()
+            .map(|r| ryeos_runtime::alias_registry::AliasDef {
+                surface: r.surface.clone(),
+                tokens: r.tokens.clone(),
+                verb: r.verb.clone(),
+                deprecated: r.deprecated.unwrap_or(false),
+                replacement_tokens: r.replacement_tokens.clone(),
+                removed_in: r.removed_in.clone(),
+            })
+            .collect::<Vec<_>>(),
+    ).context("failed to build alias registry from node-config records")?);
+
+    // Validate: all aliases reference known verbs
+    standalone_ar
+        .validate_all_verbs_known(&standalone_vr)
+        .context("alias registry validation failed")?;
+
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(standalone_vr.clone()));
 
     let app_state = state::AppState {
@@ -615,6 +676,7 @@ async fn run_service_standalone(
                 .context("load sealed-envelope vault — did `rye init` run?")?,
         ),
         verb_registry: standalone_vr,
+        alias_registry: standalone_ar,
         authorizer: standalone_auth,
     };
 

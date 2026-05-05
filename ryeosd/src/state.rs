@@ -5,6 +5,7 @@ use arc_swap::ArcSwap;
 use serde::Serialize;
 
 use ryeos_engine::engine::Engine;
+use ryeos_runtime::alias_registry::AliasRegistry;
 use ryeos_runtime::authorizer::Authorizer;
 use ryeos_runtime::verb_registry::VerbRegistry;
 
@@ -63,9 +64,12 @@ pub struct AppState {
     /// daemon stays vendor-agnostic — this trait moves opaque
     /// `String -> String` pairs and never enumerates provider names.
     pub vault: Arc<dyn crate::vault::NodeVault>,
-    /// Verb registry for capability implication expansion (execute → fetch,
-    /// sign → fetch). Built once at startup with `VerbRegistry::with_builtins()`.
+    /// Verb registry for capability checking. Built once at startup
+    /// from node-config verb YAMLs.
     pub verb_registry: Arc<VerbRegistry>,
+    /// Alias registry for token routing. Built once at startup
+    /// from node-config alias YAMLs.
+    pub alias_registry: Arc<AliasRegistry>,
     /// Unified capability evaluator. Built once at startup from `verb_registry`.
     /// All enforcement sites use this shared instance instead of constructing
     /// per-request.

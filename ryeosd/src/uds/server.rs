@@ -412,7 +412,12 @@ mod tests {
             Vec::new(),
         );
 
-        let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
+        let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+            ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
+            ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
+            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+        ]).unwrap());
+        let test_ar = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
 
         let state = AppState {
@@ -434,13 +439,14 @@ mod tests {
                 missing_services: vec![],
             },
             services: Arc::new(crate::service_registry::build_service_registry()),
-            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![] }),
+            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }),
             route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
-                crate::routes::build_route_table_or_bail(&crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![] }).unwrap(),
+                crate::routes::build_route_table_or_bail(&crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }).unwrap(),
             )),
             webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
             vault: Arc::new(crate::vault::EmptyVault),
             verb_registry: test_vr,
+            alias_registry: test_ar,
             authorizer: test_auth,
         };
 

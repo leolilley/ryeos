@@ -1,0 +1,6 @@
+# rye:signed:2026-05-05T07:04:23Z:d413dd76b70da0be4f3329155b6a5856bea963aba93219a183a3259360249234:zxDOw5tHLFw/4gAU5hCKfpXwtTJURSQ34vxi9TdYCtBq5dMdvHTN7n4DY0DOFStCaRP5BvB6JD7maOHBfgHKDQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "verbs"
+section: verbs
+name: thread-chain
+description: "Get the parent chain for a thread (root -> ... -> thread)"
+execute: service:threads/chain

@@ -1,11 +1,26 @@
 use std::path::PathBuf;
 
-use ryeos_runtime::authorizer::{canonical_cap, Authorizer, AuthorizationPolicy};
-
 use crate::error::CliError;
 use crate::help;
 use crate::local_verbs;
 use crate::verbs;
+
+// ── Routing status ───────────────────────────────────────────────
+//
+// The daemon has a surface-aware `AliasRegistry` (loaded from
+// `node/aliases/*.yaml`) with `(surface, tokens)` keying and
+// longest-prefix matching via `match_argv()`. The CLI does NOT yet
+// use it — this file still dispatches via the local `verbs` module
+// and sends raw tokens to the daemon's `/execute` endpoint.
+//
+// Unification path:
+//   1. CLI queries daemon for alias registry (or loads from bundle)
+//   2. CLI uses `match_argv("cli", argv)` for routing
+//   3. Delete this file's local verb table (`verbs` module)
+//   4. CLI becomes a thin pipe: match argv → send to daemon
+//
+// Until then, the CLI and daemon have separate routing tables that
+// must be kept in sync manually.
 
 /// CLI struct for clap argument parsing.
 #[derive(clap::Parser)]
@@ -85,14 +100,13 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         }
         let item_ref = &cli.rest[1];
         // Validate it parses as a canonical ref
-        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|_| {
+        let _canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|_| {
             crate::error::CliConfigError::InvalidExecuteRef {
                 path: "<cli>".into(),
                 item_ref: item_ref.clone(),
                 detail: "not a valid canonical ref".into(),
             }
         })?;
-        let required_cap = canonical_cap(&canonical.kind, &canonical.bare_id, "execute");
 
         let parameters = crate::arg_bind::bind_tail(&cli.rest[2..])?;
         let body = serde_json::json!({
@@ -100,9 +114,6 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
             "project_path": body_project_path,
             "parameters": parameters,
         });
-
-        // Local cap pre-check: fail fast if we can determine the caller lacks the cap.
-        precheck_cap(&state_dir, &required_cap)?;
 
         let bind = crate::transport::http::read_daemon_bind(&state_dir).await?;
         let signer = crate::transport::signing::Signer::resolve(&state_dir)?;
@@ -141,9 +152,6 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         "parameters": parameters,
     });
 
-    // Local cap pre-check: fail fast if we can determine the caller lacks the cap.
-    precheck_cap(&state_dir, &entry.required_cap)?;
-
     // 7. Sign + POST to daemon /execute
     let bind = crate::transport::http::read_daemon_bind(&state_dir).await?;
     let signer = crate::transport::signing::Signer::resolve(&state_dir)?;
@@ -171,89 +179,4 @@ fn discover_state_dir() -> PathBuf {
     dirs::state_dir()
         .map(|d| d.join("ryeosd"))
         .unwrap_or_else(|| PathBuf::from(".ryeosd"))
-}
-
-/// Local capability pre-check.
-///
-/// Tries to load the authorized key file for the node's fingerprint.
-/// If found, checks the derived `required_cap` against the key's scopes
-/// using the unified `Authorizer`. If not found (auth disabled, operator
-/// key), silently passes — the daemon is the final enforcement point.
-///
-/// This provides fail-fast UX: the CLI tells the operator what cap they
-/// need *before* hitting the daemon, with clear error messages.
-fn precheck_cap(state_dir: &std::path::Path, required_cap: &str) -> Result<(), CliError> {
-    // Resolve the node signing key to get the fingerprint
-    let signer = match crate::transport::signing::Signer::resolve(state_dir) {
-        Ok(s) => s,
-        Err(_) => return Ok(()), // No signing key yet (pre-init) — can't check
-    };
-    let fingerprint = &signer.fingerprint;
-
-    // Try to load the authorized key file for this fingerprint.
-    // Path matches ryeosd/src/auth.rs:load_authorized_key.
-    let auth_dir = state_dir.join(".ai").join("node").join("authorized_keys");
-    let key_file = auth_dir.join(format!("{fingerprint}.toml"));
-    if !key_file.exists() {
-        // No authorized key file → auth is disabled → daemon grants ["*"].
-        // Nothing to check locally.
-        return Ok(());
-    }
-
-    // Parse the TOML body to extract scopes.
-    let raw = match std::fs::read_to_string(&key_file) {
-        Ok(r) => r,
-        Err(_) => return Ok(()),
-    };
-    let scopes = parse_scopes_from_toml(&raw);
-
-    // If the key has wildcard, always passes.
-    if scopes.iter().any(|s| s == "*") {
-        return Ok(());
-    }
-
-    // Check using the unified Authorizer.
-    let registry = std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
-    let authorizer = Authorizer::new(registry);
-    let policy = AuthorizationPolicy::require_all(&[required_cap]);
-    if authorizer.authorize(&scopes, &policy).is_err() {
-        return Err(CliError::InsufficientCapabilities {
-            required: required_cap.to_string(),
-            fingerprint: fingerprint.clone(),
-            scopes,
-        });
-    }
-
-    Ok(())
-}
-
-/// Extract `scopes = [...]` from a TOML body.
-fn parse_scopes_from_toml(raw: &str) -> Vec<String> {
-    for line in raw.lines() {
-        let line = line.trim();
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() != "scopes" {
-                continue;
-            }
-            let v = v.trim();
-            if v.starts_with('[') && v.ends_with(']') {
-                let inner = &v[1..v.len() - 1];
-                return inner
-                    .split(',')
-                    .map(|s| {
-                        let s = s.trim();
-                        if (s.starts_with('"') && s.ends_with('"'))
-                            || (s.starts_with('\'') && s.ends_with('\''))
-                        {
-                            s[1..s.len() - 1].to_string()
-                        } else {
-                            s.to_string()
-                        }
-                    })
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
-        }
-    }
-    Vec::new()
 }
