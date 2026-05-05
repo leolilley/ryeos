@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::directive::{
-    ExecutionConfig, ProviderConfig, ProviderMessage, StreamEvent, ToolCall, ToolSchema,
+    ExecutionConfig, ProviderConfig, ProviderMessage, SamplingConfig, StreamEvent, ToolCall, ToolSchema,
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
@@ -339,6 +339,7 @@ pub struct StreamingCallInput<'a> {
     pub tools: &'a [ToolSchema],
     pub callback: &'a CallbackClient,
     pub turn: u32,
+    pub sampling: Option<&'a SamplingConfig>,
 }
 
 #[tracing::instrument(
@@ -356,6 +357,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         tools,
         callback,
         turn,
+        sampling,
     } = input;
     let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
 
@@ -391,6 +393,20 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
 
     if !tools.is_empty() {
         body["tools"] = tools_val;
+    }
+
+    // Sampling parameters — best-effort replay. Not all providers
+    // support every field; silently omit what the provider can't use.
+    // The presence of `seed` without `temperature` is valid (lock
+    // greedy sampling) and `temperature` without `seed` is valid
+    // (deterministic flavour, nondeterministic output).
+    if let Some(s) = sampling {
+        if let Some(temp) = s.temperature {
+            body["temperature"] = json!(temp);
+        }
+        if let Some(seed) = s.seed {
+            body["seed"] = json!(seed);
+        }
     }
 
     let mut req = client.post(&url);

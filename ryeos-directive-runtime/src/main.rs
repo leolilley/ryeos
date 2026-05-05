@@ -117,6 +117,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let model_name = bootstrap_output.model_name.clone();
     let context_window = bootstrap_output.context_window;
     let execution = bootstrap_output.config.execution.clone();
+    let sampling = bootstrap_output.sampling.clone();
 
     let harness = harness::Harness::new(&envelope.policy, envelope.request.depth, bootstrap_output.config.risk_policy.clone());
 
@@ -184,6 +185,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 thread_id: envelope.thread_id.clone(),
                 hooks,
                 outputs: bootstrap_output.config.outputs,
+                sampling,
             },
         )
     } else {
@@ -264,6 +266,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             thread_id: envelope.thread_id.clone(),
             hooks,
             outputs: bootstrap_output.config.outputs,
+            sampling,
         })
     };
 

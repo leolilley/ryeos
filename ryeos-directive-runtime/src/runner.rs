@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::budget::BudgetTracker;
 use ryeos_runtime::callback_client::CallbackClient;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{ExecutionConfig, OutputSpec, ProviderMessage, StreamEvent, ToolSchema};
+use crate::directive::{ExecutionConfig, OutputSpec, ProviderMessage, SamplingConfig, StreamEvent, ToolSchema};
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{HookAction, Harness};
 use ryeos_runtime::envelope::RuntimeResult;
@@ -83,6 +83,10 @@ pub struct Runner {
     /// arguments before finalization. `None` = no outputs declared,
     /// any arguments accepted.
     directive_outputs: Option<Vec<OutputSpec>>,
+    /// LLM sampling parameters from the directive's `model.sampling`.
+    /// Passed to the provider adapter for inclusion in request body.
+    /// `None` = use provider defaults.
+    sampling: Option<SamplingConfig>,
 }
 
 struct RunGuard {
@@ -124,6 +128,7 @@ pub struct RunnerConfig {
     pub thread_id: String,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
     pub outputs: Option<Vec<OutputSpec>>,
+    pub sampling: Option<SamplingConfig>,
 }
 
 impl Runner {
@@ -142,6 +147,7 @@ impl Runner {
             thread_id,
             hooks,
             outputs,
+            sampling,
         } = config;
         let mut initial_messages = Vec::new();
 
@@ -175,6 +181,7 @@ impl Runner {
             initial_turn: 0,
             hooks,
             directive_outputs: outputs,
+            sampling,
         }
     }
 
@@ -275,6 +282,7 @@ impl Runner {
                             tools: &self.tools,
                             callback: &self.callback,
                             turn,
+                            sampling: self.sampling.as_ref(),
                         },
                     )
                     .await
@@ -955,6 +963,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            sampling: None,
         });
 
         let cost = runner.compute_cost(1_000_000, 500_000);
@@ -987,6 +996,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            sampling: None,
         });
 
         let result = runner.finalize(json!("Hello world"));
@@ -1026,6 +1036,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            sampling: None,
         });
 
         assert_eq!(runner.messages.len(), 2);
@@ -1064,9 +1075,47 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs,
+            sampling: None,
         });
 
         assert!(runner.directive_outputs.is_some());
         assert_eq!(runner.directive_outputs.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sampling_stored_from_config() {
+        let provider = crate::directive::ProviderConfig {
+            category: None,
+            base_url: "http://localhost".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+        };
+
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            budget: BudgetTracker::new(1.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            provider_config: provider,
+            execution: ExecutionConfig::default(),
+            model_name: "test-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+            outputs: None,
+            sampling: Some(SamplingConfig {
+                temperature: Some(0.3),
+                seed: Some(42),
+            }),
+        });
+
+        let s = runner.sampling.unwrap();
+        assert!((s.temperature.unwrap() - 0.3).abs() < f64::EPSILON);
+        assert_eq!(s.seed.unwrap(), 42);
     }
 }
