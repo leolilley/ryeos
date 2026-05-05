@@ -245,6 +245,9 @@ async fn main() -> Result<()> {
             .context("load sealed-envelope vault — did `rye init` (or daemon bootstrap) run?")?,
     );
 
+    let verb_registry = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
+    let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone()));
+
     let app_state = AppState {
         config: Arc::new(config.clone()),
         state_store,
@@ -265,7 +268,8 @@ async fn main() -> Result<()> {
         route_table,
         webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         vault,
-        verb_registry: Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins()),
+        verb_registry,
+        authorizer,
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -579,6 +583,9 @@ async fn run_service_standalone(
         events.clone(),
     ));
 
+    let standalone_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
+    let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(standalone_vr.clone()));
+
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
         state_store,
@@ -607,7 +614,8 @@ async fn run_service_standalone(
             ryeosd::vault::SealedEnvelopeVault::load(&config.state_dir)
                 .context("load sealed-envelope vault — did `rye init` run?")?,
         ),
-        verb_registry: Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins()),
+        verb_registry: standalone_vr,
+        authorizer: standalone_auth,
     };
 
     let params: serde_json::Value = match params_json {

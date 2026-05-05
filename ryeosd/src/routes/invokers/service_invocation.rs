@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use ryeos_runtime::authorizer::{Authorizer, AuthorizationPolicy};
+use ryeos_runtime::authorizer::AuthorizationPolicy;
 
 use crate::dispatch_error::RouteDispatchError;
 use crate::routes::invocation::{
@@ -51,8 +51,8 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             let policy = AuthorizationPolicy::require_all(
                 &self.required_caps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             );
-            let authorizer = Authorizer::new(ctx.state.verb_registry.clone());
-            authorizer
+            ctx.state
+                .authorizer
                 .authorize(&principal.scopes, &policy)
                 .map_err(|_| RouteDispatchError::Unauthorized)?;
         }

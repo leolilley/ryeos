@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use ryeos_runtime::authorizer::{Authorizer, AuthorizationPolicy};
+use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
 use crate::state::AppState;
@@ -194,8 +194,7 @@ pub async fn execute_service_verified(
         let policy = AuthorizationPolicy::require_all(
             &required_caps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         );
-        let authorizer = Authorizer::new(state.verb_registry.clone());
-        match authorizer.authorize(&ctx.caller_scopes, &policy) {
+        match state.authorizer.authorize(&ctx.caller_scopes, &policy) {
             Ok(()) => required_caps.clone(),
             Err(_) => {
                 bail!(

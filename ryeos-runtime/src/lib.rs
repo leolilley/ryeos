@@ -20,7 +20,7 @@ pub mod verb_registry;
 pub mod verified_loader;
 
 pub use authorizer::{
-    cap_matches, check_capability, expand_capabilities, canonical_cap,
+    cap_matches, canonical_cap,
     Authorizer, AuthorizationError, AuthorizationPolicy, Capability, CapabilityClause,
     CapabilityParseError,
 };

@@ -1317,6 +1317,8 @@ mod tests {
             bundles: vec![],
             routes: vec![],
         };
+        let test_vr = std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
+        let test_auth = std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
         let state = crate::state::AppState {
             config: std::sync::Arc::new(config),
             state_store,
@@ -1348,7 +1350,8 @@ mod tests {
                 crate::routes::webhook_dedupe::WebhookDedupeStore::new(),
             ),
             vault: std::sync::Arc::new(crate::vault::EmptyVault),
-            verb_registry: std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins()),
+            verb_registry: test_vr,
+            authorizer: test_auth,
         };
         (tmpdir, state)
     }

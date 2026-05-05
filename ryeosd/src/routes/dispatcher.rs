@@ -5,7 +5,6 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use crate::dispatch_error::RouteDispatchError;
 use crate::routes::compile::RouteDispatchContext;
 use crate::routes::invocation::{
     RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
