@@ -82,6 +82,9 @@ pub struct Config {
     pub bind: SocketAddr,
     pub db_path: PathBuf,
     pub uds_path: PathBuf,
+    /// Daemon state root. Contains the `.ai/` tree with node identity,
+    /// vault, runtime DB, node-config, and installed bundles.
+    /// Defaults to the same path as `system_data_dir` (single `.ai/` tree).
     pub state_dir: PathBuf,
     /// Daemon-internal signing key — used for CAS state writes, node-config
     /// writes, and all `.ai/node/**` daemon-authored state.
@@ -240,13 +243,14 @@ impl Config {
 
     fn default_paths(bind: SocketAddr) -> Result<Self> {
         let base_dirs = BaseDirs::new().context("could not determine base directories")?;
-        let state_dir = base_dirs
-            .state_dir()
-            .context("could not determine XDG state directory")?
-            .join("ryeosd");
         let data_dir = base_dirs
             .data_dir()
             .join("ryeos");
+
+        // Single .ai/ tree: state_dir defaults to system_data_dir.
+        // Node keys, vault, runtime DB, bundles, and node-config all live
+        // under one directory. No XDG state/share split.
+        let state_dir = data_dir.clone();
 
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
