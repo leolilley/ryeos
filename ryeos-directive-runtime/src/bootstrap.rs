@@ -224,6 +224,7 @@ pub fn bootstrap(
             context_after,
             context_positions,
             hooks,
+            outputs: header.outputs,
             risk_policy,
         },
         provider: resolved.provider,
