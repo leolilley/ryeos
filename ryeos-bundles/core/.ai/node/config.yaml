@@ -1,0 +1,8 @@
+bind: 127.0.0.1:34741
+db_path: /home/leo/projects/ryeos-cas-as-truth/ryeos-bundles/core/.ai/state/runtime.sqlite3
+uds_path: /tmp/.tmpA2DgP5/ryeosd.sock
+system_space_dir: /home/leo/projects/ryeos-cas-as-truth/ryeos-bundles/core
+node_signing_key_path: /home/leo/projects/ryeos-cas-as-truth/ryeos-bundles/core/.ai/node/identity/private_key.pem
+user_signing_key_path: /tmp/.tmps3FspO/.ai/config/keys/signing/private_key.pem
+require_auth: false
+authorized_keys_dir: /home/leo/projects/ryeos-cas-as-truth/ryeos-bundles/core/.ai/node/auth/authorized_keys
