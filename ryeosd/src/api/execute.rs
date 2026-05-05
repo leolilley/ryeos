@@ -12,7 +12,15 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteRequest {
-    pub item_ref: String,
+    /// Canonical item ref to execute (e.g. "service:system/status").
+    /// Mutually exclusive with `tokens` — provide one or the other.
+    #[serde(default)]
+    pub item_ref: Option<String>,
+    /// CLI token sequence to resolve via alias registry.
+    /// The daemon resolves `tokens` → alias → verb → execute ref.
+    /// Mutually exclusive with `item_ref`.
+    #[serde(default)]
+    pub tokens: Option<Vec<String>>,
     /// Project root path for three-tier resolution. Required when the caller
     /// (e.g. MCP server) runs in a different cwd than the user's project.
     #[serde(default)]
@@ -66,10 +74,72 @@ pub async fn execute(
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(json!({ "error": "request body too large" })),
         ))?;
-    let request: ExecuteRequest = serde_json::from_slice(&body_bytes)
+    let mut request: ExecuteRequest = serde_json::from_slice(&body_bytes)
         .map_err(|err| invalid_request(err.into()))?;
 
-    span.record("item_ref", request.item_ref.as_str());
+    // ── Token resolution ─────────────────────────────────────────────
+    //
+    // If `tokens` is provided instead of `item_ref`, resolve via the
+    // alias registry on the "cli" surface: tokens → alias → verb →
+    // execute ref. The resolved `item_ref` replaces the field so the
+    // rest of the dispatch path is unchanged.
+    if request.item_ref.is_none() && request.tokens.is_some() {
+        let tokens = request.tokens.as_ref().unwrap();
+        if tokens.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "tokens array is empty" })),
+            ));
+        }
+        let (verb_name, _consumed) = state
+            .alias_registry
+            .match_argv("cli", tokens)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": format!("no alias matches tokens {:?}", tokens),
+                        "tokens": tokens,
+                    })),
+                )
+            })?;
+        let verb = state
+            .verb_registry
+            .get_verb(&verb_name)
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("alias resolved to verb '{}' but verb not found in registry", verb_name),
+                    })),
+                )
+            })?;
+        let execute_ref = verb.execute.as_ref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("verb '{}' has no execute ref (abstract verb)", verb_name),
+                })),
+            )
+        })?;
+        tracing::debug!(
+            tokens = ?tokens,
+            verb = %verb_name,
+            item_ref = %execute_ref,
+            "resolved tokens to item_ref"
+        );
+        request.item_ref = Some(execute_ref.clone());
+    }
+
+    // Either item_ref was provided directly or resolved from tokens above.
+    let item_ref = request.item_ref.as_ref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "either item_ref or tokens is required" })),
+        )
+    })?;
+
+    span.record("item_ref", item_ref.as_str());
     span.record("launch_mode", request.launch_mode.as_str());
     span.record("validate_only", request.validate_only);
 
@@ -181,14 +251,14 @@ pub async fn execute(
     // invocation. Parse failure is a 400 — the substring match below
     // is gone (A1), so we surface a clear DispatchError variant.
     let root_canonical = match ryeos_engine::canonical_ref::CanonicalRef::parse(
-        &request.item_ref,
+        item_ref,
     ) {
         Ok(c) => c,
         Err(e) => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": format!("invalid item ref '{}': {e}", request.item_ref)
+                    "error": format!("invalid item ref '{}': {e}", item_ref)
                 })),
             ));
         }
@@ -211,7 +281,7 @@ pub async fn execute(
         inputs: request.inputs.clone(),
     };
 
-    match crate::dispatch::dispatch(&request.item_ref, &dispatch_req, &exec_ctx, &state).await {
+    match crate::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await {
         Ok(value) => Ok(Json(value)),
         // **A1**: typed-error mapping. Single call to `http_status()`;
         // no substring matching survives. The `Display` impl of each
