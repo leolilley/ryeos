@@ -10,7 +10,9 @@ use serde_json::Value;
 use ryeos_engine::contracts::SignatureEnvelope;
 use ryeos_engine::trust::TrustStore;
 
+use super::sections::alias::AliasRecord;
 use super::sections::bundle::BundleSection;
+use super::sections::verb::VerbRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, SectionSourcePolicy, SectionTable,
 };
@@ -168,6 +170,8 @@ impl<'a> BootstrapLoader<'a> {
     ) -> Result<NodeConfigSnapshot> {
         let mut loaded_bundles: Vec<BundleRecord> = Vec::new();
         let mut routes: Vec<RawRouteSpec> = Vec::new();
+        let mut verbs: Vec<VerbRecord> = Vec::new();
+        let mut aliases: Vec<AliasRecord> = Vec::new();
 
         for section_name in section_table.section_names() {
             let section = section_table
@@ -313,6 +317,28 @@ impl<'a> BootstrapLoader<'a> {
                             .clone();
                         record.source_file = path.clone();
                         routes.push(record);
+                    } else if section_name == "verbs" {
+                        let record = section
+                            .parse(name, &body)
+                            .with_context(|| format!("failed to parse verb record {}", path.display()))?;
+                        let mut record: VerbRecord = record
+                            .as_any()
+                            .downcast_ref::<VerbRecord>()
+                            .context("VerbSection::parse returned wrong type")?
+                            .clone();
+                        record.source_file = path.clone();
+                        verbs.push(record);
+                    } else if section_name == "aliases" {
+                        let record = section
+                            .parse(name, &body)
+                            .with_context(|| format!("failed to parse alias record {}", path.display()))?;
+                        let mut record: AliasRecord = record
+                            .as_any()
+                            .downcast_ref::<AliasRecord>()
+                            .context("AliasSection::parse returned wrong type")?
+                            .clone();
+                        record.source_file = path.clone();
+                        aliases.push(record);
                     }
                 }
             }
@@ -325,6 +351,8 @@ impl<'a> BootstrapLoader<'a> {
         Ok(NodeConfigSnapshot {
             bundles: loaded_bundles,
             routes,
+            verbs,
+            aliases,
         })
     }
 }

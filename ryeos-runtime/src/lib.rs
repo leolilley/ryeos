@@ -1,9 +1,10 @@
+pub mod alias_registry;
 pub mod authorizer;
 pub mod callback;
 pub mod callback_client;
 pub mod callback_contract;
-pub mod checkpoint;
 pub mod callback_uds;
+pub mod checkpoint;
 pub mod envelope;
 pub mod events;
 pub mod condition;
@@ -44,4 +45,5 @@ pub use paths::{
 };
 pub use progress::{ProgressEvent, StatusEvent};
 pub use transcript::{KnowledgeRenderOptions, Transcript};
-pub use verb_registry::{VerbDef, VerbRegistry};
+pub use alias_registry::{AliasDef, AliasRegistry, AliasRegistryError};
+pub use verb_registry::{UnknownVerbInCap, VerbDef, VerbRegistry, VerbRegistryError};

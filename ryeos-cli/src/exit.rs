@@ -12,7 +12,6 @@ impl CliError {
             CliError::Dispatch(d) => d.exit_code(),
             CliError::Transport(t) => t.exit_code(),
             CliError::UnknownVerb { .. } => EX_USAGE,
-            CliError::InsufficientCapabilities { .. } => 77, // EX_NOPERM
             CliError::Io(_) => EX_SOFTWARE,
             CliError::Internal { .. } => EX_SOFTWARE,
             CliError::Local { .. } => 1,

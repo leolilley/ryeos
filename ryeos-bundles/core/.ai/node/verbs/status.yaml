@@ -1,0 +1,6 @@
+# rye:signed:2026-05-05T07:04:23Z:62c39d135917388ff063df562b4280294f1f916fec4edc7a88976c6194f01b8b:U69E38X/43odKa6wk7c5OqKRhzrdiO+5+TmblasVSAnP3Jbeqz3LSlTNpgLXZTjV79MfXP5hUFF2ueLXATttDw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "verbs"
+section: verbs
+name: status
+description: "Show daemon status: version, uptime, bind address, active threads"
+execute: service:system/status

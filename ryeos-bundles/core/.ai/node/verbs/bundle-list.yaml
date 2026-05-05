@@ -1,0 +1,6 @@
+# rye:signed:2026-05-05T07:04:23Z:9115f2b4be4ffe52225e704f0917cf03a46e8ba903b8f239d43496202f1450b3:3snOngtl4f7ceU0lWHArLfrL+ORKT9qoHjn0g6zMwC4ZUCPcdzaiYa0Q2AU3i311qmXD5eo+psj/cn9LDpwkAw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "verbs"
+section: verbs
+name: bundle-list
+description: "List installed bundles"
+execute: service:bundle/list

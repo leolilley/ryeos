@@ -21,6 +21,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::node_config::sections::alias::AliasRecord;
+use crate::node_config::sections::verb::VerbRecord;
 use crate::routes::raw::RawRouteSpec;
 
 /// Which sources a section scans.
@@ -30,7 +32,7 @@ pub enum SectionSourcePolicy {
     /// Used by the `bundles` section so bundles can't self-register.
     SystemAndState,
     /// `state_dir` + all effective bundle roots.
-    /// Used by sections like `routes` that bundles can contribute to.
+    /// Used by sections like `routes` and `verbs` that bundles can contribute to.
     EffectiveBundleRootsAndState,
 }
 
@@ -53,6 +55,10 @@ pub struct NodeConfigSnapshot {
     pub bundles: Vec<BundleRecord>,
     /// All loaded route specifications, in load order.
     pub routes: Vec<RawRouteSpec>,
+    /// All loaded verb definitions (security-canonical).
+    pub verbs: Vec<VerbRecord>,
+    /// All loaded alias definitions (routing sugar).
+    pub aliases: Vec<AliasRecord>,
 }
 
 impl NodeConfigSnapshot {
@@ -89,12 +95,20 @@ impl SectionTable {
     pub fn new() -> Self {
         let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
         sections.insert(
+            "aliases",
+            Box::new(sections::alias::AliasSection),
+        );
+        sections.insert(
             "bundles",
             Box::new(sections::bundle::BundleSection),
         );
         sections.insert(
             "routes",
             Box::new(sections::route::RouteSection),
+        );
+        sections.insert(
+            "verbs",
+            Box::new(sections::verb::VerbSection),
         );
         Self { sections }
     }

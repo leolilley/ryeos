@@ -1,0 +1,7 @@
+# rye:signed:2026-05-05T07:04:23Z:8fb0d95b8bc71016d1eeeb4b5954f71635cec24e55ed3ada8e8f2e0aaa19143a:FwvpULQYUHZ0o9him9FDAIBy1dGKS4twGbwJRhW+NxxB/8bYx254hQL/ixco4WIwUMwilF/k7kf0vYOm7sJtBw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "aliases"
+section: aliases
+surface: cli
+tokens: ["thread", "chain"]
+verb: thread-chain
+description: "Get a thread's chain"

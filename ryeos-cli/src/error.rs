@@ -94,13 +94,6 @@ pub enum CliError {
     #[error("unknown verb: {argv:?}")]
     UnknownVerb { argv: Vec<String> },
 
-    #[error("insufficient capabilities: requires '{required}', but key {fingerprint} has scopes {scopes:?}")]
-    InsufficientCapabilities {
-        required: String,
-        fingerprint: String,
-        scopes: Vec<String>,
-    },
-
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

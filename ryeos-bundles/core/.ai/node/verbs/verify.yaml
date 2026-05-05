@@ -1,0 +1,6 @@
+# rye:signed:2026-05-05T07:04:23Z:764a941959ed1378b3f7364a9753caf6dc86d650fe04ea2e939f9889e4ef6ae2:mqBmxSzieS2Cxqgs1qaVJBGHKgbU5tOjIbOZN0aCw3mZ2KveRI/VuLfE2W09407pZFAS8B/2XetVGnNpqSvUCg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+category: "verbs"
+section: verbs
+name: verify
+description: "Verify an item's signature chain"
+execute: service:verify

@@ -1316,8 +1316,15 @@ mod tests {
         let snapshot = crate::node_config::NodeConfigSnapshot {
             bundles: vec![],
             routes: vec![],
+            verbs: vec![],
+            aliases: vec![],
         };
-        let test_vr = std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::with_builtins());
+        let test_vr = std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+            ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
+            ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
+            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+        ]).unwrap());
+        let test_ar = std::sync::Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
         let test_auth = std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
         let state = crate::state::AppState {
             config: std::sync::Arc::new(config),
@@ -1351,6 +1358,7 @@ mod tests {
             ),
             vault: std::sync::Arc::new(crate::vault::EmptyVault),
             verb_registry: test_vr,
+            alias_registry: test_ar,
             authorizer: test_auth,
         };
         (tmpdir, state)

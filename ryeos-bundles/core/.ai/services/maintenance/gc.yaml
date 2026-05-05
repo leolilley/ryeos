@@ -1,4 +1,4 @@
-# rye:signed:2026-05-04T23:23:42Z:e269e78c684ce8287e18e6dd8d82a845e0e31ed5d0ce98bc47bff83581451e41:QxY4D3rknX0xsLbxn0B5sls0xcW1sDSXrCTMw4lvyGuZvOvgbTHcf9thmtoMe5pMpDgPDRKPIXCklBg9Dbz8Ag==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-05T07:04:23Z:e269e78c684ce8287e18e6dd8d82a845e0e31ed5d0ce98bc47bff83581451e41:QxY4D3rknX0xsLbxn0B5sls0xcW1sDSXrCTMw4lvyGuZvOvgbTHcf9thmtoMe5pMpDgPDRKPIXCklBg9Dbz8Ag==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "maintenance"
 name: "gc"
 kind: service

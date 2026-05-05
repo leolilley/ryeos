@@ -1,8 +1,7 @@
 //! Unified capability authorization.
 //!
 //! Single evaluator for all capability checks across the system.
-//! One implementation of matching logic (exact, `*`, `?`, prefix wildcards)
-//! with verb-implication expansion via `VerbRegistry`.
+//! One implementation of matching logic (exact, `*`, `?`, prefix wildcards).
 //!
 //! Wire format: `rye.<verb>.<kind>.<subject>`
 //!
@@ -12,8 +11,7 @@
 //! matches `bundle/install`, `bundle/remove`, but not `bundleX`).
 //!
 //! Required-side patterns support wildcards in verb, kind, and subject
-//! positions. `require("rye.*")` means "any rye cap". `require("rye.fetch.*")`
-//! means "any fetch cap" and is satisfied by `rye.execute.*` via implication.
+//! positions. `require("rye.*")` means "any rye cap".
 //!
 //! # Example
 //!
@@ -22,7 +20,18 @@
 //! use ryeos_runtime::verb_registry::VerbRegistry;
 //! use ryeos_runtime::authorizer::{Authorizer, AuthorizationPolicy};
 //!
-//! let registry = Arc::new(VerbRegistry::with_builtins());
+//! let registry = Arc::new(VerbRegistry::from_records(&[
+//!     ryeos_runtime::verb_registry::VerbDef {
+//!         name: "execute".into(), execute: None,
+//!     },
+//!     ryeos_runtime::verb_registry::VerbDef {
+//!         name: "fetch".into(), execute: None,
+//!     },
+//!     ryeos_runtime::verb_registry::VerbDef {
+//!         name: "sign".into(),
+//!         execute: Some("tool:rye/core/sign".into()),
+//!     },
+//! ]).unwrap());
 //! let authorizer = Authorizer::new(registry);
 //!
 //! let policy = AuthorizationPolicy::require("rye.execute.service.bundle/install");
@@ -161,13 +170,11 @@ impl RequiredPattern {
             }
             RequiredPattern::VerbWildcard { verb } => {
                 // `rye.<verb>.*` — verb must match, kind/subject free.
-                // Try structured match first, then pattern match.
                 if let Ok(cap) = Capability::parse(granted) {
                     if cap.verb == *verb {
                         return true;
                     }
                 }
-                // Pattern match: `rye.execute.*` matches "anything.execute.anything"
                 cap_matches(granted, &format!("rye.{}.*", verb))
             }
             RequiredPattern::SubjectWildcard { verb, kind } => {
@@ -177,8 +184,6 @@ impl RequiredPattern {
                         return true;
                     }
                 }
-                // Pattern match: `rye.execute.service.*` or `rye.execute.*`
-                // both satisfy this requirement.
                 cap_matches(granted, &format!("rye.{}.{}.*", verb, kind))
             }
             RequiredPattern::Full {
@@ -186,7 +191,6 @@ impl RequiredPattern {
                 kind,
                 subject,
             } => {
-                // Structured match: verb, kind, then subject via cap_matches.
                 if let Ok(cap) = Capability::parse(granted) {
                     if cap.verb == *verb && cap.kind == *kind
                         && cap_matches(subject, &cap.subject)
@@ -194,8 +198,6 @@ impl RequiredPattern {
                         return true;
                     }
                 }
-                // Pattern match fallback: the granted scope may itself be
-                // a wildcard that covers this requirement.
                 cap_matches(granted, &format!("rye.{}.{}.{}", verb, kind, subject))
             }
             RequiredPattern::Other(req) => {
@@ -268,9 +270,9 @@ pub enum AuthorizationError {
 /// Unified capability evaluator. One implementation of matching logic
 /// for the entire system.
 ///
-/// Wraps a `VerbRegistry` for implication expansion (execute → fetch,
-/// sign → fetch). The `VerbRegistry` is shared via `Arc` so the same
-/// instance is used across `AppState.verb_registry` and this authorizer.
+/// Holds a `VerbRegistry` for verb lookup and token routing. The registry
+/// is shared via `Arc` so the same instance is used across `AppState` and
+/// this authorizer.
 pub struct Authorizer {
     verbs: Arc<VerbRegistry>,
 }
@@ -281,7 +283,6 @@ impl Authorizer {
     }
 
     /// Access the underlying `VerbRegistry`.
-    /// Used for testing that the registry is shared with `AppState`.
     pub fn verb_registry(&self) -> &VerbRegistry {
         &*self.verbs
     }
@@ -314,70 +315,22 @@ impl Authorizer {
 
     /// Check a single required capability against granted scopes.
     ///
-    /// Three matching mechanisms:
+    /// Two matching mechanisms:
     /// 1. **Wildcard granted**: `granted = "rye.execute.service.*"` satisfies
     ///    `required = "rye.execute.service.bundle/install"`.
     /// 2. **Wildcard required**: `required = "rye.*"` is satisfied by any
     ///    granted rye cap. `required = "rye.execute.service.*"` is satisfied
     ///    by any granted cap with verb=execute, kind=service.
-    /// 3. **Verb implication**: `required = "rye.fetch.service.x"` is also
-    ///    satisfied by `granted = "rye.execute.service.x"` because execute
-    ///    implies fetch.
     fn check_single(&self, scopes: &[String], required: &str) -> bool {
         let pattern = RequiredPattern::parse(required);
 
-        // Check each granted scope against the required pattern.
         for granted in scopes {
-            // Mechanism 1 & 2: pattern matching (handles both wildcard
-            // granted and wildcard required).
             if pattern.matches(granted) {
                 return true;
             }
         }
 
-        // Mechanism 3: verb implication expansion.
-        // Expand the required side: if required is `rye.fetch.service.x`,
-        // also check `rye.execute.service.x` (because execute implies fetch).
-        let expanded = self.expand_required(required);
-        if expanded.len() > 1 {
-            for req in &expanded[1..] {
-                let exp_pattern = RequiredPattern::parse(req);
-                for granted in scopes {
-                    if exp_pattern.matches(granted) {
-                        return true;
-                    }
-                }
-            }
-        }
-
         false
-    }
-
-    /// Expand a required capability using verb implications.
-    ///
-    /// For `rye.fetch.service.x`, returns `["rye.fetch.service.x",
-    /// "rye.execute.service.x", "rye.sign.service.x"]` (because both
-    /// execute and sign imply fetch).
-    fn expand_required(&self, required: &str) -> Vec<String> {
-        if required == "*" || !required.starts_with("rye.") {
-            return vec![required.to_string()];
-        }
-
-        let Ok(cap) = Capability::parse(required) else {
-            return vec![required.to_string()];
-        };
-
-        let mut result = vec![required.to_string()];
-        for verb_name in self.verbs.verb_names() {
-            let implied = self.verbs.implied_verbs(verb_name);
-            if implied.contains(&cap.verb) {
-                result.push(format!(
-                    "rye.{}.{}.{}",
-                    verb_name, cap.kind, cap.subject
-                ));
-            }
-        }
-        result
     }
 }
 
@@ -427,9 +380,14 @@ pub fn cap_matches(granted: &str, required: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verb_registry::VerbDef;
 
     fn test_authorizer() -> Authorizer {
-        Authorizer::new(Arc::new(VerbRegistry::with_builtins()))
+        Authorizer::new(Arc::new(VerbRegistry::from_records(&[
+            VerbDef { name: "execute".into(), execute: None },
+            VerbDef { name: "fetch".into(), execute: None },
+            VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+        ]).unwrap()))
     }
 
     // ── Capability parsing ────────────────────────────────────────
@@ -648,14 +606,14 @@ mod tests {
         ));
     }
 
-    // ── Authorizer: implication expansion ─────────────────────────
+    // ── Authorizer: no implication — verbs are independent ────────
 
     #[test]
-    fn execute_implies_fetch() {
+    fn execute_does_not_imply_fetch() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("rye.fetch.service.x");
         let scopes = vec!["rye.execute.service.x".to_string()];
-        assert!(auth.authorize(&scopes, &policy).is_ok());
+        assert!(auth.authorize(&scopes, &policy).is_err());
     }
 
     #[test]
@@ -667,11 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn sign_implies_fetch() {
+    fn sign_does_not_imply_fetch() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("rye.fetch.tool.x");
         let scopes = vec!["rye.sign.tool.x".to_string()];
-        assert!(auth.authorize(&scopes, &policy).is_ok());
+        assert!(auth.authorize(&scopes, &policy).is_err());
     }
 
     #[test]
@@ -714,7 +672,6 @@ mod tests {
     #[test]
     fn verb_wildcard_required_satisfied_by_concrete_grant() {
         let auth = test_authorizer();
-        // require("rye.execute.*") → any execute cap satisfies
         let policy = AuthorizationPolicy::require("rye.execute.*");
         assert!(auth
             .authorize(&["rye.execute.service.x".to_string()], &policy)
@@ -730,7 +687,6 @@ mod tests {
     #[test]
     fn subject_wildcard_required_satisfied_by_concrete_grant() {
         let auth = test_authorizer();
-        // require("rye.execute.service.*") → any execute service satisfies
         let policy = AuthorizationPolicy::require("rye.execute.service.*");
         assert!(auth
             .authorize(&["rye.execute.service.bundle/install".to_string()], &policy)
@@ -741,20 +697,9 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_required_with_implication() {
+    fn different_verbs_are_independent() {
         let auth = test_authorizer();
-        // require("rye.fetch.service.*") → satisfied by rye.execute.service.x
-        // because execute implies fetch.
-        let policy = AuthorizationPolicy::require("rye.fetch.service.*");
-        assert!(auth
-            .authorize(&["rye.execute.service.bundle/install".to_string()], &policy)
-            .is_ok());
-    }
-
-    #[test]
-    fn narrow_execute_does_not_escalate_without_implication() {
-        let auth = test_authorizer();
-        // fetch does NOT imply execute
+        // Without implication, each verb is checked independently
         let policy = AuthorizationPolicy::require("rye.execute.service.bundle/install");
         assert!(auth
             .authorize(&["rye.fetch.service.*".to_string()], &policy)
@@ -814,9 +759,12 @@ mod tests {
 
     #[test]
     fn authorizer_shares_registry_instance() {
-        let vr = Arc::new(VerbRegistry::with_builtins());
+        let vr = Arc::new(VerbRegistry::from_records(&[
+            VerbDef { name: "execute".into(), execute: None },
+            VerbDef { name: "fetch".into(), execute: None },
+            VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+        ]).unwrap());
         let auth = Authorizer::new(vr.clone());
-        // Same pointer — the Arc is shared.
         let state_ptr = &*vr as *const VerbRegistry;
         let auth_ptr = auth.verb_registry() as *const VerbRegistry;
         assert_eq!(state_ptr, auth_ptr, "Authorizer must share the same VerbRegistry instance");
