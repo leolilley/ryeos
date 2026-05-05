@@ -417,7 +417,7 @@ impl Runner {
                         State::CheckingContinuation
                     } else {
                         let tc = &pending[index];
-                        if let Err(e) = self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref()).await {
+                        if let Err(e) = self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref(), self.harness.effective_caps()).await {
                             state = State::Errored { error: format!("resume-critical callback emit_tool_dispatch failed: {e}") };
                             continue;
                         }

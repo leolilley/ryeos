@@ -283,12 +283,15 @@ impl CallbackClient {
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
-    /// Maps to `tool_call_start`.
-    pub async fn emit_tool_dispatch(&self, tool: &str, call_id: Option<&str>) -> Result<()> {
+    /// Maps to `tool_call_start`. Includes the thread's effective
+    /// capabilities so event consumers can see what the thread was
+    /// authorized to do at dispatch time.
+    pub async fn emit_tool_dispatch(&self, tool: &str, call_id: Option<&str>, effective_caps: &[String]) -> Result<()> {
         let mut data = serde_json::json!({"tool": tool});
         if let Some(id) = call_id {
             data["call_id"] = serde_json::json!(id);
         }
+        data["effective_caps"] = serde_json::json!(effective_caps);
         self.append_event("tool_call_start", data).await
     }
 
