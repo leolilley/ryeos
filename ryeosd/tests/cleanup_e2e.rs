@@ -188,15 +188,12 @@ async fn cli_execute_defaults_project_path_to_dot() {
     let h = DaemonHarness::start().await.expect("start daemon");
     let rye = rye_binary();
 
-    // The CLI's verb table comes from the three-tier `.ai/config/cli/`
-    // hierarchy. The verb `status` (-> `service:system/status`) ships in the
-    // `standard` bundle (`ryeos-bundles/standard/.ai/config/cli/status.yaml`);
-    // `core` is engine-config-only and has no `config/cli/`. We point the
-    // CLI's RYE_SYSTEM_SPACE at standard for verb discovery; the daemon
-    // already runs against `system_data_dir()` (= `core`) for engine kinds.
-    // HOME points the user tier at the harness user space (where
-    // `populate_user_space` pre-loaded the trusted-signers fixture so the
-    // verb YAMLs verify). RYEOS_STATE_DIR locates the daemon's bind socket.
+    // The CLI sends raw tokens (`["status"]`) to the daemon's /execute
+    // endpoint. The daemon resolves via its AliasRegistry (loaded from
+    // the core bundle's `node/aliases/`). RYEOS_STATE_DIR locates the
+    // daemon's bind socket. HOME points the user tier at the harness
+    // user space (where `populate_user_space` pre-loaded the
+    // trusted-signers fixture).
     let standard_bundle = common::workspace_root().join("ryeos-bundles/standard");
     let out = tokio::process::Command::new(&rye)
         .arg("status") // alias → service:system/status, no --project-path
