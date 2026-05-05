@@ -8,10 +8,10 @@ use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
 
 /// A parsed alias definition loaded from `.ai/node/aliases/<name>.yaml`.
 ///
-/// Aliases are surface-aware routing sugar: `(surface, tokens)` maps to a
-/// verb name. They have no security implications — authorization is handled
-/// by the verb registry. Aliases can be deprecated, renamed, or extended
-/// freely without touching authorization.
+/// Aliases are routing sugar: `tokens` maps to a verb name. They have no
+/// security implications — authorization is handled by the verb registry.
+/// Aliases can be deprecated, renamed, or extended freely without touching
+/// authorization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AliasRecord {
@@ -19,8 +19,6 @@ pub struct AliasRecord {
     pub category: String,
     /// Must be `"aliases"`. Matches parent directory, enforced by loader.
     pub section: String,
-    /// Which surface this alias is for (e.g. "cli").
-    pub surface: String,
     /// Token sequence that triggers this alias (e.g. `["sign"]` or `["bundle", "install"]`).
     pub tokens: Vec<String>,
     /// Verb name this alias routes to (must exist in `VerbRegistry`).
@@ -71,11 +69,6 @@ impl NodeConfigSection for AliasSection {
             );
         }
 
-        // Surface must be non-empty
-        if record.surface.is_empty() {
-            bail!("alias '{}' has empty surface", name);
-        }
-
         // Tokens must be non-empty
         if record.tokens.is_empty() {
             bail!("alias '{}' has empty tokens list", name);
@@ -114,7 +107,6 @@ mod tests {
         serde_json::json!({
             "category": "aliases",
             "section": "aliases",
-            "surface": "cli",
             "tokens": ["sign"],
             "verb": "sign",
             "description": "Sign an item"
@@ -128,7 +120,6 @@ mod tests {
         assert!(result.is_ok());
         let boxed = result.unwrap();
         let record = boxed.as_any().downcast_ref::<AliasRecord>().unwrap();
-        assert_eq!(record.surface, "cli");
         assert_eq!(record.tokens, vec!["sign"]);
         assert_eq!(record.verb, "sign");
     }
@@ -139,7 +130,6 @@ mod tests {
         let body = serde_json::json!({
             "category": "aliases",
             "section": "aliases",
-            "surface": "cli",
             "tokens": ["bundle", "install"],
             "verb": "bundle-install",
             "description": "Install a bundle"
@@ -158,7 +148,6 @@ mod tests {
         let body = serde_json::json!({
             "category": "aliases",
             "section": "aliases",
-            "surface": "cli",
             "tokens": ["sig"],
             "verb": "sign",
             "description": "Sign (deprecated)",
@@ -198,14 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_surface_rejected() {
+    fn surface_field_rejected_as_unknown() {
+        // `surface` was removed — it must be rejected by deny_unknown_fields.
         let section = AliasSection;
         let mut body = valid_body();
-        body["surface"] = serde_json::json!("");
+        body["surface"] = serde_json::json!("cli");
         let result = section.parse("sign", &body);
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("empty surface"), "got: {msg}");
+        assert!(msg.contains("unknown field"), "got: {msg}");
     }
 
     #[test]

@@ -77,67 +77,93 @@ pub async fn execute(
     let mut request: ExecuteRequest = serde_json::from_slice(&body_bytes)
         .map_err(|err| invalid_request(err.into()))?;
 
+    // ── API invariants ────────────────────────────────────────────────
+    // item_ref and tokens are mutually exclusive; one must be present.
+    match (&request.item_ref, &request.tokens) {
+        (Some(_), Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "item_ref and tokens are mutually exclusive" })),
+            ));
+        }
+        (None, None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "either item_ref or tokens is required" })),
+            ));
+        }
+        _ => {}
+    }
+
     // ── Token resolution ─────────────────────────────────────────────
     //
-    // If `tokens` is provided instead of `item_ref`, resolve via the
-    // alias registry on the "cli" surface: tokens → alias → verb →
-    // execute ref. The resolved `item_ref` replaces the field so the
-    // rest of the dispatch path is unchanged.
-    if request.item_ref.is_none() && request.tokens.is_some() {
-        let tokens = request.tokens.as_ref().unwrap();
+    // If `tokens` is provided, use the shared resolver to resolve
+    // alias → verb → execute ref + bind tail parameters.
+    if let Some(ref tokens) = request.tokens {
         if tokens.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "tokens array is empty" })),
             ));
         }
-        let (verb_name, _consumed) = state
-            .alias_registry
-            .match_argv("cli", tokens)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "error": format!("no alias matches tokens {:?}", tokens),
-                        "tokens": tokens,
-                    })),
-                )
-            })?;
-        let verb = state
-            .verb_registry
-            .get_verb(&verb_name)
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": format!("alias resolved to verb '{}' but verb not found in registry", verb_name),
-                    })),
-                )
-            })?;
-        let execute_ref = verb.execute.as_ref().ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
+        let resolved = ryeos_runtime::resolve_command(
+            tokens,
+            &state.alias_registry,
+            &state.verb_registry,
+        )
+        .map_err(|e| match &e {
+            ryeos_runtime::ResolveError::NoMatch { tokens } => (
+                StatusCode::NOT_FOUND,
                 Json(json!({
-                    "error": format!("verb '{}' has no execute ref (abstract verb)", verb_name),
+                    "error": e.to_string(),
+                    "tokens": tokens,
                 })),
-            )
+            ),
+            ryeos_runtime::ResolveError::VerbNotFound { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            ),
+            ryeos_runtime::ResolveError::VerbNotExecutable { .. } => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            ),
         })?;
+
         tracing::debug!(
             tokens = ?tokens,
-            verb = %verb_name,
-            item_ref = %execute_ref,
-            "resolved tokens to item_ref"
+            verb = %resolved.verb,
+            consumed = resolved.consumed,
+            item_ref = %resolved.execute_ref,
+            deprecated = resolved.deprecated,
+            "resolved tokens via shared resolver"
         );
-        request.item_ref = Some(execute_ref.clone());
+
+        if resolved.deprecated {
+            tracing::warn!(
+                verb = %resolved.verb,
+                replacement = ?resolved.replacement_tokens,
+                removed_in = ?resolved.removed_in,
+                "deprecated alias used"
+            );
+        }
+
+        request.item_ref = Some(resolved.execute_ref);
+        // Merge: tail-bound params win over client-supplied params on conflict
+        let tail_params = resolved.parameters;
+        match (request.parameters.take(), tail_params) {
+            (serde_json::Value::Object(mut client), serde_json::Value::Object(tail)) => {
+                for (k, v) in tail {
+                    client.insert(k, v);
+                }
+                request.parameters = serde_json::Value::Object(client);
+            }
+            (_, tail) => {
+                request.parameters = tail;
+            }
+        }
     }
 
-    // Either item_ref was provided directly or resolved from tokens above.
-    let item_ref = request.item_ref.as_ref().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "either item_ref or tokens is required" })),
-        )
-    })?;
+    let item_ref = request.item_ref.as_ref().unwrap();
 
     span.record("item_ref", item_ref.as_str());
     span.record("launch_mode", request.launch_mode.as_str());

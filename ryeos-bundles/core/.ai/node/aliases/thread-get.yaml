@@ -1,7 +1,6 @@
-# rye:signed:2026-05-05T07:56:52Z:bb1fb97694b7ef4c6f20ce0636417a8fbe612e2eee8cc5bfe4f8b7b756c5d19e:TdPw4S0fIt5crbgtU9DatRzRb7jP/s7tKHOOPO3eUlxOF03gURpIGdOWhu9typU/tqH7WH5fMkgvqi6tQtciAg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-05T08:31:45Z:4d6a1595816c97fd6be231a03719fa66f1ebf900815a208ad8a09d8e392bfadb:myrfuUCmvKVKPMsh8cKdrH+w5K4ZIIET3QgRyKdRWZHs4v8f7Wn6UdoJgYnN9k9p1dPOhha7FrGQlZEpnZBpDg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 category: "aliases"
 section: aliases
-surface: cli
 tokens: ["thread", "get"]
 verb: thread-get
 description: "Get a thread's details"
