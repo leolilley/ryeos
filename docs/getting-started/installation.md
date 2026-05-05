@@ -17,13 +17,13 @@ cargo build
 
 This produces:
 
-| Binary | Path | Purpose |
-|--------|------|---------|
-| `ryeosd` | `target/debug/ryeosd` | The daemon |
-| `rye` | `target/debug/rye` | The CLI |
-| `rye-bundle-tool` | `target/debug/rye-bundle-tool` | Bundle manifest tool |
-| `rye-sign` | `target/debug/rye-sign` | Item signing tool |
-| `rye-inspect` | `target/debug/rye-inspect` | Runtime inspection tool |
+| Binary            | Path                           | Purpose                 |
+| ----------------- | ------------------------------ | ----------------------- |
+| `ryeosd`          | `target/debug/ryeosd`          | The daemon              |
+| `rye`             | `target/debug/rye`             | The CLI                 |
+| `rye-bundle-tool` | `target/debug/rye-bundle-tool` | Bundle manifest tool    |
+| `rye-sign`        | `target/debug/rye-sign`        | Item signing tool       |
+| `rye-inspect`     | `target/debug/rye-inspect`     | Runtime inspection tool |
 
 Release builds: `cargo build --release`.
 
@@ -41,26 +41,26 @@ cargo run -p ryeos-cli -- \
 
 This creates:
 
-| What | Where | Purpose |
-|------|-------|---------|
-| Node signing key | `$XDG_STATE_DIR/ryeosd/.ai/node/identity/` | Daemon's Ed25519 identity |
-| User signing key | `~/.ai/config/keys/signing/` | Operator's Ed25519 identity |
-| Vault keypair | `$XDG_STATE_DIR/ryeosd/.ai/node/vault/` | X25519 secret encryption |
-| Core bundle | `$XDG_DATA_DIR/ryeos/` | Kind schemas, parsers, handlers, runtimes |
-| Standard bundle | `$XDG_STATE_DIR/ryeosd/.ai/bundles/standard/` | Directives, tools, knowledge |
-| Trust store | `~/.ai/config/keys/trusted/` | Self-signed trust docs for node + user keys |
+| What             | Where                                         | Purpose                                     |
+| ---------------- | --------------------------------------------- | ------------------------------------------- |
+| Node signing key | `$XDG_STATE_DIR/ryeosd/.ai/node/identity/`    | Daemon's Ed25519 identity                   |
+| User signing key | `~/.ai/config/keys/signing/`                  | Operator's Ed25519 identity                 |
+| Vault keypair    | `$XDG_STATE_DIR/ryeosd/.ai/node/vault/`       | X25519 secret encryption                    |
+| Core bundle      | `$XDG_DATA_DIR/ryeos/`                        | Kind schemas, parsers, handlers, runtimes   |
+| Standard bundle  | `$XDG_STATE_DIR/ryeosd/.ai/bundles/standard/` | Directives, tools, knowledge                |
+| Trust store      | `~/.ai/config/keys/trusted/`                  | Self-signed trust docs for node + user keys |
 
 ### Init flags
 
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--core-source <PATH>` | Yes | Source tree to copy `core` bundle from |
-| `--standard-source <PATH>` | No | Source tree to copy `standard` bundle from. Omit with `--core-only` |
-| `--core-only` | No | Skip installing the standard bundle |
-| `--state-dir <PATH>` | No | Override daemon state root (default: `$XDG_STATE_DIR/ryeosd`) |
-| `--user-root <PATH>` | No | Override user space root (default: `$HOME`) |
-| `--system-data-dir <PATH>` | No | Override where the core bundle is installed (default: `$XDG_DATA_DIR/ryeos`) |
-| `--force-node-key` | No | Force-regenerate the node signing key |
+| Flag                       | Required | Description                                                                  |
+| -------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `--core-source <PATH>`     | Yes      | Source tree to copy `core` bundle from                                       |
+| `--standard-source <PATH>` | No       | Source tree to copy `standard` bundle from. Omit with `--core-only`          |
+| `--core-only`              | No       | Skip installing the standard bundle                                          |
+| `--state-dir <PATH>`       | No       | Override daemon state root (default: `$XDG_STATE_DIR/ryeosd`)                |
+| `--user-root <PATH>`       | No       | Override user space root (default: `$HOME`)                                  |
+| `--system-data-dir <PATH>` | No       | Override where the core bundle is installed (default: `$XDG_DATA_DIR/ryeos`) |
+| `--force-node-key`         | No       | Force-regenerate the node signing key                                        |
 
 ## Required environment variables
 
