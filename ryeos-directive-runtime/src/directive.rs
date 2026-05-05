@@ -70,6 +70,20 @@ pub struct ModelSpec {
     pub name: Option<String>,
     #[serde(default)]
     pub context_window: Option<u64>,
+    #[serde(default)]
+    pub sampling: Option<SamplingConfig>,
+}
+
+/// LLM sampling parameters for best-effort replay. Not all providers
+/// support every field — e.g. OpenAI supports `seed`, Anthropic does
+/// not. The provider adapter silently omits unsupported fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamplingConfig {
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

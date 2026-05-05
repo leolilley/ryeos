@@ -24,6 +24,7 @@ pub struct BootstrapOutput {
     pub provider: ProviderConfig,
     pub model_name: String,
     pub context_window: u64,
+    pub sampling: Option<SamplingConfig>,
 }
 
 pub fn bootstrap(
@@ -230,6 +231,7 @@ pub fn bootstrap(
         provider: resolved.provider,
         model_name: resolved.model_name,
         context_window: resolved.context_window,
+        sampling: header.model.as_ref().and_then(|m| m.sampling.clone()),
     })
 }
 
@@ -584,6 +586,7 @@ mod tests {
                 provider: Some("openai".to_string()),
                 name: Some("gpt-4".to_string()),
                 context_window: Some(128_000),
+                sampling: None,
             }),
             ..Default::default()
         };
@@ -602,6 +605,7 @@ mod tests {
                 provider: None,
                 name: Some("gpt-4".to_string()),
                 context_window: Some(128_000),
+                sampling: None,
             }),
             ..Default::default()
         };
@@ -619,6 +623,7 @@ mod tests {
                 provider: Some("openai".to_string()),
                 name: Some("gpt-4".to_string()),
                 context_window: None,  // <-- missing
+                sampling: None,
             }),
             ..Default::default()
         };
@@ -636,6 +641,7 @@ mod tests {
                 provider: None,
                 name: None,
                 context_window: None,
+                sampling: None,
             }),
             ..Default::default()
         };
@@ -686,6 +692,7 @@ mod tests {
                 provider: Some("openai".to_string()),  // ignored — name is None
                 name: None,
                 context_window: None,
+                sampling: None,
             }),
             ..Default::default()
         };
