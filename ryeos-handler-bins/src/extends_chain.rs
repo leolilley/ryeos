@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use regex::Regex;
 use ryeos_handler_protocol::{
     ComposeRequest, ComposeSuccess, ResolutionStepNameWire,
 };
@@ -224,6 +225,46 @@ fn validate_field_shape(
     Ok(())
 }
 
+/// Check if a granted capability pattern covers a child capability.
+///
+/// Same semantics as `ryeos_runtime::authorizer::cap_matches`:
+/// - Exact match → true
+/// - `*` → `.*` (matches any characters including `/`)
+/// - `?` → `.` (matches exactly one character)
+/// - Regex metacharacters are escaped
+/// - Anchored `^...$`
+fn cap_covers(granted: &str, child: &str) -> bool {
+    if granted == child {
+        return true;
+    }
+    let mut regex_str = String::from("^");
+    for ch in granted.chars() {
+        match ch {
+            '*' => regex_str.push_str(".*"),
+            '?' => regex_str.push('.'),
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                regex_str.push('\\');
+                regex_str.push(ch);
+            }
+            _ => regex_str.push(ch),
+        }
+    }
+    regex_str.push('$');
+    Regex::new(&regex_str)
+        .map(|re| re.is_match(child))
+        .unwrap_or(false)
+}
+
+/// Narrow a child's verb caps against the parent's verb caps.
+/// Returns only the child caps that are covered by at least one parent cap.
+fn narrow_verb(child_caps: &[String], parent_caps: &[String]) -> Vec<String> {
+    child_caps
+        .iter()
+        .filter(|child| parent_caps.iter().any(|parent| cap_covers(parent, child)))
+        .cloned()
+        .collect()
+}
+
 fn apply_strategy(
     rule: &ComposerFieldRule,
     composed: &mut Value,
@@ -258,6 +299,88 @@ fn apply_strategy(
             merge_string_seq_dict(&mut merged, root_parsed.get(&rule.name));
             if let Value::Object(obj) = composed {
                 obj.insert(rule.name.clone(), Value::Object(merged));
+            }
+        }
+        ComposerStrategy::NarrowAgainstParentEffective => {
+            let child_has = root_parsed
+                .get(&rule.name)
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+
+            if !child_has {
+                // Child omitted the field — inherit from first ancestor that has it.
+                for parent in ancestor_parsed {
+                    if let Some(v) = parent.get(&rule.name) {
+                        if !v.is_null() {
+                            if let Value::Object(obj) = composed {
+                                obj.insert(rule.name.clone(), v.clone());
+                            }
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Child declared the field — narrow each verb against parent effective.
+                let child_val = root_parsed.get(&rule.name).unwrap();
+                let parent_val = ancestor_parsed
+                    .iter()
+                    .find_map(|p| p.get(&rule.name).filter(|v| !v.is_null()));
+
+                let narrowed = match (child_val.as_object(), parent_val.and_then(|v| v.as_object())) {
+                    (Some(child_map), Some(parent_map)) => {
+                        let mut result = Map::new();
+                        let all_verbs: HashSet<&str> = child_map
+                            .keys()
+                            .chain(parent_map.keys())
+                            .map(|s| s.as_str())
+                            .collect();
+
+                        for verb in all_verbs {
+                            let child_verb_caps = child_map
+                                .get(verb)
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect::<Vec<String>>()
+                                })
+                                .unwrap_or_default();
+
+                            let parent_verb_caps = parent_map
+                                .get(verb)
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect::<Vec<String>>()
+                                })
+                                .unwrap_or_default();
+
+                            if child_map.contains_key(verb) {
+                                // Child declared this verb — narrow against parent
+                                let narrowed_caps = narrow_verb(&child_verb_caps, &parent_verb_caps);
+                                result.insert(
+                                    verb.to_string(),
+                                    Value::Array(
+                                        narrowed_caps.into_iter().map(Value::String).collect(),
+                                    ),
+                                );
+                            } else {
+                                // Child omitted this verb — inherit parent's caps
+                                result.insert(
+                                    verb.to_string(),
+                                    parent_map.get(verb).cloned().unwrap_or(Value::Null),
+                                );
+                            }
+                        }
+                        Value::Object(result)
+                    }
+                    _ => child_val.clone(), // Not a mapping — verbatim (no narrowing possible)
+                };
+
+                if let Value::Object(obj) = composed {
+                    obj.insert(rule.name.clone(), narrowed);
+                }
             }
         }
     }
@@ -356,6 +479,7 @@ enum ComposerStrategy {
     RootVerbatim,
     InheritFromTopmost,
     DictMergeStringSeqRootLast,
+    NarrowAgainstParentEffective,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -424,7 +548,7 @@ mod tests {
                 },
                 {
                     "name": "permissions",
-                    "strategy": "inherit_from_topmost",
+                    "strategy": "narrow_against_parent_effective",
                     "expect_value_type": "mapping"
                 },
                 {
@@ -546,7 +670,10 @@ mod tests {
     }
 
     #[test]
-    fn child_field_wins_over_parent() {
+    fn child_field_narrowed_against_parent() {
+        // With narrow_against_parent_effective, child's caps must be
+        // covered by parent. Parent has bash, child requests read —
+        // bash doesn't cover read, so narrowed to empty.
         let r = json!({
             "name": "child",
             "extends": "parent",
@@ -558,10 +685,7 @@ mod tests {
             "body": ""
         });
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.read"]
-        );
+        assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());
     }
 
     #[test]
@@ -801,5 +925,172 @@ mod tests {
         let r = json!({});
         let view = run(cfg, r, vec![]).unwrap();
         assert!(policy_fact_string_seq(&view, "caps").is_empty());
+    }
+
+    // ── NarrowAgainstParentEffective tests ─────────────────────────
+
+    #[test]
+    fn child_cannot_exceed_parent() {
+        // Parent allows only read
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["rye.execute.tool.rye.file-system.read"] },
+            "body": ""
+        });
+        // Child requests write (not covered by parent)
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": ["rye.execute.tool.rye.file-system.write"] },
+            "body": "body"
+        });
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        // Narrowed to empty — parent doesn't cover write
+        assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());
+    }
+
+    #[test]
+    fn child_subset_passes_through() {
+        // Parent allows wildcard
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["rye.execute.tool.rye.file-system.*"] },
+            "body": ""
+        });
+        // Child requests specific tool within wildcard
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": ["rye.execute.tool.rye.file-system.write"] },
+            "body": "body"
+        });
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        assert_eq!(
+            policy_fact_string_seq(&view, "effective_caps"),
+            vec!["rye.execute.tool.rye.file-system.write"]
+        );
+    }
+
+    #[test]
+    fn child_omits_permissions_inherits_parent() {
+        // Parent allows read
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["rye.execute.tool.rye.file-system.read"] },
+            "body": ""
+        });
+        // Child does not declare permissions
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "body": "body"
+        });
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        assert_eq!(
+            policy_fact_string_seq(&view, "effective_caps"),
+            vec!["rye.execute.tool.rye.file-system.read"]
+        );
+    }
+
+    #[test]
+    fn child_omits_verb_inherits_parent_verb() {
+        // Parent has execute and fetch
+        let p = json!({
+            "name": "parent",
+            "permissions": {
+                "execute": ["rye.execute.tool.x"],
+                "fetch": ["rye.fetch.tool.x"]
+            },
+            "body": ""
+        });
+        // Child declares only execute
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": ["rye.execute.tool.x"] },
+            "body": "body"
+        });
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        // Child keeps its execute
+        assert_eq!(
+            policy_fact_string_seq(&view, "effective_caps"),
+            vec!["rye.execute.tool.x"]
+        );
+        // Child inherits parent's fetch
+        let fetch_caps = view
+            .composed
+            .get("permissions")
+            .and_then(|p| p.get("fetch"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(fetch_caps, vec!["rye.fetch.tool.x"]);
+    }
+
+    #[test]
+    fn wildcard_parent_covers_child_wildcard() {
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["rye.execute.tool.*"] },
+            "body": ""
+        });
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": ["rye.execute.tool.rye.*"] },
+            "body": "body"
+        });
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        assert_eq!(
+            policy_fact_string_seq(&view, "effective_caps"),
+            vec!["rye.execute.tool.rye.*"]
+        );
+    }
+
+    #[test]
+    fn empty_child_caps_stay_empty() {
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["rye.execute.tool.*"] },
+            "body": ""
+        });
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": [] },
+            "body": "body"
+        });
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());
+    }
+
+    #[test]
+    fn global_wildcard_covers_everything() {
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["*"] },
+            "body": ""
+        });
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": [
+                "rye.execute.tool.rye.file-system.write",
+                "rye.execute.service.bundle/install"
+            ]},
+            "body": "body"
+        });
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        assert_eq!(
+            policy_fact_string_seq(&view, "effective_caps"),
+            vec![
+                "rye.execute.tool.rye.file-system.write",
+                "rye.execute.service.bundle/install"
+            ]
+        );
     }
 }
