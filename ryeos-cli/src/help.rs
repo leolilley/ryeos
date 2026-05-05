@@ -38,6 +38,8 @@ pub fn print_verb_help(
                 .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
             writeln!(out, "  Execute: {}", e.execute)
                 .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
+            writeln!(out, "  Cap:     {}", e.required_cap)
+                .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
             writeln!(out, "  Source:  {}", e.source_file.display())
                 .map_err(|e| crate::error::CliError::Internal { detail: e.to_string() })?;
             writeln!(out, "  Signer:  {}", e.signer_fingerprint)

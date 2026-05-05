@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use ryeos_engine::roots;
+use ryeos_runtime::authorizer::canonical_cap;
 
 use crate::error::CliConfigError;
 
@@ -28,6 +29,11 @@ pub struct VerbEntry {
     pub verb_tokens: Vec<String>,
     pub description: String,
     pub execute: String,
+    /// The canonical cap required to execute this verb's target, derived
+    /// from the `execute` ref: `service:bundle/install` →
+    /// `rye.execute.service.bundle/install`. Used for client-side
+    /// pre-check and help display.
+    pub required_cap: String,
     pub source_file: PathBuf,
     pub signer_fingerprint: String,
 }
@@ -274,13 +280,16 @@ fn parse_verb_yaml(path: &Path, content: &str) -> Result<VerbEntry, crate::error
         .to_string();
 
     // Validate the execute ref parses as a canonical ref
-    ryeos_engine::canonical_ref::CanonicalRef::parse(&execute).map_err(|e| {
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&execute).map_err(|e| {
         CliConfigError::InvalidExecuteRef {
             path: path.display().to_string(),
             item_ref: execute.clone(),
             detail: e.to_string(),
         }
     })?;
+
+    // Derive the canonical cap: service:bundle/install → rye.execute.service.bundle/install
+    let required_cap = canonical_cap(&canonical.kind, &canonical.bare_id, "execute");
 
     // Extract signer fingerprint from signature header
     let signer_fingerprint =
@@ -299,6 +308,7 @@ fn parse_verb_yaml(path: &Path, content: &str) -> Result<VerbEntry, crate::error
         verb_tokens: tokens,
         description,
         execute,
+        required_cap,
         source_file: path.to_path_buf(),
         signer_fingerprint,
     })

@@ -5,6 +5,7 @@ use arc_swap::ArcSwap;
 use serde::Serialize;
 
 use ryeos_engine::engine::Engine;
+use ryeos_runtime::authorizer::Authorizer;
 use ryeos_runtime::verb_registry::VerbRegistry;
 
 use crate::config::Config;
@@ -65,6 +66,10 @@ pub struct AppState {
     /// Verb registry for capability implication expansion (execute → fetch,
     /// sign → fetch). Built once at startup with `VerbRegistry::with_builtins()`.
     pub verb_registry: Arc<VerbRegistry>,
+    /// Unified capability evaluator. Built once at startup from `verb_registry`.
+    /// All enforcement sites use this shared instance instead of constructing
+    /// per-request.
+    pub authorizer: Arc<Authorizer>,
 }
 
 #[derive(Debug, Serialize)]
