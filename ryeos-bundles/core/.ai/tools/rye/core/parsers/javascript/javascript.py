@@ -1,4 +1,4 @@
-# rye:signed:2026-05-05T08:31:45Z:e021397d26bf21b327a872eff56571bd27a0524d8d49618da26e31d224a062cd:TNMnTK5s4wT5Svds4Feer4OIirfo/l8wXj30pWSE9qmvYL/pfbN+iKfxZQey8WnGQiv/NgXwJPw42y4YY8uBDw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# rye:signed:2026-05-05T08:53:04Z:e021397d26bf21b327a872eff56571bd27a0524d8d49618da26e31d224a062cd:TNMnTK5s4wT5Svds4Feer4OIirfo/l8wXj30pWSE9qmvYL/pfbN+iKfxZQey8WnGQiv/NgXwJPw42y4YY8uBDw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
 """JavaScript/TypeScript parser for extracting metadata from JS/TS tools.
 
 Extracts exported constants and CONFIG_SCHEMA using regex.

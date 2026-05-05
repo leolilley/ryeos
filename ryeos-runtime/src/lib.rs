@@ -1,4 +1,5 @@
 pub mod alias_registry;
+pub mod arg_binder;
 pub mod authorizer;
 pub mod callback;
 pub mod callback_client;
@@ -47,5 +48,6 @@ pub use paths::{
 pub use progress::{ProgressEvent, StatusEvent};
 pub use transcript::{KnowledgeRenderOptions, Transcript};
 pub use alias_registry::{AliasDef, AliasRegistry, AliasRegistryError};
-pub use resolver::{ResolvedCommand, ResolveError, bind_argv_tail, resolve_command};
+pub use arg_binder::bind_argv;
+pub use resolver::{ResolvedCommand, ResolveError, resolve_command};
 pub use verb_registry::{UnknownVerbInCap, VerbDef, VerbRegistry, VerbRegistryError};

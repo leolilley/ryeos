@@ -78,7 +78,7 @@ pub fn resolve_command(
 
     // 3. Extract tail and bind parameters
     let tail: Vec<String> = tokens[consumed..].to_vec();
-    let parameters = bind_argv_tail(&tail);
+    let parameters = crate::arg_binder::bind_argv(&tail);
 
     // 4. Check deprecation
     let consumed_tokens: Vec<String> = tokens[..consumed].to_vec();
@@ -97,41 +97,6 @@ pub fn resolve_command(
         replacement_tokens,
         removed_in,
     })
-}
-
-/// Bind tail argv tokens into a JSON parameters object.
-///
-/// `--key value` and `--key=value` become `{ "key": "value" }`.
-/// `--flag` (no value) becomes `{ "flag": true }`.
-/// Remaining positional tokens become `{ "_args": [...] }`.
-pub fn bind_argv_tail(tail: &[String]) -> serde_json::Value {
-    let mut params = serde_json::Map::new();
-    let mut positional = Vec::new();
-    let mut i = 0;
-
-    while i < tail.len() {
-        let token = &tail[i];
-        if let Some(key) = token.strip_prefix("--") {
-            if key.contains('=') {
-                let (k, v) = key.split_once('=').unwrap();
-                params.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-            } else if i + 1 < tail.len() && !tail[i + 1].starts_with('-') {
-                i += 1;
-                params.insert(key.to_string(), serde_json::Value::String(tail[i].clone()));
-            } else {
-                params.insert(key.to_string(), serde_json::Value::Bool(true));
-            }
-        } else {
-            positional.push(serde_json::Value::String(token.clone()));
-        }
-        i += 1;
-    }
-
-    if !positional.is_empty() {
-        params.insert("_args".to_string(), serde_json::Value::Array(positional));
-    }
-
-    serde_json::Value::Object(params)
 }
 
 #[cfg(test)]
@@ -246,14 +211,14 @@ mod tests {
 
     #[test]
     fn bind_empty_tail() {
-        let result = bind_argv_tail(&[]);
+        let result = crate::arg_binder::bind_argv(&[]);
         assert!(result.as_object().unwrap().is_empty());
     }
 
     #[test]
     fn bind_key_value_pairs() {
         let tail = vec!["--name".to_string(), "foo".to_string(), "--verbose".to_string()];
-        let result = bind_argv_tail(&tail);
+        let result = crate::arg_binder::bind_argv(&tail);
         assert_eq!(result.get("name").unwrap(), "foo");
         assert_eq!(result.get("verbose").unwrap(), true);
     }
@@ -261,14 +226,14 @@ mod tests {
     #[test]
     fn bind_equals_syntax() {
         let tail = vec!["--seed=119".to_string()];
-        let result = bind_argv_tail(&tail);
+        let result = crate::arg_binder::bind_argv(&tail);
         assert_eq!(result.get("seed").unwrap(), "119");
     }
 
     #[test]
     fn bind_positional_args() {
         let tail = vec!["./bundles/standard".to_string()];
-        let result = bind_argv_tail(&tail);
+        let result = crate::arg_binder::bind_argv(&tail);
         let args = result.get("_args").unwrap().as_array().unwrap();
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], "./bundles/standard");
@@ -279,7 +244,7 @@ mod tests {
         // --force followed by a non-dash token: the non-dash token is
         // consumed as the flag's value (resolver has no schema knowledge).
         let tail = vec!["--force".to_string(), "some-arg".to_string()];
-        let result = bind_argv_tail(&tail);
+        let result = crate::arg_binder::bind_argv(&tail);
         assert_eq!(result.get("force").unwrap(), "some-arg");
         // No positional _args because "some-arg" was consumed by --force
         assert!(result.get("_args").is_none());
