@@ -160,11 +160,11 @@ pub fn resolve_project_context(
             let manifest_hash = &snapshot.project_manifest_hash;
             let exec_dir = state
                 .config
-                .state_dir
+                .system_space_dir
                 .join("executions")
                 .join(checkout_id);
             let cache = crate::execution::cache::MaterializationCache::new(
-                state.config.state_dir.join("cache").join("snapshots"),
+                state.config.system_space_dir.join("cache").join("snapshots"),
             );
             crate::execution::checkout_project(&cas_root, manifest_hash, &exec_dir, Some(&cache))
                 .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;

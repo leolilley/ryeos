@@ -96,13 +96,13 @@ pub fn run_sign(
 
     let user_root = roots::user_root().ok();
     let system_roots = {
-        let state_dir = match std::env::var("RYEOS_STATE_DIR") {
+        let system_space_dir = match std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
             Ok(p) => PathBuf::from(p),
-            Err(_) => dirs::state_dir()
-                .map(|d| d.join("ryeosd"))
-                .unwrap_or_else(|| PathBuf::from(".ryeosd")),
+            Err(_) => dirs::data_dir()
+                .map(|d| d.join("ryeos"))
+                .expect("could not determine XDG data directory"),
         };
-        let bundles_dir = state_dir.join(ryeos_engine::AI_DIR).join("bundles");
+        let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
         let mut additional: Vec<PathBuf> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
             for entry in entries.flatten() {

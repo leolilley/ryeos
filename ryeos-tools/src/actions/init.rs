@@ -48,13 +48,11 @@ pub const PLATFORM_AUTHOR_PUBKEY: [u8; 32] = [
 
 #[derive(Debug)]
 pub struct InitOptions {
-    /// Daemon state root (parent of `.ai/`). Defaults to XDG state dir.
-    pub state_dir: PathBuf,
+    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    /// Contains both runtime state (identity, vault, CAS) and bundle content.
+    pub system_space_dir: PathBuf,
     /// User space root (parent of `~/.ai/`). Defaults to `$HOME`.
     pub user_root: PathBuf,
-    /// Where the core bundle should live (system data dir). The CLI copies
-    /// `core_source` here when first laying down the platform.
-    pub system_data_dir: PathBuf,
     /// Source tree to copy `core` from. Required — the operator points this
     /// at the bundled `core` from their package install (e.g.
     /// `/usr/share/ryeos/bundles/core`) or at the dev tree
@@ -87,18 +85,18 @@ pub struct InitReport {
 /// Run `rye init` end-to-end.
 ///
 /// Order:
-///   1. Layout: create `<state>/.ai/{node,state,bundles}` + vault placeholder
+///   1. Layout: create `<system_space_dir>/.ai/{node,state,bundles}` + vault placeholder
 ///   2. User key (load-or-create at `<user>/.ai/config/keys/signing/private_key.pem`)
-///   3. Node key (load-or-create at `<state>/.ai/node/identity/private_key.pem`)
+///   3. Node key (load-or-create at `<system_space_dir>/.ai/node/identity/private_key.pem`)
 ///   4. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
 ///   5. Pin platform author key into user trust dir
-///   6. Lay down core at `system_data_dir` (copy from `core_source`)
+///   6. Lay down core at `system_space_dir` (copy from `core_source`)
 ///   7. Install standard bundle (unless `core_only`) — copy + signed
 ///      registration record
 ///   8. Verify post-init trust store contains all required keys; refuse if not
 pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     // ── 1. Layout ──
-    create_layout(&opts.state_dir, &opts.user_root)?;
+    create_layout(&opts.system_space_dir, &opts.user_root)?;
 
     let trust_dir = opts
         .user_root
@@ -124,7 +122,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
     // ── 3. Node key ──
     let node_key_path = opts
-        .state_dir
+        .system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("identity")
@@ -159,33 +157,39 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             opts.core_source.display()
         );
     }
-    if opts.system_data_dir.exists() {
-        verify_core_already_consistent(&opts.system_data_dir, &opts.core_source)?;
+    let core_kinds_dir = opts.system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("engine")
+        .join("kinds");
+    if core_kinds_dir.is_dir() {
+        // Core bundle already laid down — verify it's consistent.
+        verify_core_already_consistent(&opts.system_space_dir, &opts.core_source)?;
         // Verify the on-disk core is still signature-valid against the
         // trust we just pinned. Any drift here is a hard failure — we
         // refuse to proceed rather than risk handing an unverified core
         // to the daemon.
         crate::actions::install::preflight_verify_bundle(
-            &opts.system_data_dir,
-            &opts.system_data_dir,
+            &opts.system_space_dir,
+            &opts.system_space_dir,
             Some(opts.user_root.as_path()),
         )
         .context("verify on-disk core against pinned platform author key")?;
     } else {
         // Verify the source BEFORE copying so a tampered core never
-        // touches the operator's system_data_dir.
+        // touches the operator's system_space_dir.
         crate::actions::install::preflight_verify_bundle(
             &opts.core_source,
             &opts.core_source,
             Some(opts.user_root.as_path()),
         )
         .context("verify core source against pinned platform author key")?;
-        copy_dir_recursive(&opts.core_source, &opts.system_data_dir).with_context(
+        copy_dir_recursive(&opts.core_source, &opts.system_space_dir).with_context(
             || {
                 format!(
                     "lay down core: {} -> {}",
                     opts.core_source.display(),
-                    opts.system_data_dir.display()
+                    opts.system_space_dir.display()
                 )
             },
         )?;
@@ -206,7 +210,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             );
         }
         let target = opts
-            .state_dir
+            .system_space_dir
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join("standard");
@@ -215,10 +219,10 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             Some(target.canonicalize()?)
         } else {
             install_standard_bundle(
-                &opts.state_dir,
+                &opts.system_space_dir,
                 standard_source,
                 &node_key,
-                &opts.system_data_dir,
+                &opts.system_space_dir,
                 opts.user_root.as_path(),
             )?
         }
@@ -228,7 +232,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     let post_trust = TrustStore::load_three_tier(
         None,
         Some(opts.user_root.as_path()),
-        std::slice::from_ref(&opts.system_data_dir),
+        std::slice::from_ref(&opts.system_space_dir),
     )
     .context("load post-init trust store")?;
     if !post_trust.is_trusted(PLATFORM_AUTHOR_FP) {
@@ -256,7 +260,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         );
     }
 
-    let vault_dir = opts.state_dir.join(ryeos_engine::AI_DIR).join("node").join("vault");
+    let vault_dir = opts.system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("vault");
     fs::create_dir_all(&vault_dir)
         .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
     // Vault X25519 keypair — separate from the Ed25519 node identity
@@ -279,9 +283,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
     let mut next_steps = vec![
         format!(
-            "Start the daemon: ryeosd --state-dir {} --system-data-dir {}",
-            opts.state_dir.display(),
-            opts.system_data_dir.display()
+            "Start the daemon: ryeosd --system-space-dir {}",
+            opts.system_space_dir.display()
         ),
         "Try a verb: rye status".to_string(),
     ];
@@ -297,7 +300,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         user_key_fingerprint: user_fp,
         node_key_fingerprint: node_fp,
         platform_author_pinned: PLATFORM_AUTHOR_FP.to_string(),
-        core_installed_at: opts.system_data_dir.clone(),
+        core_installed_at: opts.system_space_dir.clone(),
         standard_installed_at,
         vault_dir,
         vault_pubkey_fingerprint: vault_sk.public_key().fingerprint(),
@@ -327,17 +330,17 @@ fn decode_platform_author_pubkey() -> Result<VerifyingKey> {
 ///
 /// Reserves `<state>/.ai/state/` even though only the daemon writes here in
 /// v1 — keeps the layout consistent with the documented contract.
-fn create_layout(state_dir: &Path, user_root: &Path) -> Result<()> {
+fn create_layout(system_space_dir: &Path, user_root: &Path) -> Result<()> {
     let dirs = [
         // Node tier (daemon-owned)
-        state_dir.join(ryeos_engine::AI_DIR).join("node").join("identity"),
-        state_dir.join(ryeos_engine::AI_DIR).join("node").join("auth").join("authorized_keys"),
-        state_dir.join(ryeos_engine::AI_DIR).join("node").join("vault"),
+        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("identity"),
+        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("auth").join("authorized_keys"),
+        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("vault"),
         // CAS state
-        state_dir.join(ryeos_engine::AI_DIR).join("state").join("objects"),
-        state_dir.join(ryeos_engine::AI_DIR).join("state").join("refs"),
+        system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects"),
+        system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("refs"),
         // Bundles dir (populated by bundle.install or rye init)
-        state_dir.join(ryeos_engine::AI_DIR).join("bundles"),
+        system_space_dir.join(ryeos_engine::AI_DIR).join("bundles"),
         // User tier (operator-edited)
         user_root.join(ryeos_engine::AI_DIR).join("config").join("keys").join("signing"),
         user_root.join(ryeos_engine::AI_DIR).join("config").join("keys").join("trusted"),
@@ -375,26 +378,26 @@ fn load_or_create_key(path: &Path, force: bool) -> Result<SigningKey> {
     Ok(signing_key)
 }
 
-/// If `system_data_dir` already exists, sanity-check that it contains a
+/// If `system_space_dir` already exists, sanity-check that it contains a
 /// recognisable `core` bundle so we don't clobber something else and we
 /// don't overwrite a previously-laid-down core (idempotency).
-fn verify_core_already_consistent(system_data_dir: &Path, core_source: &Path) -> Result<()> {
-    let kinds = system_data_dir
+fn verify_core_already_consistent(system_space_dir: &Path, core_source: &Path) -> Result<()> {
+    let kinds = system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("engine")
         .join("kinds");
     if !kinds.is_dir() {
         bail!(
-            "system_data_dir exists at {} but is not a core bundle \
+            "system_space_dir exists at {} but is not a core bundle \
              (no .ai/node/engine/kinds/) — refusing to clobber. \
-             Wipe it manually if intentional, or point --system-data-dir \
+             Wipe it manually if intentional, or point --system-space-dir \
              elsewhere.",
-            system_data_dir.display()
+            system_space_dir.display()
         );
     }
     tracing::info!(
-        existing = %system_data_dir.display(),
+        existing = %system_space_dir.display(),
         source = %core_source.display(),
         "core bundle already laid down — keeping existing"
     );
@@ -424,18 +427,18 @@ fn verify_bundle_already_installed(target: &Path, source: &Path) -> Result<()> {
 /// required). The platform author trust must already be pinned (we just
 /// did so in [`run_init`]) so preflight verification passes.
 fn install_standard_bundle(
-    state_dir: &Path,
+    system_space_dir: &Path,
     standard_source: &Path,
     node_key: &SigningKey,
-    system_data_dir: &Path,
+    system_space_dir_for_kinds: &Path,
     user_root: &Path,
 ) -> Result<Option<PathBuf>> {
-    // Preflight: load trust store from operator state (user + system_data_dir
+    // Preflight: load trust store from operator state (user + system_space_dir
     // for kind schemas only — trust comes from user-tier).
     let trust_store = TrustStore::load_three_tier(
         None,
         Some(user_root),
-        &[system_data_dir.to_path_buf()],
+        &[system_space_dir_for_kinds.to_path_buf()],
     )
     .context("preflight: load trust store")?;
     if !trust_store.is_trusted(PLATFORM_AUTHOR_FP) {
@@ -450,13 +453,13 @@ fn install_standard_bundle(
     // Verify every signable item in the source bundle against the trust store.
     crate::actions::install::preflight_verify_bundle(
         standard_source,
-        system_data_dir,
+        system_space_dir_for_kinds,
         Some(user_root),
     )
     .context("preflight verification of standard bundle")?;
 
-    // Copy bundle into <state>/.ai/bundles/standard/
-    let target = state_dir.join(ryeos_engine::AI_DIR).join("bundles").join("standard");
+    // Copy bundle into <system_space_dir>/.ai/bundles/standard/
+    let target = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles").join("standard");
     fs::create_dir_all(target.parent().unwrap())
         .with_context(|| format!("create bundles parent for {}", target.display()))?;
     copy_dir_recursive(standard_source, &target)
@@ -466,7 +469,7 @@ fn install_standard_bundle(
         .context("canonicalize standard install path")?;
 
     // Write signed kind: node bundle registration record.
-    let node_dir = state_dir.join(ryeos_engine::AI_DIR).join("node");
+    let node_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("node");
     write_node_bundle_registration(&node_dir, "standard", &canonical, node_key)?;
 
     Ok(Some(canonical))
@@ -562,9 +565,8 @@ mod tests {
         let standard_src = workspace_root().join("ryeos-bundles/standard");
 
         let opts = InitOptions {
-            state_dir: state.clone(),
+            system_space_dir: state.clone(),
             user_root: user.clone(),
-            system_data_dir: tmp.path().join("system"),
             core_source: core_src,
             standard_source: Some(standard_src),
             core_only: true, // skip standard for unit-test speed
@@ -588,9 +590,8 @@ mod tests {
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
         let opts = InitOptions {
-            state_dir: state.clone(),
+            system_space_dir: state.clone(),
             user_root: user,
-            system_data_dir: tmp.path().join("system"),
             core_source: workspace_root().join("ryeos-bundles/core"),
             standard_source: None,
             core_only: true,
@@ -617,9 +618,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let opts = InitOptions {
-            state_dir: state.clone(),
+            system_space_dir: state.clone(),
             user_root: tmp.path().join("home"),
-            system_data_dir: tmp.path().join("system"),
             core_source: workspace_root().join("ryeos-bundles/core"),
             standard_source: None,
             core_only: true,
@@ -640,9 +640,8 @@ mod tests {
         let user = tmp.path().join("home");
         let core_src = workspace_root().join("ryeos-bundles/core");
         let opts = InitOptions {
-            state_dir: state.clone(),
+            system_space_dir: state.clone(),
             user_root: user.clone(),
-            system_data_dir: tmp.path().join("system"),
             core_source: core_src,
             standard_source: None,
             core_only: true,
@@ -658,9 +657,8 @@ mod tests {
     fn run_init_force_regenerates_node_key_only() {
         let tmp = tempfile::tempdir().unwrap();
         let mut opts = InitOptions {
-            state_dir: tmp.path().join("state"),
+            system_space_dir: tmp.path().join("state"),
             user_root: tmp.path().join("home"),
-            system_data_dir: tmp.path().join("system"),
             core_source: workspace_root().join("ryeos-bundles/core"),
             standard_source: None,
             core_only: true,

@@ -12,7 +12,6 @@ pub enum DispatchKind {
 
 #[derive(Debug, Clone)]
 pub struct ToolDispatchResult {
-    pub tool_name: String,
     pub call_id: Option<String>,
     pub arguments: Value,
     pub canonical_ref: String,
@@ -73,7 +72,6 @@ impl Dispatcher {
         let dispatch_kind = classify_dispatch(&canonical_ref);
 
         Ok(ToolDispatchResult {
-            tool_name: tool_name.to_string(),
             call_id,
             arguments,
             canonical_ref,
@@ -127,8 +125,8 @@ mod tests {
     fn resolve_known_tool() {
         let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()]);
         let result = d.resolve("read_file", r#"{"path": "/tmp"}"#, None).unwrap();
-        assert_eq!(result.tool_name, "read_file");
         assert_eq!(result.arguments["path"], "/tmp");
+        assert_eq!(result.canonical_ref, "tool:read_file");
         assert_eq!(result.dispatch_kind, DispatchKind::Tool);
     }
 

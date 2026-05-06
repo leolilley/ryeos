@@ -421,7 +421,7 @@ pub fn validate_protocol_builder(
             timeout: Duration::from_secs(30),
             acting_principal: "boot-check",
             cas_root: dummy_path,
-            state_dir: dummy_path,
+            system_space_dir: dummy_path,
             thread_auth_token: "boot-check-tat",
         };
 
@@ -1315,7 +1315,7 @@ composed_value_contract:
             timeout: Duration::from_secs(30),
             acting_principal: "test",
             cas_root: dummy,
-            state_dir: dummy,
+            system_space_dir: dummy,
             thread_auth_token: "test-tat",
         };
 
@@ -1372,7 +1372,7 @@ composed_value_contract:
             timeout: Duration::from_secs(30),
             acting_principal: "test",
             cas_root: dummy,
-            state_dir: dummy,
+            system_space_dir: dummy,
             thread_auth_token: "test-tat",
         };
 

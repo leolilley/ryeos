@@ -105,6 +105,7 @@ mod tests {
     fn make_raw(status: Option<u16>, content_type: Option<&str>, body_b64: Option<&str>) -> RawRouteSpec {
         RawRouteSpec {
             section: "routes".to_string(),
+            category: None,
             id: "test-route".to_string(),
             path: "/test".to_string(),
             methods: ["GET".to_string()].into_iter().collect(),

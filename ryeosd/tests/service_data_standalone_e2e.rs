@@ -64,23 +64,23 @@ async fn standalone_bundle_install_then_list_then_remove() {
     std::fs::write(src.path().join(".ai/marker.txt"), b"hello").unwrap();
     let src_path = src.path().to_str().unwrap().to_string();
 
-    // 3. Install. We need to reuse the SAME state_dir across calls so the
+    // 3. Install. We need to reuse the SAME system_space_dir across calls so the
     //    install persists. Re-using sd/us tempdirs requires a non-fresh
     //    helper, which the harness doesn't expose today. The simplest
-    //    path: call the daemon binary directly with --state-dir = sd.path().
+    //    path: call the daemon binary directly with --system-space-dir = sd.path().
     //    Look at `run_service_standalone_fresh` in `common/mod.rs` to see
     //    the exact ryeosd invocation; replicate it inline here, but use
     //    the existing sd/us tempdirs so state survives between calls.
     let install_out = std::process::Command::new(common::ryeosd_binary())
         .arg("--init-if-missing")
-        .arg("--state-dir").arg(sd.path().join("state"))
+        .arg("--system-space-dir").arg(sd.path().join("state"))
         .arg("--uds-path").arg(sd.path().join("state/ryeosd.sock"))
         .arg("run-service")
         .arg("service:bundle/install")
         .arg("--params")
         .arg(format!(r#"{{"name":"testbundle","source_path":"{src_path}"}}"#))
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::system_data_dir())
+        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
         .env("USER_SPACE", us.path())
         .env("HOME", us.path())
         .output()
@@ -103,14 +103,14 @@ async fn standalone_bundle_install_then_list_then_remove() {
 
     // 6. Remove and verify both paths are gone.
     let remove_out = std::process::Command::new(common::ryeosd_binary())
-        .arg("--state-dir").arg(sd.path().join("state"))
+        .arg("--system-space-dir").arg(sd.path().join("state"))
         .arg("--uds-path").arg(sd.path().join("state/ryeosd.sock"))
         .arg("run-service")
         .arg("service:bundle/remove")
         .arg("--params")
         .arg(r#"{"name":"testbundle"}"#)
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::system_data_dir())
+        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
         .env("USER_SPACE", us.path())
         .env("HOME", us.path())
         .output()

@@ -34,7 +34,7 @@
 //!
 //! ## Production trust is unchanged
 //!
-//! `rye init` continues to copy bundles into `system_data_dir` as
+//! `rye init` continues to copy bundles into `system_space_dir` as
 //! static, signed artifacts with no symlinks. The race that this
 //! fixture closes is dev-tree-only and has never reached an installed
 //! daemon.

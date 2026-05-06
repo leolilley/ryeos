@@ -284,7 +284,7 @@ pub async fn execute_service_verified(
 
     // 7c. Standalone NDJSON audit (only in Standalone mode, not projection-backed)
     if mode == ExecutionMode::Standalone {
-        let audit_path = crate::standalone_audit::default_audit_path(&state.config.state_dir);
+        let audit_path = crate::standalone_audit::default_audit_path(&state.config.system_space_dir);
         let record = crate::standalone_audit::StandaloneAuditRecord {
             ts: lillux::time::iso8601_now(),
             mode: "standalone",

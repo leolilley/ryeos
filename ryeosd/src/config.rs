@@ -27,9 +27,9 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Override the state directory (default: XDG state dir / ryeosd)
+    /// Override the system space directory (default: XDG data dir / ryeos)
     #[arg(long)]
-    pub state_dir: Option<PathBuf>,
+    pub system_space_dir: Option<PathBuf>,
 
     #[arg(long)]
     pub bind: Option<SocketAddr>,
@@ -39,9 +39,6 @@ pub struct Cli {
 
     #[arg(long)]
     pub uds_path: Option<PathBuf>,
-
-    #[arg(long)]
-    pub system_data_dir: Option<PathBuf>,
 
     #[arg(long)]
     pub require_auth: bool,
@@ -82,18 +79,17 @@ pub struct Config {
     pub bind: SocketAddr,
     pub db_path: PathBuf,
     pub uds_path: PathBuf,
-    /// Daemon state root. Contains the `.ai/` tree with node identity,
-    /// vault, runtime DB, node-config, and installed bundles.
-    /// Defaults to the same path as `system_data_dir` (single `.ai/` tree).
-    pub state_dir: PathBuf,
-    /// Daemon-internal signing key — used for CAS state writes, node-config
-    /// writes, and all `.ai/node/**` daemon-authored state.
-    /// Defaults to `<state_dir>/.ai/node/identity/private_key.pem`.
+    /// System space root — the single directory containing the `.ai/` tree.
+    /// Holds node identity, vault, runtime DB, bundles, node-config, and
+    /// all bundle content. Defaults to `~/.local/share/ryeos/`.
+    /// Override with `--system-space-dir` or `RYE_SYSTEM_SPACE` env var.
+    pub system_space_dir: PathBuf,
+    /// Daemon-internal signing key.
+    /// Defaults to `<system_space_dir>/.ai/node/identity/private_key.pem`.
     pub node_signing_key_path: PathBuf,
     /// Operator signing key — used for operator edits in project + user space.
     /// Defaults to `~/.ai/config/keys/signing/private_key.pem`.
     pub user_signing_key_path: PathBuf,
-    pub system_data_dir: PathBuf,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
 }
@@ -104,10 +100,9 @@ struct PartialConfig {
     bind: Option<SocketAddr>,
     db_path: Option<PathBuf>,
     uds_path: Option<PathBuf>,
-    state_dir: Option<PathBuf>,
+    system_space_dir: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
     user_signing_key_path: Option<PathBuf>,
-    system_data_dir: Option<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
 }
@@ -119,7 +114,7 @@ impl Config {
         let file_cfg = if let Some(path) = &cli.config {
             Some(Self::load_file(path)?)
         } else {
-            let default_config = defaults.state_dir.join(".ai").join("node").join("config.yaml");
+            let default_config = defaults.system_space_dir.join(".ai").join("node").join("config.yaml");
             if default_config.exists() {
                 Some(Self::load_file(&default_config)
                     .with_context(|| format!("failed to load existing config at {}", default_config.display()))?)
@@ -154,16 +149,13 @@ impl Config {
             }
         };
 
-        let state_dir = cli
-            .state_dir
+        // Resolve system_space_dir: CLI > env > config file > default
+        let system_space_dir = cli
+            .system_space_dir
             .clone()
-            .or_else(|| {
-                cli.db_path
-                    .as_ref()
-                    .and_then(|p| p.parent().map(Path::to_path_buf))
-            })
-            .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.state_dir.clone()))
-            .unwrap_or_else(|| defaults.state_dir.clone());
+            .or_else(|| env::var_os("RYE_SYSTEM_SPACE").map(PathBuf::from))
+            .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.system_space_dir.clone()))
+            .unwrap_or_else(|| defaults.system_space_dir.clone());
 
         let cfg = Self {
             bind: resolved_bind,
@@ -171,33 +163,24 @@ impl Config {
                 .db_path
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.db_path.clone()))
-                .unwrap_or_else(|| state_dir.join(".ai").join("state").join("runtime.sqlite3")),
+                .unwrap_or_else(|| system_space_dir.join(".ai").join("state").join("runtime.sqlite3")),
             uds_path: cli
                 .uds_path
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.uds_path.clone()))
                 .unwrap_or_else(|| defaults.uds_path.clone()),
-            state_dir: state_dir.clone(),
+            system_space_dir: system_space_dir.clone(),
             node_signing_key_path: file_cfg
                 .as_ref()
                 .and_then(|cfg| cfg.node_signing_key_path.clone())
                 .unwrap_or_else(|| {
-                    state_dir.join(".ai").join("node").join("identity").join("private_key.pem")
+                    system_space_dir.join(".ai").join("node").join("identity").join("private_key.pem")
                 }),
             user_signing_key_path: file_cfg
                 .as_ref()
                 .and_then(|cfg| cfg.user_signing_key_path.clone())
                 .or_else(|| env::var_os("RYE_SIGNING_KEY_PATH").map(PathBuf::from))
                 .unwrap_or_else(|| defaults.user_signing_key_path.clone()),
-            system_data_dir: env::var_os("RYE_SYSTEM_SPACE")
-                .map(PathBuf::from)
-                .or_else(|| cli.system_data_dir.clone())
-                .or_else(|| {
-                    file_cfg
-                        .as_ref()
-                        .and_then(|cfg| cfg.system_data_dir.clone())
-                })
-                .unwrap_or_else(|| defaults.system_data_dir.clone()),
             require_auth: cli.require_auth
                 || file_cfg
                     .as_ref()
@@ -211,7 +194,7 @@ impl Config {
                         .as_ref()
                         .and_then(|cfg| cfg.authorized_keys_dir.clone())
                 })
-                .unwrap_or_else(|| state_dir.join(".ai").join("node").join("auth").join("authorized_keys")),
+                .unwrap_or_else(|| system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys")),
         };
 
         // Only create minimal runtime directories (db parent, socket parent).
@@ -243,14 +226,9 @@ impl Config {
 
     fn default_paths(bind: SocketAddr) -> Result<Self> {
         let base_dirs = BaseDirs::new().context("could not determine base directories")?;
-        let data_dir = base_dirs
+        let system_space_dir = base_dirs
             .data_dir()
             .join("ryeos");
-
-        // Single .ai/ tree: state_dir defaults to system_data_dir.
-        // Node keys, vault, runtime DB, bundles, and node-config all live
-        // under one directory. No XDG state/share split.
-        let state_dir = data_dir.clone();
 
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -260,10 +238,10 @@ impl Config {
 
         Ok(Self {
             bind,
-            db_path: state_dir.join(".ai").join("state").join("runtime.sqlite3"),
+            db_path: system_space_dir.join(".ai").join("state").join("runtime.sqlite3"),
             uds_path: runtime_root.join("ryeosd.sock"),
-            state_dir: state_dir.clone(),
-            node_signing_key_path: state_dir
+            system_space_dir: system_space_dir.clone(),
+            node_signing_key_path: system_space_dir
                 .join(".ai")
                 .join("node")
                 .join("identity")
@@ -274,9 +252,8 @@ impl Config {
                 .join("keys")
                 .join("signing")
                 .join("private_key.pem"),
-            system_data_dir: data_dir,
             require_auth: false,
-            authorized_keys_dir: state_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+            authorized_keys_dir: system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
         })
     }
 }

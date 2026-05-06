@@ -1,10 +1,10 @@
 //! `bundle.install` — install a downstream bundle via node-config writer.
 //!
-//! Copies source to `<state_dir>/.ai/bundles/<name>/`, writes a signed
-//! `kind: node` `section: bundles` item at `<state_dir>/.ai/node/bundles/<name>.yaml`.
+//! Copies source to `<system_space_dir>/.ai/bundles/<name>/`, writes a signed
+//! `kind: node` `section: bundles` item at `<system_space_dir>/.ai/node/bundles/<name>.yaml`.
 //!
 //! `core` cannot be installed — it is the packaged base root laid down at
-//! `system_data_dir` out-of-band (by the OS package installer or manual copy).
+//! `system_space_dir` out-of-band (by the OS package installer or manual copy).
 //!
 //! OfflineOnly: the daemon must be stopped (engine reload not implemented).
 
@@ -36,7 +36,7 @@ fn validate_name(name: &str) -> Result<()> {
         bail!(
             "\"core\" cannot be installed via bundle.install — \
              it is the packaged base root and must be laid down at \
-             system_data_dir out-of-band"
+             system_space_dir out-of-band"
         );
     }
     if name.is_empty()
@@ -62,7 +62,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    let bundles_root = state.config.state_dir.join(".ai").join("bundles");
+    let bundles_root = state.config.system_space_dir.join(".ai").join("bundles");
     let target = bundles_root.join(&req.name);
 
     if target.exists() {
@@ -77,13 +77,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // signable item in the bundle BEFORE any filesystem mutation.
     //
     // Trust source: operator-tier ONLY (project + user). System bundles
-    // (`system_data_dir`) contribute kind schemas + parser tools, never
+    // (`system_space_dir`) contribute kind schemas + parser tools, never
     // trust docs. Bundles whose signers aren't already trusted are
     // rejected — operators must `rye trust pin <fingerprint>` first.
     let user_root = roots::user_root().ok();
     preflight_verify_bundle(
         &req.source_path,
-        &state.config.system_data_dir,
+        &state.config.system_space_dir,
         user_root.as_deref(),
     )
     .context("preflight verification refused install")?;
@@ -109,7 +109,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Write signed kind: node bundle registration
     let config_item_path = crate::node_config::writer::write_signed_node_item(
-        &state.config.state_dir.join(".ai").join("node"),
+        &state.config.system_space_dir.join(".ai").join("node"),
         "bundles",
         &req.name,
         &serde_json::json!({ "path": canonical_target }),

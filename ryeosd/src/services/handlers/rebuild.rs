@@ -32,7 +32,7 @@ pub struct RebuildReport {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let inner = state.config.state_dir.join(".ai").join("state");
+    let inner = state.config.system_space_dir.join(".ai").join("state");
     let cas_root = inner.join("objects");
     let refs_root = inner.join("refs");
     let projection_path = inner.join("projection.sqlite3");

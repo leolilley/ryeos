@@ -221,6 +221,7 @@ mod tests {
     ) -> RawRouteSpec {
         RawRouteSpec {
             section: "routes".into(),
+            category: None,
             id: "test-route".into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),
@@ -378,6 +379,7 @@ mod tests {
         let mode = JsonMode;
         let raw = RawRouteSpec {
             section: "routes".into(),
+            category: None,
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),
@@ -413,6 +415,7 @@ mod tests {
         let mode = JsonMode;
         let raw = RawRouteSpec {
             section: "routes".into(),
+            category: None,
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),

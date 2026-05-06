@@ -224,6 +224,7 @@ mod tests {
     fn make_raw(id: &str, path: &str, methods: &[&str], auth: &str, mode: &str) -> RawRouteSpec {
         RawRouteSpec {
             section: "routes".to_string(),
+            category: None,
             id: id.to_string(),
             path: path.to_string(),
             methods: methods.iter().map(|s| s.to_string()).collect(),

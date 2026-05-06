@@ -196,10 +196,10 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // V5.4 P2.1 note: the `standard` bundle now ships
     // `ryeos-directive-runtime` and `ryeos-graph-runtime` in its
     // SourceManifest, but this harness uses `ryeos-bundles/core` as
-    // RYE_SYSTEM_SPACE (see `ryeosd/tests/common/mod.rs::system_data_dir`)
+    // RYE_SYSTEM_SPACE (see `ryeosd/tests/common/mod.rs::workspace_core_dir`)
     // and `core` has no `bin/` directory. Real coverage would plant a
     // signed `bundles` registration under
-    // `<system_data_dir>/.ai/node/bundles/standard.yaml` so the engine
+    // `<workspace_core_dir>/.ai/node/bundles/standard.yaml` so the engine
     // also walks `ryeos-bundles/standard` (kinds from `core`, binaries
     // from `standard`). TODO(V5.4): wire that registration into the
     // harness once the bundle install/registration writer is exposed
@@ -296,14 +296,14 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     let uds_path = state_path.join("ryeosd.sock");
 
     let mut cmd = Command::new(common::ryeosd_binary());
-    cmd.arg("--state-dir")
+    cmd.arg("--system-space-dir")
         .arg(&state_path)
         .arg("--bind")
         .arg(&bind)
         .arg("--uds-path")
         .arg(&uds_path)
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::system_data_dir())
+        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .stdout(Stdio::null())

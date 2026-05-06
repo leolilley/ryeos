@@ -6,11 +6,11 @@
 //!
 //! - All signable items in the bundle MUST be signed.
 //! - The signer fingerprint MUST already be in the operator's trust store
-//!   (loaded from project + user tier; system_data_dir and the bundle
+//!   (loaded from project + user tier; system_space_dir and the bundle
 //!   itself contribute ONLY kind schemas + parser tools, never trust docs).
 //! - Path-anchoring validator MUST pass for every item.
 //!
-//! Parser descriptors are sourced from system_data_dir, the operator's
+//! Parser descriptors are sourced from system_space_dir, the operator's
 //! user tier, AND the bundle being verified — bundles MAY introduce new
 //! parsers alongside new kinds. Trust still gates loading.
 //!
@@ -39,7 +39,7 @@ use ryeos_engine::trust::TrustStore;
 /// Verify every signable item in a bundle source tree.
 ///
 /// `source_path`: bundle root to verify (the directory containing `.ai/`).
-/// `system_data_dir`: where `core` lives — provides the kind schemas + parser
+/// `system_space_dir`: where `core` lives — provides the kind schemas + parser
 ///   tools used to parse and validate `source_path` items. Does NOT
 ///   contribute trust docs.
 /// `user_root`: parent of `~/.ai/`. Provides the operator's trust store
@@ -50,7 +50,7 @@ use ryeos_engine::trust::TrustStore;
 /// failed item; install/copy is refused.
 pub fn preflight_verify_bundle(
     source_path: &Path,
-    system_data_dir: &Path,
+    system_space_dir: &Path,
     user_root: Option<&Path>,
 ) -> Result<()> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
@@ -61,12 +61,12 @@ pub fn preflight_verify_bundle(
         );
     }
 
-    // 1. Kind schemas come from system_data_dir + the bundle itself.
+    // 1. Kind schemas come from system_space_dir + the bundle itself.
     //    The bundle's own kind schemas are loaded so its items can be
     //    parsed; this does not bypass trust because each kind schema is
     //    itself signature-verified via the loaded trust store.
     let mut schema_roots = Vec::new();
-    let system_kinds = system_data_dir
+    let system_kinds = system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join(ryeos_engine::KIND_SCHEMAS_DIR);
     if system_kinds.is_dir() {
@@ -78,8 +78,8 @@ pub fn preflight_verify_bundle(
     }
     if schema_roots.is_empty() {
         bail!(
-            "preflight: no kind schemas in system_data_dir ({}) or bundle ({})",
-            system_data_dir.display(),
+            "preflight: no kind schemas in system_space_dir ({}) or bundle ({})",
+            system_space_dir.display(),
             bundle_kinds.display()
         );
     }
@@ -106,7 +106,7 @@ pub fn preflight_verify_bundle(
     //    being verified — bundles MAY ship their own parser descriptors
     //    needed for new kinds they introduce. Trust still gates loading.
     //
-    //    Dedupe by canonicalized path: when `source_path == system_data_dir`
+    //    Dedupe by canonicalized path: when `source_path == system_space_dir`
     //    (e.g. preflight verifying core in place during `rye init`) the
     //    same root must not be walked twice — `HandlerRegistry::load_base`
     //    rejects duplicate handler refs across roots.
@@ -121,7 +121,7 @@ pub fn preflight_verify_bundle(
             roots.push((path, trust));
         }
     };
-    push_unique(system_data_dir.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem, &mut parser_search_roots, &mut seen_roots);
+    push_unique(system_space_dir.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem, &mut parser_search_roots, &mut seen_roots);
     if let Some(ur) = user_root {
         push_unique(ur.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser, &mut parser_search_roots, &mut seen_roots);
     }

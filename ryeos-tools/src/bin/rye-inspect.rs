@@ -65,9 +65,9 @@ enum Cmd {
 
     /// Return the node's public identity document.
     Identity {
-        /// State directory (defaults to XDG state dir / ryeosd).
+        /// System space directory (defaults to XDG data dir / ryeos).
         #[arg(long)]
-        state_dir: Option<String>,
+        system_space_dir: Option<String>,
     },
 }
 
@@ -132,13 +132,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        Cmd::Identity { state_dir } => {
+        Cmd::Identity { system_space_dir } => {
             let params = if cli.stdin_json {
                 read_stdin_json()?
             } else {
                 let mut obj = serde_json::json!({});
-                if let Some(s) = state_dir {
-                    obj["state_dir"] = serde_json::json!(s);
+                if let Some(s) = system_space_dir {
+                    obj["system_space_dir"] = serde_json::json!(s);
                 }
                 obj
             };

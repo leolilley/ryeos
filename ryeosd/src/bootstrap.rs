@@ -26,14 +26,14 @@ pub struct InitOptions {
     pub force: bool,
 }
 
-/// Collect signed node-config items under `state_dir/<AI_DIR>/node/`
+/// Collect signed node-config items under `system_space_dir/<AI_DIR>/node/`
 /// that would become unverifiable if the node signing key is
 /// regenerated.
 ///
 /// A file is considered signed if its first non-empty line begins
 /// with `# rye:signed:`. Returns sorted, deduplicated absolute paths.
-fn find_signed_node_config_items(state_dir: &Path) -> Result<Vec<PathBuf>> {
-    let node_dir = state_dir.join(AI_DIR).join("node");
+fn find_signed_node_config_items(system_space_dir: &Path) -> Result<Vec<PathBuf>> {
+    let node_dir = system_space_dir.join(AI_DIR).join("node");
     if !node_dir.exists() {
         return Ok(Vec::new());
     }
@@ -91,7 +91,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     create_directory_layout(config)?;
 
     // 2. Write default config file if missing (or force rewrite)
-    let config_path = config.state_dir.join(".ai").join("node").join("config.yaml");
+    let config_path = config.system_space_dir.join(".ai").join("node").join("config.yaml");
     if options.force || !config_path.exists() {
         write_default_config(&config_path, config)?;
         tracing::info!(path = %config_path.display(), "wrote default config");
@@ -111,7 +111,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         // γ: refuse --force if signed node-config items exist — rotating
         // the node key would make them unverifiable. The operator must
         // use `rye daemon rotate-key` instead, which re-signs first.
-        let signed_items = find_signed_node_config_items(&config.state_dir)?;
+        let signed_items = find_signed_node_config_items(&config.system_space_dir)?;
         if !signed_items.is_empty() {
             let lines: Vec<String> = signed_items
                 .iter()
@@ -175,7 +175,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     );
 
     // 6. Write public identity document (node only)
-    let identity_path = config.state_dir.join(".ai").join("node").join("identity").join("public-identity.json");
+    let identity_path = config.system_space_dir.join(".ai").join("node").join("identity").join("public-identity.json");
     if options.force || !identity_path.exists() {
         node_identity.write_public_identity(&identity_path)?;
         tracing::info!(path = %identity_path.display(), "wrote node public identity");
@@ -186,7 +186,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // first boot if missing (parallel to user/node keys above); never
     // force-rotated by daemon bootstrap (rotation is `rye vault rewrap`).
     let vault_dir = config
-        .state_dir
+        .system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("vault");
@@ -226,7 +226,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 
     // NOTE: We intentionally do NOT write a node-config registration for the
     // system bundle here. `engine_init::build_engine` always adds
-    // `config.system_data_dir` to its system roots unconditionally, so a
+    // `config.system_space_dir` to its system roots unconditionally, so a
     // `bundles` registration pointing back at it would cause Phase 1 to
     // return that same path, which `engine_init` would then add a second
     // time (producing duplicate parsers / kinds at boot). The `bundles`
@@ -287,7 +287,7 @@ pem = "ed25519:{key_b64}"
 
 // V5.2-CLOSEOUT: sign_unsigned_items + walk helpers deleted.
 // Daemon bootstrap is bootstrap-only — must NEVER mutate
-// system_data_dir or any operator/publisher-managed bundle.
+// system_space_dir or any operator/publisher-managed bundle.
 // To sign bundle items use: cargo run --example resign_yaml -p ryeos-engine -- <path>
 
 
@@ -299,10 +299,10 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     // .tmp/POST-KINDS-FLIP-PLAN.md §7). Reserved here so the layout is
     // stable across the v1 → vault upgrade.
     let dirs = [
-        config.state_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
-        config.state_dir.join(".ai").join("node").join("vault"),
-        config.state_dir.join(".ai").join("state").join("objects"),
-        config.state_dir.join(".ai").join("state").join("refs"),
+        config.system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+        config.system_space_dir.join(".ai").join("node").join("vault"),
+        config.system_space_dir.join(".ai").join("state").join("objects"),
+        config.system_space_dir.join(".ai").join("state").join("refs"),
     ];
     for dir in &dirs {
         fs::create_dir_all(dir)
@@ -323,12 +323,12 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
 
 /// Check if the daemon has been initialized.
 pub fn verify_initialized(config: &Config) -> Result<()> {
-    let state_dir = &config.state_dir;
-    if !state_dir.exists() {
+    let system_space_dir = &config.system_space_dir;
+    if !system_space_dir.exists() {
         anyhow::bail!(
-            "ryeosd not initialized: state dir missing at {}\n\
+            "ryeosd not initialized: system space dir missing at {}\n\
              Run: rye init",
-            state_dir.display()
+            system_space_dir.display()
         );
     }
     if !config.node_signing_key_path.exists() {
@@ -342,8 +342,7 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 
 /// Two-phase node-config bootstrap: shared by daemon-start and standalone paths.
 ///
-/// 1. Phase 1: load bundle section from `system_data_dir` + `state_dir`
-///    to determine effective bundle roots.
+/// 1. Phase 1: load bundle section from system space to determine effective bundle roots.
 /// 2. Build the engine with those roots.
 /// 3. Phase 2: full node-config scan across all sections → snapshot.
 ///
@@ -358,12 +357,11 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 pub fn load_node_config_two_phase(
     config: &Config,
 ) -> Result<(Arc<Engine>, Arc<NodeConfigSnapshot>)> {
-    let system_data_dir = &config.system_data_dir;
-    let state_dir = &config.state_dir;
+    let system_space_dir = &config.system_space_dir;
 
     // Discover user root (same logic as engine_init)
     let user_root = roots::user_root().ok();
-    let system_roots_phase1 = vec![system_data_dir.to_path_buf()];
+    let system_roots_phase1 = vec![system_space_dir.to_path_buf()];
 
     // ── Phase 1: bootstrap trust store + bundle section ──
     // Use three-tier trust (same as engine_init) so daemon-written items verify.
@@ -375,8 +373,7 @@ pub fn load_node_config_two_phase(
     .context("failed to load bootstrap trust store for node-config verification")?;
 
     let bootstrap_loader = crate::node_config::loader::BootstrapLoader {
-        system_data_dir,
-        state_dir,
+        system_space_dir,
         trust_store: &bootstrap_trust_store,
     };
 
@@ -390,7 +387,7 @@ pub fn load_node_config_two_phase(
         .collect();
 
     tracing::info!(
-        system_data_dir = %system_data_dir.display(),
+        system_space_dir = %system_space_dir.display(),
         bundle_count = effective_bundle_roots.len(),
         trust_signers = bootstrap_trust_store.len(),
         "Phase 1: effective bundle roots determined"
@@ -404,8 +401,7 @@ pub fn load_node_config_two_phase(
     // ── Phase 2: full node-config scan ──
     let section_table = SectionTable::new();
     let full_loader = crate::node_config::loader::BootstrapLoader {
-        system_data_dir,
-        state_dir,
+        system_space_dir,
         trust_store: &bootstrap_trust_store,
     };
     let snapshot = Arc::new(
@@ -429,24 +425,23 @@ mod tests {
 
     /// Build a minimal Config for testing with all paths under a tempdir.
     fn test_config(tmp: &std::path::Path) -> Config {
-        let state_dir = tmp.join("state");
+        let system_space_dir = tmp.join("state");
         let user_keys = tmp.join("user_keys");
-        std::fs::create_dir_all(state_dir.join(".ai").join("node").join("auth").join("authorized_keys")).unwrap();
-        std::fs::create_dir_all(state_dir.join(".ai").join("state")).unwrap();
+        std::fs::create_dir_all(system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys")).unwrap();
+        std::fs::create_dir_all(system_space_dir.join(".ai").join("state")).unwrap();
         std::fs::create_dir_all(user_keys.join("signing")).unwrap();
         Config {
             bind: "127.0.0.1:0".parse().unwrap(),
-            db_path: state_dir.join(".ai").join("state").join("runtime.sqlite3"),
-            uds_path: state_dir.join("ryeosd.sock"),
-            state_dir: state_dir.clone(),
-            node_signing_key_path: state_dir
+            db_path: system_space_dir.join(".ai").join("state").join("runtime.sqlite3"),
+            uds_path: system_space_dir.join("ryeosd.sock"),
+            system_space_dir: system_space_dir.clone(),
+            node_signing_key_path: system_space_dir
                 .join(".ai")
                 .join("node")
                 .join("identity")
                 .join("private_key.pem"),
             user_signing_key_path: user_keys.join("signing").join("private_key.pem"),
-            authorized_keys_dir: state_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
-            system_data_dir: tmp.join("system"),
+            authorized_keys_dir: system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
             require_auth: false,
         }
     }
@@ -590,7 +585,7 @@ mod tests {
         assert!(config.node_signing_key_path.exists());
 
         // Plant a signed YAML in the node dir.
-        let node_bundles = config.state_dir.join(".ai").join("node").join("bundles");
+        let node_bundles = config.system_space_dir.join(".ai").join("node").join("bundles");
         fs::create_dir_all(&node_bundles).unwrap();
         let signed_yaml = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nname: test-bundle\n";
         fs::write(node_bundles.join("test.yaml"), signed_yaml).unwrap();
@@ -624,7 +619,7 @@ mod tests {
         init(&config, &InitOptions { force: false }).unwrap();
 
         // Plant an unsigned YAML.
-        let node_bundles = config.state_dir.join(".ai").join("node").join("bundles");
+        let node_bundles = config.system_space_dir.join(".ai").join("node").join("bundles");
         fs::create_dir_all(&node_bundles).unwrap();
         fs::write(node_bundles.join("unsigned.yaml"), "name: unsigned-bundle\n").unwrap();
 

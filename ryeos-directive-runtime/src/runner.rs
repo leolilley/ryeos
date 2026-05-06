@@ -74,6 +74,7 @@ pub struct Runner {
     continuation: ContinuationCheck,
     result_guard: ResultGuard,
     provider_config: crate::directive::ProviderConfig,
+    provider_id: String,
     execution: ExecutionConfig,
     model_name: String,
     thread_id: String,
@@ -123,6 +124,7 @@ pub struct RunnerConfig {
     pub callback: CallbackClient,
     pub context_window: u64,
     pub provider_config: crate::directive::ProviderConfig,
+    pub provider_id: String,
     pub execution: ExecutionConfig,
     pub model_name: String,
     pub thread_id: String,
@@ -142,6 +144,7 @@ impl Runner {
             callback,
             context_window,
             provider_config,
+            provider_id,
             execution,
             model_name,
             thread_id,
@@ -175,6 +178,7 @@ impl Runner {
             continuation: ContinuationCheck::new(context_window),
             result_guard: ResultGuard::new(),
             provider_config,
+            provider_id,
             execution,
             model_name,
             thread_id,
@@ -276,6 +280,7 @@ impl Runner {
                         crate::provider_adapter::StreamingCallInput {
                             client: &client,
                             provider: &self.provider_config,
+                            provider_id: &self.provider_id,
                             execution: &self.execution,
                             model: &self.model_name,
                             messages: &self.messages,
@@ -440,23 +445,15 @@ impl Runner {
                                 raw_args: tc.arguments.to_string(),
                             }
                         } else {
-                            let required_cap = format!("rye.execute.tool.{}", tc.name);
-                            if !self.harness.check_permission(&required_cap) {
-                                self.messages.push(ProviderMessage {
-                                    role: "tool".to_string(),
-                                    content: Some(json!({"error": format!("permission denied: {}", tc.name)})),
-                                    tool_calls: None,
-                                    tool_call_id: tc.id.clone(),
-                                });
-                                State::DispatchingTools { pending, index: index + 1 }
-                            } else {
-                                State::ProcessingToolResult {
-                                    call_id: tc.id.clone().unwrap_or_default(),
-                                    tool_name: tc.name.clone(),
-                                    raw_args: tc.arguments.to_string(),
-                                    pending,
-                                    index,
-                                }
+                            // Permission check deferred to the dispatcher,
+                            // which uses the canonical ref (not the LLM-
+                            // emitted tool name) for cap matching.
+                            State::ProcessingToolResult {
+                                call_id: tc.id.clone().unwrap_or_default(),
+                                tool_name: tc.name.clone(),
+                                raw_args: tc.arguments.to_string(),
+                                pending,
+                                index,
                             }
                         }
                     }
@@ -958,6 +955,7 @@ mod tests {
             callback: make_callback(),
             context_window: 200_000,
             provider_config: provider,
+            provider_id: "openai".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -991,6 +989,7 @@ mod tests {
             callback: make_callback(),
             context_window: 200_000,
             provider_config: provider,
+            provider_id: "openai".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -1031,6 +1030,7 @@ mod tests {
             callback: make_callback(),
             context_window: 200_000,
             provider_config: provider,
+            provider_id: "openai".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -1070,6 +1070,7 @@ mod tests {
             callback: make_callback(),
             context_window: 200_000,
             provider_config: provider,
+            provider_id: "openai".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -1103,6 +1104,7 @@ mod tests {
             callback: make_callback(),
             context_window: 200_000,
             provider_config: provider,
+            provider_id: "openai".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),

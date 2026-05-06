@@ -18,7 +18,7 @@ pub struct BundleSection;
 
 impl NodeConfigSection for BundleSection {
     fn source_policy(&self) -> SectionSourcePolicy {
-        // Bundles cannot self-register — only system_data_dir + state_dir.
+        // Bundles cannot self-register — only the system space root.
         SectionSourcePolicy::SystemAndState
     }
 

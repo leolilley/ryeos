@@ -65,7 +65,6 @@ async fn cli_daemon_up_uses_execute() {
     let out = tokio::process::Command::new(&rye)
         .arg("execute")
         .arg("service:system/status")
-        .env("RYEOS_STATE_DIR", &h.state_path)
         .env("RYEOSD_BIN", ryeosd_binary())
         .output()
         .await
@@ -98,10 +97,9 @@ async fn cli_daemon_down_fails_fast_with_exit_75() {
     let out = tokio::process::Command::new(&rye)
         .arg("execute")
         .arg("service:system/status")
-        .env("RYEOS_STATE_DIR", &state_path)
         // RYEOSD_BIN intentionally NOT set — the new contract has no
         // fallback that would consult it; presence or absence is moot.
-        .env("RYE_SYSTEM_SPACE", common::system_data_dir())
+        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .output()
@@ -190,14 +188,13 @@ async fn cli_execute_defaults_project_path_to_dot() {
 
     // The CLI sends raw tokens (`["status"]`) to the daemon's /execute
     // endpoint. The daemon resolves via its AliasRegistry (loaded from
-    // the core bundle's `node/aliases/`). RYEOS_STATE_DIR locates the
+    // the core bundle's `node/aliases/`). RYE_SYSTEM_SPACE locates the
     // daemon's bind socket. HOME points the user tier at the harness
     // user space (where `populate_user_space` pre-loaded the
     // trusted-signers fixture).
     let standard_bundle = common::workspace_root().join("ryeos-bundles/standard");
     let out = tokio::process::Command::new(&rye)
         .arg("status") // alias → service:system/status, no --project-path
-        .env("RYEOS_STATE_DIR", &h.state_path)
         .env("RYE_SYSTEM_SPACE", &standard_bundle)
         .env("HOME", h.user_space.path())
         .output()
@@ -257,7 +254,7 @@ async fn init_only_does_not_mutate_system_space() {
             }
         }
     }
-    copy_dir_all(&common::system_data_dir(), &sys_root);
+    copy_dir_all(&common::workspace_core_dir(), &sys_root);
 
     let before = snapshot(&sys_root);
     assert!(!before.is_empty(), "system bundle should be non-empty");
@@ -270,7 +267,7 @@ async fn init_only_does_not_mutate_system_space() {
     // Run --init-only against the COPIED system bundle.
     let init = std::process::Command::new(ryeosd_binary())
         .arg("--init-only")
-        .arg("--state-dir").arg(&state_path)
+        .arg("--system-space-dir").arg(&state_path)
         .arg("--uds-path").arg(state_path.join("ryeosd.sock"))
         .env("RYE_SYSTEM_SPACE", &sys_root)
         .env("USER_SPACE", user_space.path())
@@ -360,7 +357,7 @@ async fn uds_namespace_rejects_service_methods() {
 }
 
 // ── Test 10: State lock prevents concurrent daemons (Gate 8 daemon-spawn) ──
-//   Two daemons sharing the same state_dir: the second must fail to acquire
+//   Two daemons sharing the same system_space_dir: the second must fail to acquire
 //   the state lock and exit with an error. This closes the TODO at
 //   cleanup_invariants.rs:289.
 
@@ -379,11 +376,11 @@ async fn state_lock_prevents_concurrent_daemons() {
 
     // Point the second daemon at the SAME state dir as the first
     let mut cmd = tokio::process::Command::new(common::ryeosd_binary());
-    cmd.arg("--state-dir").arg(&h1.state_path)
+    cmd.arg("--system-space-dir").arg(&h1.state_path)
         .arg("--bind").arg(bind.to_string())
         .arg("--uds-path").arg(&uds_path)
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::system_data_dir())
+        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .stdout(std::process::Stdio::piped())

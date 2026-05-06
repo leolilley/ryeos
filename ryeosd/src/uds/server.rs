@@ -369,10 +369,9 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             db_path: runtime_db_path.clone(),
             uds_path: tmpdir.path().join("test.sock"),
-            state_dir: tmpdir.path().to_path_buf(),
+            system_space_dir: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
             user_signing_key_path: tmpdir.path().join("user-key.pem"),
-            system_data_dir: tmpdir.path().join("system"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
         };

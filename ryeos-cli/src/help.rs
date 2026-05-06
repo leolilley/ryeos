@@ -44,14 +44,14 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
 /// Print verb-specific help by querying the daemon.
 pub async fn print_verb_help(
     verb_tokens: &[String],
-    state_dir: &std::path::Path,
+    system_space_dir: &std::path::Path,
     project_path: &str,
 ) -> Result<(), CliError> {
     // We send the tokens to the daemon — if it resolves, we get back
     // the execution result which shows what the verb does. If not,
     // we get an error with the unmatched tokens.
-    let bind = crate::transport::http::read_daemon_bind(state_dir).await?;
-    let signer = crate::transport::signing::Signer::resolve(state_dir)?;
+    let bind = crate::transport::http::read_daemon_bind(system_space_dir).await?;
+    let signer = crate::transport::signing::Signer::resolve(system_space_dir)?;
 
     let body = serde_json::json!({
         "tokens": verb_tokens,

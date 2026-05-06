@@ -85,13 +85,13 @@ fn build_parser_dispatcher(
 
 /// Discover installed bundle roots from the daemon state directory.
 fn discover_bundle_roots() -> Vec<PathBuf> {
-    let state_dir = match std::env::var("RYEOS_STATE_DIR") {
+    let system_space_dir = match std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
         Ok(p) => PathBuf::from(p),
-        Err(_) => dirs::state_dir()
-            .map(|d| d.join("ryeosd"))
-            .unwrap_or_else(|| PathBuf::from(".ryeosd")),
+        Err(_) => dirs::data_dir()
+            .map(|d| d.join("ryeos"))
+            .expect("could not determine XDG data directory"),
     };
-    let bundles_dir = state_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
     let mut roots = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
         for entry in entries.flatten() {

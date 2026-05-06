@@ -1,0 +1,7 @@
+# Test-generated artifacts (integration tests write into the core bundle dir)
+daemon.json
+.ai/node/config.yaml
+.ai/node/identity/
+.ai/node/vault/
+.ai/state/
+.ai/bundles/

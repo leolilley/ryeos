@@ -114,6 +114,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     )?;
 
     let provider = bootstrap_output.provider.clone();
+    let provider_id = bootstrap_output.provider_id.clone();
     let model_name = bootstrap_output.model_name.clone();
     let context_window = bootstrap_output.context_window;
     let execution = bootstrap_output.config.execution.clone();
@@ -180,6 +181,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 callback,
                 context_window,
                 provider_config: provider,
+                provider_id,
                 execution,
                 model_name,
                 thread_id: envelope.thread_id.clone(),
@@ -261,6 +263,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             callback,
             context_window,
             provider_config: provider,
+            provider_id,
             execution,
             model_name,
             thread_id: envelope.thread_id.clone(),

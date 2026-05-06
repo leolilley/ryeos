@@ -5,7 +5,7 @@
 //!
 //! The daemon loads node-config at startup in two phases:
 //! - **Phase 1 (bootstrap):** load only the `bundles` section from
-//!   `system_data_dir` + `state_dir` to determine effective bundle roots.
+//!   `system_space_dir` to determine effective bundle roots.
 //! - **Phase 2 (full pass):** build the engine with effective roots, then
 //!   scan all sections from all sources.
 //!
@@ -28,10 +28,10 @@ use crate::routes::raw::RawRouteSpec;
 /// Which sources a section scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionSourcePolicy {
-    /// Only `system_data_dir` + `state_dir`.
+    /// Only `system_space_dir`.
     /// Used by the `bundles` section so bundles can't self-register.
     SystemAndState,
-    /// `state_dir` + all effective bundle roots.
+    /// `system_space_dir` + all effective bundle roots.
     /// Used by sections like `routes` and `verbs` that bundles can contribute to.
     EffectiveBundleRootsAndState,
 }
