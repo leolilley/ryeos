@@ -71,7 +71,7 @@ pub struct SubprocessBuildRequest {
     pub callback_token: Option<String>,
     pub callback_socket_path: Option<String>,
     pub vault_handle: Option<String>,
-    pub state_dir: PathBuf,
+    pub system_space_dir: PathBuf,
     pub thread_auth_token: Option<String>,
     pub params: Value,
     pub resolution_output: Option<ResolutionOutput>,

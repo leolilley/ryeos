@@ -289,9 +289,9 @@ fn checkout_from_snapshot(
     let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
 
     let manifest_hash = snapshot.project_manifest_hash.clone();
-    let exec_dir = state.config.state_dir.join("executions").join(thread_id);
+    let exec_dir = state.config.system_space_dir.join("executions").join(thread_id);
     let cache = crate::execution::cache::MaterializationCache::new(
-        state.config.state_dir.join("cache").join("snapshots"),
+        state.config.system_space_dir.join("cache").join("snapshots"),
     );
     crate::execution::checkout_project(&cas_root, &manifest_hash, &exec_dir, Some(&cache))?;
 
@@ -575,11 +575,11 @@ fn mint_callback_env(
             .map(|p| p.to_path_buf())
             .unwrap_or_default(),
         acting_principal: acting_principal.to_string(),
-        cas_root: state.config.state_dir.join("cas"),
+        cas_root: state.config.system_space_dir.join("cas"),
         callback_token: Some(cap.token.clone()),
         callback_socket_path: Some(state.config.uds_path.to_string_lossy().to_string()),
         vault_handle: None,
-        state_dir: state.config.state_dir.clone(),
+        system_space_dir: state.config.system_space_dir.clone(),
         thread_auth_token: Some(thread_auth.token.clone()),
         params: json!({}),
         resolution_output: None,
@@ -589,7 +589,7 @@ fn mint_callback_env(
         (EnvInjectionSource::CallbackSocketPath, "RYEOSD_SOCKET_PATH"),
         (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN"),
         (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID"),
-        (EnvInjectionSource::StateDir, "RYEOS_STATE_DIR"),
+        (EnvInjectionSource::SystemSpaceDir, "RYEOS_SYSTEM_SPACE_DIR"),
         (EnvInjectionSource::ThreadAuthToken, "RYEOSD_THREAD_AUTH_TOKEN"),
     ];
 
@@ -693,12 +693,12 @@ pub async fn run_inline(
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
 
-    // Daemon-owned per-thread state dir under config.state_dir — does
+    // Daemon-owned per-thread state dir under config.system_space_dir — does
     // NOT live under the (ephemeral, CAS-checkout) working directory,
     // so checkpoints survive working-dir cleanup and daemon restart.
     // See `launch_metadata::daemon_thread_state_dir`.
-    let state_dir = crate::launch_metadata::daemon_thread_state_dir(
-        &state.config.state_dir,
+    let thread_state_dir = crate::launch_metadata::daemon_thread_state_dir(
+        &state.config.system_space_dir,
         &tid,
     );
     let inline_snapshot = base_snapshot_hash.clone();
@@ -711,7 +711,7 @@ pub async fn run_inline(
                 chain_root_id: &crid,
                 vault_bindings: vault,
                 daemon_callback_env: cb_bindings,
-                thread_state_dir: Some(state_dir.as_path()),
+                thread_state_dir: Some(thread_state_dir.as_path()),
                 is_resume: false,
                 original_snapshot_hash: inline_snapshot.as_deref(),
             },
@@ -911,7 +911,7 @@ pub async fn run_detached(
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
     let bg_project_path = params.project_path.clone();
-    let bg_state_root = state.config.state_dir.clone();
+    let bg_state_root = state.config.system_space_dir.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,
@@ -1009,7 +1009,7 @@ async fn dispatch_detached_bg_task(
         "attach_failed"
     };
 
-    let state_dir =
+    let thread_state_dir =
         crate::launch_metadata::daemon_thread_state_dir(&bg_state_root, &bg_thread_id);
 
     let tid_for_spawn = bg_thread_id.clone();
@@ -1029,7 +1029,7 @@ async fn dispatch_detached_bg_task(
                 chain_root_id: &crid_for_spawn,
                 vault_bindings: vault_for_spawn,
                 daemon_callback_env: cb_for_spawn,
-                thread_state_dir: Some(state_dir.as_path()),
+                thread_state_dir: Some(thread_state_dir.as_path()),
                 is_resume,
                 original_snapshot_hash: snap_for_spawn.as_deref(),
             },
@@ -1465,7 +1465,7 @@ pub async fn run_existing_detached(
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
     let bg_project_path = params.project_path.clone();
-    let bg_state_root = state.config.state_dir.clone();
+    let bg_state_root = state.config.system_space_dir.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,

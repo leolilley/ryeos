@@ -57,27 +57,27 @@ pub const BLOCKED_NAMES: &[&str] = &[
     "DYLD_INSERT_LIBRARIES",
 ];
 
-/// Default sealed-envelope store path: `<state>/.ai/state/secrets/store.enc`.
-pub fn default_sealed_store_path(state_dir: &Path) -> PathBuf {
-    state_dir
+/// Default sealed-envelope store path: `<system_space_dir>/.ai/state/secrets/store.enc`.
+pub fn default_sealed_store_path(system_space_dir: &Path) -> PathBuf {
+    system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("secrets")
         .join("store.enc")
 }
 
-/// Default vault private key path: `<state>/.ai/node/vault/private_key.pem`.
-pub fn default_vault_secret_key_path(state_dir: &Path) -> PathBuf {
-    state_dir
+/// Default vault private key path: `<system_space_dir>/.ai/node/vault/private_key.pem`.
+pub fn default_vault_secret_key_path(system_space_dir: &Path) -> PathBuf {
+    system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("vault")
         .join("private_key.pem")
 }
 
-/// Default vault public key path: `<state>/.ai/node/vault/public_key.pem`.
-pub fn default_vault_public_key_path(state_dir: &Path) -> PathBuf {
-    state_dir
+/// Default vault public key path: `<system_space_dir>/.ai/node/vault/public_key.pem`.
+pub fn default_vault_public_key_path(system_space_dir: &Path) -> PathBuf {
+    system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("vault")
@@ -187,7 +187,7 @@ fn read_sealed_secrets(
 
 #[derive(Debug)]
 pub struct PutOptions {
-    pub state_dir: PathBuf,
+    pub system_space_dir: PathBuf,
     /// `KEY=VALUE` pairs to merge into the store. Later pairs override
     /// earlier pairs for the same key (rare but well-defined).
     pub assignments: Vec<String>,
@@ -202,7 +202,7 @@ pub struct PutReport {
 
 #[derive(Debug)]
 pub struct ListOptions {
-    pub state_dir: PathBuf,
+    pub system_space_dir: PathBuf,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -216,7 +216,7 @@ pub struct ListReport {
 
 #[derive(Debug)]
 pub struct RemoveOptions {
-    pub state_dir: PathBuf,
+    pub system_space_dir: PathBuf,
     pub keys: Vec<String>,
 }
 
@@ -230,7 +230,7 @@ pub struct RemoveReport {
 
 #[derive(Debug)]
 pub struct RewrapOptions {
-    pub state_dir: PathBuf,
+    pub system_space_dir: PathBuf,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -250,7 +250,7 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
     if opts.assignments.is_empty() {
         bail!("rye vault put: at least one KEY=VALUE assignment required");
     }
-    let key_path = default_vault_secret_key_path(&opts.state_dir);
+    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
     let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
         format!(
             "read vault secret key {} — has `rye init` (or daemon) ever run \
@@ -259,7 +259,7 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
         )
     })?;
     let pk = sk.public_key();
-    let store_path = default_sealed_store_path(&opts.state_dir);
+    let store_path = default_sealed_store_path(&opts.system_space_dir);
 
     let mut current = read_sealed_secrets(&store_path, &sk)?;
     let mut keys_written = Vec::with_capacity(opts.assignments.len());
@@ -282,11 +282,11 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
 /// are intentionally NOT printed; this is a discovery command, not a
 /// reveal command.
 pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
-    let key_path = default_vault_secret_key_path(&opts.state_dir);
+    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
     let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
         format!("read vault secret key {}", key_path.display())
     })?;
-    let store_path = default_sealed_store_path(&opts.state_dir);
+    let store_path = default_sealed_store_path(&opts.system_space_dir);
     let current = read_sealed_secrets(&store_path, &sk)?;
     let mut keys: Vec<String> = current.keys().cloned().collect();
     keys.sort();
@@ -299,12 +299,12 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
     if opts.keys.is_empty() {
         bail!("rye vault remove: at least one KEY required");
     }
-    let key_path = default_vault_secret_key_path(&opts.state_dir);
+    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
     let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
         format!("read vault secret key {}", key_path.display())
     })?;
     let pk = sk.public_key();
-    let store_path = default_sealed_store_path(&opts.state_dir);
+    let store_path = default_sealed_store_path(&opts.system_space_dir);
 
     let mut current = read_sealed_secrets(&store_path, &sk)?;
     let mut removed = Vec::new();
@@ -382,9 +382,9 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
 /// On Unix, the new private key is written 0600 (via
 /// [`lillux::vault::write_secret_key`]).
 pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
-    let key_path = default_vault_secret_key_path(&opts.state_dir);
-    let pub_path = default_vault_public_key_path(&opts.state_dir);
-    let store_path = default_sealed_store_path(&opts.state_dir);
+    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
+    let pub_path = default_vault_public_key_path(&opts.system_space_dir);
+    let store_path = default_sealed_store_path(&opts.system_space_dir);
 
     let old_sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
         format!("read vault secret key {}", key_path.display())
@@ -635,7 +635,7 @@ mod tests {
     fn put_creates_store_and_writes_keys() {
         let (state, _sk) = fresh_state_with_keypair();
         let report = run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec![
                 "OPENAI_API_KEY=sk-1".into(),
                 "DATABASE_URL=postgres://h/db".into(),
@@ -646,7 +646,7 @@ mod tests {
         assert!(report.store_path.exists());
 
         let listed = run_list(&ListOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(listed.keys, vec!["DATABASE_URL", "OPENAI_API_KEY"]);
@@ -656,12 +656,12 @@ mod tests {
     fn put_merges_with_existing() {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["A=1".into()],
         })
         .unwrap();
         let report = run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["B=2".into()],
         })
         .unwrap();
@@ -672,12 +672,12 @@ mod tests {
     fn put_overwrites_existing_key() {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["FOO=old".into()],
         })
         .unwrap();
         run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["FOO=new".into()],
         })
         .unwrap();
@@ -694,7 +694,7 @@ mod tests {
     fn put_rejects_blocked_key() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["PATH=/evil".into()],
         })
         .unwrap_err();
@@ -705,7 +705,7 @@ mod tests {
     fn put_rejects_invalid_key_chars() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["FOO-BAR=baz".into()],
         })
         .unwrap_err();
@@ -716,7 +716,7 @@ mod tests {
     fn put_rejects_no_equals() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["JUSTAKEY".into()],
         })
         .unwrap_err();
@@ -727,7 +727,7 @@ mod tests {
     fn put_requires_at_least_one_assignment() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec![],
         })
         .unwrap_err();
@@ -738,7 +738,7 @@ mod tests {
     fn list_on_missing_store_returns_empty() {
         let (state, _sk) = fresh_state_with_keypair();
         let report = run_list(&ListOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
         })
         .unwrap();
         assert!(report.keys.is_empty());
@@ -748,13 +748,13 @@ mod tests {
     fn remove_drops_keys_idempotently() {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["A=1".into(), "B=2".into()],
         })
         .unwrap();
 
         let report = run_remove(&RemoveOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             keys: vec!["A".into(), "C".into()],
         })
         .unwrap();
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(report.total_keys_after_remove, 1);
 
         let listed = run_list(&ListOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(listed.keys, vec!["B"]);
@@ -777,14 +777,14 @@ mod tests {
         // pair fully committed — never a half-rotated state.
         let (state, old_sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["FOO=bar".into(), "BAZ=qux".into()],
         })
         .unwrap();
         let old_fingerprint = old_sk.public_key().fingerprint();
 
         let report = run_rewrap(&RewrapOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(report.old_fingerprint, old_fingerprint);
@@ -834,7 +834,7 @@ mod tests {
     fn rewrap_with_empty_store_only_rotates_keys() {
         let (state, old_sk) = fresh_state_with_keypair();
         let report = run_rewrap(&RewrapOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(report.keys_rewrapped, 0);
@@ -853,12 +853,12 @@ mod tests {
         // `store.enc` sealed under the OLD key — bricking the vault.
         let (state, _old_sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             assignments: vec!["ONLY=value".into()],
         })
         .unwrap();
         run_remove(&RemoveOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
             keys: vec!["ONLY".into()],
         })
         .unwrap();
@@ -869,7 +869,7 @@ mod tests {
         );
 
         run_rewrap(&RewrapOptions {
-            state_dir: state.path().to_path_buf(),
+            system_space_dir: state.path().to_path_buf(),
         })
         .unwrap();
 

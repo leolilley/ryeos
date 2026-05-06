@@ -1,7 +1,7 @@
 //! `bundle.remove` — remove a bundle via node-config deletion.
 //!
-//! Deletes the signed `kind: node` item at `<state_dir>/.ai/node/bundles/<name>.yaml`
-//! and the bundle directory at `<state_dir>/.ai/bundles/<name>/`.
+//! Deletes the signed `kind: node` item at `<system_space_dir>/.ai/node/bundles/<name>.yaml`
+//! and the bundle directory at `<system_space_dir>/.ai/bundles/<name>/`.
 //!
 //! OfflineOnly: the daemon must be stopped (engine reload not implemented).
 
@@ -18,7 +18,7 @@ use crate::state::AppState;
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    /// Bundle name (directory under `<state_dir>/.ai/bundles/`).
+    /// Bundle name (directory under `<system_space_dir>/.ai/bundles/`).
     pub name: String,
 }
 
@@ -38,7 +38,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Delete the signed node-config item
     let config_item_path = state
         .config
-        .state_dir
+        .system_space_dir
         .join(".ai")
         .join("node")
         .join("bundles")
@@ -62,7 +62,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Delete the bundle directory
     let bundle_dir = state
         .config
-        .state_dir
+        .system_space_dir
         .join(".ai")
         .join("bundles")
         .join(&req.name);

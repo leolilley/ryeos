@@ -94,17 +94,13 @@ fn map_local_err(e: anyhow::Error) -> CliError {
     no_binary_name = true
 )]
 struct InitArgs {
-    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    state_dir: Option<PathBuf>,
+    system_space_dir: Option<PathBuf>,
 
     /// User space root (parent of `~/.ai/`). Defaults to $HOME.
     #[arg(long)]
     user_root: Option<PathBuf>,
-
-    /// Where the core bundle should live. Defaults to XDG data dir / ryeos.
-    #[arg(long)]
-    system_data_dir: Option<PathBuf>,
 
     /// Source tree to copy `core` from (e.g. `/usr/share/ryeos/bundles/core`
     /// in a packaged install, or `ryeos-bundles/core` in dev).
@@ -126,14 +122,12 @@ struct InitArgs {
 
 fn run_init_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<InitArgs>(argv)?;
-    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
+    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
     let user_root = args.user_root.unwrap_or_else(default_user_root);
-    let system_data_dir = args.system_data_dir.unwrap_or_else(default_system_data_dir);
 
     let opts = InitOptions {
-        state_dir,
+        system_space_dir,
         user_root,
-        system_data_dir,
         core_source: args.core_source,
         standard_source: args.standard_source,
         core_only: args.core_only,
@@ -198,16 +192,16 @@ struct VaultPutArgs {
     #[arg(required = true)]
     assignments: Vec<String>,
 
-    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    /// System space root. Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    state_dir: Option<PathBuf>,
+    system_space_dir: Option<PathBuf>,
 }
 
 fn run_vault_put_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultPutArgs>(argv)?;
-    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
+    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
     let report = run_vault_put(&PutOptions {
-        state_dir,
+        system_space_dir: system_space_dir,
         assignments: args.assignments,
     })
     .context("rye vault put failed")?;
@@ -222,15 +216,15 @@ fn run_vault_put_verb(argv: &[String]) -> Result<()> {
     no_binary_name = true
 )]
 struct VaultListArgs {
-    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    /// System space root. Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    state_dir: Option<PathBuf>,
+    system_space_dir: Option<PathBuf>,
 }
 
 fn run_vault_list_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultListArgs>(argv)?;
-    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
-    let report = run_vault_list(&ListOptions { state_dir })
+    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
+    let report = run_vault_list(&ListOptions { system_space_dir: system_space_dir })
         .context("rye vault list failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -247,16 +241,16 @@ struct VaultRemoveArgs {
     #[arg(required = true)]
     keys: Vec<String>,
 
-    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    /// System space root. Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    state_dir: Option<PathBuf>,
+    system_space_dir: Option<PathBuf>,
 }
 
 fn run_vault_remove_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultRemoveArgs>(argv)?;
-    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
+    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
     let report = run_vault_remove(&RemoveOptions {
-        state_dir,
+        system_space_dir: system_space_dir,
         keys: args.keys,
     })
     .context("rye vault remove failed")?;
@@ -271,15 +265,15 @@ fn run_vault_remove_verb(argv: &[String]) -> Result<()> {
     no_binary_name = true
 )]
 struct VaultRewrapArgs {
-    /// Daemon state root. Defaults to XDG state dir / ryeosd.
+    /// System space root. Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    state_dir: Option<PathBuf>,
+    system_space_dir: Option<PathBuf>,
 }
 
 fn run_vault_rewrap_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultRewrapArgs>(argv)?;
-    let state_dir = args.state_dir.unwrap_or_else(default_state_dir);
-    let report = run_vault_rewrap(&RewrapOptions { state_dir })
+    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
+    let report = run_vault_rewrap(&RewrapOptions { system_space_dir: system_space_dir })
         .context("rye vault rewrap failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -366,22 +360,15 @@ fn resolve_signing_key(key: Option<&std::path::Path>, seed: Option<u8>) -> Resul
 
 // ── Defaults ────────────────────────────────────────────────────────
 
-fn default_state_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("RYEOS_STATE_DIR") {
+fn default_system_space_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
         return PathBuf::from(p);
     }
-    dirs::state_dir()
-        .map(|d| d.join("ryeosd"))
-        .unwrap_or_else(|| PathBuf::from(".ryeosd"))
+    dirs::data_dir()
+        .map(|d| d.join("ryeos"))
+        .expect("could not determine XDG data directory")
 }
 
 fn default_user_root() -> PathBuf {
     roots::user_root().ok().unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn default_system_data_dir() -> PathBuf {
-    roots::system_roots(&[])
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| PathBuf::from(".ryeos-data"))
 }

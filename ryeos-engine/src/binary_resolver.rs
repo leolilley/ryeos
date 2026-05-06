@@ -235,10 +235,10 @@ pub fn resolve_bundle_binary_ref(
     if !is_dispatchable_trust_class(trust_class) {
         return Err(EngineError::BinUntrusted {
             bin: bin_name,
-            fingerprint: fingerprint.unwrap_or_default(),
+            fingerprint: fingerprint.unwrap_or_else(|| "<unknown>".to_string()),
         });
     }
-    let signer_fingerprint = fingerprint.unwrap_or_default();
+    let signer_fingerprint = fingerprint.unwrap_or_else(|| "<unknown>".to_string());
 
     Ok(ResolvedBinary {
         absolute_path: bin_path,

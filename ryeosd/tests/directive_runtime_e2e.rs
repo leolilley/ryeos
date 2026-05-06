@@ -406,15 +406,9 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
         plant_mock_provider(user, &mock_url, &fixture.publisher)?;
         plant_model_routing(user, &fixture.publisher)?;
         plant_python_echo_tool(user, "echo")?;
-        // Wildcard cap so BOTH gates pass:
-        // - runner's `Harness::check_permission("rye.execute.tool.echo")`
-        //   (by tool *name*, see runner.rs DispatchingTools)
-        // - dispatcher's `Dispatcher::check_permission(
-        //     "rye.execute.tool.<canonical_ref>")`
-        //   (by canonical ref, see dispatcher.rs::resolve)
-        // The two cap-string conventions diverge by design — the
-        // wildcard is the only way to keep the test from accidentally
-        // pinning one cap convention over the other.
+        // Wildcard cap: the dispatcher checks `rye.execute.tool.<canonical_ref>`
+        // (see dispatcher.rs::resolve). The runner no longer does a separate
+        // name-based pre-check — permission is the dispatcher's job.
         plant_directive(
             user,
             "test/round_trip",

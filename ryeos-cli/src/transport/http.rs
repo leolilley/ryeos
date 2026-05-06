@@ -93,9 +93,9 @@ async fn collect_body(body: Incoming) -> Result<Vec<u8>, CliTransportError> {
     Ok(bufs)
 }
 
-/// Read `daemon.json` from the state dir and return the bind address.
-pub async fn read_daemon_bind(state_dir: &std::path::Path) -> Result<String, CliTransportError> {
-    let path = state_dir.join("daemon.json");
+/// Read `daemon.json` from the system space dir and return the bind address.
+pub async fn read_daemon_bind(system_space_dir: &std::path::Path) -> Result<String, CliTransportError> {
+    let path = system_space_dir.join("daemon.json");
     let raw = std::fs::read_to_string(&path).map_err(|_| CliTransportError::DaemonJsonMissing {
         path: path.clone(),
     })?;

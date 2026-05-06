@@ -1093,4 +1093,112 @@ mod tests {
             ]
         );
     }
+
+    // ── 3-level (multilevel) narrowing tests ────────────────────────
+
+    #[test]
+    fn three_level_chain_narrows_against_immediate_parent() {
+        // Grandparent: broad (rye.*)
+        let gp = json!({
+            "name": "grandparent",
+            "permissions": { "execute": ["rye.*"] },
+            "body": ""
+        });
+        // Parent: narrowed (rye.execute.tool.*)
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["rye.execute.tool.*"] },
+            "body": ""
+        });
+        // Child: requests a specific tool — covered by parent's wildcard
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": ["rye.execute.tool.rye.file-system.read"] },
+            "body": "body"
+        });
+        // ancestors are nearest-first: [parent, grandparent]
+        let view = run(
+            demo_config(),
+            r,
+            vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
+        )
+        .unwrap();
+        // Child narrows against immediate parent (rye.execute.tool.*),
+        // which covers rye.execute.tool.rye.file-system.read — passes.
+        assert_eq!(
+            policy_fact_string_seq(&view, "effective_caps"),
+            vec!["rye.execute.tool.rye.file-system.read"]
+        );
+    }
+
+    #[test]
+    fn three_level_chain_child_omits_inherits_immediate_parent() {
+        // Grandparent: broad
+        let gp = json!({
+            "name": "grandparent",
+            "permissions": { "execute": ["rye.*"] },
+            "body": ""
+        });
+        // Parent: narrowed
+        let p = json!({
+            "name": "parent",
+            "permissions": { "execute": ["rye.execute.tool.read"] },
+            "body": ""
+        });
+        // Child: omits permissions — should inherit from immediate parent
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "body": "body"
+        });
+        // ancestors are nearest-first: [parent, grandparent]
+        let view = run(
+            demo_config(),
+            r,
+            vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
+        )
+        .unwrap();
+        // Child inherits from immediate parent (parent), not grandparent
+        assert_eq!(
+            policy_fact_string_seq(&view, "effective_caps"),
+            vec!["rye.execute.tool.read"]
+        );
+    }
+
+    #[test]
+    fn three_level_chain_grandparent_only_child_narrows_against_grandparent() {
+        // Grandparent: narrow
+        let gp = json!({
+            "name": "grandparent",
+            "permissions": { "execute": ["rye.execute.tool.read"] },
+            "body": ""
+        });
+        // Parent: omits permissions (inherits from grandparent)
+        let p = json!({
+            "name": "parent",
+            "body": ""
+        });
+        // Child: requests broad — should narrow against parent's effective
+        // (which was inherited from grandparent: rye.execute.tool.read)
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "permissions": { "execute": ["rye.*"] },
+            "body": "body"
+        });
+        // ancestors are nearest-first: [parent, grandparent]
+        let view = run(
+            demo_config(),
+            r,
+            vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
+        )
+        .unwrap();
+        // Child's rye.* narrowed against parent's effective (inherited from gp: rye.execute.tool.read)
+        // rye.* is NOT covered by rye.execute.tool.read → empty
+        assert!(
+            policy_fact_string_seq(&view, "effective_caps").is_empty(),
+            "child broad cap should be narrowed to empty against grandparent's narrow cap inherited by parent"
+        );
+    }
 }

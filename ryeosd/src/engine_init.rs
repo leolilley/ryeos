@@ -39,8 +39,8 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
         }
     }
 
-    // 2. Collect all system roots (system_data_dir + bundle_roots, ordered)
-    let mut system_roots = vec![config.system_data_dir.clone()];
+    // 2. Collect all system roots (system_space_dir + bundle_roots, ordered)
+    let mut system_roots = vec![config.system_space_dir.clone()];
     system_roots.extend(bundle_roots.iter().cloned());
     let user_root = roots::user_root().ok();
 
@@ -85,7 +85,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
 
     // 5. Load kind registry from filesystem (requires trust store for verification)
     let kinds = if schema_roots.is_empty() {
-        anyhow::bail!("no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
+        anyhow::bail!("no kind schema roots found; set system_space_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
     } else {
         KindRegistry::load_base(&schema_roots, &trust_store).context("failed to load kind schemas")?
     };

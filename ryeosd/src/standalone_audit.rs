@@ -1,7 +1,7 @@
 //! Standalone audit NDJSON writer.
 //!
 //! Appends one NDJSON line per standalone service invocation to
-//! `<state_dir>/.ai/state/audit/standalone.ndjson`.
+//! `<system_space_dir>/.ai/state/audit/standalone.ndjson`.
 //!
 //! File is opened in append mode each call (no long-lived handle).
 //! No automatic rotation in V5.2 — revisit if file grows past ~100MB
@@ -67,9 +67,9 @@ pub fn write_audit_record(
     Ok(())
 }
 
-/// Return the default standalone audit path for a given state directory.
-pub fn default_audit_path(state_dir: &Path) -> std::path::PathBuf {
-    state_dir
+/// Return the default standalone audit path for a given system space directory.
+pub fn default_audit_path(system_space_dir: &Path) -> std::path::PathBuf {
+    system_space_dir
         .join(".ai")
         .join("state")
         .join("audit")

@@ -2,7 +2,7 @@
 //! (`native_resume`) tools.
 //!
 //! The daemon allocates a per-thread checkpoint directory under
-//! `<config.state_dir>/threads/<thread_id>/checkpoints/` at spawn time
+//! `<config.system_space_dir>/threads/<thread_id>/checkpoints/` at spawn time
 //! (when the spec declares `runtime.handlers.native_resume`) and
 //! injects its path as the `RYE_CHECKPOINT_DIR` env var. Tools call
 //! `CheckpointWriter::from_env()` to attach to that directory and

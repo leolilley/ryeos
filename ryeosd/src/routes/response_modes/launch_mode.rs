@@ -349,6 +349,7 @@ mod tests {
     fn make_raw(id: &str) -> RawRouteSpec {
         RawRouteSpec {
             section: "routes".into(),
+            category: None,
             id: id.into(),
             path: "/hook/test".into(),
             methods: ["POST".into()].into_iter().collect(),

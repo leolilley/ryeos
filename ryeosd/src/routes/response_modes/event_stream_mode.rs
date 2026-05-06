@@ -453,6 +453,7 @@ mod tests {
     fn make_gateway_raw(id: &str, path: &str) -> RawRouteSpec {
         RawRouteSpec {
             section: "routes".into(),
+            category: None,
             id: id.into(),
             path: path.into(),
             methods: ["POST".into()].into_iter().collect(),
@@ -480,6 +481,7 @@ mod tests {
     fn make_subscription_raw(id: &str, path: &str) -> RawRouteSpec {
         RawRouteSpec {
             section: "routes".into(),
+            category: None,
             id: id.into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),

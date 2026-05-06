@@ -8,26 +8,26 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct IdentityParams {
     #[serde(default)]
-    pub state_dir: Option<String>,
+    pub system_space_dir: Option<String>,
 }
 
 pub fn run_identity(params: IdentityParams) -> Result<Value> {
-    let state_dir = match params.state_dir {
+    let system_space_dir = match params.system_space_dir {
         Some(ref p) => std::path::PathBuf::from(p),
         None => {
-            // 1. RYEOS_STATE_DIR (set by the daemon for subprocess tools)
-            // 2. XDG state dir / ryeosd
-            if let Ok(env_dir) = std::env::var("RYEOS_STATE_DIR") {
+            // 1. RYEOS_SYSTEM_SPACE_DIR (set by the daemon for subprocess tools)
+            // 2. XDG data dir / ryeos
+            if let Ok(env_dir) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
                 std::path::PathBuf::from(env_dir)
             } else {
-                dirs::state_dir()
-                    .map(|d| d.join("ryeosd"))
-                    .ok_or_else(|| anyhow!("could not determine state directory (no state_dir param, no RYEOS_STATE_DIR env, no XDG state dir)"))?
+                dirs::data_dir()
+                    .map(|d| d.join("ryeos"))
+                    .ok_or_else(|| anyhow!("could not determine system space directory (no system_space_dir param, no RYEOS_SYSTEM_SPACE_DIR env, no XDG data dir)"))?
             }
         }
     };
 
-    let identity_path = state_dir
+    let identity_path = system_space_dir
         .join(".ai")
         .join("node")
         .join("identity")

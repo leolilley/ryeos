@@ -59,20 +59,42 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Path to the system data dir we hand to the daemon (the bundled
-/// `ryeos-bundles/core` tree, which is signed by the fixture key).
+/// Path to the workspace core bundle (source for test copies).
+/// DO NOT pass this directly to the daemon as --system-space-dir —
+/// the daemon mutates that dir. Use [`copy_core_to_temp`] for the
+/// Returns the workspace's core bundle directory — used as a read-only
+/// daemon's system space dir.
 ///
-/// Tests that exercise `bin:rye-inspect` resolution under workspace
-/// concurrency MUST NOT use this directly; they would race the
-/// `target/debug/rye-inspect` symlink against the bundle manifest hash
-/// (the dev-tree race documented in
-/// `docs/operations/dev-tree-caveats.md`). Use
-/// [`ryeos_tools::test_support::isolated_core_bundle`] from
-/// `service_data_e2e.rs` instead — it copies the bundle and re-signs
-/// the manifest in-process so the resulting tree is decoupled from
-/// `target/debug`.
-pub fn system_data_dir() -> PathBuf {
+/// This IS safe to use for `RYE_SYSTEM_SPACE` (read-only bundle
+/// discovery) and as a source for `copy_dir_all`.
+pub fn workspace_core_dir() -> PathBuf {
     workspace_root().join("ryeos-bundles/core")
+}
+
+/// Copy the core bundle to an isolated temp dir and return `(tempdir, path)`.
+/// The daemon can safely write into the copy without polluting the workspace.
+pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir for core bundle copy");
+    let src = workspace_core_dir();
+    let dst = tmp.path().join("core");
+    copy_dir_recursive(&src, &dst).expect("copy core bundle to temp");
+    (tmp, dst)
+}
+
+/// Recursive directory copy (Unix, no special handling).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Path to the fixture trusted-signers TOML for the bundle signer.
@@ -107,15 +129,15 @@ pub fn populate_user_space(user_space: &Path) {
 }
 
 /// A live ryeosd daemon child process bound to `bind`, with state under
-/// `state_path` (which is `<_state_dir_outer>/state`). Drop kills the
-/// child and best-effort cleans up the UDS.
+/// `system_space_dir`. Drop kills the child and best-effort cleans up the UDS.
 pub struct DaemonHarness {
-    /// Outer tempdir, kept alive for RAII cleanup. Daemon's actual
-    /// `--state-dir` is the `state` subdir inside it.
+    /// Outer tempdir for UDS socket (RAII cleanup).
     _state_dir_outer: TempDir,
-    /// Path the daemon was launched with as `--state-dir`. Use this for
-    /// reading `daemon.json`, audit files, etc. Equivalent to
-    /// `state_dir.path()` in the old API.
+    /// Tempdir holding the copied core bundle. The daemon writes into this copy,
+    /// not the workspace tree.
+    _core_bundle_tmp: TempDir,
+    /// Path the daemon was launched with as `--system-space-dir`. Use this for
+    /// reading `daemon.json`, audit files, etc.
     pub state_path: PathBuf,
     pub user_space: TempDir,
     pub bind: SocketAddr,
@@ -160,23 +182,24 @@ impl DaemonHarness {
         let user_space = tempfile::tempdir()?;
         populate_user_space(user_space.path());
 
-        // Use a NON-EXISTENT subdir so `--init-if-missing` actually triggers
-        // init. (`init-if-missing` skips when the marker file exists.)
-        let state_path = state_dir_outer.path().join("state");
+        // Copy core bundle to an isolated temp dir so the daemon writes
+        // state (identity, vault, DB, daemon.json) into the copy, not
+        // the workspace tree.
+        let (core_bundle_tmp, system_space_dir) = copy_core_to_temp();
 
-        pre_init(&state_path, user_space.path())?;
+        pre_init(&system_space_dir, user_space.path())?;
 
         let port = pick_free_port();
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let uds_path = state_path.join("ryeosd.sock");
+        // UDS socket in a temp dir (avoids writing socket into workspace tree)
+        let uds_path = state_dir_outer.path().join("ryeosd.sock");
 
         let mut cmd = Command::new(ryeosd_binary());
         cmd.arg("--init-if-missing")
-            .arg("--state-dir").arg(&state_path)
+            .arg("--system-space-dir").arg(&system_space_dir)
             .arg("--bind").arg(bind.to_string())
             .arg("--uds-path").arg(&uds_path)
             .env("HOSTNAME", "testhost")
-            .env("RYE_SYSTEM_SPACE", system_data_dir())
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
             // When RYEOSD_TEST_STDERR_DIR is set, mirror daemon stderr
@@ -199,7 +222,7 @@ impl DaemonHarness {
 
         let child = cmd.spawn()?;
 
-        let daemon_json = state_path.join("daemon.json");
+        let daemon_json = system_space_dir.join("daemon.json");
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if daemon_json.exists() {
@@ -245,7 +268,8 @@ impl DaemonHarness {
 
         Ok(Self {
             _state_dir_outer: state_dir_outer,
-            state_path,
+            _core_bundle_tmp: core_bundle_tmp,
+            state_path: system_space_dir.to_path_buf(),
             user_space,
             bind,
             uds_path,
@@ -286,25 +310,23 @@ impl DaemonHarness {
         let state_dir_outer = tempfile::tempdir()?;
         let user_space = tempfile::tempdir()?;
 
-        // NON-EXISTENT subdir so the fast fixture writes the daemon's
-        // state from scratch — matches the layout the daemon expects
-        // when launched without `--init-if-missing`.
-        let state_path = state_dir_outer.path().join("state");
+        // Copy core bundle to temp so fast fixture writes don't pollute workspace.
+        let (core_bundle_tmp, state_path) = copy_core_to_temp();
 
         let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
         plant(&state_path, user_space.path(), &fixture)?;
 
         let port = pick_free_port();
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let uds_path = state_path.join("ryeosd.sock");
+        // UDS socket in a temp dir (avoids writing socket into workspace tree)
+        let uds_path = state_dir_outer.path().join("ryeosd.sock");
 
         let mut cmd = Command::new(ryeosd_binary());
         // NOTE: NO --init-if-missing. The fast fixture is the init.
-        cmd.arg("--state-dir").arg(&state_path)
+        cmd.arg("--system-space-dir").arg(&state_path)
             .arg("--bind").arg(bind.to_string())
             .arg("--uds-path").arg(&uds_path)
             .env("HOSTNAME", "testhost")
-            .env("RYE_SYSTEM_SPACE", system_data_dir())
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
             .stdout(Stdio::null())
@@ -365,6 +387,7 @@ impl DaemonHarness {
 
         let harness = Self {
             _state_dir_outer: state_dir_outer,
+            _core_bundle_tmp: core_bundle_tmp,
             state_path,
             user_space,
             bind,
@@ -464,22 +487,19 @@ pub async fn run_service_standalone(
 ) -> anyhow::Result<(std::process::Output, TempDir, TempDir)> {
     populate_user_space(user_space.path());
 
-    // Use a NON-EXISTENT subdir so `--init-if-missing` actually triggers
-    // init. Daemon's `--init-if-missing` runs before subcommand dispatch
-    // so run-service inherits the init.
-    let state_path = state_dir.path().join("state");
+    // Copy core bundle to temp so daemon init doesn't mutate workspace.
+    let (core_tmp, core_path) = copy_core_to_temp();
 
     let mut cmd = Command::new(ryeosd_binary());
     cmd.arg("--init-if-missing")
-        .arg("--state-dir").arg(&state_path)
-        .arg("--uds-path").arg(state_path.join("ryeosd.sock"))
+        .arg("--system-space-dir").arg(&core_path)
+        .arg("--uds-path").arg(state_dir.path().join("ryeosd.sock"))
         .arg("run-service")
         .arg(service_ref);
     if let Some(p) = params_json {
         cmd.arg("--params").arg(p);
     }
     cmd.env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", system_data_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .stdout(Stdio::piped())
@@ -495,6 +515,7 @@ pub async fn run_service_standalone(
         s.read_to_end(&mut stderr_buf).await?;
     }
     let status = child.wait().await?;
+    // core_tmp cleaned up here — child has exited so files are closed.
     Ok((
         std::process::Output { status, stdout: stdout_buf, stderr: stderr_buf },
         state_dir,

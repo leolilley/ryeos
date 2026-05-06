@@ -11,16 +11,15 @@ use std::process::Command;
 /// Returns (state_dir, trace_path).
 fn spawn_daemon_once(tmp: &tempfile::TempDir, exe: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let state_dir = tmp.path().to_path_buf();
-    let trace_path = state_dir.join(".state/trace-events.ndjson");
+    let trace_path = state_dir.join(".ai").join("state").join("trace-events.ndjson");
 
     // Bootstrap a minimal state
     let output = Command::new(exe)
         .args([
             "--init-only",
-            "--state-dir",
+            "--system-space-dir",
             state_dir.to_str().unwrap(),
         ])
-        .env("RYE_STATE", state_dir.to_str().unwrap())
         .env("RUST_LOG", "ryeosd=info")
         .output()
         .expect("failed to run ryeosd --init-only");
@@ -65,8 +64,7 @@ fn file_sink_survives_daemon_restart() {
 
     // Start daemon #1, let it write some startup spans, then kill it
     let mut child1 = Command::new(&exe)
-        .args(["--state-dir", state_str])
-        .env("RYE_STATE", state_str)
+        .args(["--system-space-dir", state_str])
         .env("RUST_LOG", "ryeosd=info")
         .spawn()
         .expect("failed to spawn ryeosd #1");
@@ -86,8 +84,7 @@ fn file_sink_survives_daemon_restart() {
 
     // Run #2: restart against same state
     let mut child2 = Command::new(&exe)
-        .args(["--state-dir", state_str])
-        .env("RYE_STATE", state_str)
+        .args(["--system-space-dir", state_str])
         .env("RUST_LOG", "ryeosd=info")
         .spawn()
         .expect("failed to spawn ryeosd #2");

@@ -211,17 +211,17 @@ impl SealedEnvelopeVault {
         }
     }
 
-    /// Load the vault secret key from `<state>/.ai/node/vault/private_key.pem`
-    /// and bind it to `<state>/.ai/state/secrets/store.enc`.
-    pub fn load(state_dir: &Path) -> Result<Self> {
-        let secret_path = state_dir
+    /// Load the vault secret key from `<system_space_dir>/.ai/node/vault/private_key.pem`
+    /// and bind it to `<system_space_dir>/.ai/state/secrets/store.enc`.
+    pub fn load(system_space_dir: &Path) -> Result<Self> {
+        let secret_path = system_space_dir
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("vault")
             .join("private_key.pem");
         let secret_key = lillux::vault::read_secret_key(&secret_path)
             .map_err(|e| anyhow!("vault: load secret key {}: {e:#}", secret_path.display()))?;
-        Ok(Self::new(default_sealed_store_path(state_dir), secret_key))
+        Ok(Self::new(default_sealed_store_path(system_space_dir), secret_key))
     }
 
     pub fn store_path(&self) -> &Path {

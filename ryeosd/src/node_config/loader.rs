@@ -20,18 +20,17 @@ use crate::routes::raw::RawRouteSpec;
 
 /// Bootstrap loader for node-config items.
 ///
-/// Phase 1: `load_bundle_section()` — minimal bootstrap verifier, system_data_dir + state_dir only.
+/// Phase 1: `load_bundle_section()` — minimal bootstrap verifier, system space only.
 /// Phase 2: `load_full()` — full engine-based scan across all sources.
 pub struct BootstrapLoader<'a> {
-    pub system_data_dir: &'a Path,
-    pub state_dir: &'a Path,
+    pub system_space_dir: &'a Path,
     pub trust_store: &'a TrustStore,
 }
 
 impl<'a> BootstrapLoader<'a> {
     /// Phase 1: load only the `bundles` section to determine effective bundle roots.
     ///
-    /// Scans `system_data_dir/.ai/node/bundles/` and `state_dir/.ai/node/bundles/`.
+    /// Scans `<system_space_dir>/.ai/node/bundles/`.
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
     pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
         let section = BundleSection;
@@ -43,14 +42,7 @@ impl<'a> BootstrapLoader<'a> {
 
         let mut records: Vec<BundleRecord> = Vec::new();
 
-        // Scan system_data_dir + state_dir only (bundle section policy).
-        // Deduplicate: when state_dir == system_data_dir (unified tree),
-        // the same directory must not be scanned twice or bundle collision
-        // detection will flag duplicates.
-        let mut scan_roots = vec![self.system_data_dir];
-        if self.state_dir != self.system_data_dir {
-            scan_roots.push(self.state_dir);
-        }
+        let scan_roots = [self.system_space_dir];
         for root in &scan_roots {
             let node_dir = root.join(".ai").join("node").join("bundles");
             if !node_dir.is_dir() {
@@ -186,14 +178,10 @@ impl<'a> BootstrapLoader<'a> {
 
             let scan_roots = match section.source_policy() {
                 SectionSourcePolicy::SystemAndState => {
-                    let mut roots = vec![self.system_data_dir.to_path_buf()];
-                    if self.state_dir != self.system_data_dir {
-                        roots.push(self.state_dir.to_path_buf());
-                    }
-                    roots
+                    vec![self.system_space_dir.to_path_buf()]
                 }
                 SectionSourcePolicy::EffectiveBundleRootsAndState => {
-                    let mut roots = vec![self.state_dir.to_path_buf()];
+                    let mut roots = vec![self.system_space_dir.to_path_buf()];
                     for b in bundles {
                         if !roots.iter().any(|r| r == &b.path) {
                             roots.push(b.path.clone());

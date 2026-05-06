@@ -1,6 +1,6 @@
 //! Operator state lock for mutual exclusion between daemon and standalone mode.
 //!
-//! The daemon acquires an exclusive lock on `<state_dir>/.ai/state/operator.lock`
+//! The daemon acquires an exclusive lock on `<system_space_dir>/.ai/state/operator.lock`
 //! at startup and holds it for its lifetime. Standalone state-backed services
 //! must acquire the same lock or fail with "daemon is running."
 //!
@@ -98,8 +98,8 @@ fn flock_exclusive_nb(file: &File) -> io::Result<()> {
 }
 
 /// Return the default lock path for a given state directory.
-pub fn default_lock_path(state_dir: &Path) -> PathBuf {
-    state_dir.join(".ai").join("state").join("operator.lock")
+pub fn default_lock_path(system_space_dir: &Path) -> PathBuf {
+    system_space_dir.join(".ai").join("state").join("operator.lock")
 }
 
 #[cfg(test)]

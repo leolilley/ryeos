@@ -106,15 +106,6 @@ impl Harness {
         Ok(())
     }
 
-    pub fn check_permission(&self, required: &str) -> bool {
-        if self.effective_caps.is_empty() {
-            return false;
-        }
-        self.effective_caps
-            .iter()
-            .any(|cap| ryeos_runtime::cap_matches(cap, required))
-    }
-
     pub fn record_turn(&mut self) {
         self.turns_used += 1;
     }
@@ -325,13 +316,8 @@ mod tests {
             HardLimits::default(),
             vec!["rye.execute.tool.*".to_string()],
         );
-        assert!(harness.check_permission("rye.execute.tool.read_file"));
-    }
-
-    #[test]
-    fn check_permission_denied_empty_caps() {
-        let harness = make_harness(HardLimits::default(), vec![]);
-        assert!(!harness.check_permission("rye.execute.tool.read_file"));
+        // effective_caps set but check_permission removed; verify caps are stored
+        assert_eq!(harness.effective_caps().len(), 1);
     }
 
     #[test]

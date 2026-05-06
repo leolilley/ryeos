@@ -73,9 +73,6 @@ pub enum CliError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error("internal error: {detail}")]
-    Internal { detail: String },
-
     /// Failure inside a hardcoded local verb (`init`, `trust pin`, `publish`).
     /// These run in-process without daemon dispatch.
     #[error("{detail}")]

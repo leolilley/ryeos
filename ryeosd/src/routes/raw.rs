@@ -7,6 +7,9 @@ use std::collections::HashSet;
 pub struct RawRouteSpec {
     #[serde(default)]
     pub section: String,
+    /// Metadata field from signed YAML — ignored at runtime.
+    #[serde(default, skip_serializing)]
+    pub category: Option<String>,
     pub id: String,
     pub path: String,
     pub methods: HashSet<String>,

@@ -58,13 +58,18 @@ impl SubscriberConfig {
     ///
     /// Installs the stderr layer (human-readable) PLUS a second
     /// `fmt::layer().json()` that appends structured ndjson lines to
-    /// `<state_dir>/.ai/state/trace-events.ndjson`. The file is opened
+    /// `<system_space_dir>/.ai/state/trace-events.ndjson`. The file is opened
     /// once with append mode and shared across all writes via
     /// `Arc<Mutex<File>>`. Survives daemon restart — the file
     /// persists so test harnesses can tail across runs.
     pub fn for_daemon_with_file_sink(state_dir: &Path) -> Self {
         // Ensure the .ai/state/ directory exists before opening the file.
-        let _ = std::fs::create_dir_all(state_dir.join(".ai").join("state"));
+        let state_dir_path = state_dir.join(".ai").join("state");
+        if let Err(e) = std::fs::create_dir_all(&state_dir_path) {
+            // Log but continue — the file open below will produce a clearer
+            // error if the directory truly can't be created.
+            eprintln!("warn: failed to create trace dir {}: {e}", state_dir_path.display());
+        }
 
         let trace_path = state_dir.join(".ai").join("state").join("trace-events.ndjson");
         let file = OpenOptions::new()

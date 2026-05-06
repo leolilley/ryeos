@@ -410,7 +410,7 @@ async fn service_maintenance_gc_real_run_writes_event_log() {
         json!({"dry_run": false, "compact": false}),
     ).await;
     let _ = unwrap_result(status, &body, "maintenance.gc real");
-    // GC writes to <state_dir>/.ai/state/<event-log>. The exact path
+    // GC writes to <system_space_dir>/.ai/state/<event-log>. The exact path
     // is `gc::event_log::append_event` — read its source if needed.
     // We just assert the GC succeeded and SOME file under state changed.
     let state_dir = h.state_path.join(".ai/state");

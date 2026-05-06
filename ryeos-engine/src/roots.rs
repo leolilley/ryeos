@@ -41,10 +41,10 @@ pub fn user_root() -> Result<PathBuf, RootError> {
 }
 
 /// Pass-through for symmetry with `user_root`. The daemon's
-/// effective state_dir IS the state root; this function exists so
+/// effective system_space_dir IS the state root; this function exists so
 /// future relocation has one chokepoint.
-pub fn state_root(state_dir: &std::path::Path) -> PathBuf {
-    state_dir.to_path_buf()
+pub fn state_root(system_space_dir: &std::path::Path) -> PathBuf {
+    system_space_dir.to_path_buf()
 }
 
 /// Ordered list of system bundle roots.

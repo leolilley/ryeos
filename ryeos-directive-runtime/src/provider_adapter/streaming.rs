@@ -333,6 +333,7 @@ fn parse_complete_chunks(parsed: &Value, events: &mut Vec<StreamEvent>) {
 pub struct StreamingCallInput<'a> {
     pub client: &'a reqwest::Client,
     pub provider: &'a ProviderConfig,
+    pub provider_id: &'a str,
     pub execution: &'a ExecutionConfig,
     pub model: &'a str,
     pub messages: &'a [ProviderMessage],
@@ -351,6 +352,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     let StreamingCallInput {
         client,
         provider,
+        provider_id,
         execution,
         model,
         messages,
@@ -395,19 +397,9 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         body["tools"] = tools_val;
     }
 
-    // Sampling parameters — best-effort replay. Not all providers
-    // support every field; silently omit what the provider can't use.
-    // The presence of `seed` without `temperature` is valid (lock
-    // greedy sampling) and `temperature` without `seed` is valid
-    // (deterministic flavour, nondeterministic output).
-    if let Some(s) = sampling {
-        if let Some(temp) = s.temperature {
-            body["temperature"] = json!(temp);
-        }
-        if let Some(seed) = s.seed {
-            body["seed"] = json!(seed);
-        }
-    }
+    // Sampling parameters — gated by provider capabilities so we
+    // never send a field the upstream API will reject with a 400.
+    inject_sampling(&mut body, provider_id, sampling);
 
     let mut req = client.post(&url);
 
@@ -717,6 +709,71 @@ fn harvest_chunk_meta(
     }
 }
 
+/// Inject sampling fields into the request body, gated by provider
+/// capabilities. Unknown providers get no fields (fail-closed).
+fn inject_sampling(
+    body: &mut Value,
+    provider_id: &str,
+    sampling: Option<&SamplingConfig>,
+) {
+    if let Some(s) = sampling {
+        let caps = provider_capabilities(provider_id);
+        if caps.supports_temperature {
+            if let Some(temp) = s.temperature {
+                body["temperature"] = json!(temp);
+            }
+        }
+        if caps.supports_seed {
+            if let Some(seed) = s.seed {
+                body["seed"] = json!(seed);
+            }
+        }
+    }
+}
+
+// ── Provider capabilities ──────────────────────────────────────
+
+/// Capability flags for a single provider. Used to gate which
+/// sampling fields are safe to inject into the request body.
+#[derive(Debug, Clone)]
+struct ProviderCapabilities {
+    supports_temperature: bool,
+    supports_seed: bool,
+}
+
+impl Default for ProviderCapabilities {
+    fn default() -> Self {
+        // Conservative default: temperature is widely supported,
+        // seed is not. Unknown providers get this.
+        // Fail-closed: unknown providers get no sampling fields injected
+        // until explicitly added to the match in provider_capabilities().
+        Self {
+            supports_temperature: false,
+            supports_seed: false,
+        }
+    }
+}
+
+/// Look up capabilities for a known provider ID. Falls back to
+/// the conservative default for unrecognised providers.
+fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
+    match provider_id {
+        "openai" => ProviderCapabilities {
+            supports_temperature: true,
+            supports_seed: true,
+        },
+        "anthropic" => ProviderCapabilities {
+            supports_temperature: true,
+            supports_seed: false,
+        },
+        "google" | "gemini" => ProviderCapabilities {
+            supports_temperature: true,
+            supports_seed: false,
+        },
+        _ => ProviderCapabilities::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,5 +940,91 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
 
         let span = trace_test::find_span(&spans, "provider:parse_sse");
         assert!(span.is_some(), "expected provider:parse_sse span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn provider_capabilities_openai_supports_seed() {
+        let caps = provider_capabilities("openai");
+        assert!(caps.supports_temperature);
+        assert!(caps.supports_seed);
+    }
+
+    #[test]
+    fn provider_capabilities_anthropic_omits_seed() {
+        let caps = provider_capabilities("anthropic");
+        assert!(caps.supports_temperature);
+        assert!(!caps.supports_seed);
+    }
+
+    #[test]
+    fn provider_capabilities_google_omits_seed() {
+        let caps = provider_capabilities("google");
+        assert!(caps.supports_temperature);
+        assert!(!caps.supports_seed);
+    }
+
+    #[test]
+    fn provider_capabilities_unknown_is_fail_closed() {
+        let caps = provider_capabilities("some-new-provider");
+        assert!(!caps.supports_temperature, "unknown provider should not assume temperature");
+        assert!(!caps.supports_seed, "unknown provider should not assume seed");
+    }
+
+    // ── Body-level sampling injection tests ─────────────────────
+
+    #[test]
+    fn sampling_injection_openai_includes_both_fields() {
+        let mut body = json!({"model": "gpt-4", "messages": []});
+        let sampling = SamplingConfig {
+            temperature: Some(0.3),
+            seed: Some(42),
+        };
+        inject_sampling(&mut body, "openai", Some(&sampling));
+        assert_eq!(body["temperature"].as_f64(), Some(0.3));
+        assert_eq!(body["seed"].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn sampling_injection_anthropic_omits_seed() {
+        let mut body = json!({"model": "claude-3", "messages": []});
+        let sampling = SamplingConfig {
+            temperature: Some(0.7),
+            seed: Some(99),
+        };
+        inject_sampling(&mut body, "anthropic", Some(&sampling));
+        assert_eq!(body["temperature"].as_f64(), Some(0.7));
+        assert!(body.get("seed").is_none(), "anthropic body must not contain seed");
+    }
+
+    #[test]
+    fn sampling_injection_google_omits_seed() {
+        let mut body = json!({"model": "gemini-pro", "messages": []});
+        let sampling = SamplingConfig {
+            temperature: Some(0.5),
+            seed: Some(1),
+        };
+        inject_sampling(&mut body, "google", Some(&sampling));
+        assert_eq!(body["temperature"].as_f64(), Some(0.5));
+        assert!(body.get("seed").is_none(), "google body must not contain seed");
+    }
+
+    #[test]
+    fn sampling_injection_unknown_provider_omits_everything() {
+        let mut body = json!({"model": "custom", "messages": []});
+        let sampling = SamplingConfig {
+            temperature: Some(0.9),
+            seed: Some(77),
+        };
+        inject_sampling(&mut body, "custom-provider", Some(&sampling));
+        assert!(body.get("temperature").is_none(), "unknown provider must not get temperature");
+        assert!(body.get("seed").is_none(), "unknown provider must not get seed");
+    }
+
+    #[test]
+    fn sampling_injection_none_sampling_no_fields() {
+        let mut body = json!({"model": "gpt-4", "messages": []});
+        inject_sampling(&mut body, "openai", None);
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("seed").is_none());
     }
 }

@@ -25,15 +25,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli)?;
 
-    // Initialize tracing with file sink (writes ndjson to <state_dir>/.ai/state/trace-events.ndjson).
-    // Must come after config load so state_dir is known.
+    // Initialize tracing with file sink (writes ndjson to <system_space_dir>/.ai/state/trace-events.ndjson).
+    // Must come after config load so system_space_dir is known.
     // The init_if_missing / init_only paths below may create .ai/state/ if it doesn't exist yet,
     // but for_daemon_with_file_sink already creates .ai/state/ on its own.
-    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(&config.state_dir));
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(&config.system_space_dir));
 
     // --init-only: bootstrap node-local state (identity, trust, dirs) and exit.
     //
-    // This intentionally does NOT walk or sign items in `system_data_dir`.
+    // This intentionally does NOT walk or sign items in `system_space_dir`.
     // System-tier bundle items are operator/publisher-managed and out of
     // scope for daemon init. To sign bundle items, use the explicit signer
     // tool (`cargo run --example resign_yaml -p ryeos-engine -- <path>`).
@@ -49,13 +49,13 @@ async fn main() -> Result<()> {
     // so standalone callers don't need a separate init step.
     //
     // We check for both node identity and vault key files rather than
-    // `state_dir.exists()` because the tracing subscriber pre-creates
-    // `<state_dir>/.ai/state/` before this code runs, which would
+    // `system_space_dir.exists()` because the tracing subscriber pre-creates
+    // `<system_space_dir>/.ai/state/` before this code runs, which would
     // otherwise defeat the predicate. Either key missing triggers a
     // (load-or-create-per-key idempotent) init; this matters when a
     // test or operator has pre-placed one key but not the other.
     let vault_secret_path = config
-        .state_dir
+        .system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("vault")
@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
     
-    let state_root = config.state_dir.join(".ai").join("state");
+    let state_root = config.system_space_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
     // Acquire operator state lock — prevents standalone services from
     // running while the daemon is up. Released on process exit (Drop).
     let _state_lock = state_lock::StateLock::acquire(
-        &state_lock::default_lock_path(&config.state_dir),
+        &state_lock::default_lock_path(&config.system_space_dir),
     ).context("failed to acquire state lock — is another ryeosd instance or standalone service running?")?;
     tracing::info!("State lock acquired");
     
@@ -241,7 +241,7 @@ async fn main() -> Result<()> {
     // `services::thread_lifecycle::spawn_item`. Daemon stays vendor-
     // agnostic — `vault.rs` only moves opaque `String -> String` pairs.
     let vault: Arc<dyn ryeosd::vault::NodeVault> = Arc::new(
-        ryeosd::vault::SealedEnvelopeVault::load(&config.state_dir)
+        ryeosd::vault::SealedEnvelopeVault::load(&config.system_space_dir)
             .context("load sealed-envelope vault — did `rye init` (or daemon bootstrap) run?")?,
     );
 
@@ -346,7 +346,7 @@ async fn main() -> Result<()> {
         "bind": config.bind.to_string(),
         "started_at": lillux::time::iso8601_now(),
     });
-    let daemon_json_path = config.state_dir.join("daemon.json");
+    let daemon_json_path = config.system_space_dir.join("daemon.json");
     std::fs::write(
         &daemon_json_path,
         serde_json::to_string_pretty(&daemon_info)?,
@@ -605,10 +605,10 @@ async fn run_service_standalone(
 
     // Acquire state lock (prevents concurrent daemon)
     let _state_lock = state_lock::StateLock::acquire(
-        &state_lock::default_lock_path(&config.state_dir),
+        &state_lock::default_lock_path(&config.system_space_dir),
     ).context("failed to acquire state lock — is the daemon running?")?;
 
-    let state_root = config.state_dir.join(".ai").join("state");
+    let state_root = config.system_space_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     let write_barrier = ryeosd::write_barrier::WriteBarrier::new();
@@ -699,7 +699,7 @@ async fn run_service_standalone(
         )),
         webhook_dedupe: Arc::new(routes::webhook_dedupe::WebhookDedupeStore::new()),
         vault: Arc::new(
-            ryeosd::vault::SealedEnvelopeVault::load(&config.state_dir)
+            ryeosd::vault::SealedEnvelopeVault::load(&config.system_space_dir)
                 .context("load sealed-envelope vault — did `rye init` run?")?,
         ),
         verb_registry: standalone_vr,

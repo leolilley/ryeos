@@ -22,6 +22,7 @@ const DERIVED_COMPOSED_CONTEXT: &str = "composed_context";
 pub struct BootstrapOutput {
     pub config: BootstrapConfig,
     pub provider: ProviderConfig,
+    pub provider_id: String,
     pub model_name: String,
     pub context_window: u64,
     pub sampling: Option<SamplingConfig>,
@@ -229,6 +230,7 @@ pub fn bootstrap(
             risk_policy,
         },
         provider: resolved.provider,
+        provider_id: resolved.provider_id,
         model_name: resolved.model_name,
         context_window: resolved.context_window,
         sampling: header.model.as_ref().and_then(|m| m.sampling.clone()),

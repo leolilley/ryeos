@@ -43,7 +43,7 @@ impl KindProfileRegistry {
     }
 
     fn find_config_path(config: &Config) -> Option<PathBuf> {
-        let path = config.state_dir.join(".ai").join("node").join("config.yaml");
+        let path = config.system_space_dir.join(".ai").join("node").join("config.yaml");
         if path.exists() {
             Some(path)
         } else {

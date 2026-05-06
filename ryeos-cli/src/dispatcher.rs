@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use serde_json::Value;
+
 use crate::error::CliError;
 use crate::local_verbs;
 
@@ -33,8 +35,8 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         None => ".".to_string(),
     };
 
-    // 2. State dir
-    let state_dir = discover_state_dir();
+    // 2. System space dir
+    let system_space_dir = discover_system_space_dir();
 
     // 3. Hardcoded LOCAL verbs (must work before daemon exists):
     //      rye init             — bootstrap operator state
@@ -59,7 +61,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     // `rye help <verb...>` → verb help (queries daemon for alias info)
     if cli.rest.len() > 1 && cli.rest[0] == "help" {
-        crate::help::print_verb_help(&cli.rest[1..], &state_dir, &body_project_path).await?;
+        crate::help::print_verb_help(&cli.rest[1..], &system_space_dir, &body_project_path).await?;
         return Ok(());
     }
 
@@ -87,7 +89,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
             "parameters": parameters,
         });
 
-        let result = post_to_daemon(&state_dir, &body).await?;
+        let result = post_to_daemon(&system_space_dir, &body).await?;
         print_result(result);
         return Ok(());
     }
@@ -99,18 +101,18 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         "project_path": body_project_path,
     });
 
-    let result = post_to_daemon(&state_dir, &body).await?;
+    let result = post_to_daemon(&system_space_dir, &body).await?;
     print_result(result);
     Ok(())
 }
 
 /// POST a JSON body to the daemon's /execute endpoint and return the response.
 async fn post_to_daemon(
-    state_dir: &std::path::Path,
-    body: &serde_json::Value,
-) -> Result<serde_json::Value, CliError> {
-    let bind = crate::transport::http::read_daemon_bind(state_dir).await?;
-    let signer = crate::transport::signing::Signer::resolve(state_dir)?;
+    system_space_dir: &std::path::Path,
+    body: &Value,
+) -> Result<Value, CliError> {
+    let bind = crate::transport::http::read_daemon_bind(system_space_dir).await?;
+    let signer = crate::transport::signing::Signer::resolve(system_space_dir)?;
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
     let headers = signer.sign("POST", "/execute", &body_bytes)?;
     let payload = crate::transport::http::post_json(&bind, &headers, &body_bytes).await?;
@@ -127,11 +129,11 @@ fn print_result(payload: serde_json::Value) {
     println!("{pretty}");
 }
 
-fn discover_state_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("RYEOS_STATE_DIR") {
+fn discover_system_space_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
         return PathBuf::from(p);
     }
-    dirs::state_dir()
-        .map(|d| d.join("ryeosd"))
-        .unwrap_or_else(|| PathBuf::from(".ryeosd"))
+    dirs::data_dir()
+        .map(|d| d.join("ryeos"))
+        .expect("could not determine XDG data directory")
 }
