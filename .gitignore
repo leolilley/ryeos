@@ -130,8 +130,13 @@ ryeosd/target/
 target/
 tests/e2e/.ai/knowledge/agent/threads/
 
-## Bundle CAS artifacts — derivable from source via:
-##   target/release/rye-bundle-tool rebuild-manifest --source ryeos-bundles/<name> --seed N
-## CI rebuilds these on every release. Devs rebuild locally as needed.
+## Bundle CAS + binary artifacts — fully derivable from source.
+## Single source of truth: scripts/populate-bundles.sh
+##   - cargo build --release of all bins
+##   - install into ryeos-bundles/<name>/.ai/bin/<triple>/
+##   - rye-bundle-tool rebuild-manifest --source ryeos-bundles/<name>
+## Run `./scripts/populate-bundles.sh` (or `./scripts/gate.sh`) after a fresh
+## checkout. Dockerfile invokes the same script in the build stage.
 ryeos-bundles/*/.ai/objects/
 ryeos-bundles/*/.ai/refs/
+ryeos-bundles/*/.ai/bin/*/
