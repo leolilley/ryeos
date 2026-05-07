@@ -13,44 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY . .
 
-RUN cargo build --release \
-      -p ryeosd \
-      -p ryeos-directive-runtime \
-      -p ryeos-graph-runtime \
-      -p ryeos-knowledge-runtime \
-      -p ryeos-handler-bins \
-      -p ryeos-cli && \
-    cargo build --release -p ryeos-tools \
-      --bin rye-bundle-tool --bin rye-inspect --bin rye-sign
-
-# Place freshly built runtimes/CLI into the standard bundle's bin/<triple>/.
-RUN install -m 0755 \
-      target/release/ryeos-directive-runtime \
-      target/release/ryeos-graph-runtime \
-      target/release/ryeos-knowledge-runtime \
-      target/release/rye \
-      ryeos-bundles/standard/.ai/bin/x86_64-unknown-linux-gnu/
-
-# Place freshly built handlers/CLI tools into the core bundle's bin/<triple>/.
-RUN install -m 0755 \
-      target/release/rye-parser-yaml-document \
-      target/release/rye-parser-yaml-header-document \
-      target/release/rye-parser-regex-kv \
-      target/release/rye-composer-extends-chain \
-      target/release/rye-composer-graph-permissions \
-      target/release/rye-composer-identity \
-      target/release/rye-inspect \
-      target/release/rye-sign \
-      target/release/rye-tool-streaming-demo \
-      ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/
-
-# Rebuild CAS for both bundles. The seed default is for local docker-build runs;
-# CI replaces this with a real key (see workflow Phase 2 hardening).
+# Single source of truth: build all bins, install into bundle bin/ trees,
+# rebuild both bundle CAS manifests. Identical to the local dev path
+# (scripts/gate.sh runs the same script).
 ARG RYE_SIGNING_SEED=1
-RUN target/release/rye-bundle-tool rebuild-manifest \
-        --source ryeos-bundles/standard --seed ${RYE_SIGNING_SEED} && \
-    target/release/rye-bundle-tool rebuild-manifest \
-        --source ryeos-bundles/core --seed ${RYE_SIGNING_SEED}
+RUN RYE_SIGNING_SEED=${RYE_SIGNING_SEED} ./scripts/populate-bundles.sh
 
 # ── Stage 2: Runtime image ──
 FROM debian:bookworm-slim
