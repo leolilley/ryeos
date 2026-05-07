@@ -129,3 +129,9 @@ tests/e2e/.ai/knowledge/
 ryeosd/target/
 target/
 tests/e2e/.ai/knowledge/agent/threads/
+
+## Bundle CAS artifacts — derivable from source via:
+##   target/release/rye-bundle-tool rebuild-manifest --source ryeos-bundles/<name> --seed N
+## CI rebuilds these on every release. Devs rebuild locally as needed.
+ryeos-bundles/*/.ai/objects/
+ryeos-bundles/*/.ai/refs/
