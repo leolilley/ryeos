@@ -40,6 +40,11 @@ build/
 node_modules/
 target/
 
+# Local-machine cargo config has an absolute target-dir that breaks the
+# container build (cargo writes binaries to the host path instead of /build).
+# CI/Docker uses cargo's default target dir under the workspace.
+.cargo/
+
 # Local development
 *.env
 !.env.example
