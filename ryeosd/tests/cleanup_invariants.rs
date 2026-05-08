@@ -588,7 +588,7 @@ fn gate_17_trust_store_loads() {
         "trust store should have at least 1 entry"
     );
     assert!(
-        trust_store.is_trusted("09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c"),
+        trust_store.is_trusted("c9d7301fba468b669d91a6000e9b6a4158c0e615dea4fe1f99906b8c9214bc28"),
         "fixture trust store must contain the known test signer fingerprint"
     );
 }
