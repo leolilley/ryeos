@@ -276,7 +276,7 @@ impl VerifiedLoader {
             "directive" => ".ai/directives/",
             "tool" => ".ai/tools/",
             "knowledge" => ".ai/knowledge/",
-            "config" => ".ai/config/rye-runtime/",
+            "config" => ".ai/config/ryeos-runtime/",
             _ => ".ai/",
         }
     }
@@ -748,17 +748,17 @@ pem = """
 
         create_file(
             &system,
-            ".ai/config/rye-runtime/test.yaml",
+            ".ai/config/ryeos-runtime/test.yaml",
             "name: system\n",
         );
         create_file(
             &user,
-            ".ai/config/rye-runtime/test.yaml",
+            ".ai/config/ryeos-runtime/test.yaml",
             "name: user\n",
         );
         create_file(
             &project,
-            ".ai/config/rye-runtime/test.yaml",
+            ".ai/config/ryeos-runtime/test.yaml",
             "name: project\n",
         );
 
@@ -786,7 +786,7 @@ pem = """
 
         create_file(
             &project,
-            ".ai/config/rye-runtime/bad.yaml",
+            ".ai/config/ryeos-runtime/bad.yaml",
             "not valid yaml: [",
         );
 
@@ -804,7 +804,7 @@ pem = """
 
         create_file(
             &system,
-            ".ai/config/rye-runtime/defaults.yaml",
+            ".ai/config/ryeos-runtime/defaults.yaml",
             "key: from_system\n",
         );
 
@@ -828,7 +828,7 @@ pem = """
         let loader = VerifiedLoader::new(tmp.path().to_path_buf(), None, vec![]);
         let verified = loader.load_verified("directive", &path).unwrap();
 
-        assert!(!verified.content.contains("rye:signed:"));
+        assert!(!verified.content.contains("ryeos:signed:"));
         assert!(verified.content.contains("# Hello"));
         assert_eq!(verified.hash.len(), 64);
     }

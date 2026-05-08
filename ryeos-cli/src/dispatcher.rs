@@ -8,7 +8,7 @@ use crate::local_verbs;
 /// CLI struct for clap argument parsing.
 #[derive(clap::Parser)]
 #[command(
-    name = "rye",
+    name = "ryeos",
     about = "CLI for Rye OS",
     disable_help_subcommand = true,
     trailing_var_arg = true
@@ -39,10 +39,10 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     let system_space_dir = discover_system_space_dir();
 
     // 3. Hardcoded LOCAL verbs (must work before daemon exists):
-    //      rye init             — bootstrap operator state
-    //      rye trust pin <fp>   — pin a publisher key
-    //      rye publish <src>    — bundle author publish dance
-    //      rye vault {put,list,remove,rewrap} — sealed secret management
+    //      ryos init                       — bootstrap operator state
+    //      ryos trust pin --from <trust>   — pin a publisher key
+    //      ryos publish <src>              — bundle author publish dance
+    //      ryos vault {put,list,remove,rewrap} — sealed secret management
     if local_verbs::try_dispatch(&cli.rest)? {
         return Ok(());
     }
@@ -53,19 +53,19 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // `rye help` → top-level help
+    // `ryeos help` → top-level help
     if cli.rest == ["help"] {
         crate::help::print_help(std::io::stdout())?;
         return Ok(());
     }
 
-    // `rye help <verb...>` → verb help (queries daemon for alias info)
+    // `ryeos help <verb...>` → verb help (queries daemon for alias info)
     if cli.rest.len() > 1 && cli.rest[0] == "help" {
         crate::help::print_verb_help(&cli.rest[1..], &system_space_dir, &body_project_path).await?;
         return Ok(());
     }
 
-    // 5. Hardcoded `rye execute <item_ref>` — the universal escape hatch
+    // 5. Hardcoded `ryeos execute <item_ref>` — the universal escape hatch
     if cli.rest.first().map(|s| s.as_str()) == Some("execute") {
         if cli.rest.len() < 2 {
             return Err(CliError::UnknownVerb {

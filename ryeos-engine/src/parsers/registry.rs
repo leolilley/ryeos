@@ -5,7 +5,7 @@
 //! (typically `.ai/parsers/`), strict-deserializes every YAML file as
 //! a `ParserDescriptor`, verifies the signature using the envelope
 //! declared by the `parser` kind schema, and stores them by canonical
-//! ref like `parser:rye/core/yaml/yaml`. Parser kind identity is
+//! ref like `parser:ryeos/core/yaml/yaml`. Parser kind identity is
 //! implicit from location (parsers are their own kind) — there is no
 //! discriminator field on the descriptor.
 //!
@@ -54,7 +54,7 @@ pub struct DuplicateRef {
 
 /// In-memory parser tool descriptor table.
 ///
-/// Lookup is by canonical ref (`parser:rye/core/yaml/yaml`).
+/// Lookup is by canonical ref (`parser:ryeos/core/yaml/yaml`).
 /// Fingerprint is over the verified signed bytes of every descriptor
 /// the registry contains (plus the base fingerprint for overlay
 /// composition).
@@ -658,7 +658,7 @@ location:
   directory: parsers
 formats:
   - extensions: [\".yaml\", \".yml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 ";
@@ -674,7 +674,7 @@ formats:
         let yaml_owned = if yaml.contains("composed_value_contract") {
             yaml.to_string()
         } else {
-            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:rye/core/identity\n") } }
+            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:ryeos/core/identity\n") } }
         };
         let signed = lillux::signature::sign_content(&yaml_owned, sk, "#", None);
         fs::write(parser_dir.join("parser.kind-schema.yaml"), signed).unwrap();
@@ -695,19 +695,19 @@ formats:
         let yaml = "\
 version: \"1.0.0\"
 description: \"yaml document parser\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config:
   require_mapping: true
 ";
         let p = root
-            .join(".ai/parsers/rye/core/yaml/yaml.yaml");
+            .join(".ai/parsers/ryeos/core/yaml/yaml.yaml");
         write_signed(&p, yaml, &sk);
 
         let (reg, dups) = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
         assert!(dups.is_empty());
-        let d = reg.get("parser:rye/core/yaml/yaml").unwrap();
-        assert_eq!(d.handler, "handler:rye/core/yaml-document");
+        let d = reg.get("parser:ryeos/core/yaml/yaml").unwrap();
+        assert_eq!(d.handler, "handler:ryeos/core/yaml-document");
         assert_eq!(d.parser_api_version, 1);
         assert!(!reg.fingerprint().is_empty());
     }
@@ -725,9 +725,9 @@ parser_config:
 
         let yaml = "\
 version: \"1.0.0\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 ";
-        let p = root.join(".ai/parsers/rye/core/something.yaml");
+        let p = root.join(".ai/parsers/ryeos/core/something.yaml");
         write_signed(&p, yaml, &sk);
 
         let err = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();
@@ -745,11 +745,11 @@ handler: \"handler:rye/core/yaml-document\"
 
         let yaml = "\
 version: \"1.0.0\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
-        let p = root.join(".ai/parsers/rye/core/x/x.yaml");
+        let p = root.join(".ai/parsers/ryeos/core/x/x.yaml");
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, yaml).unwrap();
 
@@ -775,25 +775,25 @@ parser_config: {}
         let yaml_a = "\
 version: \"1.0.0\"
 description: \"A wins\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         let yaml_b = "\
 version: \"2.0.0\"
 description: \"B loses\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
-        let p_a = root_a.join(".ai/parsers/rye/core/yaml/yaml.yaml");
-        let p_b = root_b.join(".ai/parsers/rye/core/yaml/yaml.yaml");
+        let p_a = root_a.join(".ai/parsers/ryeos/core/yaml/yaml.yaml");
+        let p_b = root_b.join(".ai/parsers/ryeos/core/yaml/yaml.yaml");
         write_signed(&p_a, yaml_a, &sk);
         write_signed(&p_b, yaml_b, &sk);
 
         let (reg, dups) =
             ParserRegistry::load_base(&[root_a.clone(), root_b.clone()], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
-        let d = reg.get("parser:rye/core/yaml/yaml").unwrap();
+        let d = reg.get("parser:ryeos/core/yaml/yaml").unwrap();
         assert_eq!(d.version, "1.0.0");
         assert_eq!(d.description.as_deref(), Some("A wins"));
         // single canonical ref retained
@@ -803,7 +803,7 @@ parser_config: {}
         // validator can fail loud instead of silently dropping the
         // shadowed descriptor.
         assert_eq!(dups.len(), 1);
-        assert_eq!(dups[0].canonical_ref, "parser:rye/core/yaml/yaml");
+        assert_eq!(dups[0].canonical_ref, "parser:ryeos/core/yaml/yaml");
         assert_eq!(dups[0].paths.len(), 2);
         assert!(dups[0].paths[0].starts_with(&root_a));
         assert!(dups[0].paths[1].starts_with(&root_b));
@@ -822,31 +822,31 @@ parser_config: {}
         let yaml_base = "\
 version: \"1.0.0\"
 description: \"base\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         let yaml_proj = "\
 version: \"9.0.0\"
 description: \"project override\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         write_signed(
-            &base.join(".ai/parsers/rye/core/yaml/yaml.yaml"),
+            &base.join(".ai/parsers/ryeos/core/yaml/yaml.yaml"),
             yaml_base,
             &sk,
         );
         write_signed(
-            &project.join(".ai/parsers/rye/core/yaml/yaml.yaml"),
+            &project.join(".ai/parsers/ryeos/core/yaml/yaml.yaml"),
             yaml_proj,
             &sk,
         );
 
         let (base_reg, _dups) = ParserRegistry::load_base(&[base], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
         let overlaid = base_reg.with_project_overlay(&project, &ts, &default_parser_kinds(&sk, &ts)).unwrap();
-        let d = overlaid.get("parser:rye/core/yaml/yaml").unwrap();
+        let d = overlaid.get("parser:ryeos/core/yaml/yaml").unwrap();
         assert_eq!(d.version, "9.0.0");
         assert_eq!(d.description.as_deref(), Some("project override"));
     }
@@ -866,7 +866,7 @@ location:
   directory: custom_parsers
 formats:
   - extensions: [\".yaml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 ",
@@ -876,18 +876,18 @@ formats:
 
         let yaml = "\
 version: \"1.0.0\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         // Write to the schema-declared directory; the legacy
         // hardcoded `parsers` dir does NOT exist.
-        let p = root.join(".ai/custom_parsers/rye/core/yaml/yaml.yaml");
+        let p = root.join(".ai/custom_parsers/ryeos/core/yaml/yaml.yaml");
         write_signed(&p, yaml, &sk);
 
         let (reg, _dups) = ParserRegistry::load_base(&[root], &ts, &kinds).unwrap();
         assert!(
-            reg.get("parser:rye/core/yaml/yaml").is_some(),
+            reg.get("parser:ryeos/core/yaml/yaml").is_some(),
             "loader must walk schema-declared `custom_parsers/` directory; \
              refs = {:?}",
             reg.refs().collect::<Vec<_>>()
@@ -939,29 +939,29 @@ parser_config: {}
         let yaml_a = "\
 version: \"1.0.0\"
 description: \"overlay file A\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         let yaml_b = "\
 version: \"2.0.0\"
 description: \"overlay file B\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
         // Both `.yaml` and `.yml` strip to canonical ref
-        // `parser:rye/core/yaml/yaml` — the parser kind accepts both
+        // `parser:ryeos/core/yaml/yaml` — the parser kind accepts both
         // extensions, and `derive_canonical_ref` strips the suffix.
         // This is exactly the kind of project authoring bug the
         // duplicate check is meant to catch.
         write_signed(
-            &project.join(".ai/parsers/rye/core/yaml/yaml.yaml"),
+            &project.join(".ai/parsers/ryeos/core/yaml/yaml.yaml"),
             yaml_a,
             &sk,
         );
         write_signed(
-            &project.join(".ai/parsers/rye/core/yaml/yaml.yml"),
+            &project.join(".ai/parsers/ryeos/core/yaml/yaml.yml"),
             yaml_b,
             &sk,
         );
@@ -976,7 +976,7 @@ parser_config: {}
         );
         assert!(
             msg.contains("duplicate parser canonical ref")
-                && msg.contains("parser:rye/core/yaml/yaml"),
+                && msg.contains("parser:ryeos/core/yaml/yaml"),
             "error must name the duplicated ref so the project author \
              can fix the offending files; got: {msg}"
         );
@@ -998,7 +998,7 @@ location:
   directory: parsers
 formats:
   - extensions: [\".schema.yaml\", \".tar.gz\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 ",
@@ -1037,7 +1037,7 @@ location:
   directory: parsers
 formats:
   - extensions: [\".yaml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -1070,12 +1070,12 @@ formats:
 
         let yaml = "\
 version: \"1.0.0\"
-handler: \"handler:rye/core/yaml-document\"
+handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 totally_made_up_field: hi
 ";
-        let p = root.join(".ai/parsers/rye/core/y/y.yaml");
+        let p = root.join(".ai/parsers/ryeos/core/y/y.yaml");
         write_signed(&p, yaml, &sk);
 
         let err = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();

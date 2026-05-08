@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn non_reserved_env_names_accepted() {
-        for name in &["RYE_FOO", "MY_VAR", "SOME_CUSTOM_ENV"] {
+        for name in &["RYEOS_FOO", "MY_VAR", "SOME_CUSTOM_ENV"] {
             assert!(!is_reserved_env_name(name));
             validate_env_name(name).unwrap();
         }

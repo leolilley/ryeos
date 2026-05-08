@@ -1,7 +1,7 @@
 //! Shared bundle-install preflight logic.
 //!
 //! `service:bundle/install` (in `ryeosd/src/services/handlers/bundle_install.rs`)
-//! and the operator-side `rye init` standard-bundle path both call into
+//! and the operator-side `ryeos init` standard-bundle path both call into
 //! [`preflight_verify_bundle`] to enforce the trust contract:
 //!
 //! - All signable items in the bundle MUST be signed.
@@ -16,7 +16,7 @@
 //!
 //! Refusal modes:
 //! - Untrusted signer → install rejected. The operator must
-//!   `rye trust pin <fingerprint>` before retrying.
+//!   `ryeos trust pin <fingerprint>` before retrying.
 //! - Unsigned file under a kind directory → install rejected.
 //! - Tampered content (hash mismatch) → install rejected.
 //!
@@ -87,13 +87,13 @@ pub fn preflight_verify_bundle(
     // 2. Trust comes from operator tiers ONLY (project + user). The
     //    `system_roots` arg to `load_three_tier` is intentionally empty —
     //    bundle-internal `.ai/config/keys/trusted/` directories are NOT
-    //    a trust source. Pin keys with `rye trust pin` instead.
+    //    a trust source. Pin keys with `ryeos trust pin` instead.
     let trust_store = TrustStore::load_three_tier(None, user_root, &[])
         .context("preflight: load operator trust store")?;
     if trust_store.is_empty() {
         bail!(
-            "preflight: operator trust store is empty — run `rye init` to \
-             pin the platform author key, or `rye trust pin <fingerprint>` \
+            "preflight: operator trust store is empty — run `ryeos init` to \
+             pin the platform author key, or `ryeos trust pin <fingerprint>` \
              to pin a third-party publisher"
         );
     }
@@ -107,7 +107,7 @@ pub fn preflight_verify_bundle(
     //    needed for new kinds they introduce. Trust still gates loading.
     //
     //    Dedupe by canonicalized path: when `source_path == system_space_dir`
-    //    (e.g. preflight verifying core in place during `rye init`) the
+    //    (e.g. preflight verifying core in place during `ryeos init`) the
     //    same root must not be walked twice — `HandlerRegistry::load_base`
     //    rejects duplicate handler refs across roots.
     let mut parser_search_roots: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = Vec::new();
@@ -136,7 +136,7 @@ pub fn preflight_verify_bundle(
         tracing::warn!(
             path = %legacy_trust.display(),
             "bundle ships a legacy `.ai/config/keys/trusted/` dir which is \
-             ignored — pin the publisher key with `rye trust pin <fingerprint>` \
+             ignored — pin the publisher key with `ryeos trust pin <fingerprint>` \
              instead"
         );
     }
@@ -226,7 +226,7 @@ pub fn preflight_verify_bundle(
                     if !trust_store.is_trusted(&header.signer_fingerprint) {
                         failures.push(format!(
                             "{}: signer {} not in operator trust store \
-                             (run `rye trust pin {}` to trust this publisher)",
+                             (run `ryeos trust pin {}` to trust this publisher)",
                             rel.display(),
                             header.signer_fingerprint,
                             header.signer_fingerprint

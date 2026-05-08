@@ -81,7 +81,7 @@ fn enforce_callback_caps(
 
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_id)
         .with_context(|| format!("invalid callback item_id '{item_id}'"))?;
-    let required = format!("rye.execute.{}.{}", canonical.kind, canonical.bare_id);
+    let required = format!("ryeos.execute.{}.{}", canonical.kind, canonical.bare_id);
 
     let policy = AuthorizationPolicy::require_all(&[&required]);
     if authorizer.authorize(effective_caps, &policy).is_err() {
@@ -203,7 +203,7 @@ mod tests {
             std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
                 ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
                 ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-                ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+                ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
             ]).unwrap()),
         )
     }
@@ -211,8 +211,8 @@ mod tests {
     #[test]
     fn caps_full_wildcard_allows_everything() {
         let auth = test_auth();
-        // The `rye.*` cap (or expansion) covers all kinds.
-        let caps = vec!["rye.*".to_string()];
+        // The `ryeos.*` cap (or expansion) covers all kinds.
+        let caps = vec!["ryeos.*".to_string()];
         assert!(enforce_callback_caps("tool:any/thing", &caps, &auth).is_ok());
         assert!(enforce_callback_caps("directive:any/thing", &caps, &auth).is_ok());
     }
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn caps_kind_wildcard_matches_any_id_in_kind() {
         let auth = test_auth();
-        let caps = vec!["rye.execute.tool.*".to_string()];
+        let caps = vec!["ryeos.execute.tool.*".to_string()];
         assert!(enforce_callback_caps("tool:any/echo", &caps, &auth).is_ok());
         assert!(enforce_callback_caps("tool:other/foo", &caps, &auth).is_ok());
         // Different kind — denied.
@@ -243,9 +243,9 @@ mod tests {
     #[test]
     fn caps_exact_match_with_slash_subject() {
         let auth = test_auth();
-        // `tool:foo/bar` → required cap `rye.execute.tool.foo/bar`.
+        // `tool:foo/bar` → required cap `ryeos.execute.tool.foo/bar`.
         // Slash is preserved in subject, matching the canonical format.
-        let caps = vec!["rye.execute.tool.foo/bar".to_string()];
+        let caps = vec!["ryeos.execute.tool.foo/bar".to_string()];
         assert!(enforce_callback_caps("tool:foo/bar", &caps, &auth).is_ok());
         let err = enforce_callback_caps("tool:foo/baz", &caps, &auth).unwrap_err();
         assert!(err.to_string().contains("not present"));
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn caps_invalid_item_id_rejected() {
         let auth = test_auth();
-        let caps = vec!["rye.execute.tool.foo".to_string()];
+        let caps = vec!["ryeos.execute.tool.foo".to_string()];
         let err = enforce_callback_caps("not-a-canonical-ref", &caps, &auth).unwrap_err();
         assert!(
             err.to_string().contains("invalid callback item_id"),
@@ -266,12 +266,12 @@ mod tests {
     #[test]
     fn caps_path_prefix_wildcard_matches_slash_subject() {
         let auth = test_auth();
-        // `rye.execute.tool.foo/*` matches `tool:foo/bar` because
+        // `ryeos.execute.tool.foo/*` matches `tool:foo/bar` because
         // `/*` is the path-prefix wildcard convention.
-        let caps = vec!["rye.execute.tool.foo/*".to_string()];
+        let caps = vec!["ryeos.execute.tool.foo/*".to_string()];
         assert!(enforce_callback_caps("tool:foo/bar", &caps, &auth).is_ok());
-        // A sibling `tool:foobar` requires `rye.execute.tool.foobar`,
-        // which does NOT match `rye.execute.tool.foo/*` — the `/`
+        // A sibling `tool:foobar` requires `ryeos.execute.tool.foobar`,
+        // which does NOT match `ryeos.execute.tool.foo/*` — the `/`
         // separator is required.
         let err = enforce_callback_caps("tool:foobar", &caps, &auth).unwrap_err();
         assert!(err.to_string().contains("not present"));
@@ -280,9 +280,9 @@ mod tests {
     #[test]
     fn caps_full_kind_wildcard_matches_any_subject() {
         let auth = test_auth();
-        // `rye.execute.tool.*` matches any tool subject, including
+        // `ryeos.execute.tool.*` matches any tool subject, including
         // those with `/` separators.
-        let caps = vec!["rye.execute.tool.*".to_string()];
+        let caps = vec!["ryeos.execute.tool.*".to_string()];
         assert!(enforce_callback_caps("tool:foo/bar", &caps, &auth).is_ok());
         assert!(enforce_callback_caps("tool:baz/qux/deep", &caps, &auth).is_ok());
     }

@@ -1,9 +1,8 @@
 name: Publish ryeosd to GHCR
 
 # Triggered ONLY by tags prefixed `ryeosd-v*` so it never collides with the
-# Python `publish.yml` flow (which fires on `v*`). The Python workflow does
-# not exist on this branch; this workflow does not exist on `main`. The two
-# pipelines are fully isolated.
+# Python `publish.yml` flow (which fires on `v*`). The two pipelines are
+# fully isolated.
 
 on:
   push:
@@ -12,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (without `ryeosd-v` prefix), e.g. 0.1.0"
+        description: "Version (without `ryeosd-v` prefix), e.g. 0.2.0"
         required: true
         type: string
 
@@ -37,6 +36,40 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
+
+      - name: Assert publisher key secret exists
+        run: |
+          test -n "${{ secrets.RYEOS_PUBLISHER_KEY }}" || \
+            { echo "ERROR: RYEOS_PUBLISHER_KEY secret is not set"; exit 1; }
+
+      - name: Verify publisher key matches OFFICIAL_PUBLISHER_FP
+        run: |
+          # Extract the compiled-in fingerprint from source (may span 2 lines).
+          EXPECTED=$(grep -A1 'OFFICIAL_PUBLISHER_FP.*&str' \
+            ryeos-tools/src/actions/init.rs \
+            | grep -oE '[0-9a-f]{64}' | head -1)
+          echo "Compiled-in OFFICIAL_PUBLISHER_FP: $EXPECTED"
+
+          # Write the secret to a temp file so openssl can read it.
+          echo "${{ secrets.RYEOS_PUBLISHER_KEY }}" > /tmp/publisher-key.pem
+
+          # Compute the fingerprint: sha256 of the raw 32-byte Ed25519
+          # verifying key (last 32 bytes of the DER-encoded public key).
+          ACTUAL=$(openssl pkey -in /tmp/publisher-key.pem -pubout -outform DER 2>/dev/null \
+            | tail -c 32 \
+            | sha256sum \
+            | cut -d' ' -f1)
+          rm -f /tmp/publisher-key.pem
+          echo "Secret key fingerprint:          $ACTUAL"
+
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::Publisher key fingerprint mismatch: secret=$ACTUAL compiled=$EXPECTED"
+            echo "The RYEOS_PUBLISHER_KEY secret does not match the OFFICIAL_PUBLISHER_FP"
+            echo "compiled into ryeos-tools/src/actions/init.rs."
+            echo "Either update the secret or update the source constant."
+            exit 1
+          fi
+          echo "Publisher key fingerprint matches."
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -69,8 +102,8 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.ver.outputs.version }}
-          build-args: |
-            RYE_SIGNING_SEED=1
+          secrets: |
+            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

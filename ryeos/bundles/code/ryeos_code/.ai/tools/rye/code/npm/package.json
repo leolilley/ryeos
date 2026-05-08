@@ -1,8 +1,0 @@
-{
-  "name": "rye-code-npm",
-  "private": true,
-  "type": "module",
-  "devDependencies": {
-    "tsx": "^4.0.0"
-  }
-}

@@ -1,0 +1,31 @@
+# ryeos:signed:2026-05-08T04:04:07Z:2209ea56ca4fa5cae7814213cc990d82948afa2de43d29061a667bc62bbdb0d6:Uh8OCtLh1UqztuNZcA6MyNN7G8Xlv7Q7MU1gX5CVip21MKlLpfYUTzbU+Ia4gzUKfS5SOTsyFrr2GDC2QHasAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/subprocess"
+version: "1.0.0"
+executor_id: null
+description: "Subprocess execute - run commands with configurable arguments (terminal node)"
+
+config_schema:
+  type: object
+  properties:
+    command:
+      type: string
+      description: Command to execute
+    args:
+      type: array
+      items:
+        type: string
+      description: Command arguments
+    cwd:
+      type: string
+      description: Working directory
+    env:
+      type: object
+      description: Environment variables
+    timeout_secs:
+      type: integer
+      default: 300
+      description: Timeout in seconds
+    input_data:
+      type: string
+      description: Data to pipe to stdin
+  required: [command]

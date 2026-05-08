@@ -1,9 +1,9 @@
 //! User-key signing — operator-side validated sign.
 //!
 //! Used by:
-//! - `rye sign <ref>` (CLI verb → tool:rye/core/sign → rye-sign binary)
-//! - `rye dev resign <ref>` (dev convenience)
-//! - `rye dev build-bundle` (re-signs every YAML it touches)
+//! - `ryeos sign <ref>` (CLI verb → tool:ryeos/core/sign → ryeos-core-tools binary)
+//! - `ryeos dev resign <ref>` (dev convenience)
+//! - `ryeos dev build-bundle` (re-signs every YAML it touches)
 //!
 //! The flow:
 //!   1. Parse the canonical ref (`<kind>:<bare-id>`).
@@ -74,14 +74,14 @@ impl SignSource {
 /// `item_ref` may be a single canonical ref OR a glob pattern in the
 /// bare-id position. Examples:
 ///   * `directive:hello`             — single item
-///   * `tool:rye/core/sign`          — single item
-///   * `tool:rye/core/*`             — all tools at one path level
+///   * `tool:ryeos/core/sign`          — single item
+///   * `tool:ryeos/core/*`             — all tools at one path level
 ///   * `tool:*`                      — every tool recursively
 ///   * `directive:agent/**/*`        — every directive under `agent/`
 ///
 /// `project_path` is required when `source = Project`; ignored
-/// otherwise. The user signing key is loaded from `RYE_SIGNING_KEY`
-/// env or `~/.ai/config/keys/signing/private_key.pem` as fallback.
+/// otherwise. The user signing key is loaded from
+/// `~/.ai/config/keys/signing/private_key.pem`.
 ///
 /// Returns a `BatchReport` always — single-item refs produce a one-
 /// element vec. Per-item failures are collected; a failed validator
@@ -435,8 +435,7 @@ fn build_parser_dispatcher(
 }
 
 /// Sign a file in place using the kind's signature envelope. Loads
-/// the user signing key from `RYE_SIGNING_KEY` env or
-/// `~/.ai/config/keys/signing/private_key.pem`.
+/// the user signing key from `~/.ai/config/keys/signing/private_key.pem`.
 fn sign_in_place(input: &Path, envelope: &SignatureEnvelope) -> Result<SignatureReport> {
     let body = fs::read_to_string(input)
         .with_context(|| format!("read {}", input.display()))?;
@@ -478,13 +477,8 @@ pub struct SignatureReport {
 }
 
 fn load_user_signing_key() -> Result<SigningKey> {
-    let path: PathBuf = match std::env::var("RYE_SIGNING_KEY") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => {
-            let home = std::env::var("HOME").context("HOME not set")?;
-            Path::new(&home).join(".ai/config/keys/signing/private_key.pem")
-        }
-    };
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let path = Path::new(&home).join(".ai/config/keys/signing/private_key.pem");
 
     let pem = fs::read_to_string(&path)
         .with_context(|| format!("read signing key from {}", path.display()))?;
@@ -492,7 +486,7 @@ fn load_user_signing_key() -> Result<SigningKey> {
 }
 
 fn extract_signature_line(content: &str, prefix: &str) -> Option<String> {
-    let needle = format!("{prefix} rye:signed:");
+    let needle = format!("{prefix} ryeos:signed:");
     content
         .lines()
         .find(|l| l.starts_with(&needle))

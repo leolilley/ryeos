@@ -5,13 +5,13 @@
 //! generic native-resume wire format) but specifically for the graph
 //! runtime's checkpoint+replay precedence:
 //!
-//!   1. `RYE_RESUME=1` + local `CheckpointWriter` payload → checkpoint
+//!   1. `RYEOS_RESUME=1` + local `CheckpointWriter` payload → checkpoint
 //!      wins (D10 step 1; carries cursor + state both).
-//!   2. `RYE_RESUME=1` + no local checkpoint → replay-events fallback
+//!   2. `RYEOS_RESUME=1` + no local checkpoint → replay-events fallback
 //!      (D10 step 2; cursor only, state empty per v1 limitation).
-//!   3. `RYE_RESUME=1` + neither source → fail loud (D10 step 3; the
+//!   3. `RYEOS_RESUME=1` + neither source → fail loud (D10 step 3; the
 //!      graph runtime binary `bail!`s rather than silent cold-start).
-//!   4. `RYE_RESUME` unset → cold start.
+//!   4. `RYEOS_RESUME` unset → cold start.
 //!
 //! The full daemon-restart-then-respawn loop is exercised at the OS
 //! level by `native_resume_after_restart_e2e.rs`. This file pins the
@@ -32,7 +32,7 @@ fn unique_checkpoint_dir() -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "rye_graph_resume_e2e_{}_{}",
+        "ryeos_graph_resume_e2e_{}_{}",
         std::process::id(),
         nanos
     ))

@@ -1,7 +1,7 @@
 //! Hardcoded CLI help — no daemon dependency for top-level help.
 //!
-//! `rye help` prints a static overview of built-in verbs + hints.
-//! `rye help <verb>` queries the daemon for alias info via the same
+//! `ryeos help` prints a static overview of built-in verbs + hints.
+//! `ryeos help <verb>` queries the daemon for alias info via the same
 //! token dispatch path.
 
 use std::io::Write;
@@ -10,14 +10,14 @@ use crate::error::CliError;
 
 /// Print top-level help. No daemon round-trip.
 pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
-    writeln!(out, "rye — CLI for Rye OS")?;
+    writeln!(out, "ryeos — CLI for Rye OS")?;
     writeln!(out)?;
     writeln!(out, "USAGE:")?;
-    writeln!(out, "  rye [-p PROJECT] [--debug] <verb...> [args...]")?;
+    writeln!(out, "  ryos [-p PROJECT] [--debug] <verb...> [args...]")?;
     writeln!(out)?;
     writeln!(out, "LOCAL COMMANDS (no daemon required):")?;
     writeln!(out, "  {:<30} {}", "init", "Bootstrap operator keys and core bundle")?;
-    writeln!(out, "  {:<30} {}", "trust pin <fp>", "Pin a publisher's Ed25519 public key")?;
+    writeln!(out, "  {:<30} {}", "trust pin --from <trust.toml>", "Pin a publisher key from PUBLISHER_TRUST.toml")?;
     writeln!(out, "  {:<30} {}", "publish <src>", "Sign and publish a bundle")?;
     writeln!(out, "  {:<30} {}", "vault put <K=V>...", "Add entries to sealed secret store")?;
     writeln!(out, "  {:<30} {}", "vault list", "List sealed secret keys")?;
@@ -37,7 +37,7 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(out, "  {:<30} {}", "bundle list", "List installed bundles")?;
     writeln!(out, "  {:<30} {}", "bundle remove", "Remove a bundle")?;
     writeln!(out)?;
-    writeln!(out, "Run `rye help <verb>` for verb-specific help.")?;
+    writeln!(out, "Run `ryeos help <verb>` for verb-specific help.")?;
     Ok(())
 }
 

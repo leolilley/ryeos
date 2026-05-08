@@ -4,9 +4,9 @@
 //! `kind: node` items in `system` space — the daemon's own node-config
 //! writes (bundle registrations, route entries, etc.).
 //!
-//! For operator edits in project/user space, use `rye-sign` (invokes
+//! For operator edits in project/user space, use `ryos-core-tools` (invokes
 //! `ryeos_tools::actions::sign::run_sign` with the user key).
-//! For bundle authoring, use `rye-bundle-tool sign-items` (uses the
+//! For bundle authoring, use `ryos publish sign-items` (uses the
 //! author key explicitly).
 
 use std::path::{Path, PathBuf};
@@ -49,7 +49,7 @@ impl SignSpace {
 pub struct Request {
     /// Canonical ref of the item to sign, e.g. `directive:hello`,
     /// `node:engine/kinds/config/config`, or a glob like
-    /// `tool:rye/core/*`.
+    /// `tool:ryeos/core/*`.
     pub item_ref: String,
     /// Space to look for the item in.
     pub space: SignSpace,
@@ -107,7 +107,7 @@ fn run_node_sign(req: &Request, state: &AppState) -> Result<BatchReport> {
         SignSpace::User | SignSpace::Project => {
             bail!(
                 "service:node-sign does not sign {}-space items — \
-                 use `rye-sign` for operator edits (invokes the user signing key)",
+                 use `ryos-core-tools` for operator edits (invokes the user signing key)",
                 req.space.label()
             );
         }
@@ -121,7 +121,7 @@ fn run_node_sign(req: &Request, state: &AppState) -> Result<BatchReport> {
         bail!(
             "service:node-sign only signs kind=node items in system space — \
              kind=`{}` is not permitted. For bundle authoring use \
-             `rye-bundle-tool sign-items`; for operator edits use `rye-sign`",
+             `ryos publish sign-items`; for operator edits use `ryos-core-tools`",
             canonical.kind
         );
     }
@@ -324,7 +324,7 @@ fn sign_in_place(
     std::fs::rename(&tmp, input)
         .with_context(|| format!("rename {} -> {}", tmp.display(), input.display()))?;
 
-    let needle = format!("{} rye:signed:", envelope.prefix);
+    let needle = format!("{} ryeos:signed:", envelope.prefix);
     let signature_line = signed
         .lines()
         .find(|l| l.starts_with(&needle))
@@ -413,7 +413,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:node-sign",
     endpoint: "node-sign",
     availability: ServiceAvailability::Both,
-    required_caps: &["rye.execute.service.node-sign"],
+    required_caps: &["ryeos.execute.service.node-sign"],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)

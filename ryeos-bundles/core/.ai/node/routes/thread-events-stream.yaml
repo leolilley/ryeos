@@ -1,11 +1,11 @@
-# rye:signed:2026-05-05T09:31:54Z:6263f6ba458af6ee11c332080493defb6d842d5f8ce8915df29e74c441e131de:sCKxEtnBcnw/f5IgRpcarp+GogReqIQpt488+GNDASigKEhkVYsJaRi5VXMh6i3f51YPm4jdcwt2OV63VOjxAQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:5f23f346c92cb28cb5376b1303380212c72b2c046aaf2c04104b502d30ab68f2:V45Zs7DGYmsyr/9neX72m16/GxHvIAyUfmY00/bcKfbdcfHB3gWyNk75BrqHWkr/C0klclHFcz0bDh/wY8nKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "routes"
 section: routes
 id: thread/events-stream
 path: /threads/{thread_id}/events/stream
 methods:
   - GET
-auth: rye_signed
+auth: ryeos_signed
 limits:
   body_bytes_max: 0
   timeout_ms: 0

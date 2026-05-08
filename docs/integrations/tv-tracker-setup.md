@@ -68,7 +68,7 @@ outputs: `response` and `tools`).
 Backend receives thread_completed SSE event
   → thread_id from the stream_started event
   → GET http://127.0.0.1:7400/threads/{thread_id}
-    (signed with x-rye-* headers, same as /execute/stream)
+    (signed with x-ryeos-* headers, same as /execute/stream)
   → daemon returns:
     {
       "thread_id": "...",
@@ -91,13 +91,15 @@ response mode added to the daemon. See "Daemon changes needed" below.
 
 ## Prerequisites
 
-1. **ryeosd running** at `127.0.0.1:7400` with `require_auth: false` (dev mode)
-   — or with an authorized key for the backend
+1. **ryeosd** — either local (`ryeosd` binary) or containerized
+   (`ghcr.io/leolilley/ryeosd-full` image). Production setups require
+   authenticated requests (see Production Deployment below).
 2. **ClickHouse** with the TV ratings data
 3. **Express backend** at `:4000`
-4. **Node signing key** — the backend needs a key to sign `/execute/stream`
-   requests. During dev, use the node's own key at
-   `<state_dir>/.ai/node/identity/private_key.pem`
+4. **Ed25519 signing key** — the backend needs a keypair to sign
+   `/execute/stream` requests. During dev, use the node's own key at
+   `<state_dir>/.ai/node/identity/private_key.pem`. In production,
+   generate a dedicated client key and authorize it (see below).
 
 ---
 
@@ -133,7 +135,7 @@ You respond in markdown with tables and structured analysis.
 
 Sign it:
 ```bash
-rye sign knowledge:apps/tv-tracker/Identity
+ryeos sign knowledge:apps/tv-tracker/Identity
 ```
 
 ### 1b. Knowledge: Analysis Behavior
@@ -193,7 +195,7 @@ Historical top-10 TVR rankings over time (for trend charts).
 
 Sign it:
 ```bash
-rye sign knowledge:apps/tv-tracker/AnalysisBehavior
+ryeos sign knowledge:apps/tv-tracker/AnalysisBehavior
 ```
 
 ### 1c. Directive: ai_chat
@@ -274,7 +276,7 @@ Always return:
 
 Sign it:
 ```bash
-rye sign directive:apps/tv-tracker/ai_chat
+ryeos sign directive:apps/tv-tracker/ai_chat
 ```
 
 ### 1d. Tool: backend-client
@@ -320,7 +322,7 @@ if __name__ == "__main__":
 
 Sign it:
 ```bash
-rye sign tool:apps/tv-tracker/api/backend-client
+ryeos sign tool:apps/tv-tracker/api/backend-client
 ```
 
 ---
@@ -333,20 +335,20 @@ The backend must sign requests to the daemon's `/execute/stream` endpoint
 using the same protocol as the CLI (`ryeos-request-v1`).
 
 ```typescript
-// src/rye-signer.ts
+// src/ryeos-request-signer.ts
 import crypto from 'crypto';
 import fs from 'fs';
 import { Ed25519PrivateKey } from '@lillux/crypto'; // or use noble-ed25519
 
 // Load the signing key (node's own key during dev)
-const KEY_PATH = process.env.RYE_CLI_KEY_PATH 
+const KEY_PATH = process.env.RYEOS_CLI_KEY_PATH 
   || `${process.env.HOME}/.local/state/ryeosd/.ai/node/identity/private_key.pem`;
 
 export interface SignHeaders {
-  'x-rye-key-id': string;
-  'x-rye-timestamp': string;
-  'x-rye-nonce': string;
-  'x-rye-signature': string;
+  'x-ryeos-key-id': string;
+  'x-ryeos-timestamp': string;
+  'x-ryeos-nonce': string;
+  'x-ryeos-signature': string;
 }
 
 export async function signRequest(
@@ -382,10 +384,10 @@ export async function signRequest(
   const sigB64 = signature.toString('base64');
   
   return {
-    'x-rye-key-id': `fp:${fingerprint}`,
-    'x-rye-timestamp': timestamp,
-    'x-rye-nonce': nonce,
-    'x-rye-signature': sigB64,
+    'x-ryeos-key-id': `fp:${fingerprint}`,
+    'x-ryeos-timestamp': timestamp,
+    'x-ryeos-nonce': nonce,
+    'x-ryeos-signature': sigB64,
   };
 }
 
@@ -406,7 +408,7 @@ function sha256Hex(data: Buffer | string): string {
 ```typescript
 // src/routes/ai-chat.ts
 import { Router, Request, Response } from 'express';
-import { signRequest } from '../rye-signer';
+import { signRequest } from '../ryeos-request-signer';
 
 const router = Router();
 const RYEOSD_URL = process.env.RYEOSD_URL || 'http://127.0.0.1:7400';
@@ -420,7 +422,7 @@ router.post('/chat', async (req: Request, res: Response) => {
   // 2. Build the execute/stream request body
   const body = JSON.stringify({
     item_ref: 'directive:apps/tv-tracker/ai_chat',
-    project_path: process.env.RYE_PROJECT_PATH || 
+    project_path: process.env.RYEOS_PROJECT_PATH || 
       `${process.env.HOME}/.ai/projects/network-tv-tracker`,
     parameters: {
       message,
@@ -658,7 +660,9 @@ export function useStreamingChat() {
 ## Step 4: Register the directive with the daemon
 
 The daemon resolves items from project/user/system spaces. The project space
-needs to be at the path the backend sends as `project_path`:
+needs to be at the path the backend sends as `project_path`.
+
+### Local dev
 
 ```bash
 # Create project directory
@@ -668,8 +672,16 @@ mkdir -p ~/.ai/projects/network-tv-tracker/.ai/{knowledge/apps/tv-tracker,direct
 # ... or create them directly in the project directory
 
 # Verify resolution:
-rye execute directive:apps/tv-tracker/ai_chat --project-path ~/.ai/projects/network-tv-tracker
+ryeos execute directive:apps/tv-tracker/ai_chat --project-path ~/.ai/projects/network-tv-tracker
 ```
+
+### Containerized production
+
+In production, the tv-tracker project tree is mounted into the daemon container
+at a stable path. See **Production Deployment** below for the full walkthrough.
+
+The `project_path` in requests must match the **in-container mount path**, not
+the host path.
 
 ---
 
@@ -699,7 +711,7 @@ curl -X POST http://127.0.0.1:7400/execute \
 ```bash
 curl -N -X POST http://127.0.0.1:7400/execute/stream \
   -H "Content-Type: application/json" \
-  -H "x-rye-key-id: fp:$(cat ~/.local/state/ryeosd/.ai/node/identity/public-identity.json | jq -r .fingerprint | sed 's/fp://')" \
+  -H "x-ryeos-key-id: fp:$(cat ~/.local/state/ryeosd/.ai/node/identity/public-identity.json | jq -r .fingerprint | sed 's/fp://')" \
   -d '{
     "item_ref": "directive:apps/tv-tracker/ai_chat",
     "project_path": "'$HOME'/.ai/projects/network-tv-tracker",
@@ -734,11 +746,187 @@ curl -N -X POST http://localhost:4000/api/ai/chat \
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `RYEOSD_URL` | `http://127.0.0.1:7400` | Daemon address |
-| `RYE_CLI_KEY_PATH` | `<state_dir>/.ai/node/identity/private_key.pem` | Signing key for daemon auth |
-| `RYE_PROJECT_PATH` | `$HOME/.ai/projects/network-tv-tracker` | Project root with Rye items |
+| `RYEOS_CLI_KEY_PATH` | `<state_dir>/.ai/node/identity/private_key.pem` | Signing key for daemon auth |
+| `RYEOS_PROJECT_PATH` | `$HOME/.ai/projects/network-tv-tracker` | Project root with Rye items |
 | `BACKEND_PORT` | `4000` | Express backend port |
 | `BACKEND_URL` | `http://127.0.0.1:4000` | Backend self-reference for DB fetch |
 | `CLICKHOUSE_URL` | (required) | ClickHouse connection string |
+
+---
+
+## Production Deployment
+
+This section covers running the daemon in a container with the tv-tracker
+project mounted in, authenticated requests, and publisher trust.
+
+### Volume contract
+
+The daemon container expects a single persistent volume mounted at `/data`:
+
+```
+/data
+├── core/                  # System space (RYEOS_SYSTEM_SPACE_DIR)
+│   └── .ai/
+│       ├── node/           # Node identity, auth keys, vault
+│       ├── engine/kinds/   # Core bundle (from image, updated on boot)
+│       ├── bundles/        # Installed bundles
+│       └── state/          # CAS objects, refs
+├── user/                  # User space (HOME=/data/user)
+│   └── .ai/
+│       └── config/keys/    # Operator trust store, user signing key
+└── projects/              # Consumer project mounts
+    └── network-tv-tracker/
+        └── .ai/           # tv-tracker directives, tools, knowledge
+```
+
+Both `/data/core` and `/data/user` persist across container redeploys. The
+entrypoint runs `ryeos init` on every boot (idempotent) to keep bundles
+current with the image.
+
+### Step 1: Publish the tv-tracker project
+
+The daemon only loads items that are signed by a key in the operator's trust
+store. Before mounting the tv-tracker project, sign all its items:
+
+```bash
+# From the network-tv-tracker repo root (on your build machine)
+ryeos publish . \
+  --key path/to/tv-tracker-publisher.pem \
+  --owner tv-tracker-team
+```
+
+This produces `./PUBLISHER_TRUST.toml` in the project root — keep this file,
+you'll need it to pin trust on the daemon.
+
+### Step 2: Pin the tv-tracker publisher key
+
+The daemon must trust the key that signed the tv-tracker items. Use
+`ryeos trust pin --from` to pin it:
+
+```bash
+# Run inside the daemon container (or against the same /data volume)
+ryeos trust pin \
+  --from /data/projects/network-tv-tracker/PUBLISHER_TRUST.toml \
+  --user-root /data/user
+```
+
+This writes a trust doc to
+`/data/user/.ai/config/keys/trusted/<fp>.toml`. After this step, the daemon
+will load and verify signed items from the tv-tracker project.
+
+### Step 3: Mount the project into the container
+
+Mount the published project tree into the container at a stable path. The
+`project_path` in API requests must match this in-container path.
+
+**docker run:**
+
+```bash
+docker run -d \
+  -v ryeos-data:/data \
+  -v /host/path/to/network-tv-tracker:/data/projects/network-tv-tracker:ro \
+  -p 7400:8000 \
+  ghcr.io/leolilley/ryeosd-full:0.2.0
+```
+
+**Docker Compose:**
+
+```yaml
+services:
+  ryeosd:
+    image: ghcr.io/leolilley/ryeosd-full:0.2.0
+    volumes:
+      - ryeos-data:/data
+      - ./network-tv-tracker:/data/projects/network-tv-tracker:ro
+    ports:
+      - "7400:8000"
+
+volumes:
+  ryeos-data:
+```
+
+**Railway / Fly.io:** Use a persistent volume mounted at `/data`, and a
+separate mount or build step to place the project at
+`/data/projects/network-tv-tracker`.
+
+### Step 4: Authorize the backend client
+
+The backend must sign every request to the daemon's authenticated endpoints.
+Generate a keypair for the backend and authorize its public key:
+
+```bash
+# 1. Generate a signing keypair for the backend (on your build machine)
+openssl genpkey -algorithm ED25519 -out tv-tracker-backend.pem
+
+# 2. Extract the raw public key bytes as base64
+#    (Ed25519 PKCS#8 DER: last 32 bytes are the raw key)
+PUBKEY_B64=$(python3 -c "
+import base64, subprocess
+der = subprocess.run(['openssl', 'pkey', '-in', 'tv-tracker-backend.pem',
+                       '-pubout', '-outform', 'DER'],
+                      capture_output=True).stdout
+print(base64.b64encode(der[-32:]).decode())
+")
+
+# 3. Authorize the key on the daemon
+#    (run inside the container, or from a machine with access to /data)
+ryeos-core-tools authorize-client \
+  --system-space-dir /data/core \
+  --public-key "$PUBKEY_B64" \
+  --scopes '*' \
+  --label "tv-tracker-backend"
+```
+
+The backend's `RYEOS_CLI_KEY_PATH` should point to `tv-tracker-backend.pem`.
+The signing code in Step 2a uses this key to produce the `x-ryeos-*` headers.
+
+### Step 5: Configure the backend
+
+Set these environment variables on the backend:
+
+| Variable | Value | Notes |
+|----------|-------|-------|
+| `RYEOSD_URL` | `http://ryeosd:8000` | Daemon address (container network) |
+| `RYEOS_CLI_KEY_PATH` | `/path/to/tv-tracker-backend.pem` | Client signing key |
+| `RYEOS_PROJECT_PATH` | `/data/projects/network-tv-tracker` | In-container project path |
+| `DEEPSEEK_API_KEY` | (your key) | LLM provider key (vault or env) |
+
+### Step 6: Verify end-to-end
+
+```bash
+# From a machine that can reach the daemon
+# (replace <fp> with the backend key's fingerprint)
+FP=$(python3 -c "
+import base64, subprocess
+der = subprocess.run(['openssl', 'pkey', '-in', 'tv-tracker-backend.pem',
+                       '-pubout', '-outform', 'DER'],
+                      capture_output=True).stdout
+import hashlib; print(hashlib.sha256(der[-32:]).hexdigest())
+")
+
+curl -N -X POST http://localhost:7400/execute/stream \
+  -H "Content-Type: application/json" \
+  -H "x-ryeos-key-id: fp:${FP}" \
+  -H "x-ryeos-timestamp: $(date +%s)" \
+  -H "x-ryeos-nonce: $(openssl rand -hex 16)" \
+  -d '{
+    "item_ref": "directive:apps/tv-tracker/ai_chat",
+    "project_path": "/data/projects/network-tv-tracker",
+    "parameters": {
+      "message": "What are the top 5 programs?"
+    }
+  }'
+```
+
+> Note: The curl above is missing the `x-ryeos-signature` header, which
+> requires Ed25519 signing. Use the backend's signed proxy for real requests.
+
+### Redeploy safety
+
+The entrypoint runs `ryeos init` on every boot. Both operator trust
+(`/data/user/.ai/config/keys/trusted/`) and node state
+(`/data/core/.ai/node/`) persist on the volume. Re-pulling the image or
+restarting the container preserves all state — no manual re-bootstrap needed.
 
 ---
 
@@ -839,19 +1027,37 @@ No new response modes. No new service handlers. Same plugin pattern, same data-d
 
 ### Change 2: Auth for external callers (required for production)
 
-Currently `require_auth: false` skips auth entirely. For production:
+All authenticated endpoints (including `/execute/stream`) require requests signed
+by an Ed25519 key whose fingerprint appears in an authorized-key TOML under
+`<system-space>/.ai/node/auth/authorized_keys/`. That TOML must itself be signed
+by the node identity key.
 
-1. Create an authorized key TOML for the backend's signing key:
-   ```toml
-   # <state_dir>/.ai/node/auth/authorized_keys/<backend-fp>.toml
-   fingerprint = "<backend-key-fingerprint>"
-   public_key = "ed25519:<base64>"
-   scopes = ["execute", "threads:read"]
-   label = "tv-tracker-backend"
-   ```
-2. Set `require_auth: true` in `config.yaml`
+Use `ryeos-core-tools authorize-client` to produce this file:
 
-For dev, `require_auth: false` works fine.
+```bash
+# Generate a keypair for the backend (do this once)
+openssl genpkey -algorithm ED25519 -out tv-tracker-backend.pem
+openssl pkey -in tv-tracker-backend.pem -pubout -out tv-tracker-backend.pub
+
+# Extract the raw 32-byte public key as base64 (ed25519 DER → raw)
+PUBKEY_B64=$(openssl pkey -in tv-tracker-backend.pem -pubout | \
+  tail -c 45 | head -c 32 | base64 | tr -d '\n')
+
+# Authorize the backend's public key on the daemon
+ryeos-core-tools authorize-client \
+  --system-space-dir /data/core \
+  --public-key "$PUBKEY_B64" \
+  --scopes '*' \
+  --label "tv-tracker-backend"
+```
+
+This writes a node-signed TOML to
+`/data/core/.ai/node/auth/authorized_keys/<fp>.toml`. The daemon loads
+authorized keys at startup. After running this command, restart the daemon
+(or rely on hot-reload if supported).
+
+The backend uses the private key (`tv-tracker-backend.pem`) to sign each
+request. See the `signRequest` function in Step 2a for the signing protocol.
 
 ### Change 3: Provider config (required)
 

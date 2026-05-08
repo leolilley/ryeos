@@ -1,16 +1,16 @@
-//! Operator-side `rye init` — bootstraps user space, node space, pins the
-//! platform author key into the operator's trust store, lays down the core
+//! Operator-side `ryeos init` — bootstraps user space, node space, pins the
+//! official publisher key into the operator's trust store, lays down the core
 //! bundle, and (unless `--core-only`) installs the standard bundle.
 //!
 //! Idempotent. Re-running keeps existing keys; only fills in missing pieces.
 //! Refuses on inconsistent state — e.g. trust-doc fingerprint doesn't match
 //! the key on disk. Refusing means a wipe-and-reinit recovery is required;
-//! see `docs/operator-init-recipe.md` (NOT something `rye init` does).
+//! see `docs/operator-init-recipe.md` (NOT something `ryeos init` does).
 //!
-//! `rye init` does NOT auto-import trust docs from any bundle. The platform
-//! author key is hardcoded in this source ([`PLATFORM_AUTHOR_PUBKEY`]) and
+//! `ryeos init` does NOT auto-import trust docs from any bundle. The official
+//! publisher key is hardcoded in this source ([`OFFICIAL_PUBLISHER_PUBKEY`]) and
 //! pinned explicitly. Third-party bundle authors are pinned via
-//! `rye trust pin <fingerprint>`.
+//! `ryeos trust pin <fingerprint>` or `--trust-file <PUBLISHER_TRUST.toml>`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,21 +25,24 @@ use serde::Serialize;
 
 use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
 
-/// SHA-256 fingerprint of the platform author Ed25519 public key.
+/// SHA-256 fingerprint of the official publisher Ed25519 public key.
 ///
 /// This is the long-lived release key under which all official `core` and
 /// `standard` bundles are signed in the public registry. Hardcoded here
-/// so `rye init` can pin it without trusting any on-disk source. Rotation
-/// is rare and requires a coordinated release of a new `rye` binary.
-pub const PLATFORM_AUTHOR_FP: &str =
+/// so `ryeos init` can pin it without trusting any on-disk source. Rotation
+/// is rare and requires a coordinated release of a new `ryeos` binary.
+///
+/// For local development, bundles are signed with the dev publisher key
+/// (`.dev-keys/PUBLISHER_DEV.pem`), and `--trust-file` is used to pin it.
+pub const OFFICIAL_PUBLISHER_FP: &str =
     "09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c";
 
-/// Raw 32-byte Ed25519 public key for the platform author.
+/// Raw 32-byte Ed25519 public key for the official publisher.
 ///
-/// Encoded inline so `rye init` does NOT need to read any bundle file to
+/// Encoded inline so `ryeos init` does NOT need to read any bundle file to
 /// pin trust. The fingerprint over these bytes MUST equal
-/// [`PLATFORM_AUTHOR_FP`] — verified at init time.
-pub const PLATFORM_AUTHOR_PUBKEY: [u8; 32] = [
+/// [`OFFICIAL_PUBLISHER_FP`] — verified at init time.
+pub const OFFICIAL_PUBLISHER_PUBKEY: [u8; 32] = [
     0x01, 0x16, 0x95, 0xa5, 0x8f, 0x1d, 0xd6, 0x20,
     0x0a, 0x84, 0xab, 0x8b, 0xb8, 0x36, 0xc4, 0x3d,
     0x92, 0x29, 0x75, 0x19, 0x9b, 0xd7, 0x41, 0xfa,
@@ -64,13 +67,16 @@ pub struct InitOptions {
     pub core_only: bool,
     /// Force-regenerate the node signing key. Does NOT touch the user key.
     pub force_node_key: bool,
+    /// Additional PUBLISHER_TRUST.toml files to pin before verifying bundles.
+    /// Each file contains `public_key`, `fingerprint`, and `owner` fields.
+    pub trust_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct InitReport {
     pub user_key_fingerprint: String,
     pub node_key_fingerprint: String,
-    pub platform_author_pinned: String,
+    pub official_publisher_pinned: String,
     pub core_installed_at: PathBuf,
     pub standard_installed_at: Option<PathBuf>,
     pub vault_dir: PathBuf,
@@ -82,14 +88,14 @@ pub struct InitReport {
     pub next_steps: Vec<String>,
 }
 
-/// Run `rye init` end-to-end.
+/// Run `ryeos init` end-to-end.
 ///
 /// Order:
 ///   1. Layout: create `<system_space_dir>/.ai/{node,state,bundles}` + vault placeholder
 ///   2. User key (load-or-create at `<user>/.ai/config/keys/signing/private_key.pem`)
 ///   3. Node key (load-or-create at `<system_space_dir>/.ai/node/identity/private_key.pem`)
 ///   4. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
-///   5. Pin platform author key into user trust dir
+///   5. Pin official publisher key into user trust dir
 ///   6. Lay down core at `system_space_dir` (copy from `core_source`)
 ///   7. Install standard bundle (unless `core_only`) — copy + signed
 ///      registration record
@@ -137,17 +143,23 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     pin_key(&node_key.verifying_key(), "node", &trust_dir, Some(&node_key))
         .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
 
-    // ── 5. Pin platform author key ──
-    let platform_vk = decode_platform_author_pubkey()?;
-    let pinned_fp = pin_key(&platform_vk, "platform-author", &trust_dir, None)
-        .map_err(|e| anyhow!("pin platform author trust doc: {e}"))?;
-    if pinned_fp != PLATFORM_AUTHOR_FP {
+    // ── 5. Pin official publisher key ──
+    let official_publisher_vk = decode_official_publisher_pubkey()?;
+    let pinned_fp = pin_key(&official_publisher_vk, "official-publisher", &trust_dir, None)
+        .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
+    if pinned_fp != OFFICIAL_PUBLISHER_FP {
         bail!(
-            "platform author fingerprint mismatch: hardcoded {} but \
+            "official publisher fingerprint mismatch: hardcoded {} but \
              public key bytes hash to {}",
-            PLATFORM_AUTHOR_FP,
+            OFFICIAL_PUBLISHER_FP,
             pinned_fp
         );
+    }
+
+    // ── 5b. Pin additional trust files (--trust-file) ──
+    for trust_file in &opts.trust_files {
+        pin_trust_file(trust_file, &trust_dir)
+            .with_context(|| format!("pin trust file {}", trust_file.display()))?;
     }
 
     // ── 6. Lay down core bundle ──
@@ -163,18 +175,38 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .join("engine")
         .join("kinds");
     if core_kinds_dir.is_dir() {
-        // Core bundle already laid down — verify it's consistent.
-        verify_core_already_consistent(&opts.system_space_dir, &opts.core_source)?;
-        // Verify the on-disk core is still signature-valid against the
-        // trust we just pinned. Any drift here is a hard failure — we
-        // refuse to proceed rather than risk handing an unverified core
-        // to the daemon.
+        // Core bundle already laid down — verify the on-disk structure
+        // is consistent, then re-copy to bring it up to date with the source.
+        verify_core_structure(&opts.system_space_dir)?;
+
+        // Verify the source BEFORE re-copying so a tampered core never
+        // touches the operator's system_space_dir.
         crate::actions::install::preflight_verify_bundle(
-            &opts.system_space_dir,
-            &opts.system_space_dir,
+            &opts.core_source,
+            &opts.core_source,
             Some(opts.user_root.as_path()),
         )
-        .context("verify on-disk core against pinned platform author key")?;
+        .context("verify core source against pinned official publisher key")?;
+
+        // Re-copy over the top of the existing installation. This brings
+        // new binaries, kind schemas, handlers, etc. forward while
+        // preserving the layout. Derived CAS artifacts (objects/, refs/)
+        // are left in place — the daemon will rebuild them if needed.
+        copy_dir_recursive(&opts.core_source, &opts.system_space_dir).with_context(|| {
+            format!(
+                "update core: {} -> {}",
+                opts.core_source.display(),
+                opts.system_space_dir.display()
+            )
+        })?;
+
+        // No post-copy verification: the source was already preflighted
+        // before the copy (line 184 above), and walking the on-disk
+        // tree now would include daemon-runtime artifacts (signed
+        // `node/config.yaml`, `node/bundles/*.yaml`, identity files)
+        // that the bundle preflight schema doesn't recognize. The
+        // source was trusted and copied verbatim — the post-copy state
+        // is correct by construction.
     } else {
         // Verify the source BEFORE copying so a tampered core never
         // touches the operator's system_space_dir.
@@ -183,7 +215,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             &opts.core_source,
             Some(opts.user_root.as_path()),
         )
-        .context("verify core source against pinned platform author key")?;
+        .context("verify core source against pinned official publisher key")?;
         copy_dir_recursive(&opts.core_source, &opts.system_space_dir).with_context(
             || {
                 format!(
@@ -215,7 +247,46 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .join("bundles")
             .join("standard");
         if target.exists() {
-            verify_bundle_already_installed(&target, standard_source)?;
+            // Standard bundle already installed.
+            // 1. Verify the installed target against operator trust.
+            //    Any drift here is a hard failure — we will not silently
+            //    repair-by-recopy.
+            verify_bundle_structure(&target)?;
+            crate::actions::install::preflight_verify_bundle(
+                &target,
+                &opts.system_space_dir,
+                Some(opts.user_root.as_path()),
+            )
+            .context("verify installed standard bundle against operator trust")?;
+
+            // 2. Verify the source so a tampered source never touches disk.
+            //    Kind schemas live in core, which is `system_space_dir` —
+            //    the standard source has no kinds of its own.
+            crate::actions::install::preflight_verify_bundle(
+                standard_source,
+                &opts.system_space_dir,
+                Some(opts.user_root.as_path()),
+            )
+            .context("verify standard source signatures")?;
+
+            // 3. Re-copy to bring it up to date with the source.
+            copy_dir_recursive(standard_source, &target).with_context(|| {
+                format!(
+                    "update standard: {} -> {}",
+                    standard_source.display(),
+                    target.display()
+                )
+            })?;
+
+            // 4. Ensure the signed node bundle registration record exists.
+            ensure_node_bundle_registration(
+                &opts.system_space_dir,
+                "standard",
+                &target,
+                &node_key,
+            )
+            .context("verify/recreate node/bundles/standard.yaml")?;
+
             Some(target.canonicalize()?)
         } else {
             install_standard_bundle(
@@ -235,11 +306,11 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         std::slice::from_ref(&opts.system_space_dir),
     )
     .context("load post-init trust store")?;
-    if !post_trust.is_trusted(PLATFORM_AUTHOR_FP) {
+    if !post_trust.is_trusted(OFFICIAL_PUBLISHER_FP) {
         bail!(
-            "post-init self-check failed: platform author key {} is \
+            "post-init self-check failed: official publisher key {} is \
              not in the loaded trust store — trust dir at {}",
-            PLATFORM_AUTHOR_FP,
+            OFFICIAL_PUBLISHER_FP,
             trust_dir.display()
         );
     }
@@ -286,11 +357,11 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             "Start the daemon: ryeosd --system-space-dir {}",
             opts.system_space_dir.display()
         ),
-        "Try a verb: rye status".to_string(),
+        "Try a verb: ryeos status".to_string(),
     ];
     if opts.core_only {
         next_steps.push(
-            "Install the standard bundle later: rye bundle install --name standard \
+            "Install the standard bundle later: ryeos bundle install --name standard \
              --source-path <path>"
                 .to_string(),
         );
@@ -299,7 +370,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     Ok(InitReport {
         user_key_fingerprint: user_fp,
         node_key_fingerprint: node_fp,
-        platform_author_pinned: PLATFORM_AUTHOR_FP.to_string(),
+        official_publisher_pinned: OFFICIAL_PUBLISHER_FP.to_string(),
         core_installed_at: opts.system_space_dir.clone(),
         standard_installed_at,
         vault_dir,
@@ -309,24 +380,41 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     })
 }
 
-/// Decode the hardcoded platform author public key into a `VerifyingKey`,
-/// guaranteeing the fingerprint matches [`PLATFORM_AUTHOR_FP`].
-fn decode_platform_author_pubkey() -> Result<VerifyingKey> {
-    let vk = VerifyingKey::from_bytes(&PLATFORM_AUTHOR_PUBKEY)
-        .map_err(|e| anyhow!("hardcoded platform author key invalid: {e}"))?;
+/// Decode the hardcoded official publisher public key into a `VerifyingKey`,
+/// guaranteeing the fingerprint matches [`OFFICIAL_PUBLISHER_FP`].
+fn decode_official_publisher_pubkey() -> Result<VerifyingKey> {
+    let vk = VerifyingKey::from_bytes(&OFFICIAL_PUBLISHER_PUBKEY)
+        .map_err(|e| anyhow!("hardcoded official publisher key invalid: {e}"))?;
     let fp = compute_fingerprint(&vk);
-    if fp != PLATFORM_AUTHOR_FP {
+    if fp != OFFICIAL_PUBLISHER_FP {
         bail!(
-            "internal error: hardcoded platform author fingerprint {} does \
-             not match SHA-256 over PLATFORM_AUTHOR_PUBKEY ({})",
-            PLATFORM_AUTHOR_FP,
+            "internal error: hardcoded official publisher fingerprint {} does \
+             not match SHA-256 over OFFICIAL_PUBLISHER_PUBKEY ({})",
+            OFFICIAL_PUBLISHER_FP,
             fp
         );
     }
     Ok(vk)
 }
 
-/// Create the directory layout `rye init` is responsible for.
+/// Parse a `PUBLISHER_TRUST.toml` and pin its key into the trust store.
+fn pin_trust_file(trust_file: &Path, trust_dir: &Path) -> Result<()> {
+    let content = fs::read_to_string(trust_file)
+        .with_context(|| format!("read trust file {}", trust_file.display()))?;
+
+    let doc = ryeos_engine::trust::PublisherTrustDoc::parse(&content)
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let vk = doc.decode_verifying_key()
+        .map_err(|e| anyhow!("{e}"))?;
+
+    pin_key(&vk, &doc.owner, trust_dir, None)
+        .map_err(|e| anyhow!("pin trust doc for {}: {e}", doc.owner))?;
+
+    Ok(())
+}
+
+/// Create the directory layout `ryeos init` is responsible for.
 ///
 /// Reserves `<state>/.ai/state/` even though only the daemon writes here in
 /// v1 — keeps the layout consistent with the documented contract.
@@ -339,7 +427,7 @@ fn create_layout(system_space_dir: &Path, user_root: &Path) -> Result<()> {
         // CAS state
         system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects"),
         system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("refs"),
-        // Bundles dir (populated by bundle.install or rye init)
+        // Bundles dir (populated by bundle.install or ryeos init)
         system_space_dir.join(ryeos_engine::AI_DIR).join("bundles"),
         // User tier (operator-edited)
         user_root.join(ryeos_engine::AI_DIR).join("config").join("keys").join("signing"),
@@ -381,7 +469,9 @@ fn load_or_create_key(path: &Path, force: bool) -> Result<SigningKey> {
 /// If `system_space_dir` already exists, sanity-check that it contains a
 /// recognisable `core` bundle so we don't clobber something else and we
 /// don't overwrite a previously-laid-down core (idempotency).
-fn verify_core_already_consistent(system_space_dir: &Path, core_source: &Path) -> Result<()> {
+/// Verify that an existing core bundle installation has the expected
+/// directory structure. Refuses to proceed if the layout is wrong.
+fn verify_core_structure(system_space_dir: &Path) -> Result<()> {
     let kinds = system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
@@ -396,35 +486,24 @@ fn verify_core_already_consistent(system_space_dir: &Path, core_source: &Path) -
             system_space_dir.display()
         );
     }
-    tracing::info!(
-        existing = %system_space_dir.display(),
-        source = %core_source.display(),
-        "core bundle already laid down — keeping existing"
-    );
     Ok(())
 }
 
-/// If a bundle directory already exists at the install target, sanity-check
-/// it looks like a Rye bundle (`.ai/` exists). Idempotent: don't reinstall.
-fn verify_bundle_already_installed(target: &Path, source: &Path) -> Result<()> {
+/// Verify that an existing bundle directory has the expected `.ai/` structure.
+fn verify_bundle_structure(target: &Path) -> Result<()> {
     if !target.join(ryeos_engine::AI_DIR).is_dir() {
         bail!(
             "{} exists but is not a Rye bundle — refusing to clobber",
             target.display()
         );
     }
-    tracing::info!(
-        existing = %target.display(),
-        source = %source.display(),
-        "bundle already installed — keeping existing"
-    );
     Ok(())
 }
 
 /// Install the standard bundle by copy + signed `kind: node` registration.
 ///
 /// Mirrors `service:bundle/install` semantics but runs in-process (no daemon
-/// required). The platform author trust must already be pinned (we just
+/// required). The official publisher trust must already be pinned (we just
 /// did so in [`run_init`]) so preflight verification passes.
 fn install_standard_bundle(
     system_space_dir: &Path,
@@ -441,11 +520,11 @@ fn install_standard_bundle(
         &[system_space_dir_for_kinds.to_path_buf()],
     )
     .context("preflight: load trust store")?;
-    if !trust_store.is_trusted(PLATFORM_AUTHOR_FP) {
+    if !trust_store.is_trusted(OFFICIAL_PUBLISHER_FP) {
         bail!(
-            "internal error: platform author key {} not in trust store \
-             after `rye init` pinned it — trust dir at {}",
-            PLATFORM_AUTHOR_FP,
+            "internal error: official publisher key {} not in trust store \
+             after `ryeos init` pinned it — trust dir at {}",
+            OFFICIAL_PUBLISHER_FP,
             user_root.join(".ai/config/keys/trusted").display()
         );
     }
@@ -503,6 +582,92 @@ fn write_node_bundle_registration(
     Ok(())
 }
 
+/// Ensure a node bundle registration record exists and is valid.
+///
+/// - If missing → write + sign it (idempotent repair).
+/// - If present and signature-valid with correct path → no-op.
+/// - If present but invalid (broken signature, mismatched path) → hard fail.
+fn ensure_node_bundle_registration(
+    system_space_dir: &Path,
+    name: &str,
+    bundle_path: &Path,
+    node_key: &SigningKey,
+) -> Result<()> {
+    let reg_path = system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("bundles")
+        .join(format!("{name}.yaml"));
+
+    if !reg_path.exists() {
+        // Missing — write a fresh registration.
+        let node_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("node");
+        write_node_bundle_registration(&node_dir, name, bundle_path, node_key)?;
+        return Ok(());
+    }
+
+    // Existing record — verify signature and content.
+    let content = fs::read_to_string(&reg_path)
+        .with_context(|| format!("read {}", reg_path.display()))?;
+
+    // Verify the node key's signature on this file.
+    let node_vk = node_key.verifying_key();
+    let node_fp = compute_fingerprint(&node_vk);
+
+    let sig_header = lillux::signature::parse_signature_line(
+        content.lines().next().unwrap_or(""),
+        "#",
+        None,
+    )
+    .ok_or_else(|| anyhow!(
+        "node bundle registration {} has no valid signature line",
+        reg_path.display()
+    ))?;
+
+    let body = lillux::signature::strip_signature_lines(&content);
+    let actual_hash = lillux::signature::content_hash(&body);
+    if actual_hash != sig_header.content_hash {
+        bail!(
+            "node bundle registration {} has corrupted content (hash mismatch)",
+            reg_path.display()
+        );
+    }
+
+    if sig_header.signer_fingerprint != node_fp {
+        bail!(
+            "node bundle registration {} signed by {} but node key is {} — \
+             wipe and re-init to repair",
+            reg_path.display(),
+            sig_header.signer_fingerprint,
+            node_fp
+        );
+    }
+
+    if !lillux::signature::verify_signature(
+        &sig_header.content_hash,
+        &sig_header.signature_b64,
+        &node_vk,
+    ) {
+        bail!(
+            "node bundle registration {} has invalid Ed25519 signature",
+            reg_path.display()
+        );
+    }
+
+    // Signature valid — check the path field matches.
+    if !body.contains(&format!("path: {}", bundle_path.display())) {
+        bail!(
+            "node bundle registration {} references wrong path — \
+             expected {} but record contains a different path. \
+             Wipe and re-init to repair",
+            reg_path.display(),
+            bundle_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// Recursive directory copy with symlink preservation (Unix only).
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)
@@ -536,14 +701,14 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 
 /// Sanity check helper exposed for tests.
 #[doc(hidden)]
-pub fn _decode_platform_author_pubkey_for_tests() -> Result<VerifyingKey> {
-    decode_platform_author_pubkey()
+pub fn _decode_official_publisher_pubkey_for_tests() -> Result<VerifyingKey> {
+    decode_official_publisher_pubkey()
 }
 
 /// Compile-time-ish self-check: encode the platform pubkey for inclusion
 /// in error messages or audit logs.
-pub fn platform_author_pubkey_b64() -> String {
-    base64::engine::general_purpose::STANDARD.encode(PLATFORM_AUTHOR_PUBKEY)
+pub fn official_publisher_pubkey_b64() -> String {
+    base64::engine::general_purpose::STANDARD.encode(OFFICIAL_PUBLISHER_PUBKEY)
 }
 
 #[cfg(test)]
@@ -551,9 +716,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_author_fingerprint_matches_hardcoded_pubkey() {
-        let vk = decode_platform_author_pubkey().expect("decode pubkey");
-        assert_eq!(compute_fingerprint(&vk), PLATFORM_AUTHOR_FP);
+    fn official_publisher_fingerprint_matches_hardcoded_pubkey() {
+        let vk = decode_official_publisher_pubkey().expect("decode pubkey");
+        assert_eq!(compute_fingerprint(&vk), OFFICIAL_PUBLISHER_FP);
+    }
+
+    fn dev_trust_file() -> PathBuf {
+        workspace_root().join(".dev-keys/PUBLISHER_DEV_TRUST.toml")
     }
 
     #[test]
@@ -571,16 +740,17 @@ mod tests {
             standard_source: Some(standard_src),
             core_only: true, // skip standard for unit-test speed
             force_node_key: false,
+            trust_files: vec![dev_trust_file()],
         };
         let report = run_init(&opts).expect("init");
-        assert_eq!(report.platform_author_pinned, PLATFORM_AUTHOR_FP);
+        assert_eq!(report.official_publisher_pinned, OFFICIAL_PUBLISHER_FP);
         assert!(report.standard_installed_at.is_none());
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(user.join(".ai/config/keys/signing/private_key.pem").exists());
         assert!(user
             .join(".ai/config/keys/trusted")
-            .join(format!("{}.toml", PLATFORM_AUTHOR_FP))
+            .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
             .exists());
     }
 
@@ -596,6 +766,7 @@ mod tests {
             standard_source: None,
             core_only: true,
             force_node_key: false,
+        trust_files: vec![dev_trust_file()],
         };
         let report = run_init(&opts).expect("init");
         let vault_priv = state.join(".ai/node/vault/private_key.pem");
@@ -624,6 +795,7 @@ mod tests {
             standard_source: None,
             core_only: true,
             force_node_key: false,
+        trust_files: vec![dev_trust_file()],
         };
         let r1 = run_init(&opts).expect("init #1");
         let r2 = run_init(&opts).expect("init #2");
@@ -646,6 +818,7 @@ mod tests {
             standard_source: None,
             core_only: true,
             force_node_key: false,
+        trust_files: vec![dev_trust_file()],
         };
         let r1 = run_init(&opts).expect("init #1");
         let r2 = run_init(&opts).expect("init #2");
@@ -663,6 +836,7 @@ mod tests {
             standard_source: None,
             core_only: true,
             force_node_key: false,
+        trust_files: vec![dev_trust_file()],
         };
         let r1 = run_init(&opts).expect("init #1");
         opts.force_node_key = true;

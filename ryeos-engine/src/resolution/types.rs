@@ -20,7 +20,7 @@ pub enum TrustClass {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AliasHop {
-    /// Ordered chain of alias expansions: ["@core", "@base", "directive:rye/agent/core/base"]
+    /// Ordered chain of alias expansions: ["@core", "@base", "directive:ryeos/agent/core/base"]
     pub expansion: Vec<String>,
     /// Depth used (≤ execution.alias_max_depth).
     pub depth: usize,
@@ -136,7 +136,7 @@ pub struct KindComposedView {
 }
 
 impl KindComposedView {
-    /// View used by composers (e.g. the `handler:rye/core/identity`
+    /// View used by composers (e.g. the `handler:ryeos/core/identity`
     /// composer binary) that perform
     /// no merge: `composed` is the root parser output verbatim.
     pub fn identity(composed: serde_json::Value) -> Self {

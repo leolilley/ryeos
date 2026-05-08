@@ -56,7 +56,7 @@ impl NodeIdentity {
     pub fn load(key_path: &Path) -> Result<Self> {
         let pem = fs::read_to_string(key_path).with_context(|| {
             format!(
-                "signing key not found at {} — run 'rye daemon init' first",
+                "signing key not found at {} — run 'ryeos daemon init' first",
                 key_path.display()
             )
         })?;
@@ -99,7 +99,7 @@ impl NodeIdentity {
     pub fn load_public_identity(path: &Path) -> Result<PublicIdentityDoc> {
         let data = fs::read(path).with_context(|| {
             format!(
-                "public identity not found at {} — run 'rye daemon init' first",
+                "public identity not found at {} — run 'ryeos daemon init' first",
                 path.display()
             )
         })?;

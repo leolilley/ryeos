@@ -46,10 +46,10 @@ const RESERVED_ENV_NAMES: &[&str] = &[
     "TMPDIR",
     "TEMP",
     "TMP",
-    "RYE_SIGNING_KEY_DIR",
-    "RYE_KERNEL_PYTHON",
-    "RYE_REMOTE_NAME",
-    "RYE_NODE_CONFIG",
+    "RYEOS_SIGNING_KEY_DIR",
+    "RYEOS_KERNEL_PYTHON",
+    "RYEOS_REMOTE_NAME",
+    "RYEOS_NODE_CONFIG",
     "USER_SPACE",
     "VIRTUAL_ENV",
     "CONDA_PREFIX",
@@ -70,7 +70,7 @@ const RESERVED_ENV_PREFIXES: &[&str] = &[
     "GITHUB_",
     "CI_",
     "DOCKER_",
-    "RYE_INTERNAL_",
+    "RYEOS_INTERNAL_",
 ];
 
 // ---------------------------------------------------------------------------

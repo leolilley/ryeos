@@ -28,7 +28,7 @@
 //!   * **Adds** publisher self-trust: tests sign their own bundle /
 //!     directive / route content with `FastFixture::publisher`, and the
 //!     daemon's trust store needs that key pinned. Real `init` doesn't
-//!     pin publisher keys — the operator does that via `rye trust pin`.
+//!     pin publisher keys — the operator does that via `ryeos trust pin`.
 //!   * **Adds** system-bundle signer trust (via
 //!     `super::populate_user_space`): without this the daemon refuses
 //!     to load `node:engine/kinds/...` items in the core bundle and
@@ -166,7 +166,7 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     write_pem_signing_key(&node_identity_dir.join("private_key.pem"), &node)
         .context("write node signing key")?;
 
-    // Public identity doc — read by the `tool:rye/core/identity/public_key`
+    // Public identity doc — read by the `tool:ryeos/core/identity/public_key`
     // tool. Daemon startup itself doesn't need this file (it loads the
     // private key directly), but tests that exercise the public_key tool
     // would otherwise see a null result. Mirrors what
@@ -219,6 +219,7 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
 /// when a test needs the standard bundle's runtime/directive YAMLs in
 /// the daemon's effective bundle roots.
 pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    super::ensure_bundles_fresh();
     let standard = super::workspace_root().join("ryeos-bundles/standard");
     if !standard.is_dir() {
         anyhow::bail!(
@@ -241,7 +242,7 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
 /// Write a signed authorized-key TOML for the daemon's HTTP auth path.
 ///
 /// `subject_sk` is the public key the daemon will accept on
-/// `x-rye-key-id`-signed HTTP requests (typically [`FastFixture::user`]).
+/// `x-ryeos-key-id`-signed HTTP requests (typically [`FastFixture::user`]).
 ///
 /// `signer_sk` MUST be the node identity ([`FastFixture::node`]) — the
 /// daemon's auth loader requires authorized-key files to be signed by

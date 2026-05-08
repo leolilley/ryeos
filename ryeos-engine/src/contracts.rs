@@ -607,7 +607,7 @@ optional:
 
 // ── Signature envelope ───────────────────────────────────────────────
 
-/// How a `rye:signed:...` payload is embedded in a source file.
+/// How a `ryeos:signed:...` payload is embedded in a source file.
 ///
 /// Varies by file type — loaded from extractor YAML, never hardcoded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -632,7 +632,7 @@ pub struct ResolvedSourceFormat {
     /// The matched file extension, e.g. `".py"`, `".md"`
     pub extension: String,
     /// Canonical parser tool ref, e.g.
-    /// `"parser:rye/core/python/ast"`. The `ParserDispatcher`
+    /// `"parser:ryeos/core/python/ast"`. The `ParserDispatcher`
     /// resolves this through `ParserRegistry`.
     pub parser: String,
     /// Signature embedding envelope for this file type
@@ -712,7 +712,7 @@ pub struct ItemMetadata {
     /// Item category
     pub category: Option<String>,
     /// Vault secret IDs this item requires (e.g. `["openai-api-key"]`).
-    /// The daemon resolves these per-principal and injects as `RYE_VAULT_*` env vars.
+    /// The daemon resolves these per-principal and injects as `RYEOS_VAULT_*` env vars.
     #[serde(default)]
     pub required_secrets: Vec<String>,
     /// Kind-specific metadata fields routed here by the metadata extraction
@@ -945,12 +945,12 @@ pub struct ExecutionDecorations {
 
 /// Resume policy declared by the `native_resume` runtime handler.
 /// Presence in the spec ⇒ the tool is replay-aware: the daemon will
-/// allocate a per-thread checkpoint dir, inject `RYE_CHECKPOINT_DIR`
+/// allocate a per-thread checkpoint dir, inject `RYEOS_CHECKPOINT_DIR`
 /// at spawn time, and on daemon restart attempt automatic resume up
 /// to `max_auto_resume_attempts` times before marking the thread
 /// failed. The tool is responsible for writing checkpoints into the
 /// supplied directory and for being idempotent / replay-safe on
-/// startup (`RYE_RESUME=1` is injected on resume spawns).
+/// startup (`RYEOS_RESUME=1` is injected on resume spawns).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeResumeSpec {
@@ -974,7 +974,7 @@ impl Default for NativeResumeSpec {
 
 /// Cancellation + streaming policy declared by the `native_async`
 /// runtime handler. Presence in the spec ⇒ this tool drives its own
-/// event stream (the runner injects `RYE_NATIVE_ASYNC=1`) and the
+/// event stream (the runner injects `RYEOS_NATIVE_ASYNC=1`) and the
 /// daemon cancellation routes through `cancellation_mode`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

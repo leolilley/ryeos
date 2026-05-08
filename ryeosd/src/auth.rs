@@ -150,13 +150,13 @@ fn load_authorized_key(
 
     // Verify node signature header
     let sig_line = sig_line.trim();
-    if !sig_line.starts_with("# rye:signed:") {
+    if !sig_line.starts_with("# ryeos:signed:") {
         bail!("unsigned key file");
     }
 
-    // Format: # rye:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>
+    // Format: # ryeos:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>
     // Timestamp may contain colons (ISO 8601), so rsplit from the right.
-    let remainder = &sig_line["# rye:signed:".len()..];
+    let remainder = &sig_line["# ryeos:signed:".len()..];
     let parts: Vec<&str> = remainder.rsplitn(4, ':').collect();
     if parts.len() != 4 {
         bail!("malformed signature header");
@@ -259,19 +259,19 @@ fn canonical_path(uri: &axum::http::Uri) -> String {
 
 pub(crate) fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers: &axum::http::HeaderMap, body: &[u8]) -> Result<Principal, String> {
     let key_id = headers
-        .get("x-rye-key-id")
+        .get("x-ryeos-key-id")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let timestamp = headers
-        .get("x-rye-timestamp")
+        .get("x-ryeos-timestamp")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let nonce = headers
-        .get("x-rye-nonce")
+        .get("x-ryeos-nonce")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let signature = headers
-        .get("x-rye-signature")
+        .get("x-ryeos-signature")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 

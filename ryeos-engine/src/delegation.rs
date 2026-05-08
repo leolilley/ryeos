@@ -130,7 +130,7 @@ mod tests {
             caller_fingerprint: "fp-abc".to_string(),
             origin_site_id: "origin-node".to_string(),
             audience_site_id: audience.to_string(),
-            delegated_scopes: vec!["rye.execute.*".to_string()],
+            delegated_scopes: vec!["ryeos.execute.*".to_string()],
             budget_lease_id: None,
             request_hash: "hash-xyz".to_string(),
             idempotency_key: "idem-001".to_string(),

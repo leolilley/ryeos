@@ -5,8 +5,7 @@
 //!
 //! Prerequisite: a populated `ryeos-bundles/standard/.ai/bin/<triple>/`
 //! plus its `MANIFEST.json`. Regenerate via:
-//!   `cargo run -p ryeos-cli --bin rye-bundle-tool -- rebuild-manifest \
-//!        --source ryeos-bundles/standard --seed 119`
+//!   `ryos publish ryeos-bundles/standard --key .dev-keys/PUBLISHER_DEV.pem`
 //! (or run the full build-bundle pipeline if binaries need rebuilding).
 
 use sha2::Digest;
@@ -45,11 +44,11 @@ fn bundle_binary_exists_and_is_executable() {
     let bin_path = bundle_dir()
         .join(".ai/bin")
         .join(&triple)
-        .join("rye");
+        .join("ryeos-directive-runtime");
 
     assert!(
         bin_path.exists(),
-        "bundle binary not found at {bin_path:?}. Run: rye dev build-bundle"
+        "bundle binary not found at {bin_path:?}. Run: ryos publish"
     );
 
     #[cfg(unix)]
@@ -69,7 +68,7 @@ fn bundle_sidecar_exists_and_parsable() {
     let sidecar_path = bundle_dir()
         .join(".ai/bin")
         .join(&triple)
-        .join("rye.item_source.json");
+        .join("ryeos-directive-runtime.item_source.json");
 
     assert!(
         sidecar_path.exists(),
@@ -89,7 +88,7 @@ fn bundle_sidecar_exists_and_parsable() {
 
     assert_eq!(
         value["item_ref"],
-        format!("bin/{triple}/rye"),
+        format!("bin/{triple}/ryeos-directive-runtime"),
         "item_ref mismatch"
     );
     assert!(
@@ -120,8 +119,7 @@ fn bundle_manifest_ref_exists() {
         // It may not exist in all checkouts — skip gracefully rather than fail.
         eprintln!(
             "skipping bundle_manifest_ref_exists: manifest ref not found at {:?}. \
-             Run: cargo run -p ryeos-cli --bin rye-bundle-tool -- rebuild-manifest \
-             --source ryeos-bundles/standard --seed 119",
+              Run: ryos publish ryeos-bundles/standard --key .dev-keys/PUBLISHER_DEV.pem",
             ref_path
         );
         return;
@@ -196,7 +194,7 @@ fn bundle_cas_contains_binary_blob() {
 
     // Get the item_source_hash for our binary
     let triple = host_triple();
-    let item_ref = format!("bin/{triple}/rye");
+    let item_ref = format!("bin/{triple}/ryeos-directive-runtime");
     let item_source_hash = manifest["item_source_hashes"][&item_ref]
         .as_str()
         .expect("item_source_hash not found in manifest");
@@ -249,24 +247,24 @@ fn bundle_manifest_json_exists() {
     let value: serde_json::Value = serde_json::from_str(&content)
         .expect("MANIFEST.json should be valid JSON");
 
-    assert!(value.get("rye").is_some(), "MANIFEST.json should have 'rye' entry");
+    assert!(value.get("ryeos-directive-runtime").is_some(), "MANIFEST.json should have 'ryeos-directive-runtime' entry");
     assert!(
-        value["rye"].get("content_blob_hash").is_some(),
-        "MANIFEST.json rye entry should have content_blob_hash"
+        value["ryeos-directive-runtime"].get("content_blob_hash").is_some(),
+        "MANIFEST.json ryos-directive-runtime entry should have content_blob_hash"
     );
     assert!(
-        value["rye"].get("manifest_hash").is_some(),
-        "MANIFEST.json rye entry should have manifest_hash"
+        value["ryeos-directive-runtime"].get("manifest_hash").is_some(),
+        "MANIFEST.json ryos-directive-runtime entry should have manifest_hash"
     );
     assert!(
-        value["rye"].get("item_source_hash").is_some(),
-        "MANIFEST.json rye entry should have item_source_hash"
+        value["ryeos-directive-runtime"].get("item_source_hash").is_some(),
+        "MANIFEST.json ryos-directive-runtime entry should have item_source_hash"
     );
 }
 
 #[test]
 fn bundle_tools_dir_has_13_signed_yamls() {
-    let tools_dir = bundle_dir().join(".ai").join("tools").join("rye");
+    let tools_dir = bundle_dir().join(".ai").join("tools").join("ryeos");
     if !tools_dir.is_dir() {
         return; // Skip if bundle not built yet
     }
@@ -274,7 +272,7 @@ fn bundle_tools_dir_has_13_signed_yamls() {
     let mut yaml_files = Vec::new();
     walk_yaml_files(&tools_dir, &mut yaml_files);
 
-    // Standard bundle's `tools/rye/` directory now only houses the
+    // Standard bundle's `tools/ryeos/` directory now only houses the
     // three agent provider tool descriptors (anthropic, openai, zen).
     // Everything else got moved out: runtimes (directive/graph/
     // knowledge) live under `.ai/runtimes/`, the agent harness is
@@ -283,7 +281,7 @@ fn bundle_tools_dir_has_13_signed_yamls() {
     assert_eq!(
         yaml_files.len(),
         3,
-        "expected exactly 3 tool YAMLs in standard bundle's tools/rye/ \
+        "expected exactly 3 tool YAMLs in standard bundle's tools/ryeos/ \
          (the agent providers), found {}: {:?}",
         yaml_files.len(),
         yaml_files
@@ -292,7 +290,7 @@ fn bundle_tools_dir_has_13_signed_yamls() {
 
 #[test]
 fn bundle_all_yamls_are_signed() {
-    let tools_dir = bundle_dir().join(".ai").join("tools").join("rye");
+    let tools_dir = bundle_dir().join(".ai").join("tools").join("ryeos");
     if !tools_dir.is_dir() {
         return; // Skip if bundle not built yet
     }
@@ -304,7 +302,7 @@ fn bundle_all_yamls_are_signed() {
         let content = std::fs::read_to_string(path).unwrap();
         let first_line = content.lines().next().unwrap_or("");
         assert!(
-            first_line.starts_with("# rye:signed:"),
+            first_line.starts_with("# ryeos:signed:"),
             "not signed: {} — first line: {:?}",
             path.display(),
             first_line
@@ -367,7 +365,7 @@ fn bundle_manifest_includes_all_runtime_binaries() {
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     let triple = host_triple();
     let map = value["item_source_hashes"].as_object().expect("map");
-    for bare in &["rye", "ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
+    for bare in &["ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
         let key = format!("bin/{triple}/{bare}");
         assert!(
             map.contains_key(&key),
@@ -402,7 +400,7 @@ fn materialization_resolves_each_runtime_binary() {
 
     let cas = lillux::cas::CasStore::new(bundle_dir().join(".ai/objects"));
     let triple = host_triple();
-    for bare in &["rye", "ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
+    for bare in &["ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
         let executor_ref = format!("native:{bare}");
         let resolved = ryeos_engine::executor_resolution::resolve_native_executor(
             &item_source_hashes,

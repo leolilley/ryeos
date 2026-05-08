@@ -1,4 +1,4 @@
-# rye:signed:2026-05-05T09:31:54Z:94cae85ab7cbdc8622b5e836776ccb1b01f1a2a9d632587bca03ee3fa706490f:BkmdzaP/OMkczXkcvpZ4yOzRmxV6GbIauRizq95KFaHM7bU+1G6hLotZiitu7MATun24AI/O4OuEJzVMRZ13Dw==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:812028c833cefe9d5293b7ef4e13d4b2e7b4e8fb3aa153816e4a5dc01cb2d583:gGSjqjt9yDNuA+WLPt59wtBfh/oF/uRUPlaYrS8wffIEFiKS68P176Y6J/WLjAt3mJf59TtALFoo08X/bFLDDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -6,27 +6,27 @@ location:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/opaque
+    protocol: protocol:ryeos/core/opaque
   thread_profile: tool_run
   aliases:
-    "@subprocess": "tool:rye/core/subprocess/execute"
+    "@subprocess": "tool:ryeos/core/subprocess/execute"
   resolution: []
 formats:
   - extensions: [".py"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: "#"
       after_shebang: true
   - extensions: [".yaml", ".yml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
   - extensions: [".js", ".ts", ".mjs", ".cjs"]
-    parser: parser:rye/core/javascript/javascript
+    parser: parser:ryeos/core/javascript/javascript
     signature:
       prefix: "//"
   - extensions: [".json"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
 # Empty by design — tool fields (executor_id, tool_type, etc.) are
@@ -34,7 +34,7 @@ formats:
 # not enforced at the kind-level shape.
 # Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
 inventory_schema_keys: [input_schema, parameters, config_schema]
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -76,7 +76,7 @@ runtime:
 metadata:
   # Tool YAML files use plain keys (`category`, `version`, etc.). Tool
   # Python files use Python's dunder convention (`__category__`,
-  # `__version__`, ...); the `parser:rye/core/python/ast` regex_kv
+  # `__version__`, ...); the `parser:ryeos/core/python/ast` regex_kv
   # config strips the `__` framing so the parsed dict has the same
   # plain keys as the YAML case. Downstream rules — and the path
   # validator — therefore see ONE shape regardless of source format.

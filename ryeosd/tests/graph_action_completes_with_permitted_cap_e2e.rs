@@ -4,7 +4,7 @@
 //!   walker → callback runtime.dispatch_action → daemon enforce_callback_caps
 //!   → dispatch → tool executor chain → subprocess → result returned to walker
 //!
-//! The graph has `permissions: [rye.execute.tool.echo]` which the daemon
+//! The graph has `permissions: [ryeos.execute.tool.echo]` which the daemon
 //! composes into effective_caps on the callback token. The tool `echo.py`
 //! is a planted Python script that reads params from stdin and returns JSON.
 //!
@@ -32,7 +32,7 @@ fn plant_echo_tool(project_dir: &Path) -> anyhow::Result<()> {
 
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
-__executor_id__ = "tool:rye/core/runtimes/python/script"
+__executor_id__ = "tool:ryeos/core/runtimes/python/script"
 __category__ = "echo"
 __description__ = "echo input as json"
 
@@ -54,11 +54,12 @@ fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Res
     //
     // `permissions` populates the callback token's effective_caps via the
     // graph_permissions composer; the cap shape mirrors `enforce_callback_caps`
-    // in runtime_dispatch.rs (rye.execute.<kind>.<bare_id_with_/_as_.>).
+    // in runtime_dispatch.rs — `ryeos.execute.<kind>.<bare_id>` where the
+    // bare id keeps its `/` separators (canonical Capability format).
     let body = r#"category: ""
 version: "1.0.0"
 permissions:
-  - rye.execute.tool.echo.echo
+  - ryeos.execute.tool.echo/echo
 config:
   start: greet
   nodes:

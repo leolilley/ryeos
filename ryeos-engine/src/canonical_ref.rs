@@ -35,7 +35,7 @@ pub enum RefSuffix {
 pub struct CanonicalRef {
     /// The kind string, e.g. `"tool"`, `"directive"`, `"graph"`
     pub kind: String,
-    /// The bare item ID, e.g. `"rye/bash/bash"`
+    /// The bare item ID, e.g. `"ryeos/bash/bash"`
     pub bare_id: String,
     /// Optional suffix modifier
     pub suffix: Option<RefSuffix>,
@@ -232,9 +232,9 @@ mod tests {
 
     #[test]
     fn parse_simple_ref() {
-        let r = CanonicalRef::parse("tool:rye/bash/bash").unwrap();
+        let r = CanonicalRef::parse("tool:ryeos/bash/bash").unwrap();
         assert_eq!(r.kind, "tool");
-        assert_eq!(r.bare_id, "rye/bash/bash");
+        assert_eq!(r.bare_id, "ryeos/bash/bash");
         assert!(r.suffix.is_none());
     }
 
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn parse_capability_suffix() {
-        let r = CanonicalRef::parse("tool:rye/email/send@cap:sig123:fp456:ch789").unwrap();
+        let r = CanonicalRef::parse("tool:ryeos/email/send@cap:sig123:fp456:ch789").unwrap();
         assert_eq!(
             r.suffix,
             Some(RefSuffix::Capability {
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn reject_bare_ref() {
-        let err = CanonicalRef::parse("rye/bash/bash").unwrap_err();
+        let err = CanonicalRef::parse("ryeos/bash/bash").unwrap_err();
         assert!(
             matches!(err, EngineError::BareRefRejected { .. }),
             "expected BareRefRejected, got: {err:?}"
@@ -325,14 +325,14 @@ mod tests {
 
     #[test]
     fn roundtrip_display() {
-        let input = "tool:rye/bash/bash";
+        let input = "tool:ryeos/bash/bash";
         let r = CanonicalRef::parse(input).unwrap();
         assert_eq!(r.to_string(), input);
     }
 
     #[test]
     fn roundtrip_display_with_suffix() {
-        let input = "tool:rye/email/send@cap:sig:fp:ch";
+        let input = "tool:ryeos/email/send@cap:sig:fp:ch";
         let r = CanonicalRef::parse(input).unwrap();
         assert_eq!(r.to_string(), input);
     }
@@ -369,9 +369,9 @@ mod tests {
 
     #[test]
     fn accept_valid_nested() {
-        let r = CanonicalRef::parse("tool:rye/bash/bash").unwrap();
+        let r = CanonicalRef::parse("tool:ryeos/bash/bash").unwrap();
         assert_eq!(r.kind, "tool");
-        assert_eq!(r.bare_id, "rye/bash/bash");
+        assert_eq!(r.bare_id, "ryeos/bash/bash");
     }
 
     #[test]
@@ -406,8 +406,8 @@ mod tests {
         // hand-rolled Hash impl that breaks the invariant.
         use std::collections::HashSet;
 
-        let a = CanonicalRef::parse("tool:rye/bash/bash").unwrap();
-        let b = CanonicalRef::parse("tool:rye/bash/bash").unwrap();
+        let a = CanonicalRef::parse("tool:ryeos/bash/bash").unwrap();
+        let b = CanonicalRef::parse("tool:ryeos/bash/bash").unwrap();
         assert_eq!(a, b);
 
         let mut set: HashSet<CanonicalRef> = HashSet::new();

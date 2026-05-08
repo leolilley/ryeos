@@ -32,16 +32,16 @@ fn dispatcher_for_yaml_and_markdown_directive() -> ParserDispatcher {
     };
     let entries = vec![
         (
-            "parser:rye/core/yaml/yaml".to_string(),
+            "parser:ryeos/core/yaml/yaml".to_string(),
             mk(
-                "handler:rye/core/yaml-document",
+                "handler:ryeos/core/yaml-document",
                 json!({ "require_mapping": true }),
             ),
         ),
         (
-            "parser:rye/core/markdown/directive".to_string(),
+            "parser:ryeos/core/markdown/directive".to_string(),
             mk(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 json!({
                     "require_header": true,
                     "body_field": "body",
@@ -98,7 +98,7 @@ fn sign_yaml(yaml: &str) -> String {
             );
         }
         if !yaml_owned.contains("composer:") {
-            yaml_owned.push_str("composer: handler:rye/core/identity\n");
+            yaml_owned.push_str("composer: handler:ryeos/core/identity\n");
         }
     }
     lillux::signature::sign_content(&yaml_owned, &signing_key(), "#", None)
@@ -116,7 +116,7 @@ location:
   directory: nodes
 formats:
   - extensions: [\".yaml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 execution:
@@ -213,7 +213,7 @@ location:
   directory: directives
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/directive
+    parser: parser:ryeos/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -227,9 +227,9 @@ execution:
 /// Regression: the bytes the parser sees and the bytes the envelope
 /// binds and ships in `raw_content` MUST be byte-identical. Before the
 /// fix, `load_item_at` stripped via the generic `strip_signature_lines`
-/// helper, which removes any `# rye:signed:...` line regardless of
+/// helper, which removes any `# ryeos:signed:...` line regardless of
 /// envelope. For a markdown directive (envelope `<!-- ... -->`), a
-/// `# rye:signed:...` literal in the BODY is just text — the parser
+/// `# ryeos:signed:...` literal in the BODY is just text — the parser
 /// keeps it, and the resolution payload must too.
 #[test]
 fn raw_content_uses_envelope_aware_strip_for_markdown() {
@@ -256,7 +256,7 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
                 ---\n\
                 \n\
                 pre-marker\n\
-                # rye:signed:fake-not-a-real-sig\n\
+                # ryeos:signed:fake-not-a-real-sig\n\
                 post-marker\n";
     fs::write(directives_dir.join("sample.md"), body).unwrap();
 
@@ -272,7 +272,7 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
         .expect("pipeline must succeed for unsigned markdown directive");
 
     assert!(
-        output.root.raw_content.contains("# rye:signed:fake-not-a-real-sig"),
+        output.root.raw_content.contains("# ryeos:signed:fake-not-a-real-sig"),
         "envelope-aware strip must NOT remove a `#`-prefixed line from a markdown body \
          (envelope is `<!-- ... -->`); raw_content = {:?}",
         output.root.raw_content

@@ -450,7 +450,7 @@ mod tests {
         let yaml_owned = if yaml.contains("composed_value_contract") {
             yaml.to_string()
         } else {
-            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:rye/core/identity\n") } }
+            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:ryeos/core/identity\n") } }
         };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }
@@ -460,7 +460,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -535,7 +535,7 @@ formats:
     fn resolve_rejects_unknown_kind() {
         let engine = test_engine();
         let ctx = test_plan_context();
-        let r = CanonicalRef::parse("tool:rye/bash/bash").unwrap();
+        let r = CanonicalRef::parse("tool:ryeos/bash/bash").unwrap();
         let err = engine.resolve(&ctx, &r).unwrap_err();
         assert!(
             matches!(err, EngineError::UnsupportedKind { ref kind } if kind == "tool"),
@@ -572,7 +572,7 @@ formats:
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(
             tool_dir.join("hello.py"),
-            "# rye:signed:2026-04-10T00:00:00Z:abc123:sigdata:fp_test\nprint('hello')\n",
+            "# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigdata:fp_test\nprint('hello')\n",
         )
         .unwrap();
 
@@ -603,7 +603,7 @@ formats:
         assert_eq!(resolved.kind, "tool");
         assert_eq!(resolved.source_space, ItemSpace::Project);
         assert_eq!(resolved.source_format.extension, ".py");
-        assert_eq!(resolved.source_format.parser, "parser:rye/core/python/ast");
+        assert_eq!(resolved.source_format.parser, "parser:ryeos/core/python/ast");
         assert!(resolved.signature_header.is_some());
         let sig = resolved.signature_header.unwrap();
         assert_eq!(sig.timestamp, "2026-04-10T00:00:00Z");
@@ -636,7 +636,7 @@ formats:
         let sig: lillux::crypto::Signature = signing_key.sign(hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
         format!(
-            "# rye:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fingerprint}\n{body}"
+            "# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fingerprint}\n{body}"
         )
     }
 
@@ -804,7 +804,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".yaml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 ";
@@ -845,7 +845,7 @@ formats:
         let ref_ = CanonicalRef::parse("tool:hello").unwrap();
         let resolved = engine.resolve(&ctx, &ref_).unwrap();
         assert_eq!(resolved.source_format.extension, ".py");
-        assert_eq!(resolved.source_format.parser, "parser:rye/core/python/ast");
+        assert_eq!(resolved.source_format.parser, "parser:ryeos/core/python/ast");
     }
 
     #[test]
@@ -925,7 +925,7 @@ location:
   directory: parsers
 formats:
   - extensions: [\".yaml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 ";
@@ -1006,15 +1006,15 @@ formats:
         assert_eq!(boot_fp, no_project_fp);
 
         // Project ships a parser descriptor that shadows
-        // `parser:rye/core/yaml/yaml`. Even though the descriptor
+        // `parser:ryeos/core/yaml/yaml`. Even though the descriptor
         // body is identical in shape to the test built-in, the
         // serialized bytes differ (different version field), so the
         // overlay MUST change the registry fingerprint.
         write_signed_parser_descriptor(
             &project_dir,
-            "rye/core/yaml/yaml",
+            "ryeos/core/yaml/yaml",
             "version: \"9.9.9-project-overlay\"\n\
-             handler: \"handler:rye/core/yaml-document\"\n\
+             handler: \"handler:ryeos/core/yaml-document\"\n\
              parser_api_version: 1\n\
              parser_config: {}\n",
         );
@@ -1037,7 +1037,7 @@ formats:
             .unwrap();
         let descriptor = effective
             .parser_tools
-            .get("parser:rye/core/yaml/yaml")
+            .get("parser:ryeos/core/yaml/yaml")
             .expect("project overlay descriptor present in effective dispatcher");
         assert_eq!(
             descriptor.version, "9.9.9-project-overlay",
@@ -1077,7 +1077,7 @@ formats:
             &project_dir,
             "proj/only",
             "version: \"1.0.0\"\n\
-             handler: \"handler:rye/core/yaml-document\"\n\
+             handler: \"handler:ryeos/core/yaml-document\"\n\
              parser_api_version: 1\n\
              parser_config:\n  require_mapping: true\n",
         );
@@ -1154,9 +1154,9 @@ formats:
         // identity would still hold but the test would be trivial.
         write_signed_parser_descriptor(
             &project_dir,
-            "rye/core/yaml/yaml",
+            "ryeos/core/yaml/yaml",
             "version: \"7.7.7-snapshot-test\"\n\
-             handler: \"handler:rye/core/yaml-document\"\n\
+             handler: \"handler:ryeos/core/yaml-document\"\n\
              parser_api_version: 1\n\
              parser_config: {}\n",
         );

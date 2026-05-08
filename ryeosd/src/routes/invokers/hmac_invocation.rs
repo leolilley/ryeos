@@ -1321,7 +1321,7 @@ mod tests {
         let test_vr = std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
             ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
             ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
         ]).unwrap());
         let test_ar = std::sync::Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
         let test_auth = std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));

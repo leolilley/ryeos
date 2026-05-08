@@ -1,0 +1,21 @@
+# ryeos:signed:2026-05-08T04:04:07Z:dfaf804110d15a49dc8ea84238562fde8490eb54dd3d98764043f60983dd8a6e:numqNCnSpPfx7N4/3RFU5ihvXbNepHo4uUY5R8mTvMluKNGYihoUq/OI3bFm3fdgDxOkM5b6I+vAzq8wnEeIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: tool_streaming_v1
+category: ryeos/core
+abi_version: v1
+description: Tool with streaming stdout chunks; daemon reads length-prefixed JSON frames during execution.
+stdin:
+  shape: parameters_json
+stdout:
+  shape: streaming_chunks_v1
+  mode: streaming
+env_injections:
+  - { name: RYE_THREAD_ID, source: thread_id }
+  - { name: RYE_PROJECT_PATH, source: project_path }
+capabilities:
+  allows_pushed_head: true
+  allows_target_site: true
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: none

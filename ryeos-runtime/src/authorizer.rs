@@ -3,15 +3,15 @@
 //! Single evaluator for all capability checks across the system.
 //! One implementation of matching logic (exact, `*`, `?`, prefix wildcards).
 //!
-//! Wire format: `rye.<verb>.<kind>.<subject>`
+//! Wire format: `ryeos.<verb>.<kind>.<subject>`
 //!
 //! Subjects use `/` as path separators, matching canonical ref format.
 //! Wildcards use `*` (matches any characters including `/`).
-//! Path-prefix wildcards use `/*` (e.g., `rye.execute.service.bundle/*`
+//! Path-prefix wildcards use `/*` (e.g., `ryeos.execute.service.bundle/*`
 //! matches `bundle/install`, `bundle/remove`, but not `bundleX`).
 //!
 //! Required-side patterns support wildcards in verb, kind, and subject
-//! positions. `require("rye.*")` means "any rye cap".
+//! positions. `require("ryeos.*")` means "any rye cap".
 //!
 //! # Example
 //!
@@ -29,13 +29,13 @@
 //!     },
 //!     ryeos_runtime::verb_registry::VerbDef {
 //!         name: "sign".into(),
-//!         execute: Some("tool:rye/core/sign".into()),
+//!         execute: Some("tool:ryeos/core/sign".into()),
 //!     },
 //! ]).unwrap());
 //! let authorizer = Authorizer::new(registry);
 //!
-//! let policy = AuthorizationPolicy::require("rye.execute.service.bundle/install");
-//! let scopes = vec!["rye.execute.service.*".to_string()];
+//! let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
+//! let scopes = vec!["ryeos.execute.service.*".to_string()];
 //!
 //! assert!(authorizer.authorize(&scopes, &policy).is_ok());
 //! ```
@@ -48,7 +48,7 @@ use crate::verb_registry::VerbRegistry;
 
 // ── Capability struct ─────────────────────────────────────────────────
 
-/// Parsed capability string in `rye.<verb>.<kind>.<subject>` format.
+/// Parsed capability string in `ryeos.<verb>.<kind>.<subject>` format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capability {
     pub verb: String,
@@ -59,18 +59,18 @@ pub struct Capability {
 /// Error from parsing an invalid capability string.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum CapabilityParseError {
-    #[error("invalid capability format: expected 'rye.<verb>.<kind>.<subject>', got '{0}'")]
+    #[error("invalid capability format: expected 'ryeos.<verb>.<kind>.<subject>', got '{0}'")]
     InvalidFormat(String),
 }
 
 impl Capability {
     /// Parse a capability string into structured parts.
     ///
-    /// `rye.execute.service.bundle/install` →
+    /// `ryeos.execute.service.bundle/install` →
     /// `Capability { verb: "execute", kind: "service", subject: "bundle/install" }`
     pub fn parse(s: &str) -> Result<Self, CapabilityParseError> {
         let parts: Vec<&str> = s.splitn(4, '.').collect();
-        if parts.len() < 4 || parts[0] != "rye" {
+        if parts.len() < 4 || parts[0] != "ryeos" {
             return Err(CapabilityParseError::InvalidFormat(s.to_string()));
         }
         Ok(Capability {
@@ -82,18 +82,18 @@ impl Capability {
 
     /// Render back to wire format.
     pub fn to_string(&self) -> String {
-        format!("rye.{}.{}.{}", self.verb, self.kind, self.subject)
+        format!("ryeos.{}.{}.{}", self.verb, self.kind, self.subject)
     }
 }
 
 /// Derive a canonical capability string from an executable ref.
 ///
 /// `canonical_cap("service", "bundle/install", "execute")` →
-/// `"rye.execute.service.bundle/install"`
+/// `"ryeos.execute.service.bundle/install"`
 ///
 /// Subject preserves `/` separators from the ref path. Wildcards match `/`.
 pub fn canonical_cap(kind: &str, ref_path: &str, verb: &str) -> String {
-    format!("rye.{}.{}.{}", verb, kind, ref_path)
+    format!("ryeos.{}.{}.{}", verb, kind, ref_path)
 }
 
 // ── RequiredPattern ──────────────────────────────────────────────────
@@ -104,13 +104,13 @@ pub fn canonical_cap(kind: &str, ref_path: &str, verb: &str) -> String {
 /// against policy requirements. Supports wildcards in any position.
 #[derive(Debug, Clone)]
 enum RequiredPattern {
-    /// `rye.*` — matches any verb, kind, subject.
+    /// `ryeos.*` — matches any verb, kind, subject.
     AllRye,
-    /// `rye.<verb>.*` — matches any kind and subject for a specific verb.
+    /// `ryeos.<verb>.*` — matches any kind and subject for a specific verb.
     VerbWildcard { verb: String },
-    /// `rye.<verb>.<kind>.*` — matches any subject for a specific verb and kind.
+    /// `ryeos.<verb>.<kind>.*` — matches any subject for a specific verb and kind.
     SubjectWildcard { verb: String, kind: String },
-    /// `rye.<verb>.<kind>.<subject>` — fully specified; subject may contain wildcards.
+    /// `ryeos.<verb>.<kind>.<subject>` — fully specified; subject may contain wildcards.
     Full {
         verb: String,
         kind: String,
@@ -125,7 +125,7 @@ impl RequiredPattern {
         if s == "*" {
             return RequiredPattern::Other(s.to_string());
         }
-        if !s.starts_with("rye.") {
+        if !s.starts_with("ryeos.") {
             return RequiredPattern::Other(s.to_string());
         }
 
@@ -137,7 +137,7 @@ impl RequiredPattern {
                 verb: parts[1].to_string(),
             },
             3 => RequiredPattern::Full {
-                // `rye.execute.service` without subject — treat as subject wildcard
+                // `ryeos.execute.service` without subject — treat as subject wildcard
                 verb: parts[1].to_string(),
                 kind: parts[2].to_string(),
                 subject: "*".to_string(),
@@ -164,27 +164,27 @@ impl RequiredPattern {
 
         match self {
             RequiredPattern::AllRye => {
-                // `rye.*` — any rye.* cap satisfies. Also satisfied by
-                // wildcard patterns like `rye.execute.*`.
-                granted.starts_with("rye.")
+                // `ryeos.*` — any ryeos.* cap satisfies. Also satisfied by
+                // wildcard patterns like `ryeos.execute.*`.
+                granted.starts_with("ryeos.")
             }
             RequiredPattern::VerbWildcard { verb } => {
-                // `rye.<verb>.*` — verb must match, kind/subject free.
+                // `ryeos.<verb>.*` — verb must match, kind/subject free.
                 if let Ok(cap) = Capability::parse(granted) {
                     if cap.verb == *verb {
                         return true;
                     }
                 }
-                cap_matches(granted, &format!("rye.{}.*", verb))
+                cap_matches(granted, &format!("ryeos.{}.*", verb))
             }
             RequiredPattern::SubjectWildcard { verb, kind } => {
-                // `rye.<verb>.<kind>.*` — verb and kind must match.
+                // `ryeos.<verb>.<kind>.*` — verb and kind must match.
                 if let Ok(cap) = Capability::parse(granted) {
                     if cap.verb == *verb && cap.kind == *kind {
                         return true;
                     }
                 }
-                cap_matches(granted, &format!("rye.{}.{}.*", verb, kind))
+                cap_matches(granted, &format!("ryeos.{}.{}.*", verb, kind))
             }
             RequiredPattern::Full {
                 verb,
@@ -198,7 +198,7 @@ impl RequiredPattern {
                         return true;
                     }
                 }
-                cap_matches(granted, &format!("rye.{}.{}.{}", verb, kind, subject))
+                cap_matches(granted, &format!("ryeos.{}.{}.{}", verb, kind, subject))
             }
             RequiredPattern::Other(req) => {
                 cap_matches(granted, req)
@@ -316,10 +316,10 @@ impl Authorizer {
     /// Check a single required capability against granted scopes.
     ///
     /// Two matching mechanisms:
-    /// 1. **Wildcard granted**: `granted = "rye.execute.service.*"` satisfies
-    ///    `required = "rye.execute.service.bundle/install"`.
-    /// 2. **Wildcard required**: `required = "rye.*"` is satisfied by any
-    ///    granted rye cap. `required = "rye.execute.service.*"` is satisfied
+    /// 1. **Wildcard granted**: `granted = "ryeos.execute.service.*"` satisfies
+    ///    `required = "ryeos.execute.service.bundle/install"`.
+    /// 2. **Wildcard required**: `required = "ryeos.*"` is satisfied by any
+    ///    granted rye cap. `required = "ryeos.execute.service.*"` is satisfied
     ///    by any granted cap with verb=execute, kind=service.
     fn check_single(&self, scopes: &[String], required: &str) -> bool {
         let pattern = RequiredPattern::parse(required);
@@ -339,10 +339,10 @@ impl Authorizer {
 /// Match a granted capability pattern against a required capability string.
 ///
 /// Supports:
-/// - Exact match (`rye.execute.service.x` matches itself)
+/// - Exact match (`ryeos.execute.service.x` matches itself)
 /// - Global wildcard (`*` matches everything)
-/// - Prefix wildcard (`rye.execute.service.*` matches `rye.execute.service.bundle/install`)
-/// - Path-prefix wildcard (`rye.execute.service.bundle/*` matches `rye.execute.service.bundle/install`)
+/// - Prefix wildcard (`ryeos.execute.service.*` matches `ryeos.execute.service.bundle/install`)
+/// - Path-prefix wildcard (`ryeos.execute.service.bundle/*` matches `ryeos.execute.service.bundle/install`)
 /// - Single-char wildcard (`?` matches exactly one character)
 ///
 /// Special regex chars in the granted pattern are escaped; only `*` and `?`
@@ -386,7 +386,7 @@ mod tests {
         Authorizer::new(Arc::new(VerbRegistry::from_records(&[
             VerbDef { name: "execute".into(), execute: None },
             VerbDef { name: "fetch".into(), execute: None },
-            VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+            VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
         ]).unwrap()))
     }
 
@@ -394,11 +394,11 @@ mod tests {
 
     #[test]
     fn capability_parse_round_trip() {
-        let cap = Capability::parse("rye.execute.service.bundle/install").unwrap();
+        let cap = Capability::parse("ryeos.execute.service.bundle/install").unwrap();
         assert_eq!(cap.verb, "execute");
         assert_eq!(cap.kind, "service");
         assert_eq!(cap.subject, "bundle/install");
-        assert_eq!(cap.to_string(), "rye.execute.service.bundle/install");
+        assert_eq!(cap.to_string(), "ryeos.execute.service.bundle/install");
     }
 
     #[test]
@@ -408,19 +408,19 @@ mod tests {
 
     #[test]
     fn capability_parse_rejects_too_short() {
-        assert!(Capability::parse("rye.execute").is_err());
-        assert!(Capability::parse("rye").is_err());
+        assert!(Capability::parse("ryeos.execute").is_err());
+        assert!(Capability::parse("ryeos").is_err());
     }
 
     #[test]
     fn canonical_cap_derivation() {
         assert_eq!(
             canonical_cap("service", "bundle/install", "execute"),
-            "rye.execute.service.bundle/install"
+            "ryeos.execute.service.bundle/install"
         );
         assert_eq!(
-            canonical_cap("tool", "rye/file-system/read", "execute"),
-            "rye.execute.tool.rye/file-system/read"
+            canonical_cap("tool", "ryeos/file-system/read", "execute"),
+            "ryeos.execute.tool.ryeos/file-system/read"
         );
     }
 
@@ -428,13 +428,13 @@ mod tests {
 
     #[test]
     fn required_pattern_rye_star() {
-        let p = RequiredPattern::parse("rye.*");
+        let p = RequiredPattern::parse("ryeos.*");
         assert!(matches!(p, RequiredPattern::AllRye));
     }
 
     #[test]
     fn required_pattern_verb_wildcard() {
-        let p = RequiredPattern::parse("rye.execute.*");
+        let p = RequiredPattern::parse("ryeos.execute.*");
         match p {
             RequiredPattern::VerbWildcard { verb } => assert_eq!(verb, "execute"),
             _ => panic!("expected VerbWildcard, got {:?}", p),
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn required_pattern_subject_wildcard() {
-        let p = RequiredPattern::parse("rye.execute.service.*");
+        let p = RequiredPattern::parse("ryeos.execute.service.*");
         match p {
             RequiredPattern::SubjectWildcard { verb, kind } => {
                 assert_eq!(verb, "execute");
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn required_pattern_full() {
-        let p = RequiredPattern::parse("rye.execute.service.bundle/install");
+        let p = RequiredPattern::parse("ryeos.execute.service.bundle/install");
         match p {
             RequiredPattern::Full { verb, kind, subject } => {
                 assert_eq!(verb, "execute");
@@ -479,47 +479,47 @@ mod tests {
 
     #[test]
     fn all_rye_matches_any_rye_cap() {
-        let p = RequiredPattern::parse("rye.*");
-        assert!(p.matches("rye.execute.service.x"));
-        assert!(p.matches("rye.fetch.tool.y/z"));
-        assert!(p.matches("rye.sign.directive.a"));
+        let p = RequiredPattern::parse("ryeos.*");
+        assert!(p.matches("ryeos.execute.service.x"));
+        assert!(p.matches("ryeos.fetch.tool.y/z"));
+        assert!(p.matches("ryeos.sign.directive.a"));
         assert!(!p.matches("node.maintenance"));
     }
 
     #[test]
     fn verb_wildcard_matches_any_kind() {
-        let p = RequiredPattern::parse("rye.execute.*");
-        assert!(p.matches("rye.execute.service.x"));
-        assert!(p.matches("rye.execute.tool.y"));
-        assert!(!p.matches("rye.fetch.service.x"));
+        let p = RequiredPattern::parse("ryeos.execute.*");
+        assert!(p.matches("ryeos.execute.service.x"));
+        assert!(p.matches("ryeos.execute.tool.y"));
+        assert!(!p.matches("ryeos.fetch.service.x"));
     }
 
     #[test]
     fn subject_wildcard_matches_any_subject() {
-        let p = RequiredPattern::parse("rye.execute.service.*");
-        assert!(p.matches("rye.execute.service.bundle/install"));
-        assert!(p.matches("rye.execute.service.threads/get"));
-        assert!(!p.matches("rye.execute.tool.x"));
+        let p = RequiredPattern::parse("ryeos.execute.service.*");
+        assert!(p.matches("ryeos.execute.service.bundle/install"));
+        assert!(p.matches("ryeos.execute.service.threads/get"));
+        assert!(!p.matches("ryeos.execute.tool.x"));
     }
 
     #[test]
     fn full_pattern_exact_subject() {
-        let p = RequiredPattern::parse("rye.execute.service.bundle/install");
-        assert!(p.matches("rye.execute.service.bundle/install"));
-        assert!(!p.matches("rye.execute.service.bundle/remove"));
+        let p = RequiredPattern::parse("ryeos.execute.service.bundle/install");
+        assert!(p.matches("ryeos.execute.service.bundle/install"));
+        assert!(!p.matches("ryeos.execute.service.bundle/remove"));
     }
 
     #[test]
     fn full_pattern_wildcard_subject() {
-        let p = RequiredPattern::parse("rye.execute.service.bundle/*");
-        assert!(p.matches("rye.execute.service.bundle/install"));
-        assert!(p.matches("rye.execute.service.bundle/remove"));
-        assert!(!p.matches("rye.execute.service.bundleX"));
+        let p = RequiredPattern::parse("ryeos.execute.service.bundle/*");
+        assert!(p.matches("ryeos.execute.service.bundle/install"));
+        assert!(p.matches("ryeos.execute.service.bundle/remove"));
+        assert!(!p.matches("ryeos.execute.service.bundleX"));
     }
 
     #[test]
     fn global_wildcard_always_matches() {
-        let p = RequiredPattern::parse("rye.*");
+        let p = RequiredPattern::parse("ryeos.*");
         assert!(p.matches("*"));
     }
 
@@ -528,81 +528,81 @@ mod tests {
     #[test]
     fn exact_match() {
         assert!(cap_matches(
-            "rye.execute.service.threads/get",
-            "rye.execute.service.threads/get"
+            "ryeos.execute.service.threads/get",
+            "ryeos.execute.service.threads/get"
         ));
     }
 
     #[test]
     fn no_match_denied() {
         assert!(!cap_matches(
-            "rye.execute.service.threads/get",
-            "rye.execute.service.threads/list"
+            "ryeos.execute.service.threads/get",
+            "ryeos.execute.service.threads/list"
         ));
     }
 
     #[test]
     fn global_wildcard() {
-        assert!(cap_matches("*", "rye.execute.service.threads/get"));
+        assert!(cap_matches("*", "ryeos.execute.service.threads/get"));
         assert!(cap_matches("*", "anything.at.all"));
     }
 
     #[test]
     fn prefix_wildcard() {
         assert!(cap_matches(
-            "rye.execute.service.*",
-            "rye.execute.service.bundle/install"
+            "ryeos.execute.service.*",
+            "ryeos.execute.service.bundle/install"
         ));
     }
 
     #[test]
     fn path_prefix_wildcard() {
         assert!(cap_matches(
-            "rye.execute.service.bundle/*",
-            "rye.execute.service.bundle/install"
+            "ryeos.execute.service.bundle/*",
+            "ryeos.execute.service.bundle/install"
         ));
         assert!(!cap_matches(
-            "rye.execute.service.bundle/*",
-            "rye.execute.service.bundleX"
+            "ryeos.execute.service.bundle/*",
+            "ryeos.execute.service.bundleX"
         ));
     }
 
     #[test]
     fn prefix_respects_kind() {
         assert!(!cap_matches(
-            "rye.execute.service.*",
-            "rye.execute.tool.rye/file-system/read"
+            "ryeos.execute.service.*",
+            "ryeos.execute.tool.ryeos/file-system/read"
         ));
     }
 
     #[test]
     fn wildcard_does_not_cross_boundaries_without_star() {
-        assert!(!cap_matches("rye.execute", "rye.execute.tool.foo"));
+        assert!(!cap_matches("ryeos.execute", "ryeos.execute.tool.foo"));
     }
 
     #[test]
     fn single_char_wildcard() {
         assert!(cap_matches(
-            "rye.execute.tool.rye/?/fs_read",
-            "rye.execute.tool.rye/x/fs_read"
+            "ryeos.execute.tool.rye/?/fs_read",
+            "ryeos.execute.tool.rye/x/fs_read"
         ));
         assert!(!cap_matches(
-            "rye.execute.tool.rye/?/fs_read",
-            "rye.execute.tool.rye/xx/fs_read"
+            "ryeos.execute.tool.rye/?/fs_read",
+            "ryeos.execute.tool.rye/xx/fs_read"
         ));
     }
 
     #[test]
     fn full_wildcard() {
-        assert!(cap_matches("rye.*", "rye.execute.tool.anything"));
-        assert!(cap_matches("rye.*", "rye.fetch.directive.anything"));
+        assert!(cap_matches("ryeos.*", "ryeos.execute.tool.anything"));
+        assert!(cap_matches("ryeos.*", "ryeos.fetch.directive.anything"));
     }
 
     #[test]
     fn slash_in_subject_matches_wildcard() {
         assert!(cap_matches(
-            "rye.execute.service.*",
-            "rye.execute.service.bundle/install"
+            "ryeos.execute.service.*",
+            "ryeos.execute.service.bundle/install"
         ));
     }
 
@@ -611,49 +611,49 @@ mod tests {
     #[test]
     fn execute_does_not_imply_fetch() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.fetch.service.x");
-        let scopes = vec!["rye.execute.service.x".to_string()];
+        let policy = AuthorizationPolicy::require("ryeos.fetch.service.x");
+        let scopes = vec!["ryeos.execute.service.x".to_string()];
         assert!(auth.authorize(&scopes, &policy).is_err());
     }
 
     #[test]
     fn fetch_does_not_imply_execute() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.execute.service.x");
-        let scopes = vec!["rye.fetch.service.x".to_string()];
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.x");
+        let scopes = vec!["ryeos.fetch.service.x".to_string()];
         assert!(auth.authorize(&scopes, &policy).is_err());
     }
 
     #[test]
     fn sign_does_not_imply_fetch() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.fetch.tool.x");
-        let scopes = vec!["rye.sign.tool.x".to_string()];
+        let policy = AuthorizationPolicy::require("ryeos.fetch.tool.x");
+        let scopes = vec!["ryeos.sign.tool.x".to_string()];
         assert!(auth.authorize(&scopes, &policy).is_err());
     }
 
     #[test]
     fn wildcard_grant_satisfies_all() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.execute.service.bundle/install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
         assert!(auth.authorize(&["*".to_string()], &policy).is_ok());
     }
 
     #[test]
     fn prefix_wildcard_grant() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.execute.service.bundle/install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
         assert!(auth
-            .authorize(&["rye.execute.service.*".to_string()], &policy)
+            .authorize(&["ryeos.execute.service.*".to_string()], &policy)
             .is_ok());
     }
 
     #[test]
     fn path_prefix_wildcard_grant() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.execute.service.bundle/install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
         assert!(auth
-            .authorize(&["rye.execute.service.bundle/*".to_string()], &policy)
+            .authorize(&["ryeos.execute.service.bundle/*".to_string()], &policy)
             .is_ok());
     }
 
@@ -662,37 +662,37 @@ mod tests {
     #[test]
     fn rye_wildcard_required_satisfied_by_any_rye_grant() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.*");
-        assert!(auth.authorize(&["rye.execute.service.x".to_string()], &policy).is_ok());
-        assert!(auth.authorize(&["rye.fetch.tool.y".to_string()], &policy).is_ok());
-        assert!(auth.authorize(&["rye.*".to_string()], &policy).is_ok());
+        let policy = AuthorizationPolicy::require("ryeos.*");
+        assert!(auth.authorize(&["ryeos.execute.service.x".to_string()], &policy).is_ok());
+        assert!(auth.authorize(&["ryeos.fetch.tool.y".to_string()], &policy).is_ok());
+        assert!(auth.authorize(&["ryeos.*".to_string()], &policy).is_ok());
         assert!(auth.authorize(&["*".to_string()], &policy).is_ok());
     }
 
     #[test]
     fn verb_wildcard_required_satisfied_by_concrete_grant() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.execute.*");
+        let policy = AuthorizationPolicy::require("ryeos.execute.*");
         assert!(auth
-            .authorize(&["rye.execute.service.x".to_string()], &policy)
+            .authorize(&["ryeos.execute.service.x".to_string()], &policy)
             .is_ok());
         assert!(auth
-            .authorize(&["rye.execute.tool.y".to_string()], &policy)
+            .authorize(&["ryeos.execute.tool.y".to_string()], &policy)
             .is_ok());
         assert!(auth
-            .authorize(&["rye.fetch.service.x".to_string()], &policy)
+            .authorize(&["ryeos.fetch.service.x".to_string()], &policy)
             .is_err());
     }
 
     #[test]
     fn subject_wildcard_required_satisfied_by_concrete_grant() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.execute.service.*");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.*");
         assert!(auth
-            .authorize(&["rye.execute.service.bundle/install".to_string()], &policy)
+            .authorize(&["ryeos.execute.service.bundle/install".to_string()], &policy)
             .is_ok());
         assert!(auth
-            .authorize(&["rye.execute.service.threads/get".to_string()], &policy)
+            .authorize(&["ryeos.execute.service.threads/get".to_string()], &policy)
             .is_ok());
     }
 
@@ -700,9 +700,9 @@ mod tests {
     fn different_verbs_are_independent() {
         let auth = test_authorizer();
         // Without implication, each verb is checked independently
-        let policy = AuthorizationPolicy::require("rye.execute.service.bundle/install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
         assert!(auth
-            .authorize(&["rye.fetch.service.*".to_string()], &policy)
+            .authorize(&["ryeos.fetch.service.*".to_string()], &policy)
             .is_err());
     }
 
@@ -718,7 +718,7 @@ mod tests {
     #[test]
     fn empty_scopes_denied() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("rye.execute.service.x");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.x");
         assert!(auth.authorize(&[], &policy).is_err());
     }
 
@@ -726,12 +726,12 @@ mod tests {
     fn multiple_required_all_must_pass() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require_all(&[
-            "rye.execute.service.a",
-            "rye.execute.service.b",
+            "ryeos.execute.service.a",
+            "ryeos.execute.service.b",
         ]);
         let scopes = vec![
-            "rye.execute.service.a".to_string(),
-            "rye.execute.service.b".to_string(),
+            "ryeos.execute.service.a".to_string(),
+            "ryeos.execute.service.b".to_string(),
         ];
         assert!(auth.authorize(&scopes, &policy).is_ok());
     }
@@ -740,11 +740,11 @@ mod tests {
     fn multiple_required_one_missing_denies() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require_all(&[
-            "rye.execute.service.a",
-            "rye.execute.service.b",
+            "ryeos.execute.service.a",
+            "ryeos.execute.service.b",
         ]);
         assert!(auth
-            .authorize(&["rye.execute.service.a".to_string()], &policy)
+            .authorize(&["ryeos.execute.service.a".to_string()], &policy)
             .is_err());
     }
 
@@ -762,7 +762,7 @@ mod tests {
         let vr = Arc::new(VerbRegistry::from_records(&[
             VerbDef { name: "execute".into(), execute: None },
             VerbDef { name: "fetch".into(), execute: None },
-            VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+            VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
         ]).unwrap());
         let auth = Authorizer::new(vr.clone());
         let state_ptr = &*vr as *const VerbRegistry;
@@ -776,21 +776,21 @@ mod tests {
     fn subject_uses_slash_not_dot() {
         assert_eq!(
             canonical_cap("service", "bundle/install", "execute"),
-            "rye.execute.service.bundle/install"
+            "ryeos.execute.service.bundle/install"
         );
     }
 
     #[test]
     fn wildcard_matches_slash_subject() {
         assert!(cap_matches(
-            "rye.execute.service.*",
-            "rye.execute.service.bundle/install"
+            "ryeos.execute.service.*",
+            "ryeos.execute.service.bundle/install"
         ));
     }
 
     #[test]
     fn slash_subject_matches_across_systems() {
-        assert!(cap_matches("rye.execute.*", &canonical_cap("service", "node-sign", "execute")));
-        assert!(cap_matches("rye.execute.*", &canonical_cap("directive", "rye/code/review", "execute")));
+        assert!(cap_matches("ryeos.execute.*", &canonical_cap("service", "node-sign", "execute")));
+        assert!(cap_matches("ryeos.execute.*", &canonical_cap("directive", "ryeos/code/review", "execute")));
     }
 }

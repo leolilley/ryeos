@@ -115,9 +115,9 @@ fn parse_signature_info_from_bytes(bytes: &[u8]) -> Option<Value> {
     let content = std::str::from_utf8(bytes).ok()?;
     let first_line = content.lines().next()?;
 
-    let remainder = if let Some(r) = first_line.strip_prefix("# rye:signed:") {
+    let remainder = if let Some(r) = first_line.strip_prefix("# ryeos:signed:") {
         r
-    } else if let Some(inner) = first_line.strip_prefix("<!-- rye:signed:") {
+    } else if let Some(inner) = first_line.strip_prefix("<!-- ryeos:signed:") {
         inner.strip_suffix("-->")?.trim()
     } else {
         return None;

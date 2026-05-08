@@ -74,10 +74,10 @@ execution:
   resolution: []
 formats:
   - extensions: [".yaml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -101,7 +101,7 @@ default: true
 binary_ref: bin/{host_triple}/directive_runner
 abi_version: v1
 required_caps:
-  - rye.read.directive.*
+  - ryeos.read.directive.*
 description: Default directive runtime
 schema:
   envelope: LaunchEnvelope
@@ -147,7 +147,7 @@ fn parse_runtime_yaml_success() {
     assert_eq!(yaml.default, Some(true));
     assert_eq!(yaml.binary_ref, "bin/{host_triple}/directive_runner");
     assert_eq!(yaml.abi_version, "v1");
-    assert_eq!(yaml.required_caps, vec!["rye.read.directive.*".to_string()]);
+    assert_eq!(yaml.required_caps, vec!["ryeos.read.directive.*".to_string()]);
     assert_eq!(yaml.description.as_deref(), Some("Default directive runtime"));
     let schema = yaml.schema.expect("schema present");
     assert_eq!(schema.envelope, "LaunchEnvelope");
@@ -400,15 +400,15 @@ location:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/opaque
+    protocol: protocol:ryeos/core/opaque
   thread_profile: fake_run
   resolution: []
 formats:
   - extensions: [".yaml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -455,8 +455,8 @@ abi_version: "v1"
             found,
         } => {
             assert_eq!(kind, "fake_kind");
-            assert_eq!(expected, "protocol:rye/core/runtime_v1");
-            assert_eq!(found, "protocol:rye/core/opaque");
+            assert_eq!(expected, "protocol:ryeos/core/runtime_v1");
+            assert_eq!(found, "protocol:ryeos/core/opaque");
             assert!(runtime.contains("wrong-protocol-rt"));
         }
         other => panic!("expected RuntimeProtocolMismatch, got: {other:?}"),
@@ -479,10 +479,10 @@ location:
   directory: no_exec_items
 formats:
   - extensions: [".yaml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

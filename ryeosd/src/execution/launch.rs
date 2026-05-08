@@ -119,7 +119,7 @@ pub fn resolve_native_executor_path(
     // first one whose manifest contains the requested executor. This
     // matches the kind/parser-discovery model: each bundle owns a
     // disjoint slice of the executor namespace (core ships utility
-    // bins like `rye-inspect`; standard ships runtime drivers like
+    // bins like `ryos-core-tools`; standard ships runtime drivers like
     // `ryeos-directive-runtime`). Picking the first manifest blindly
     // would cause core to shadow standard for runtimes that only
     // standard ships.
@@ -933,9 +933,9 @@ mod tests {
 
     #[test]
     fn caps_passed_through_from_policy_fact() {
-        let view = view_with_caps(vec!["rye.execute.tool.bash", "rye.execute.tool.read"]);
+        let view = view_with_caps(vec!["ryeos.execute.tool.bash", "ryeos.execute.tool.read"]);
         let caps = derive_effective_caps(&view);
-        assert_eq!(caps, vec!["rye.execute.tool.bash", "rye.execute.tool.read"]);
+        assert_eq!(caps, vec!["ryeos.execute.tool.bash", "ryeos.execute.tool.read"]);
     }
 
     #[test]

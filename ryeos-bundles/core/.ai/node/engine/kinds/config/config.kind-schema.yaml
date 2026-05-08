@@ -1,17 +1,17 @@
-# rye:signed:2026-05-05T09:31:54Z:e707807545c8a454d9f817fd97dc548d6a53b5868b8be07546c81a976ab88a7f:NgiB4CKjaz9ZuhqJf4g8Sh+ZiOWGyk0DnaNPoMp25bjz8tN+mljwtx/1BB1p/SBsxEqbY1O5zUe2QGgywH65BA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:2d549d41efb7f38e5fd6d8133c81027ea04c5b45d080176225645beacbc26882:832XKUaA7eODCfynq4WuEks7maq8Yz5s862ALvjsIcCZzBa0dLUS5UfufACdleIG9UBJJuPruvMbtj5xWRYNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/config"
 version: "1.0.0"
 location:
   directory: config
 formats:
   - extensions: [".yaml", ".yml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
 # Each config consumer enforces its own schema — config kind is an
 # escape hatch for per-domain configs (execution.yaml, etc.).
 # Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

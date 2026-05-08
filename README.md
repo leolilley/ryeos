@@ -1,10 +1,10 @@
-<!-- [![RYE OS](docs/assets/hero.png)](https://ryeos.net) -->
+<!-- [![RyeOS OS](docs/assets/hero.png)](https://ryeos.net) -->
 
-# RYE OS
+# RyeOS OS
 
-> _"In Linux, everything is a file. In RYE, everything is data."_
+> _"In Linux, everything is a file. In RyeOS, everything is data."_
 
-RYE (RYE Your Execution) is a portable operating system for AI. It gives any LLM a persistent, signed workspace that travels with you across projects, machines, and models. Three tools. One substrate.
+RyeOS (RyeOS Your Execution) is a portable operating system for AI. It gives any LLM a persistent, signed workspace that travels with you across projects, machines, and models. Three tools. One substrate.
 
 | Tool      | Purpose                               |
 | --------- | ------------------------------------- |
@@ -14,23 +14,23 @@ RYE (RYE Your Execution) is a portable operating system for AI. It gives any LLM
 
 ---
 
-Most agent frameworks treat the model as something you call. RYE treats it as something you _are_.
+Most agent frameworks treat the model as something you call. RyeOS treats it as something you _are_.
 
-RYE gives you a signing key, your identity inside the system. Every item that flows through RYE carries a signature — yours, or from authors you trust. When you hand that off to a thread, push it to the registry, or run it six months from now in a different project, the chain of custody is intact. RYE knows who built it, and it knows it hasn't been touched. The registry extends this: pull signed items from the community, trust the author, and they flow through the same integrity checks as your own.
+RyeOS gives you a signing key, your identity inside the system. Every item that flows through RyeOS carries a signature — yours, or from authors you trust. When you hand that off to a thread, push it to the registry, or run it six months from now in a different project, the chain of custody is intact. RyeOS knows who built it, and it knows it hasn't been touched. The registry extends this: pull signed items from the community, trust the author, and they flow through the same integrity checks as your own.
 
 That's not just a security feature. It's a framing: you're not configuring a tool, you're establishing an identity inside a system that multiple models — Claude, GPT, Gemini, whatever comes next — will operate within. Swap the model. The substrate remains. Your signed tools remain. The capabilities you've defined remain. The intelligence compounds.
 
-RYE is the policy and orchestration layer that MCP is missing.
+RyeOS is the policy and orchestration layer that MCP is missing.
 
 ---
 
 ## How It Works
 
-RYE inverts the relationship between code and data. Runtimes, retry logic, error classification, provider configs — all swappable YAML files, not hardcoded behavior. Adding a new language runtime is a YAML file. No code changes, no recompilation.
+RyeOS inverts the relationship between code and data. Runtimes, retry logic, error classification, provider configs — all swappable YAML files, not hardcoded behavior. Adding a new language runtime is a YAML file. No code changes, no recompilation.
 
-At the base is Lillux, a microkernel that handles OS-level primitive execution. Every tool call follows a signed chain: your tool → a runtime that defines how to run it → a Lillux primitive that executes. Each element verified before anything runs. Tampered items are rejected. No fallback. No bypass. RYE never sees your environment variables or secrets — that happens at the Lillux and OS level, below RYE entirely.
+At the base is Lillux, a microkernel that handles OS-level primitive execution. Every tool call follows a signed chain: your tool → a runtime that defines how to run it → a Lillux primitive that executes. Each element verified before anything runs. Tampered items are rejected. No fallback. No bypass. RyeOS never sees your environment variables or secrets — that happens at the Lillux and OS level, below RyeOS entirely.
 
-Orchestration follows the same philosophy. Spawn child RYE threads as separate processes. Budgets cascade — children can never spend more than the parent allocated. Capabilities attenuate — each level can only have equal or fewer permissions than its parent. Full transcripts are readable in real time.
+Orchestration follows the same philosophy. Spawn child RyeOS threads as separate processes. Budgets cascade — children can never spend more than the parent allocated. Capabilities attenuate — each level can only have equal or fewer permissions than its parent. Full transcripts are readable in real time.
 
 Workflows can be defined as declarative YAML state graphs — deterministic steps and LLM reasoning are routed through the same execution layer.
 
@@ -53,7 +53,7 @@ pip install ryeos-mcp
 ```json
 {
   "mcpServers": {
-    "rye": {
+    "ryeos": {
       "command": "ryeos-mcp",
       "env": {
         "USER_SPACE": "/home/you"
@@ -65,13 +65,13 @@ pip install ryeos-mcp
 
 > `USER_SPACE` sets the base path for your user-level `.ai/` directory (defaults to `~`). See [Installation docs](docs/getting-started/installation.md) for per-client examples and other environment variables.
 
-**Then direct RYE to initialise by expressing the intent:**
+**Then direct RyeOS to initialise by expressing the intent:**
 
 > _"rye execute directive init"_
 
-RYE operates through your model and harness of choice. Successfully actioning the baseline init directive demonstrates the compatiblity of your chosen model and harness to follow RYE directives and context.
+RyeOS operates through your model and harness of choice. Successfully actioning the baseline init directive demonstrates the compatiblity of your chosen model and harness to follow RyeOS directives and context.
 
-The baseline init directive instructs RYE to handle your system setup and guide you through RYE itself.
+The baseline init directive instructs RyeOS to handle your system setup and guide you through RyeOS itself.
 
 ---
 
@@ -81,13 +81,13 @@ The baseline init directive instructs RYE to handle your system setup and guide 
 | -------------- | ------------------------------------------------------------------------------------------ |
 | `lillux`       | Microkernel — subprocess, HTTP, signing, integrity primitives                              |
 | `ryeos-engine` | Execution engine — resolver, executor, metadata                                            |
-| `ryeos-core`   | Minimal bundle for core rye functionality (`rye/core/*` items only)                        |
+| `ryeos-core`   | Minimal bundle for core ryeos functionality (`ryeos/core/*` items only)                        |
 | `ryeos`        | Standard bundle — agent, bash, file-system, MCP, primary actions                           |
 | `ryeos-mcp`    | Standard bundle + MCP server transport (stdio/SSE)                                         |
 | `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three commands                  |
 | `ryeos-node`   | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
 
-> **Note:** The CLI (`ryeos-cli/`, Rust crate, binary `rye`) is a developer/debugging tool, not the primary interface. RYE is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
+> **Note:** The CLI (`ryeos-cli/`, Rust crate, binary `ryeos`) is a developer/debugging tool, not the primary interface. RyeOS is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 
 Both `ryeos` and `ryeos-mcp` support optional extras:
 
@@ -116,7 +116,7 @@ Named remotes are configured in `remotes/remotes.yaml`:
 remotes:
   default:
     url: "https://ryeos-node--execute.modal.run"
-    key_env: "RYE_REMOTE_API_KEY"
+    key_env: "RYEOS_REMOTE_API_KEY"
   gpu:
     url: "https://gpu-worker--execute.modal.run"
     key_env: "GPU_REMOTE_API_KEY"
@@ -125,7 +125,7 @@ remotes:
 Target a remote via the `target` parameter:
 
 ```python
-rye_execute(item_id="tool:my/heavy-compute", target="remote:gpu")
+ryeos_execute(item_id="tool:my/heavy-compute", target="remote:gpu")
 ```
 
 State graph nodes can also specify per-node remotes for hybrid local/remote workflows.

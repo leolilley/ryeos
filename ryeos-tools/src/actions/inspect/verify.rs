@@ -1,4 +1,4 @@
-//! `rye-inspect verify` — resolve and trust-verify an item through the engine.
+//! `ryos-core-tools verify` — resolve and trust-verify an item through the engine.
 
 use std::path::Path;
 

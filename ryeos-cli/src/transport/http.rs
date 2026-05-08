@@ -19,10 +19,10 @@ pub async fn post_json(
         .method("POST")
         .uri(&url)
         .header("content-type", "application/json")
-        .header("x-rye-key-id", &headers.key_id)
-        .header("x-rye-timestamp", &headers.timestamp)
-        .header("x-rye-nonce", &headers.nonce)
-        .header("x-rye-signature", &headers.signature)
+        .header("x-ryeos-key-id", &headers.key_id)
+        .header("x-ryeos-timestamp", &headers.timestamp)
+        .header("x-ryeos-nonce", &headers.nonce)
+        .header("x-ryeos-signature", &headers.signature)
         .body(Full::new(Bytes::from(body.to_vec())))
         .map_err(|e| CliTransportError::Unreachable {
             bind: bind.to_string(),

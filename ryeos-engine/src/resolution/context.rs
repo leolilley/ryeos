@@ -350,7 +350,7 @@ pub(crate) fn load_item_at(
     // runtimes don't need (or trust) the daemon-stripped signature.
     //
     // Envelope-aware: only strip lines that match THIS kind's
-    // signature envelope. A `# rye:signed:...` line in the body of a
+    // signature envelope. A `# ryeos:signed:...` line in the body of a
     // markdown directive (envelope `<!-- ... -->`) is NOT part of the
     // bootstrap signature layer and must reach the runtime intact —
     // identical to what the parser dispatcher sees.

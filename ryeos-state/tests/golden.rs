@@ -1,6 +1,6 @@
 //! Golden tests for canonical JSON serialization and hashing.
 //!
-//! These tests verify that Rust rye-state produces identical canonical JSON
+//! These tests verify that Rust ryeos-state produces identical canonical JSON
 //! and SHA256 hashes across runs (determinism and stability).
 //!
 //! To regenerate expected hashes after a format change:
@@ -55,7 +55,7 @@ fn golden_thread_event_canonical_json() {
             "prev_thread_event_hash": null,
             "payload": {
                 "kind": "tool",
-                "item_ref": "tool:rye/bash/bash",
+                "item_ref": "tool:ryeos/bash/bash",
                 "executor_ref": "native:subprocess"
             }
         }),
@@ -98,7 +98,7 @@ fn golden_thread_snapshot_canonical_json() {
             "thread_id": "T-snap-002",
             "parent_thread_id": "T-root-001",
             "chain_root_id": "T-root-001",
-            "item_ref": "tool:rye/bash/bash",
+            "item_ref": "tool:ryeos/bash/bash",
             "executor_ref": "native:subprocess",
             "status": "completed",
             "ts": "2026-04-21T12:00:05Z",
@@ -147,7 +147,7 @@ fn golden_chain_state_canonical_json() {
             "thread_id": "T-root-001",
             "state": {
                 "phase": "executing",
-                "item_ref": "tool:rye/bash/bash",
+                "item_ref": "tool:ryeos/bash/bash",
                 "exit_code": 0
             },
             "ts": "2026-04-21T12:00:02Z"

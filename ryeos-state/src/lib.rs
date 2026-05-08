@@ -1,4 +1,4 @@
-//! rye-state — CAS-as-truth persistence plane for RyeOS.
+//! ryeos-state — CAS-as-truth persistence plane for RyeOS.
 //!
 //! This crate owns the answer to "what happened and how to prove it."
 //! It provides CAS object type definitions, chain operations, signed ref

@@ -1,6 +1,6 @@
 //! Smoke test for `common::fast_fixture` + `DaemonHarness::start_fast`.
 //!
-//! Proves that pre-populated deterministic state (no real `rye init`)
+//! Proves that pre-populated deterministic state (no real `ryeos init`)
 //! is sufficient for the daemon to boot, accept HTTP traffic, and
 //! return its own self-introspection via `/health` + `service:system/status`.
 

@@ -11,15 +11,15 @@ mod common;
 use common::DaemonHarness;
 use serde_json::{json, Value};
 
-/// Spawn the fast-fixture daemon harness with `RYE_SYSTEM_SPACE`
+/// Spawn the fast-fixture daemon harness with `RYEOS_SYSTEM_SPACE_DIR`
 /// pointed at a per-test isolated copy of the `core` bundle. Use this
 /// instead of `DaemonHarness::start_fast()` for any test that
-/// exercises `bin:rye-inspect` resolution
-/// (`tool:rye/core/{fetch,verify,identity}`).
+/// exercises `bin:ryos-core-tools` resolution
+/// (`tool:ryeos/core/{fetch,verify,identity}`).
 ///
 /// Each test gets its own bundle directory under
 /// `target/test-bundles/service_data_e2e/<test_name>/` so concurrent
-/// nextest processes never race the same `target/debug/rye-inspect`
+/// nextest processes never race the same `target/debug/ryos-core-tools`
 /// symlink against the bundle manifest hash. See
 /// [`ryeos_tools::test_support::isolated_core_bundle`] and
 /// `docs/operations/dev-tree-caveats.md`.
@@ -32,7 +32,7 @@ async fn start_with_isolated_bundle(
     DaemonHarness::start_fast_with(
         |_, _, _| Ok(()),
         move |cmd| {
-            cmd.env("RYE_SYSTEM_SPACE", &bundle);
+            cmd.env("RYEOS_SYSTEM_SPACE_DIR", &bundle);
         },
     )
     .await
@@ -89,7 +89,7 @@ async fn service_system_status_returns_snapshot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_identity_public_key_returns_doc() {
     let (h, _fixture) = start_with_isolated_bundle("tool_identity_public_key_returns_doc").await;
-    let (status, body) = exec(&h, "tool:rye/core/identity/public_key", json!({})).await;
+    let (status, body) = exec(&h, "tool:ryeos/core/identity/public_key", json!({})).await;
     let result = unwrap_tool_result(status, &body, "identity.public_key");
     // The node identity doc must contain a non-empty fingerprint and a
     // non-empty public_key field. Look for either spelling.
@@ -285,7 +285,7 @@ async fn service_events_chain_replay_returns_events_for_audit_chain() {
 async fn tool_fetch_resolves_known_service() {
     let (h, _fixture) = start_with_isolated_bundle("tool_fetch_resolves_known_service").await;
     let (status, body) = exec(
-        &h, "tool:rye/core/fetch",
+        &h, "tool:ryeos/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": false, "verify": true}),
     ).await;
     let result = unwrap_tool_result(status, &body, "fetch");
@@ -304,7 +304,7 @@ async fn tool_fetch_resolves_known_service() {
 async fn tool_fetch_with_content_includes_body() {
     let (h, _fixture) = start_with_isolated_bundle("tool_fetch_with_content_includes_body").await;
     let (status, body) = exec(
-        &h, "tool:rye/core/fetch",
+        &h, "tool:ryeos/core/fetch",
         json!({"item_ref": "service:system/status", "with_content": true, "verify": false}),
     ).await;
     let result = unwrap_tool_result(status, &body, "fetch with_content");
@@ -320,7 +320,7 @@ async fn tool_fetch_with_content_includes_body() {
 async fn tool_fetch_unknown_ref_errors() {
     let (h, _fixture) = start_with_isolated_bundle("tool_fetch_unknown_ref_errors").await;
     let (status, body) = exec(
-        &h, "tool:rye/core/fetch",
+        &h, "tool:ryeos/core/fetch",
         json!({"item_ref": "service:does/not/exist"}),
     ).await;
     // The fetch tool returns 200 with a result containing fetch_status:
@@ -343,7 +343,7 @@ async fn tool_fetch_unknown_ref_errors() {
 async fn tool_verify_returns_trusted_for_core_service() {
     let (h, _fixture) = start_with_isolated_bundle("tool_verify_returns_trusted_for_core_service").await;
     let (status, body) = exec(
-        &h, "tool:rye/core/verify",
+        &h, "tool:ryeos/core/verify",
         json!({"item_ref": "service:system/status"}),
     ).await;
     let result = unwrap_tool_result(status, &body, "verify");

@@ -121,7 +121,7 @@ const SPAWN_ENV_ALLOWLIST: &[&str] = &[
     "TZ",
     "TMPDIR",
     "USER_SPACE",            // root discovery (set by daemon)
-    "RYE_SYSTEM_SPACE",      // root discovery (set by daemon)
+    "RYEOS_SYSTEM_SPACE_DIR", // root discovery (set by daemon)
     "RUST_LOG", "RUST_BACKTRACE",
     "RYEOSD_TEST_STDERR_DIR",
 ];

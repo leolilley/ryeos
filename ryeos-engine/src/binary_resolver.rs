@@ -7,7 +7,7 @@
 //!
 //!   - `bin:<name>` — the canonical short form used by tool YAMLs.
 //!     The triple is implicit (always the host triple), so authors
-//!     don't have to mention it; it's also the form `rye-bundle-tool`
+//!     don't have to mention it; it's also the form `ryeos publish`
 //!     emits when describing tool binary refs.
 //!
 //!   - `bin/<triple>/<name>` — the path-style form used by runtime

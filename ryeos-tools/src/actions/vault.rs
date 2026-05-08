@@ -1,4 +1,4 @@
-//! Operator-side vault verbs — `rye vault {put,list,remove,rewrap}`.
+//! Operator-side vault verbs — `ryeos vault {put,list,remove,rewrap}`.
 //!
 //! These verbs operate directly on the daemon's on-disk vault key
 //! (`<state>/.ai/node/vault/private_key.pem`) and the sealed
@@ -23,7 +23,7 @@
 //! consumes [`validate_decrypted_keys`] post-decrypt to enforce the
 //! same key-name policy the CLI applies at write time, and
 //! [`write_sealed_secrets`] is the single authoring path for both
-//! `rye vault put` and the `bootstrap`/test-fixture write paths.
+//! `ryeos vault put` and the `bootstrap`/test-fixture write paths.
 //!
 //! ## Policy: blocked key names
 //!
@@ -117,7 +117,7 @@ pub fn validate_decrypted_keys(
 
 /// Atomically write a sealed envelope containing `secrets` to
 /// `store_path`, sealing to `vault_pk`. Used by CLI verbs (e.g.
-/// `rye vault put`) and by tests; the daemon NEVER writes the store.
+/// `ryeos vault put`) and by tests; the daemon NEVER writes the store.
 ///
 /// Refuses on any key that fails [`validate_decrypted_keys`] so a bad
 /// write at authoring time fails before the secrets are encrypted.
@@ -243,17 +243,17 @@ pub struct RewrapReport {
 
 // ── Verb implementations ─────────────────────────────────────────────
 
-/// `rye vault put KEY=VALUE [KEY=VALUE...]` — merge new entries into
+/// `ryeos vault put KEY=VALUE [KEY=VALUE...]` — merge new entries into
 /// the sealed store. Decrypts, applies the merge, validates, and
 /// re-writes atomically with the same vault keypair.
 pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
     if opts.assignments.is_empty() {
-        bail!("rye vault put: at least one KEY=VALUE assignment required");
+        bail!("ryeos vault put: at least one KEY=VALUE assignment required");
     }
     let key_path = default_vault_secret_key_path(&opts.system_space_dir);
     let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
         format!(
-            "read vault secret key {} — has `rye init` (or daemon) ever run \
+            "read vault secret key {} — has `ryeos init` (or daemon) ever run \
              on this state dir?",
             key_path.display()
         )
@@ -278,7 +278,7 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
     })
 }
 
-/// `rye vault list` — print the keys currently in the store. Values
+/// `ryeos vault list` — print the keys currently in the store. Values
 /// are intentionally NOT printed; this is a discovery command, not a
 /// reveal command.
 pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
@@ -293,11 +293,11 @@ pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
     Ok(ListReport { store_path, keys })
 }
 
-/// `rye vault remove KEY [KEY...]` — drop entries from the store.
+/// `ryeos vault remove KEY [KEY...]` — drop entries from the store.
 /// Idempotent on non-present keys (reported separately).
 pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
     if opts.keys.is_empty() {
-        bail!("rye vault remove: at least one KEY required");
+        bail!("ryeos vault remove: at least one KEY required");
     }
     let key_path = default_vault_secret_key_path(&opts.system_space_dir);
     let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
@@ -327,7 +327,7 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
     })
 }
 
-/// `rye vault rewrap` — generate a fresh X25519 keypair, decrypt the
+/// `ryeos vault rewrap` — generate a fresh X25519 keypair, decrypt the
 /// existing store with the OLD key, re-seal with the NEW public key,
 /// then atomically swap both the store and the keypair files.
 ///
@@ -403,7 +403,7 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
 
     // Whether to roll the store forward is driven by on-disk
     // existence, NOT by whether plaintext is empty. A vault with an
-    // existing-but-empty store (e.g. after `rye vault remove` cleared
+    // existing-but-empty store (e.g. after `ryeos vault remove` cleared
     // the last key) MUST be re-sealed under the new key — otherwise
     // the rotated keypair couldn't decrypt the still-present store.
     let rewrap_store = store_path.exists();

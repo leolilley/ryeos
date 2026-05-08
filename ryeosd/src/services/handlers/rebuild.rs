@@ -65,7 +65,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:rebuild",
     endpoint: "rebuild",
     availability: ServiceAvailability::OfflineOnly,
-    required_caps: &["rye.execute.service.rebuild"],
+    required_caps: &["ryeos.execute.service.rebuild"],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = if params.is_null() {

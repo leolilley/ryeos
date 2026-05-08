@@ -6,9 +6,9 @@
 //!
 //! Former in-process services `fetch`, `verify`, and
 //! `identity/public_key` have been converted to external tools
-//! (`tool:rye/core/fetch`, `tool:rye/core/verify`,
-//! `tool:rye/core/identity/public_key`). Their handler modules have
-//! been deleted; the tool YAMLs invoke `bin:rye-inspect`.
+//! (`tool:ryeos/core/fetch`, `tool:ryeos/core/verify`,
+//! `tool:ryeos/core/identity/public_key`). Their handler modules have
+//! been deleted; the tool YAMLs invoke `bin:ryos-core-tools`.
 
 use crate::service_registry::ServiceDescriptor;
 

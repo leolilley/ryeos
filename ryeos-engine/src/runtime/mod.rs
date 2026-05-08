@@ -32,7 +32,7 @@ use crate::resolution::TrustClass;
 
 /// Reserved env key prefix — runtime configs may not override
 /// daemon-injected bindings.
-pub const RESERVED_ENV_PREFIX: &str = "RYE_";
+pub const RESERVED_ENV_PREFIX: &str = "RYEOS_";
 
 // ── Chain hop (input to compilation) ─────────────────────────────────────
 

@@ -282,7 +282,7 @@ mod tests {
         ProtocolDescriptor {
             kind: "protocol".to_string(),
             name: "runtime_v1".to_string(),
-            category: "rye/core".to_string(),
+            category: "ryeos/core".to_string(),
             abi_version: "v1".to_string(),
             description: Some("test descriptor".to_string()),
             stdin: ProtocolStdin {
@@ -327,7 +327,7 @@ mod tests {
         ProtocolDescriptor {
             kind: "protocol".to_string(),
             name: "opaque".to_string(),
-            category: "rye/core".to_string(),
+            category: "ryeos/core".to_string(),
             abi_version: "v1".to_string(),
             description: None,
             stdin: ProtocolStdin {
@@ -387,7 +387,7 @@ mod tests {
     ) -> BuildRequest<'a> {
         BuildRequest {
             item_ref,
-            binary_path: Path::new("/usr/bin/rye-runtime"),
+            binary_path: Path::new("/usr/bin/ryeos-runtime"),
             args,
             cwd: Path::new("/project"),
             project_path: Path::new("/project"),
@@ -437,7 +437,7 @@ mod tests {
                 root: ResolvedAncestor {
                     requested_id: "runtime:spawn".to_string(),
                     resolved_ref: "runtime:spawn".to_string(),
-                    source_path: PathBuf::from("/project/.ai/runtimes/rye/core/runtime.yaml"),
+                    source_path: PathBuf::from("/project/.ai/runtimes/ryeos/core/runtime.yaml"),
                     trust_class: TrustClass::Unsigned,
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,

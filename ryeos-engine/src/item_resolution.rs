@@ -186,7 +186,7 @@ pub fn resolve_item(
 /// `kind_schema.extensions[].ext` produce a `CanonicalRef { kind,
 /// bare_id }` where `bare_id` is the path relative to the kind
 /// directory with the matched extension stripped (slashes preserved
-/// for nested layouts: `<dir>/rye/core/read.py` → `rye/core/read`).
+/// for nested layouts: `<dir>/ryeos/core/read.py` → `ryeos/core/read`).
 ///
 /// Precedence semantics mirror `resolve_item_full`: the first root in
 /// `roots.ordered` to surface a given `bare_id` wins, later occurrences
@@ -302,7 +302,7 @@ fn walk_kind_dir(
     }
 }
 
-/// Parse a `rye:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>` header
+/// Parse a `ryeos:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>` header
 /// from file content, using the envelope to locate the signature line.
 pub fn parse_signature_header(
     content: &str,
@@ -391,7 +391,7 @@ mod tests {
                 })
                 .collect(),
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
-            composer: "handler:rye/core/identity".to_owned(),
+            composer: "handler:ryeos/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,
             runtime: None,
             inventory_kinds: Vec::new(),
@@ -416,7 +416,7 @@ mod tests {
 
     fn write_item(root: &Path, kind_dir: &str, bare_id: &str, ext: &str, content: &str) {
         let dir = root.join(kind_dir);
-        // Handle nested bare_ids like "rye/bash/bash"
+        // Handle nested bare_ids like "ryeos/bash/bash"
         let file_path = dir.join(format!("{bare_id}{ext}"));
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn parse_signature_header_hash_prefix() {
         let content =
-            "# rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
+            "# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
         let envelope = SignatureEnvelope {
             prefix: "#".to_owned(),
             suffix: None,
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn parse_signature_header_slash_prefix() {
         let content =
-            "// rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nconsole.log('hi')";
+            "// ryeos:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nconsole.log('hi')";
         let envelope = SignatureEnvelope {
             prefix: "//".to_owned(),
             suffix: None,
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn parse_signature_header_html_prefix() {
         let content =
-            "<!-- rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer -->\n# Hello";
+            "<!-- ryeos:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer -->\n# Hello";
         let envelope = SignatureEnvelope {
             prefix: "<!--".to_owned(),
             suffix: Some("-->".to_owned()),
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn parse_signature_header_after_shebang() {
         let content =
-            "#!/usr/bin/env python3\n# rye:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
+            "#!/usr/bin/env python3\n# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
         let envelope = SignatureEnvelope {
             prefix: "#".to_owned(),
             suffix: None,

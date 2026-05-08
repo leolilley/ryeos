@@ -740,10 +740,10 @@ impl SpawnedItem {
 /// If `thread_state_dir` is supplied AND the resolved spec declares
 /// `native_resume`, the daemon-side checkpoint directory
 /// (`<thread_state_dir>/checkpoints/`) is created and injected as
-/// `RYE_CHECKPOINT_DIR` into the subprocess env. The path is also
+/// `RYEOS_CHECKPOINT_DIR` into the subprocess env. The path is also
 /// captured in `SpawnedItem.launch_metadata.checkpoint_dir` so the
 /// daemon can persist it for the resume path. When `is_resume = true`,
-/// `RYE_RESUME=1` is also injected so replay-aware tools can branch
+/// `RYEOS_RESUME=1` is also injected so replay-aware tools can branch
 /// on cold-start vs. resume.
 pub struct SpawnItemParams<'a> {
     pub engine: &'a Engine,
@@ -799,11 +799,11 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
 
     // Inject the daemon's subprocess env contract into every subprocess
     // node: allowlisted parent env (PATH/HOME/...) + daemon-resolved
-    // roots (USER_SPACE/RYE_SYSTEM_SPACE) + declared secrets, then
+    // roots (USER_SPACE/RYEOS_SYSTEM_SPACE_DIR) + declared secrets, then
     // layer the daemon callback infra (socket path, callback token,
     // thread id, project path) on top. Mirrors `execution::launch::
     // spawn_runtime`'s composition so engine-dispatched `bin:` items
-    // (e.g. `bin:rye-inspect`) see the same env contract as runtime-
+    // (e.g. `bin:ryos-core-tools`) see the same env contract as runtime-
     // binary spawns. Without this, `lillux::run`'s post-Part-B
     // `env_clear()` would leave the subprocess with only a handful of
     // RYEOSD_* vars and `ryeos_engine::roots::user_root()` would fail
@@ -819,7 +819,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
             // Seed allowlisted parent env + daemon-resolved roots +
             // declared secrets. `insert` overwrites parent-snapshotted
             // values with daemon-resolved values; plan-builder-set
-            // RYE_* vars (RYE_ITEM_KIND, RYE_SITE_ID, ...) are
+            // RYE_* vars (RYEOS_ITEM_KIND, RYEOS_SITE_ID, ...) are
             // preserved because they don't collide with the allowlist.
             for (k, v) in &base_env {
                 spec.env.insert(k.clone(), v.clone());
@@ -831,7 +831,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     }
 
     // Allocate the per-thread checkpoint directory and inject
-    // RYE_CHECKPOINT_DIR / RYE_RESUME into the subprocess env when the
+    // RYEOS_CHECKPOINT_DIR / RYEOS_RESUME into the subprocess env when the
     // spec declares `native_resume`. This is intentionally done at
     // spawn time rather than in the engine handler because the path
     // depends on the daemon-owned `<thread_state_dir>`. See
@@ -850,11 +850,11 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                         )
                     })?;
                     spec.env.insert(
-                        "RYE_CHECKPOINT_DIR".to_string(),
+                        "RYEOS_CHECKPOINT_DIR".to_string(),
                         ckpt.display().to_string(),
                     );
                     if is_resume {
-                        spec.env.insert("RYE_RESUME".to_string(), "1".to_string());
+                        spec.env.insert("RYEOS_RESUME".to_string(), "1".to_string());
                     }
                     allocated_checkpoint_dir = Some(ckpt);
                     break; // first DispatchSubprocess wins, mirrors FirstWins
@@ -900,7 +900,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     }
     // Capture resume context iff this thread declared native_resume.
     // `reconcile.rs` reads it on daemon restart to re-spawn the thread
-    // under the same `thread_id` with `RYE_RESUME=1`.
+    // under the same `thread_id` with `RYEOS_RESUME=1`.
     //
     // **Pinned-snapshot policy:** copy the full original
     // `PlanContext.project_context` AND the runner-allocated

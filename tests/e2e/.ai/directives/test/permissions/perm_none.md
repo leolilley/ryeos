@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:7b1c5987ecac0e27b09fded7e0911d0a742823b510e442fc522c40172ee30259:40K6C_-CW358DSsYA-GjHS0OZe5vq2EL1qBtnLfWyQTlUqyPAY3kXRju61oUsRF0FhsS3FHxl6YqI-vv0qm7CA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:7b1c5987ecac0e27b09fded7e0911d0a742823b510e442fc522c40172ee30259:40K6C_-CW358DSsYA-GjHS0OZe5vq2EL1qBtnLfWyQTlUqyPAY3kXRju61oUsRF0FhsS3FHxl6YqI-vv0qm7CA==:4b987fd4e40303ac -->
 # Permission Test: No Permissions
 
 No permissions block declared. All tool calls should be denied (fail-closed).

@@ -414,7 +414,7 @@ mod tests {
         let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
             ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
             ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
         ]).unwrap());
         let test_ar = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
@@ -821,7 +821,7 @@ mod tests {
                 "thread_id": "T-tat-missing",
                 "project_path": "/p",
                 "action": {
-                    "item_id": "directive:rye/agent/core/base",
+                    "item_id": "directive:ryeos/agent/core/base",
                     "thread": "inline",
                 },
             })),
@@ -853,7 +853,7 @@ mod tests {
                 "project_path": "/p",
                 "thread_auth_token": "tat-deadbeef0000000000000000000000000000000000000000000000000000",
                 "action": {
-                    "item_id": "directive:rye/agent/core/base",
+                    "item_id": "directive:ryeos/agent/core/base",
                     "thread": "inline",
                 },
             })),
@@ -900,7 +900,7 @@ mod tests {
                 "thread_auth_token": tat.token.clone(),
                 "acting_principal": "fp:attacker-spoofed-principal",
                 "action": {
-                    "item_id": "directive:rye/agent/core/base",
+                    "item_id": "directive:ryeos/agent/core/base",
                     "thread": "inline",
                 },
             })),
@@ -925,7 +925,7 @@ mod tests {
                 "project_path": "/p",
                 "thread_auth_token": tat.token,
                 "action": {
-                    "item_id": "directive:rye/agent/core/base",
+                    "item_id": "directive:ryeos/agent/core/base",
                     "thread": "inline",
                 },
             })),

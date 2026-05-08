@@ -138,7 +138,7 @@ pub struct ToolSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    /// Kind-schema metadata header (e.g. `"rye-runtime/model-providers"`)
+    /// Kind-schema metadata header (e.g. `"ryeos-runtime/model-providers"`)
     /// surfaced on the typed struct so `deny_unknown_fields` keeps
     /// holding the line. Not consumed by the runtime; logged at
     /// bootstrap for parity with the other config structs.
@@ -227,7 +227,7 @@ pub struct PricingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionConfig {
-    /// Kind-schema metadata header (e.g. `"rye-runtime"`) surfaced so
+    /// Kind-schema metadata header (e.g. `"ryeos-runtime"`) surfaced so
     /// `deny_unknown_fields` keeps holding the line. Not consumed by
     /// the runtime.
     #[serde(default)]
@@ -286,7 +286,7 @@ pub struct BootstrapConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRoutingConfig {
-    /// Kind-schema metadata header (e.g. `"rye-runtime"`) surfaced so
+    /// Kind-schema metadata header (e.g. `"ryeos-runtime"`) surfaced so
     /// `deny_unknown_fields` keeps holding the line. Not consumed by
     /// the runtime.
     #[serde(default)]

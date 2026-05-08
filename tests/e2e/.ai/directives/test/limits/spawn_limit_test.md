@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:057faa4ca7a400ff4e681adb8d96014b0f798e22c190380455c555b91f8b648f:NGIYGqE5UvD_FOOe-y4EKBAUVtvIkmdyWUMBOvz8FlYmbaPtR3J-eqedjtNpn9LEJOwnZVWmQo8BFqaNdfjhAQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:057faa4ca7a400ff4e681adb8d96014b0f798e22c190380455c555b91f8b648f:NGIYGqE5UvD_FOOe-y4EKBAUVtvIkmdyWUMBOvz8FlYmbaPtR3J-eqedjtNpn9LEJOwnZVWmQo8BFqaNdfjhAQ==:4b987fd4e40303ac -->
 # Spawn Limit Test
 
 Test that spawn limit enforcement works. This directive has a low spawns limit.

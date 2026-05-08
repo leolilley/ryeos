@@ -232,7 +232,7 @@ fn not_native_executor_errors() {
 
     let err = resolve_native_executor(
         &HashMap::new(),
-        "tool:rye/core/bash/bash",
+        "tool:ryeos/core/bash/bash",
         "x86_64-unknown-linux-gnu",
         cas.get_object_fn(),
     )

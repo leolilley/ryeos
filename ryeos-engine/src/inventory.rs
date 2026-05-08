@@ -54,9 +54,9 @@ use crate::parsers::ParserDispatcher;
 /// Field semantics:
 /// - `name`: API-safe flattened identifier intended for downstream
 ///   consumption (LLM tool name, knowledge alias, …). Derived from
-///   the canonical bare-id (`rye/core/read` → `rye_core_read`) via
+///   the canonical bare-id (`ryeos/core/read` → `ryeos_core_read`) via
 ///   [`flatten_bare_id`] so nested layouts don't collide.
-/// - `item_id`: full canonical ref (e.g. `tool:rye/core/read`) the
+/// - `item_id`: full canonical ref (e.g. `tool:ryeos/core/read`) the
 ///   runtime hands back to `runtime.dispatch_action` for execution.
 /// - `description`: extracted via the kind schema's `metadata.rules`
 ///   `description:` rule. `None` when the source declares no
@@ -259,8 +259,8 @@ fn pick_schema(parsed: &Value, keys: &[String]) -> Option<Value> {
     None
 }
 
-/// Convert `rye/core/read` (or `rye/file-system/ls`) into an
-/// API-safe flat name (`rye_core_read`, `rye_file_system_ls`). The
+/// Convert `ryeos/core/read` (or `ryeos/file-system/ls`) into an
+/// API-safe flat name (`ryeos_core_read`, `ryeos_file_system_ls`). The
 /// LLM tool surface and many other consumers don't tolerate `/` or
 /// `-`; this is the canonical projection.
 pub fn flatten_bare_id(bare_id: &str) -> String {
@@ -280,8 +280,8 @@ mod tests {
 
     #[test]
     fn flatten_strips_slashes_and_dashes() {
-        assert_eq!(flatten_bare_id("rye/core/read"), "rye_core_read");
-        assert_eq!(flatten_bare_id("rye/file-system/ls"), "rye_file_system_ls");
+        assert_eq!(flatten_bare_id("ryeos/core/read"), "ryeos_core_read");
+        assert_eq!(flatten_bare_id("ryeos/file-system/ls"), "ryeos_file_system_ls");
         assert_eq!(flatten_bare_id("echo"), "echo");
     }
 

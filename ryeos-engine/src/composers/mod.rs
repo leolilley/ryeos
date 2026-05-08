@@ -6,10 +6,10 @@
 //!
 //!   * Composer handler binaries register at boot via the
 //!     `HandlerRegistry` (see `handlers::registry`). Their canonical
-//!     refs are `handler:rye/core/<name>` (e.g.
-//!     `handler:rye/core/extends-chain`,
-//!     `handler:rye/core/identity`, `handler:rye/core/graph-permissions`).
-//!   * Kind schemas declare `composer: handler:rye/core/<name>`
+//!     refs are `handler:ryeos/core/<name>` (e.g.
+//!     `handler:ryeos/core/extends-chain`,
+//!     `handler:ryeos/core/identity`, `handler:ryeos/core/graph-permissions`).
+//!   * Kind schemas declare `composer: handler:ryeos/core/<name>`
 //!     (REQUIRED on every kind — there is no silent "no composer"
 //!     path) and an optional `composer_config:` blob the handler
 //!     validates and consumes.
@@ -61,7 +61,7 @@ struct BoundComposer {
 /// Registry of kind composers, one per kind name.
 ///
 /// Built data-drivenly via `from_kinds`: each kind schema declares a
-/// composer handler ref (`handler:rye/core/<name>`) + an optional
+/// composer handler ref (`handler:ryeos/core/<name>`) + an optional
 /// `composer_config`, and we look the ref up in the supplied
 /// `HandlerRegistry` to bind kind→(handler, config).
 ///
@@ -366,7 +366,7 @@ location:
   directory: {kind}s
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/extends_chain
+    parser: parser:ryeos/core/markdown/extends_chain
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -395,15 +395,15 @@ composer: {composer}
         write_kind(
             &root,
             "alpha",
-            "handler:rye/core/extends-chain",
+            "handler:ryeos/core/extends-chain",
             Some(cfg),
             &sk,
         );
-        write_kind(&root, "beta", "handler:rye/core/identity", None, &sk);
+        write_kind(&root, "beta", "handler:ryeos/core/identity", None, &sk);
         write_kind(
             &root,
             "gamma",
-            "handler:rye/core/graph-permissions",
+            "handler:ryeos/core/graph-permissions",
             None,
             &sk,
         );
@@ -440,7 +440,7 @@ composer: {composer}
         write_kind(
             &root,
             "directive",
-            "handler:rye/core/extends-chain",
+            "handler:ryeos/core/extends-chain",
             Some(cfg),
             &sk,
         );
@@ -451,7 +451,7 @@ composer: {composer}
 
         let parsed = json!({
             "permissions": {
-                "execute": ["rye.execute.tool.echo", "rye.execute.tool.read"]
+                "execute": ["ryeos.execute.tool.echo", "ryeos.execute.tool.read"]
             }
         });
         let anc = ResolvedAncestor {
@@ -468,7 +468,7 @@ composer: {composer}
         let caps = view.policy_fact_string_seq("effective_caps");
         assert_eq!(
             caps,
-            vec!["rye.execute.tool.echo", "rye.execute.tool.read"],
+            vec!["ryeos.execute.tool.echo", "ryeos.execute.tool.read"],
             "extends_chain effective_caps projection must work unchanged"
         );
     }

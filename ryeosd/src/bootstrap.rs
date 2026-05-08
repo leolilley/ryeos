@@ -31,7 +31,7 @@ pub struct InitOptions {
 /// regenerated.
 ///
 /// A file is considered signed if its first non-empty line begins
-/// with `# rye:signed:`. Returns sorted, deduplicated absolute paths.
+/// with `# ryeos:signed:`. Returns sorted, deduplicated absolute paths.
 fn find_signed_node_config_items(system_space_dir: &Path) -> Result<Vec<PathBuf>> {
     let node_dir = system_space_dir.join(AI_DIR).join("node");
     if !node_dir.exists() {
@@ -72,7 +72,7 @@ fn collect_signed_yaml_recursive(dir: &Path, hits: &mut Vec<PathBuf>) -> Result<
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("");
-        if first_non_empty.starts_with("# rye:signed:") {
+        if first_non_empty.starts_with("# ryeos:signed:") {
             hits.push(path);
         }
     }
@@ -110,7 +110,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     let node_identity = if options.force && node_key_path.exists() {
         // γ: refuse --force if signed node-config items exist — rotating
         // the node key would make them unverifiable. The operator must
-        // use `rye daemon rotate-key` instead, which re-signs first.
+        // use `ryeos daemon rotate-key` instead, which re-signs first.
         let signed_items = find_signed_node_config_items(&config.system_space_dir)?;
         if !signed_items.is_empty() {
             let lines: Vec<String> = signed_items
@@ -120,7 +120,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
             bail!(
                 "refusing --force: existing signed node-config items would become \
                  unverifiable after node-key regeneration:\n\n{}\n\n\
-                 run `rye daemon rotate-key` to safely rotate the node key \
+                 run `ryeos daemon rotate-key` to safely rotate the node key \
                  (re-signs all existing items + transition trust store). \
                  `--force` is only safe on a fresh install.",
                 lines.join("\n")
@@ -184,7 +184,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 6b. Vault X25519 keypair. Separate from the Ed25519 node identity
     // so node-key rotation does NOT brick the vault. Auto-generated on
     // first boot if missing (parallel to user/node keys above); never
-    // force-rotated by daemon bootstrap (rotation is `rye vault rewrap`).
+    // force-rotated by daemon bootstrap (rotation is `ryeos vault rewrap`).
     let vault_dir = config
         .system_space_dir
         .join(ryeos_engine::AI_DIR)
@@ -239,7 +239,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 /// Write a self-signed trusted-key TOML entry so the key's own signed items verify.
 ///
 /// The document is signed by the key it declares (self-signature), using the
-/// `# rye:signed:...` envelope format consumed by `TrustStore::load_three_tier`.
+/// `# ryeos:signed:...` envelope format consumed by `TrustStore::load_three_tier`.
 fn write_self_trust(
     trust_dir: &Path,
     trust_entry: &Path,
@@ -266,7 +266,7 @@ pem = "ed25519:{key_b64}"
 "#
     );
 
-    // Self-sign using the `# rye:signed:...` envelope
+    // Self-sign using the `# ryeos:signed:...` envelope
     let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
 
     let tmp = trust_entry.with_extension("tmp");
@@ -327,7 +327,7 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
     if !system_space_dir.exists() {
         anyhow::bail!(
             "ryeosd not initialized: system space dir missing at {}\n\
-             Run: rye init",
+             Run: ryeos init",
             system_space_dir.display()
         );
     }
@@ -349,7 +349,7 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 /// Trust continuity: the trust store used for node-config verification is
 /// loaded via the engine's `TrustStore::load_three_tier`, which sources trust
 /// from operator tiers ONLY (project + user). The daemon's identity must
-/// have its trust doc pinned in the user tier (created by `rye init` /
+/// have its trust doc pinned in the user tier (created by `ryeos init` /
 /// daemon bootstrap) for daemon-written `kind: node` items to verify on
 /// next boot.
 ///
@@ -587,7 +587,7 @@ mod tests {
         // Plant a signed YAML in the node dir.
         let node_bundles = config.system_space_dir.join(".ai").join("node").join("bundles");
         fs::create_dir_all(&node_bundles).unwrap();
-        let signed_yaml = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nname: test-bundle\n";
+        let signed_yaml = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nname: test-bundle\n";
         fs::write(node_bundles.join("test.yaml"), signed_yaml).unwrap();
 
         // Now try --force — should be refused.
@@ -634,7 +634,7 @@ mod tests {
         let node_dir = tmp.path().join(".ai").join("node").join("deep").join("sub");
         fs::create_dir_all(&node_dir).unwrap();
 
-        let signed_yaml = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nkey: value\n";
+        let signed_yaml = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nkey: value\n";
         fs::write(node_dir.join("nested.yaml"), signed_yaml).unwrap();
 
         let items = find_signed_node_config_items(tmp.path()).unwrap();

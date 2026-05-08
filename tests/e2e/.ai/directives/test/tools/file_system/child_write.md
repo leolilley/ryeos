@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:8051ba10f78ba72757633167554d5730d91ee1e41726b52a6181fac53683a6f3:dVe_W_ocoyIa_iDNmIMAGCL2EBeim7NHLEiBjHKCsXXtt-dX4IU8jwDYnGSgj6a2PiSt_fjv-421lX4UezBGAw==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:8051ba10f78ba72757633167554d5730d91ee1e41726b52a6181fac53683a6f3:dVe_W_ocoyIa_iDNmIMAGCL2EBeim7NHLEiBjHKCsXXtt-dX4IU8jwDYnGSgj6a2PiSt_fjv-421lX4UezBGAw==:4b987fd4e40303ac -->
 # Child Write
 
 Simple child directive — writes a message to a file, then reads it back to confirm.

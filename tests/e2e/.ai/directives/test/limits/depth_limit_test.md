@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:abf7d7f9168b11d0e737d9613b2ef5cb7fee09c2cdc2f3a6375310426386eb7c:d6-TWAIwRhn-mdrHLRKCh0PZhVpidDlscnmQZo6zOa_dprDhWwEIeJTep5TIeVcVCkrdCP0Va1F2E_FQIkazBw==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:abf7d7f9168b11d0e737d9613b2ef5cb7fee09c2cdc2f3a6375310426386eb7c:d6-TWAIwRhn-mdrHLRKCh0PZhVpidDlscnmQZo6zOa_dprDhWwEIeJTep5TIeVcVCkrdCP0Va1F2E_FQIkazBw==:4b987fd4e40303ac -->
 # Depth Limit Test
 
 Test that depth limit enforcement prevents infinitely recursive thread spawning. Sets depth=1 so: root (depth=1) → child (depth=0, can run but can't spawn) → grandchild (depth=-1, rejected).

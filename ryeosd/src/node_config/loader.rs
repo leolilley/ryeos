@@ -363,7 +363,7 @@ impl<'a> BootstrapLoader<'a> {
 fn strip_signature(content: &str) -> String {
     content
         .lines()
-        .skip_while(|l| l.starts_with("# rye:signed:"))
+        .skip_while(|l| l.starts_with("# ryeos:signed:"))
         .collect::<Vec<_>>()
         .join("\n")
         .trim_start()
@@ -417,15 +417,15 @@ mod tests {
 
     #[test]
     fn strip_signature_removes_signed_line() {
-        let content = "# rye:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\nsection: bundles\npath: /foo\n";
+        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\nsection: bundles\npath: /foo\n";
         let stripped = strip_signature(content);
         assert!(stripped.starts_with("section: bundles"));
-        assert!(!stripped.contains("rye:signed:"));
+        assert!(!stripped.contains("ryeos:signed:"));
     }
 
     #[test]
     fn strip_signature_preserves_body() {
-        let content = "# rye:signed:2026-01-01T00:00:00Z:abc:sig:fp\nsection: bundles\npath: /foo/bar\n";
+        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nsection: bundles\npath: /foo/bar\n";
         let stripped = strip_signature(content);
         let parsed: Value = serde_yaml::from_str(&stripped).unwrap();
         assert_eq!(parsed["section"], "bundles");

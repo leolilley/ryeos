@@ -38,13 +38,13 @@ pub fn strip_markdown_frontmatter(content: &str) -> Result<String, KnowledgeErro
     Ok(body.to_string())
 }
 
-/// Strip signed YAML frontmatter (`# rye:signed:...` line + body).
+/// Strip signed YAML frontmatter (`# ryeos:signed:...` line + body).
 /// Returns the body verbatim.
 pub fn strip_signed_yaml_frontmatter(content: &str) -> String {
     let mut lines = content.lines();
     // Skip the signature line
     if let Some(first) = lines.next() {
-        if first.trim().starts_with("# rye:signed:") || first.trim().starts_with("# rye: cas:") {
+        if first.trim().starts_with("# ryeos:signed:") || first.trim().starts_with("# ryos: cas:") {
             return lines.collect::<Vec<_>>().join("\n");
         }
     }
@@ -68,7 +68,7 @@ pub fn strip_frontmatter(content: &str, item_id: &str) -> Result<String, Knowled
     }
 
     // Signed YAML frontmatter
-    if trimmed.starts_with("# rye:signed:") || trimmed.starts_with("# rye: cas:") {
+    if trimmed.starts_with("# ryeos:signed:") || trimmed.starts_with("# ryos: cas:") {
         return Ok(strip_signed_yaml_frontmatter(content));
     }
 
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn strip_signed_yaml_frontmatter_basic() {
-        let input = "# rye:signed:v1:abc:def:123\nactual body\nmore body";
+        let input = "# ryeos:signed:v1:abc:def:123\nactual body\nmore body";
         let result = strip_signed_yaml_frontmatter(input);
         assert_eq!(result, "actual body\nmore body");
     }

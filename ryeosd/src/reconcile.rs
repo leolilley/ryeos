@@ -16,7 +16,7 @@ pub enum ResumeDecision {
     /// Cannot rebuild `ExecutionParams` — finalize.
     MissingResumeContext,
     /// Thread is eligible for auto-resume; the reconciler should
-    /// increment the counter and re-spawn with `RYE_RESUME=1`.
+    /// increment the counter and re-spawn with `RYEOS_RESUME=1`.
     Resume { next_attempt: u32, max: u32 },
     /// Spec declared `native_resume` and a `ResumeContext` is present,
     /// but the retry budget is exhausted — finalize.

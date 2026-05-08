@@ -1,9 +1,9 @@
-# rye:signed:2026-05-05T09:31:55Z:5d026c0c3f226cfe859ac0f839f2ea328880bd7fec762b701772181bf18b2c71:EftmKRzfti43SqUqUssvJTXFxlpg4X+edLBQDMB6PzZRPxK+lHr3t4bnpb+ECMJ4wh2DwglsGbQ4j9CqaaNmCQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:9bdce0576a8256b3fdf02e583a3cfd1ecb40248ec256fd4acbe2d8105bde5888:K8w5+Qc6aYu/RnuaEuN1jkJ0ja6Y6VOsA4D3NiLKeq/MtDw+BA1ydIbpcCd0mJpPeNaEp7P3f9tVR88lilRPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "bundle"
 name: "install"
 kind: service
 endpoint: bundle.install
-required_caps: ["rye.execute.service.bundle/install"]
+required_caps: ["ryeos.execute.service.bundle/install"]
 schema:
   name: string
   source_path: string

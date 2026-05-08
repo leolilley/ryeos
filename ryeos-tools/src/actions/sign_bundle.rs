@@ -3,13 +3,13 @@
 //! Signs every signable item in a bundle source tree using the provided
 //! author key. Validates metadata anchoring for every item before signing.
 //!
-//! This is NOT the operator-side `rye-sign` (which uses the user key and
+//! This is NOT the operator-side `ryos-core-tools` (which uses the user key and
 //! resolves through the three-tier engine space). This is the bundle
 //! authoring path: explicit `--source`, explicit `--registry-root`,
 //! explicit `--key`. No ambient machine state.
 //!
 //! Usage:
-//!   rye-bundle-tool sign-items \
+//!   ryos publish sign-items \
 //!       --source <bundle-root>          \
 //!       --registry-root <signed-core>   \
 //!       --key <author.pem>

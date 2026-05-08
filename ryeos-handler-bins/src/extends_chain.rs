@@ -653,7 +653,7 @@ mod tests {
         });
         let p_parsed = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.bash"] },
+            "permissions": { "execute": ["ryeos.execute.tool.bash"] },
             "body": ""
         });
         let view = run(
@@ -664,7 +664,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.bash"]
+            vec!["ryeos.execute.tool.bash"]
         );
         assert_eq!(derived_string(&view, "body").unwrap(), "body-text");
     }
@@ -677,11 +677,11 @@ mod tests {
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["rye.execute.tool.read"] },
+            "permissions": { "execute": ["ryeos.execute.tool.read"] },
             "body": "body"
         });
         let p = json!({
-            "permissions": { "execute": ["rye.execute.tool.bash"] },
+            "permissions": { "execute": ["ryeos.execute.tool.bash"] },
             "body": ""
         });
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
@@ -934,14 +934,14 @@ mod tests {
         // Parent allows only read
         let p = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.rye.file-system.read"] },
+            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.read"] },
             "body": ""
         });
         // Child requests write (not covered by parent)
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["rye.execute.tool.rye.file-system.write"] },
+            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.write"] },
             "body": "body"
         });
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
@@ -954,20 +954,20 @@ mod tests {
         // Parent allows wildcard
         let p = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.rye.file-system.*"] },
+            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.*"] },
             "body": ""
         });
         // Child requests specific tool within wildcard
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["rye.execute.tool.rye.file-system.write"] },
+            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.write"] },
             "body": "body"
         });
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.rye.file-system.write"]
+            vec!["ryeos.execute.tool.ryeos.file-system.write"]
         );
     }
 
@@ -976,7 +976,7 @@ mod tests {
         // Parent allows read
         let p = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.rye.file-system.read"] },
+            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.read"] },
             "body": ""
         });
         // Child does not declare permissions
@@ -988,7 +988,7 @@ mod tests {
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.rye.file-system.read"]
+            vec!["ryeos.execute.tool.ryeos.file-system.read"]
         );
     }
 
@@ -998,8 +998,8 @@ mod tests {
         let p = json!({
             "name": "parent",
             "permissions": {
-                "execute": ["rye.execute.tool.x"],
-                "fetch": ["rye.fetch.tool.x"]
+                "execute": ["ryeos.execute.tool.x"],
+                "fetch": ["ryeos.fetch.tool.x"]
             },
             "body": ""
         });
@@ -1007,14 +1007,14 @@ mod tests {
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["rye.execute.tool.x"] },
+            "permissions": { "execute": ["ryeos.execute.tool.x"] },
             "body": "body"
         });
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
         // Child keeps its execute
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.x"]
+            vec!["ryeos.execute.tool.x"]
         );
         // Child inherits parent's fetch
         let fetch_caps = view
@@ -1028,26 +1028,26 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        assert_eq!(fetch_caps, vec!["rye.fetch.tool.x"]);
+        assert_eq!(fetch_caps, vec!["ryeos.fetch.tool.x"]);
     }
 
     #[test]
     fn wildcard_parent_covers_child_wildcard() {
         let p = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.*"] },
+            "permissions": { "execute": ["ryeos.execute.tool.*"] },
             "body": ""
         });
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["rye.execute.tool.rye.*"] },
+            "permissions": { "execute": ["ryeos.execute.tool.ryeos.*"] },
             "body": "body"
         });
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.rye.*"]
+            vec!["ryeos.execute.tool.ryeos.*"]
         );
     }
 
@@ -1055,7 +1055,7 @@ mod tests {
     fn empty_child_caps_stay_empty() {
         let p = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.*"] },
+            "permissions": { "execute": ["ryeos.execute.tool.*"] },
             "body": ""
         });
         let r = json!({
@@ -1079,8 +1079,8 @@ mod tests {
             "name": "child",
             "extends": "parent",
             "permissions": { "execute": [
-                "rye.execute.tool.rye.file-system.write",
-                "rye.execute.service.bundle/install"
+                "ryeos.execute.tool.ryeos.file-system.write",
+                "ryeos.execute.service.bundle/install"
             ]},
             "body": "body"
         });
@@ -1088,8 +1088,8 @@ mod tests {
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
             vec![
-                "rye.execute.tool.rye.file-system.write",
-                "rye.execute.service.bundle/install"
+                "ryeos.execute.tool.ryeos.file-system.write",
+                "ryeos.execute.service.bundle/install"
             ]
         );
     }
@@ -1098,23 +1098,23 @@ mod tests {
 
     #[test]
     fn three_level_chain_narrows_against_immediate_parent() {
-        // Grandparent: broad (rye.*)
+        // Grandparent: broad (ryeos.*)
         let gp = json!({
             "name": "grandparent",
-            "permissions": { "execute": ["rye.*"] },
+            "permissions": { "execute": ["ryeos.*"] },
             "body": ""
         });
-        // Parent: narrowed (rye.execute.tool.*)
+        // Parent: narrowed (ryeos.execute.tool.*)
         let p = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.*"] },
+            "permissions": { "execute": ["ryeos.execute.tool.*"] },
             "body": ""
         });
         // Child: requests a specific tool — covered by parent's wildcard
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["rye.execute.tool.rye.file-system.read"] },
+            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.read"] },
             "body": "body"
         });
         // ancestors are nearest-first: [parent, grandparent]
@@ -1124,11 +1124,11 @@ mod tests {
             vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
         )
         .unwrap();
-        // Child narrows against immediate parent (rye.execute.tool.*),
-        // which covers rye.execute.tool.rye.file-system.read — passes.
+        // Child narrows against immediate parent (ryeos.execute.tool.*),
+        // which covers ryeos.execute.tool.ryeos.file-system.read — passes.
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.rye.file-system.read"]
+            vec!["ryeos.execute.tool.ryeos.file-system.read"]
         );
     }
 
@@ -1137,13 +1137,13 @@ mod tests {
         // Grandparent: broad
         let gp = json!({
             "name": "grandparent",
-            "permissions": { "execute": ["rye.*"] },
+            "permissions": { "execute": ["ryeos.*"] },
             "body": ""
         });
         // Parent: narrowed
         let p = json!({
             "name": "parent",
-            "permissions": { "execute": ["rye.execute.tool.read"] },
+            "permissions": { "execute": ["ryeos.execute.tool.read"] },
             "body": ""
         });
         // Child: omits permissions — should inherit from immediate parent
@@ -1162,7 +1162,7 @@ mod tests {
         // Child inherits from immediate parent (parent), not grandparent
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.read"]
+            vec!["ryeos.execute.tool.read"]
         );
     }
 
@@ -1171,7 +1171,7 @@ mod tests {
         // Grandparent: narrow
         let gp = json!({
             "name": "grandparent",
-            "permissions": { "execute": ["rye.execute.tool.read"] },
+            "permissions": { "execute": ["ryeos.execute.tool.read"] },
             "body": ""
         });
         // Parent: omits permissions (inherits from grandparent)
@@ -1180,11 +1180,11 @@ mod tests {
             "body": ""
         });
         // Child: requests broad — should narrow against parent's effective
-        // (which was inherited from grandparent: rye.execute.tool.read)
+        // (which was inherited from grandparent: ryeos.execute.tool.read)
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["rye.*"] },
+            "permissions": { "execute": ["ryeos.*"] },
             "body": "body"
         });
         // ancestors are nearest-first: [parent, grandparent]
@@ -1194,8 +1194,8 @@ mod tests {
             vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
         )
         .unwrap();
-        // Child's rye.* narrowed against parent's effective (inherited from gp: rye.execute.tool.read)
-        // rye.* is NOT covered by rye.execute.tool.read → empty
+        // Child's ryeos.* narrowed against parent's effective (inherited from gp: ryeos.execute.tool.read)
+        // ryeos.* is NOT covered by ryeos.execute.tool.read → empty
         assert!(
             policy_fact_string_seq(&view, "effective_caps").is_empty(),
             "child broad cap should be narrowed to empty against grandparent's narrow cap inherited by parent"

@@ -475,7 +475,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("rye:signed:"));
+        assert!(content.contains("ryeos:signed:"));
         assert!(content.contains("# Thread: thread-1"));
     }
 

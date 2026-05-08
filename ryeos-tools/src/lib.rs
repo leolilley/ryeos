@@ -1,8 +1,8 @@
-//! Shared utilities for rye-core-tools
+//! Shared utilities for ryeos-core-tools
 //!
 //! - Environment parsing
 //! - Output formatting
-//! - Action library (`actions::*`) shared by the busybox `rye` CLI
+//! - Action library (`actions::*`) shared by the busybox `ryeos` CLI
 
 pub mod actions;
 

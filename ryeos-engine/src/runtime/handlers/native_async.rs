@@ -2,7 +2,7 @@
 //!
 //! Presence of this block on a chain element flags the resulting
 //! subprocess as **owning its own event stream**: the runner injects
-//! `RYE_NATIVE_ASYNC=1` into the spawn env so the subprocess knows
+//! `RYEOS_NATIVE_ASYNC=1` into the spawn env so the subprocess knows
 //! to call `emit_progress` / `emit_status` / `publish_artifact`
 //! against `RuntimeCallbackAPI` itself, instead of having the daemon
 //! synthesise them from stdout buffering.
@@ -206,7 +206,7 @@ impl RuntimeHandler for NativeAsyncHandler {
         // canonical source of truth for the daemon/runner; this env
         // var is purely a runtime convenience for tool code.
         ctx.env
-            .insert("RYE_NATIVE_ASYNC".to_owned(), "1".to_owned());
+            .insert("RYEOS_NATIVE_ASYNC".to_owned(), "1".to_owned());
 
         Ok(())
     }
@@ -274,7 +274,7 @@ mod tests {
                 grace_secs: DEFAULT_GRACEFUL_SECS
             }
         );
-        assert_eq!(env.get("RYE_NATIVE_ASYNC").map(String::as_str), Some("1"));
+        assert_eq!(env.get("RYEOS_NATIVE_ASYNC").map(String::as_str), Some("1"));
     }
 
     #[test]

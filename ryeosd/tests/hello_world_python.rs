@@ -36,7 +36,7 @@ fn synth_project_with_hello() -> PathBuf {
         .unwrap()
         .as_nanos();
     let project_dir = std::env::temp_dir().join(format!(
-        "rye_hello_world_test_{}_{}",
+        "ryeos_hello_world_test_{}_{}",
         std::process::id(),
         nanos
     ));
@@ -54,7 +54,7 @@ fn synth_project_with_hello() -> PathBuf {
     //                     itself targets `@subprocess` (alias).
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
-__executor_id__ = "tool:rye/core/runtimes/python/script"
+__executor_id__ = "tool:ryeos/core/runtimes/python/script"
 __category__ = "hello"
 __description__ = "Hello world demo"
 
@@ -123,7 +123,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
     // Sanity: the kind schema must have extracted the executor_id dunder.
     assert_eq!(
         resolved.metadata.executor_id.as_deref(),
-        Some("tool:rye/core/runtimes/python/script"),
+        Some("tool:ryeos/core/runtimes/python/script"),
         "extraction rules failed to pull __executor_id__ from hello.py"
     );
 
@@ -140,12 +140,12 @@ fn daemon_executes_python_hello_world_end_to_end() {
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
-    // The chain MUST traverse: hello → tool:rye/core/runtimes/python/script
-    //                         → @subprocess → tool:rye/core/subprocess/execute
+    // The chain MUST traverse: hello → tool:ryeos/core/runtimes/python/script
+    //                         → @subprocess → tool:ryeos/core/subprocess/execute
     assert!(
         plan.executor_chain
             .iter()
-            .any(|e| e == "tool:rye/core/runtimes/python/script"),
+            .any(|e| e == "tool:ryeos/core/runtimes/python/script"),
         "executor_chain missing python runtime: {:?}",
         plan.executor_chain
     );

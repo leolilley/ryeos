@@ -3,7 +3,7 @@
 //! Loads trusted signer public keys from `.ai/config/keys/trusted/`. Trust
 //! is **operator-tier state only**: the resolution order is project > user.
 //! Bundles never auto-trust their own keys — operators pin publisher keys
-//! explicitly via `rye init` (platform author) and `rye trust pin <fp>`
+//! explicitly via `ryeos init` (platform author) and `ryeos trust pin <fp>`
 //! (third parties). Legacy bundle-internal trust dirs are ignored.
 //! Supports two key file formats:
 //!   - Raw `.pub`/`.key` files: base64-encoded 32-byte Ed25519 keys
@@ -11,7 +11,7 @@
 //!
 //! The TOML format matches the Python `TrustStore` identity documents:
 //! ```toml
-//! # rye:signed:TIMESTAMP:HASH:SIG:FP
+//! # ryeos:signed:TIMESTAMP:HASH:SIG:FP
 //! fingerprint = "16e73c5829f69d6f..."
 //! owner = "leo"
 //! attestation = ""
@@ -47,6 +47,87 @@ use crate::contracts::{
     ResolvedItem, SignatureEnvelope, SignatureHeader, SignerFingerprint, TrustClass, VerifiedItem,
 };
 use crate::error::EngineError;
+
+// ── Publisher trust document (PUBLISHER_TRUST.toml) ─────────────────
+
+/// Canonical schema for `PUBLISHER_TRUST.toml` — the universal trust
+/// artifact emitted by `ryeos publish` and consumed by `ryeos init
+/// --trust-file` and `ryeos trust pin --from`.
+///
+/// ```toml
+/// public_key = "ed25519:<base64>"   # required
+/// fingerprint = "<sha256-hex>"      # required, MUST match public_key
+/// owner = "<label>"                 # required, informational
+/// ```
+///
+/// Strict parsing: `deny_unknown_fields`. One parser shared by all
+/// consumers (init, trust pin, publish emit).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublisherTrustDoc {
+    /// Ed25519 public key in `ed25519:<base64>` format.
+    pub public_key: String,
+    /// SHA-256 hex fingerprint of the raw 32-byte public key.
+    pub fingerprint: String,
+    /// Informational owner label (e.g. "ryeos-official", "ryeos-dev").
+    pub owner: String,
+}
+
+impl PublisherTrustDoc {
+    /// Parse a `PUBLISHER_TRUST.toml` from text. Validates that the
+    /// fingerprint matches the public key bytes.
+    pub fn parse(text: &str) -> Result<Self, EngineError> {
+        let doc: PublisherTrustDoc = toml::from_str(text).map_err(|e| {
+            EngineError::Internal(format!("invalid PUBLISHER_TRUST.toml: {e}"))
+        })?;
+        doc.validate()?;
+        Ok(doc)
+    }
+
+    /// Validate that the fingerprint matches the public key.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        let vk = self.decode_verifying_key()?;
+        let computed = compute_fingerprint(&vk);
+        if computed != self.fingerprint {
+            return Err(EngineError::Internal(format!(
+                "PUBLISHER_TRUST.toml self-inconsistent: declared fingerprint {} \
+                 but public_key bytes hash to {}",
+                self.fingerprint, computed
+            )));
+        }
+        Ok(())
+    }
+
+    /// Decode the `ed25519:<base64>` public key into a `VerifyingKey`.
+    pub fn decode_verifying_key(&self) -> Result<VerifyingKey, EngineError> {
+        let b64 = self.public_key.strip_prefix("ed25519:").ok_or_else(|| {
+            EngineError::Internal(
+                "public_key must be ed25519:<base64> format".to_string(),
+            )
+        })?;
+        let bytes: Vec<u8> =
+            base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| {
+                EngineError::Internal(format!("invalid base64 in public_key: {e}"))
+            })?;
+        let len = bytes.len();
+        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+            EngineError::Internal(format!(
+                "public_key must decode to 32 bytes, got {len}"
+            ))
+        })?;
+        VerifyingKey::from_bytes(&arr).map_err(|e| {
+            EngineError::Internal(format!("invalid Ed25519 public key: {e}"))
+        })
+    }
+
+    /// Render to TOML text suitable for writing to disk.
+    pub fn to_toml(&self) -> String {
+        format!(
+            "public_key = \"{}\"\nfingerprint = \"{}\"\nowner = \"{}\"\n",
+            self.public_key, self.fingerprint, self.owner,
+        )
+    }
+}
 
 // ── Trusted signer entry ────────────────────────────────────────────
 
@@ -224,8 +305,8 @@ impl TrustStore {
     /// Trust is operator-side state. Bundles MUST NOT auto-trust their
     /// own keys — `system_roots` is preserved in the signature for caller
     /// convenience but is intentionally NOT iterated for trust loading.
-    /// Operators pin publisher keys explicitly via `rye init` (platform
-    /// author key) and `rye trust pin <fingerprint>` (third parties).
+    /// Operators pin publisher keys explicitly via `ryeos init` (platform
+    /// author key) and `ryeos trust pin <fingerprint>` (third parties).
     ///
     /// First match wins: a key present in the project tier is not
     /// overridden by user.
@@ -258,7 +339,7 @@ impl TrustStore {
             if candidate.is_dir() {
                 tracing::warn!(
                     path = %candidate.display(),
-                    "ignoring bundle-internal trust dir — pin the publisher key with `rye trust pin <fingerprint>` instead"
+                    "ignoring bundle-internal trust dir — pin the publisher key with `ryeos trust pin <fingerprint>` instead"
                 );
             }
         }
@@ -385,7 +466,7 @@ fn load_signer_key(path: &Path) -> Result<TrustedSigner, EngineError> {
 ///
 /// Format:
 /// ```text
-/// # rye:signed:TIMESTAMP:HASH:SIG:FP
+/// # ryeos:signed:TIMESTAMP:HASH:SIG:FP
 /// fingerprint = "..."
 /// owner = "..."
 /// [public_key]
@@ -507,7 +588,7 @@ fn parse_public_key_field(pem_str: &str, path: &Path) -> Result<VerifyingKey, En
 
 /// Verify the integrity of a signed TOML key document.
 ///
-/// Parses the `# rye:signed:TIMESTAMP:HASH:SIG:FP` line (if present),
+/// Parses the `# ryeos:signed:TIMESTAMP:HASH:SIG:FP` line (if present),
 /// recomputes the content hash, and verifies the Ed25519 signature.
 ///
 /// Supports self-signed docs (signer == key in file) and cross-signed
@@ -520,7 +601,7 @@ fn verify_key_doc_integrity(
     path: &Path,
 ) -> Result<(), EngineError> {
     // Find the signature line
-    let sig_line = match content.lines().find(|l| l.starts_with("# rye:signed:")) {
+    let sig_line = match content.lines().find(|l| l.starts_with("# ryeos:signed:")) {
         Some(line) => line,
         None => {
             tracing::debug!(path = %path.display(), "unsigned trusted key document");
@@ -528,9 +609,9 @@ fn verify_key_doc_integrity(
         }
     };
 
-    // Parse: # rye:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>
+    // Parse: # ryeos:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>
     // Timestamp may contain colons, so rsplit from the right
-    let remainder = &sig_line["# rye:signed:".len()..];
+    let remainder = &sig_line["# ryeos:signed:".len()..];
     let parts: Vec<&str> = remainder.rsplitn(4, ':').collect();
     if parts.len() != 4 {
         return Err(EngineError::Internal(format!(
@@ -687,7 +768,7 @@ pub fn pin_key(
     Ok(fingerprint)
 }
 
-/// Prepend a `# rye:signed:...` line to a TOML document body.
+/// Prepend a `# ryeos:signed:...` line to a TOML document body.
 fn sign_toml_doc(body: &str, signing_key: &lillux::crypto::SigningKey) -> String {
     lillux::signature::sign_content(body, signing_key, "#", None)
 }
@@ -1023,7 +1104,7 @@ mod tests {
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let timestamp = "2026-04-10T00:00:00Z";
 
-        let payload = format!("rye:signed:{timestamp}:{content_hash}:{sig_b64}:{fingerprint}");
+        let payload = format!("ryeos:signed:{timestamp}:{content_hash}:{sig_b64}:{fingerprint}");
 
         match &envelope.suffix {
             Some(suffix) => format!("{} {payload} {suffix}\n{body}", envelope.prefix),
@@ -1047,7 +1128,7 @@ mod tests {
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let timestamp = "2026-04-10T00:00:00Z";
 
-        let payload = format!("rye:signed:{timestamp}:{content_hash}:{sig_b64}:{fingerprint}");
+        let payload = format!("ryeos:signed:{timestamp}:{content_hash}:{sig_b64}:{fingerprint}");
         format!("{shebang}\n{} {payload}\n{body}", envelope.prefix)
     }
 
@@ -1260,7 +1341,7 @@ pem = "ed25519:{key_b64}"
         let signature: Signature = sk.sign(content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let timestamp = "2026-04-10T00:00:00Z";
-        format!("# rye:signed:{timestamp}:{content_hash}:{sig_b64}:{fp}\n{body}")
+        format!("# ryeos:signed:{timestamp}:{content_hash}:{sig_b64}:{fp}\n{body}")
     }
 
     #[test]
@@ -1306,7 +1387,7 @@ pem = "ed25519:{key_b64}"
         let signature: Signature = sk1.sign(content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let content2 =
-            format!("# rye:signed:2026-04-10T00:00:00Z:{content_hash}:{sig_b64}:{fp1}\n{body2}");
+            format!("# ryeos:signed:2026-04-10T00:00:00Z:{content_hash}:{sig_b64}:{fp1}\n{body2}");
 
         // Write files — sorted order matters: fp1 file must come before fp2
         // Use names that sort correctly
@@ -1364,7 +1445,7 @@ pem = "ed25519:{key_b64}"
         let signature: Signature = sk2.sign(content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let content =
-            format!("# rye:signed:2026-04-10T00:00:00Z:{content_hash}:{sig_b64}:{fp}\n{body}");
+            format!("# ryeos:signed:2026-04-10T00:00:00Z:{content_hash}:{sig_b64}:{fp}\n{body}");
         fs::write(dir.join(format!("{fp}.toml")), &content).unwrap();
 
         let err = TrustStore::load_from_dir(&dir).unwrap_err();
@@ -1406,7 +1487,7 @@ pem = "ed25519:{key_b64}"
         let signature: Signature = sk2.sign(content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let content =
-            format!("# rye:signed:2026-04-10T00:00:00Z:{content_hash}:{sig_b64}:{fp2}\n{body}");
+            format!("# ryeos:signed:2026-04-10T00:00:00Z:{content_hash}:{sig_b64}:{fp2}\n{body}");
         fs::write(dir.join(format!("{fp}.toml")), &content).unwrap();
 
         let err = TrustStore::load_from_dir(&dir).unwrap_err();
@@ -1447,7 +1528,7 @@ pem = "ed25519:{key_b64}"
 
         // File has signature line
         let content = fs::read_to_string(dir.join(format!("{fp}.toml"))).unwrap();
-        assert!(content.starts_with("# rye:signed:"));
+        assert!(content.starts_with("# ryeos:signed:"));
 
         // Loadable and passes integrity verification
         let store = TrustStore::load_from_dir(&dir).unwrap();
@@ -1522,7 +1603,7 @@ pem = "ed25519:{key_b64}"
     #[test]
     fn content_hash_after_sig_hash_prefix() {
         let body = "print('hello')\n";
-        let content = format!("# rye:signed:2026-04-10T00:00:00Z:abc:sig:fp\n{body}");
+        let content = format!("# ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp\n{body}");
         let envelope = hash_prefix_envelope();
 
         let hash = content_hash_after_signature(&content, &envelope).unwrap();
@@ -1532,7 +1613,7 @@ pem = "ed25519:{key_b64}"
     #[test]
     fn content_hash_after_sig_html_prefix() {
         let body = "# Hello\n";
-        let content = format!("<!-- rye:signed:2026-04-10T00:00:00Z:abc:sig:fp -->\n{body}");
+        let content = format!("<!-- ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp -->\n{body}");
         let envelope = html_envelope();
 
         let hash = content_hash_after_signature(&content, &envelope).unwrap();
@@ -1543,7 +1624,7 @@ pem = "ed25519:{key_b64}"
     fn content_hash_after_sig_with_shebang() {
         let body = "print('hello')\n";
         let content =
-            format!("#!/usr/bin/env python3\n# rye:signed:2026-04-10T00:00:00Z:abc:sig:fp\n{body}");
+            format!("#!/usr/bin/env python3\n# ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp\n{body}");
         let envelope = shebang_envelope();
 
         let hash = content_hash_after_signature(&content, &envelope).unwrap();

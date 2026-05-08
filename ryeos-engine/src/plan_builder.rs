@@ -386,22 +386,22 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     // Step 3: Build plan environment
     let mut plan_env = HashMap::new();
     plan_env.insert(
-        "RYE_ITEM_PATH".to_owned(),
+        "RYEOS_ITEM_PATH".to_owned(),
         resolved.source_path.to_string_lossy().to_string(),
     );
-    plan_env.insert("RYE_ITEM_KIND".to_owned(), resolved.kind.clone());
+    plan_env.insert("RYEOS_ITEM_KIND".to_owned(), resolved.kind.clone());
     plan_env.insert(
-        "RYE_ITEM_REF".to_owned(),
+        "RYEOS_ITEM_REF".to_owned(),
         canonical_ref.clone(),
     );
     if let Some(ref root) = resolved.materialized_project_root {
         plan_env.insert(
-            "RYE_PROJECT_ROOT".to_owned(),
+            "RYEOS_PROJECT_ROOT".to_owned(),
             root.to_string_lossy().to_string(),
         );
     }
-    plan_env.insert("RYE_SITE_ID".to_owned(), ctx.current_site_id.clone());
-    plan_env.insert("RYE_ORIGIN_SITE_ID".to_owned(), ctx.origin_site_id.clone());
+    plan_env.insert("RYEOS_SITE_ID".to_owned(), ctx.current_site_id.clone());
+    plan_env.insert("RYEOS_ORIGIN_SITE_ID".to_owned(), ctx.origin_site_id.clone());
 
     // Step 4: Compile intermediates into SubprocessSpec via the
     // runtime-handler registry. The root item's kind schema declares
@@ -503,7 +503,7 @@ fn compute_cache_key(
     hints: &ExecutionHints,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"rye:plan:v2:");
+    hasher.update(b"ryeos:plan:v2:");
     hasher.update(canonical_ref.as_bytes());
     hasher.update(b":");
     hasher.update(content_hash.as_bytes());
@@ -649,7 +649,7 @@ mod tests {
         let yaml_owned = if yaml.contains("composed_value_contract") {
             yaml.to_string()
         } else {
-            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:rye/core/identity\n") } }
+            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:ryeos/core/identity\n") } }
         };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }
@@ -659,15 +659,15 @@ location:
   directory: tools
 execution:
   aliases:
-    \"@subprocess\": \"tool:rye/core/subprocess/execute\"
+    \"@subprocess\": \"tool:ryeos/core/subprocess/execute\"
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
   - extensions: [\".yaml\", \".yml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 runtime:
@@ -724,7 +724,7 @@ metadata:
             signature_header: None,
             source_format: ResolvedSourceFormat {
                 extension: ".py".to_string(),
-                parser: "parser:rye/core/python/ast".to_string(),
+                parser: "parser:ryeos/core/python/ast".to_string(),
                 signature: SignatureEnvelope {
                     prefix: "#".to_string(),
                     suffix: None,
@@ -828,8 +828,8 @@ config:
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
 
-        // Write chain: tool → @subprocess (alias → tool:rye/core/subprocess/execute, null terminal with config)
-        let _term = write_terminal_with_config(&project_dir, "rye/core/subprocess/execute");
+        // Write chain: tool → @subprocess (alias → tool:ryeos/core/subprocess/execute, null terminal with config)
+        let _term = write_terminal_with_config(&project_dir, "ryeos/core/subprocess/execute");
         let tool_path = write_chain_tool(&project_dir, "my_tool", Some("@subprocess"));
 
         let item = make_verified_item(
@@ -930,7 +930,7 @@ config:
         let tool_schema = kinds.get("tool").unwrap();
         assert_eq!(
             tool_schema.execution.as_ref().and_then(|e| e.aliases.get("@subprocess")).map(|s| s.as_str()),
-            Some("tool:rye/core/subprocess/execute")
+            Some("tool:ryeos/core/subprocess/execute")
         );
         assert!(tool_schema.is_executable());
     }
@@ -1151,7 +1151,7 @@ config:
             "command": "/bin/echo",
             "args": [],
             "timeout_secs": 10,
-            "env": { "RYE_THREAD_ID": "evil" }
+            "env": { "RYEOS_THREAD_ID": "evil" }
         });
         let intermediates = vec![RChainIntermediate {
             executor_id: "test".into(),
@@ -1315,14 +1315,14 @@ config:
         let sig: lillux::crypto::Signature = signing_key.sign(hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
         let signed_content = format!(
-            "# rye:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}\n{body}"
+            "# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}\n{body}"
         );
         // Tamper after signing
         let tampered = signed_content.replace("@subprocess", "@tampered");
         fs::write(runtime_dir.join("script.yaml"), &tampered).unwrap();
 
         // Also need the terminal for the alias resolution (even though we won't reach it)
-        let _term = write_terminal(&project_dir, "rye/core/subprocess/execute");
+        let _term = write_terminal(&project_dir, "ryeos/core/subprocess/execute");
 
         // Root tool
         let tool_path = write_chain_tool(&project_dir, "my_tool", Some("tool:runtimes/python/script"));
@@ -1414,14 +1414,14 @@ config:
         fs::create_dir_all(&runtime_dir).unwrap();
 
         let runtime_content = r#"__executor_id__: "@subprocess"
-category: rye/core/runtimes/python
+category: ryeos/core/runtimes/python
 env_config:
   interpreter:
     type: local_binary
     binary: python3
     candidates: [python3]
     search_paths: [".venv/bin"]
-    var: RYE_PYTHON
+    var: RYEOS_PYTHON
   env:
     PYTHONUNBUFFERED: "1"
 config:
@@ -1436,17 +1436,17 @@ config:
         let runtime_path = runtime_dir.join("script.yaml");
         fs::write(&runtime_path, &runtime_content).unwrap();
 
-        // 3. Write terminal: rye/core/subprocess/execute.yaml (executor_id: null)
+        // 3. Write terminal: ryeos/core/subprocess/execute.yaml (executor_id: null)
         let terminal_dir = project_dir
             .join(AI_DIR)
             .join("tools")
-            .join("rye")
+            .join("ryeos")
             .join("core")
             .join("subprocess");
         fs::create_dir_all(&terminal_dir).unwrap();
         let terminal_content = "\
 __executor_id__: null\n\
-category: rye/core/subprocess\n";
+category: ryeos/core/subprocess\n";
         fs::write(terminal_dir.join("execute.yaml"), terminal_content).unwrap();
 
         // 4. Write root tool: my_tool.py
@@ -1543,8 +1543,8 @@ category: rye/core/subprocess\n";
         // timeout_secs from the runtime config
         assert_eq!(dispatch.timeout_secs, 120);
 
-        // Env should include PYTHONUNBUFFERED and the RYE_PYTHON var injection
+        // Env should include PYTHONUNBUFFERED and the RYEOS_PYTHON var injection
         assert_eq!(dispatch.env.get("PYTHONUNBUFFERED").unwrap(), "1");
-        assert!(dispatch.env.contains_key("RYE_PYTHON"));
+        assert!(dispatch.env.contains_key("RYEOS_PYTHON"));
     }
 }

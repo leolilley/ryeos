@@ -1,4 +1,4 @@
-//! Query layer for the rye-state projection database.
+//! Query layer for the ryeos-state projection database.
 //!
 //! Provides typed read accessors for all projection tables plus
 //! a small write helper for thread facets.

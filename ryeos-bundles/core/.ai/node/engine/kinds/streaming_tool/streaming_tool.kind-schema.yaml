@@ -1,4 +1,4 @@
-# rye:signed:2026-05-05T09:31:54Z:bb07d6a446a0270606bf3e9219e4ebb5cdd2d0aa0961170378e8a158ae3d679c:UbNWlCx6GScArHkdwxgwAFmqO+RyvkAM9ZH3sC4QL5FpfD4aSc7SplQXlF2l1r6/ZexFTWCaAVjKou4SAMFOBQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:8d19ea0ecd3f14f22ad20ea8216f9b97d04efe67d0bc7528c6f4facafa469420:1rAb6FytM4uXcbp13yVaqmfeWMmkN2YrxgeL5m+iWAy2LOoYTNVC+cxYrm4XSMryR8JnTOWSCa+JtVVNs/Q+Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/streaming_tool"
 version: "1.0.0"
 location:
@@ -6,32 +6,32 @@ location:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/tool_streaming_v1
+    protocol: protocol:ryeos/core/tool_streaming_v1
   thread_profile: streaming_tool_run
   aliases:
-    "@subprocess": "tool:rye/core/subprocess/execute"
+    "@subprocess": "tool:ryeos/core/subprocess/execute"
   resolution: []
 formats:
   - extensions: [".py"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: "#"
       after_shebang: true
   - extensions: [".yaml", ".yml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
   - extensions: [".js", ".ts", ".mjs", ".cjs"]
-    parser: parser:rye/core/javascript/javascript
+    parser: parser:ryeos/core/javascript/javascript
     signature:
       prefix: "//"
   - extensions: [".json"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
 # Streaming tools use the same identity composer as regular tools.
 inventory_schema_keys: [input_schema, parameters, config_schema]
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

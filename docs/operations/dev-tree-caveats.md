@@ -4,26 +4,26 @@ Notes for contributors working in the local checkout. None of these affect end-u
 
 ## Single-key signing model
 
-Every signable artifact in the dev bundle tree (`ryeos-bundles/{core,standard}`) is signed with the **platform-author key** at `~/.ai/config/keys/signing/private_key.pem`. That single key covers:
+Every signable artifact in the dev bundle tree (`ryeos-bundles/{core,standard}`) is signed with the **official publisher key** at `~/.ai/config/keys/signing/private_key.pem`. That single key covers:
 
 - Kind schemas and handler descriptor YAMLs
-- Binary `item_source.json` sidecars produced by `rye-bundle-tool rebuild-manifest`
+- Binary `item_source.json` sidecars produced by `ryeos publish rebuild-manifest`
 - The `MANIFEST.json` and `refs/bundles/manifest` it emits
 
-The trust store the test harness pins (`ryeos_engine::test_support::live_trust_store`) is therefore one-entry: the platform-author public key (`09674c8...`). The previous publisher-seed key (`[42; 32]`) is **only** retained inside the daemon `fast_fixture` for self-signed test content (directives, routes, providers); it is not required for bundle artifacts and is no longer trusted by the engine test helpers.
+The trust store the test harness pins (`ryeos_engine::test_support::live_trust_store`) is therefore one-entry: the official publisher public key (`OFFICIAL_PUBLISHER_FP` in `ryeos-tools/src/actions/init.rs`). The previous publisher-seed key (`[42; 32]`) is **only** retained inside the daemon `fast_fixture` for self-signed test content (directives, routes, providers); it is not required for bundle artifacts and is no longer trusted by the engine test helpers.
 
-## `rye-inspect` symlink invalidates `core`'s manifest after `cargo build`
+## `ryeos-core-tools` symlink invalidates `core`'s manifest after `cargo build`
 
-`ryeos-bundles/core/.ai/bin/<host-triple>/rye-inspect` is a symlink to `target/debug/rye-inspect`. The bundle's `refs/bundles/manifest` records the sha256 of the binary file. Any `cargo build` cycle that recompiles `rye-inspect` produces a new binary, so the symlinked file's hash diverges from the manifest entry.
+`ryeos-bundles/core/.ai/bin/<host-triple>/ryeos-core-tools` is a symlink to `target/debug/ryeos-core-tools`. The bundle's `refs/bundles/manifest` records the sha256 of the binary file. Any `cargo build` cycle that recompiles `ryeos-core-tools` produces a new binary, so the symlinked file's hash diverges from the manifest entry.
 
-Because `bin:` resolution requires a hash match (no soft fallback), every `tool:rye/core/{fetch,verify,identity}` invocation will fail with `BinHashMismatch` until the manifest is rebuilt.
+Because `bin:` resolution requires a hash match (no soft fallback), every `tool:ryeos/core/{fetch,verify,identity}` invocation will fail with `BinHashMismatch` until the manifest is rebuilt.
 
 ### Symptom — primary
 
-The error message is the giveaway. Look for `rye-inspect` hash mismatch in HTTP body or panic output:
+The error message is the giveaway. Look for `ryeos-core-tools` hash mismatch in HTTP body or panic output:
 
 ```
-binary `rye-inspect` hash mismatch: manifest declares <hash-A>,
+binary `ryeos-core-tools` hash mismatch: manifest declares <hash-A>,
 on-disk computed <hash-B>
 ```
 
@@ -37,19 +37,19 @@ start daemon: daemon.json never appeared at /tmp/.tmpXXX/state/daemon.json
 
 The daemon either fails its boot consistency check or gets stuck partway through bootstrap.
 
-If you see the daemon-startup symptom, **first** confirm the `rye-inspect` symlink hash matches the manifest:
+If you see the daemon-startup symptom, **first** confirm the `ryeos-core-tools` symlink hash matches the manifest:
 
 ```bash
-sha256sum ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/rye-inspect
+sha256sum ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools
 # Compare to the entry in:
-cat ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/MANIFEST.json | grep -A1 rye-inspect
+cat ryeos-bundles/core/.ai/bin/x86_64-unknown-linux-gnu/MANIFEST.json | grep -A1 ryeos-core-tools
 ```
 
 If they differ, this is the root cause regardless of which test is failing.
 
 ### Fix — preferred
 
-Run the gate wrapper. It detects the drift, runs `rebuild-manifest` with the correct platform-author key, then runs nextest:
+Run the gate wrapper. It detects the drift, runs `rebuild-manifest` with the correct official publisher key, then runs nextest:
 
 ```bash
 ./scripts/gate.sh
@@ -61,17 +61,17 @@ To sync the manifest without running tests:
 ./scripts/gate.sh --no-tests
 ```
 
-The script is idempotent — when on-disk and manifest hashes already match it prints `rye-inspect hash matches manifest (<hash>)` and skips the rebuild.
+The script is idempotent — when on-disk and manifest hashes already match it prints `ryeos-core-tools hash matches manifest (<hash>)` and skips the rebuild.
 
 ### Fix — manual
 
 ```bash
-cargo run --bin rye-bundle-tool -- rebuild-manifest \
+cargo run --bin ryeos publish -- rebuild-manifest \
     --source ryeos-bundles/core \
     --key ~/.ai/config/keys/signing/private_key.pem
 ```
 
-That re-hashes the on-disk binary, regenerates `MANIFEST.json` + the CAS-stored `SourceManifest` object + the signed `rye-inspect.item_source.json` sidecar, and updates `refs/bundles/manifest` to point at the new manifest hash. Signs everything with the platform-author key (the single key the engine test harness trusts).
+That re-hashes the on-disk binary, regenerates `MANIFEST.json` + the CAS-stored `SourceManifest` object + the signed `ryeos-core-tools.item_source.json` sidecar, and updates `refs/bundles/manifest` to point at the new manifest hash. Signs everything with the official publisher key (the single key the engine test harness trusts).
 
 ### Common LLM mistake — DO NOT use `--seed 42`
 
@@ -90,7 +90,7 @@ The `--seed` flag exists only for self-signed daemon `fast_fixture` content (dir
 
 ## Why the symlink at all
 
-Convenience for development. The dev tree's "core" bundle is a working bundle that the daemon can resolve against, but the binary it advertises is whatever you just built. End-user installs avoid the issue entirely because `rye init` copies the bundle to `system_data_dir` as a static artifact — the user's installed `core` always has a real binary file, not a symlink.
+Convenience for development. The dev tree's "core" bundle is a working bundle that the daemon can resolve against, but the binary it advertises is whatever you just built. End-user installs avoid the issue entirely because `ryeos init` copies the bundle to `system_data_dir` as a static artifact — the user's installed `core` always has a real binary file, not a symlink.
 
 ## What about `standard`?
 

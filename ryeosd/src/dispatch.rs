@@ -1400,7 +1400,7 @@ async fn dispatch_streaming_subprocess(
 
     // Streaming tools are *items*, not runtime-hosted kinds — each
     // tool ships its own binary in the bundle (e.g.
-    // `bin/<triple>/rye-tool-streaming-demo`) and the dispatcher
+    // `bin/<triple>/ryeos-core-tools`) and the dispatcher
     // resolves it from the verified item's `executor_id` metadata.
     // Phase2's first cut wrongly routed this through
     // `RuntimeRegistry::lookup_for(kind)` — which only finds runtimes
@@ -1898,15 +1898,15 @@ location:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime_v1
   thread_profile: runtime_run
   resolution: []
 formats:
   - extensions: [".yaml", ".yml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -1971,7 +1971,7 @@ metadata:
             std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
                 ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
                 ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-                ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:rye/core/sign".into()) },
+                ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
             ]).unwrap()),
         )
     }

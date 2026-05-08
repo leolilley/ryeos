@@ -11,8 +11,8 @@
 //! …and that any kind requiring composition has a registered composer.
 //! (Parser kind identity is implicit from location — descriptors live
 //! at `.ai/<parser-kind-directory>/**/*.yaml` (typically
-//! `.ai/parsers/rye/core/...`) and are addressed by canonical refs
-//! like `parser:rye/core/yaml/yaml`. Parsers are their own kind; there
+//! `.ai/parsers/ryeos/core/...`) and are addressed by canonical refs
+//! like `parser:ryeos/core/yaml/yaml`. Parsers are their own kind; there
 //! is no discriminator field on the descriptor to verify.)
 //!
 //! Every issue is collected — the validator does not short-circuit on
@@ -461,19 +461,19 @@ pub fn validate_protocol_builder(
         if let crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref } = terminator {
             match kind_name {
                 "runtime"
-                    if protocol_ref != "protocol:rye/core/runtime_v1" => {
+                    if protocol_ref != "protocol:ryeos/core/runtime_v1" => {
                         issues.push(BootIssue::RuntimeProtocolMismatch {
                             kind: kind_name.to_string(),
                             protocol_ref: protocol_ref.clone(),
-                            expected: "protocol:rye/core/runtime_v1".to_string(),
+                            expected: "protocol:ryeos/core/runtime_v1".to_string(),
                         });
                     }
                 "streaming_tool"
-                    if protocol_ref != "protocol:rye/core/tool_streaming_v1" => {
+                    if protocol_ref != "protocol:ryeos/core/tool_streaming_v1" => {
                         issues.push(BootIssue::StreamingToolProtocolMismatch {
                             kind: kind_name.to_string(),
                             protocol_ref: protocol_ref.clone(),
-                            expected: "protocol:rye/core/tool_streaming_v1".to_string(),
+                            expected: "protocol:ryeos/core/tool_streaming_v1".to_string(),
                         });
                     }
                 _ => {}
@@ -544,22 +544,22 @@ use crate::composers::ComposerRegistry;
 
     /// Build a composer registry from `kinds` using the live handler
     /// registry — necessary because every kind schema written by these
-    /// tests now declares `composer: handler:rye/core/identity` (or
+    /// tests now declares `composer: handler:ryeos/core/identity` (or
     /// extends-chain / graph-permissions) which only resolves through
     /// the live registry.
     fn composers_from(kinds: &KindRegistry) -> ComposerRegistry {
         ComposerRegistry::from_kinds(kinds, &live_handler_registry()).unwrap()
     }
 
-    /// Fetch the verified `handler:rye/core/identity` composer from
+    /// Fetch the verified `handler:ryeos/core/identity` composer from
     /// the live registry so tests can construct synthetic
     /// `BoundComposer` entries via `ComposerRegistry::register` after
     /// migration to subprocess composers.
     fn identity_composer_handler() -> Arc<crate::handlers::VerifiedHandler> {
         let registry = load_live_handler_registry();
         let h = registry
-            .ensure_serves("handler:rye/core/identity", HandlerServes::Composer)
-            .expect("live registry must contain handler:rye/core/identity composer");
+            .ensure_serves("handler:ryeos/core/identity", HandlerServes::Composer)
+            .expect("live registry must contain handler:ryeos/core/identity composer");
         Arc::new(h.clone())
     }
 
@@ -600,7 +600,7 @@ formats:
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {{}}
@@ -640,7 +640,7 @@ formats:
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
 {contract_yaml_indented}
 "
@@ -688,13 +688,13 @@ composed_value_contract:
 
     #[test]
     fn validate_boot_parser_ref_resolves_and_handler_checked() {
-        let parser_ref = "parser:rye/core/markdown/frontmatter";
+        let parser_ref = "parser:ryeos/core/markdown/frontmatter";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -736,12 +736,12 @@ composed_value_contract:
 
     #[test]
     fn unknown_handler_emitted() {
-        let parser_ref = "parser:rye/core/x/x";
+        let parser_ref = "parser:ryeos/core/x/x";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
-            parser_descriptor("handler:rye/core/totally_made_up", serde_json::json!({})),
+            parser_descriptor("handler:ryeos/core/totally_made_up", serde_json::json!({})),
         )]);
         let hr = handler_registry();
         let composers = composers_from(&kinds);
@@ -750,13 +750,13 @@ composed_value_contract:
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::UnknownHandler { handler, .. }
-                if handler == "handler:rye/core/totally_made_up"
+                if handler == "handler:ryeos/core/totally_made_up"
         )));
     }
 
     #[test]
     fn unknown_handler_non_handler_prefix() {
-        let parser_ref = "parser:rye/core/x/x";
+        let parser_ref = "parser:ryeos/core/x/x";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
@@ -775,13 +775,13 @@ composed_value_contract:
 
     #[test]
     fn handler_unusable_emitted_for_missing_binary() {
-        let parser_ref = "parser:rye/core/yaml/yaml";
+        let parser_ref = "parser:ryeos/core/yaml/yaml";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor(
-                "handler:rye/core/yaml-document",
+                "handler:ryeos/core/yaml-document",
                 serde_json::json!({ "require_mapping": "yes please" }),
             ),
         )]);
@@ -818,13 +818,13 @@ composed_value_contract:
 
     #[test]
     fn aggregates_multiple_issues() {
-        let parser_ref = "parser:rye/core/yaml/yaml";
+        let parser_ref = "parser:ryeos/core/yaml/yaml";
         let kinds = kinds_with_directive(parser_ref);
 
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor(
-                "handler:rye/core/yaml-document",
+                "handler:ryeos/core/yaml-document",
                 serde_json::json!({ "require_mapping": "not a bool" }),
             ),
         )]);
@@ -849,12 +849,12 @@ composed_value_contract:
 
     #[test]
     fn duplicate_parser_ref_emitted() {
-        let parser_ref = "parser:rye/core/markdown/frontmatter";
+        let parser_ref = "parser:ryeos/core/markdown/frontmatter";
         let kinds = kinds_with_directive(parser_ref);
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -868,10 +868,10 @@ composed_value_contract:
         let composers = composers_from(&kinds);
 
         let dup_refs = vec![DuplicateRef {
-            canonical_ref: "parser:rye/core/yaml/yaml".to_string(),
+            canonical_ref: "parser:ryeos/core/yaml/yaml".to_string(),
             paths: vec![
-                std::path::PathBuf::from("/system/.ai/parsers/rye/core/yaml/yaml.yaml"),
-                std::path::PathBuf::from("/user/.ai/parsers/rye/core/yaml/yaml.yaml"),
+                std::path::PathBuf::from("/system/.ai/parsers/ryeos/core/yaml/yaml.yaml"),
+                std::path::PathBuf::from("/user/.ai/parsers/ryeos/core/yaml/yaml.yaml"),
             ],
         }];
 
@@ -879,7 +879,7 @@ composed_value_contract:
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DuplicateParserRef { parser_ref: pr, paths }
-                if pr == "parser:rye/core/yaml/yaml" && paths.len() == 2
+                if pr == "parser:ryeos/core/yaml/yaml" && paths.len() == 2
         )), "expected DuplicateParserRef in {issues:?}");
     }
 
@@ -893,7 +893,7 @@ formats:
     parser: {parser_ref}
     signature:
       prefix: \"#\"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {{}}
@@ -910,7 +910,7 @@ composed_value_contract:
         let root = tempdir();
         let sk = signing_key();
         let ts = trust_store(&sk);
-        write_parser_kind(&root, "parser:rye/core/yaml/yaml", &sk);
+        write_parser_kind(&root, "parser:ryeos/core/yaml/yaml", &sk);
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
 
         let parsers = ParserRegistry::empty();
@@ -921,7 +921,7 @@ composed_value_contract:
         assert!(issues.iter().any(|i| matches!(
             i,
             BootIssue::DanglingParserRef { kind, parser_ref, .. }
-                if kind == "parser" && parser_ref == "parser:rye/core/yaml/yaml"
+                if kind == "parser" && parser_ref == "parser:ryeos/core/yaml/yaml"
         )), "expected DanglingParserRef for parser kind in {issues:?}");
     }
 
@@ -930,14 +930,14 @@ composed_value_contract:
         let root = tempdir();
         let sk = signing_key();
         let ts = trust_store(&sk);
-        let self_ref = "parser:rye/core/yaml/yaml";
+        let self_ref = "parser:ryeos/core/yaml/yaml";
         write_parser_kind(&root, self_ref, &sk);
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
 
         let parsers = ParserRegistry::from_entries(vec![(
             self_ref.to_string(),
             parser_descriptor(
-                "handler:rye/core/yaml-document",
+                "handler:ryeos/core/yaml-document",
                 serde_json::json!({ "require_mapping": true }),
             ),
         )]);
@@ -972,7 +972,7 @@ composed_value_contract:
 
     #[test]
     fn contract_satisfied_no_contract_violation() {
-        let parser_ref = "parser:rye/core/markdown/directive";
+        let parser_ref = "parser:ryeos/core/markdown/directive";
         let kinds = kinds_with_directive_contract(
             parser_ref,
             "  root_type: mapping\n  required:\n    body:\n      type: single\n      prim: string\n",
@@ -980,7 +980,7 @@ composed_value_contract:
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor_with_schema(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -1011,7 +1011,7 @@ location:
   directory: directives
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/directive
+    parser: parser:ryeos/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -1039,7 +1039,7 @@ location:
   directory: directives
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/directive
+    parser: parser:ryeos/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -1070,7 +1070,7 @@ location:
   directory: directives
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/directive
+    parser: parser:ryeos/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -1086,9 +1086,9 @@ composed_value_contract:
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
 
         let parsers = ParserRegistry::from_entries(vec![(
-            "parser:rye/core/markdown/directive".to_string(),
+            "parser:ryeos/core/markdown/directive".to_string(),
             parser_descriptor(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -1113,7 +1113,7 @@ composed_value_contract:
 
     #[test]
     fn aggregates_all_contract_violations() {
-        let parser_ref = "parser:rye/core/markdown/directive";
+        let parser_ref = "parser:ryeos/core/markdown/directive";
         let mut required = BTreeMap::new();
         required.insert("body".to_string(), FieldType::Single { prim: PrimType::String });
         required.insert("name".to_string(), FieldType::Single { prim: PrimType::String });
@@ -1136,7 +1136,7 @@ composed_value_contract:
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
             parser_descriptor_with_schema(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -1186,11 +1186,11 @@ location:
   directory: {kind}s
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/x
+    parser: parser:ryeos/core/markdown/x
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composer_config:
 {junk}
 composed_value_contract:
@@ -1206,9 +1206,9 @@ composed_value_contract:
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
 
         let parsers = ParserRegistry::from_entries(vec![(
-            "parser:rye/core/markdown/x".to_string(),
+            "parser:ryeos/core/markdown/x".to_string(),
             parser_descriptor(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 serde_json::json!({
                     "require_header": true,
                     "body_field": "body",
@@ -1218,7 +1218,7 @@ composed_value_contract:
         )]);
         // Composer-config validation now runs through the live
         // composer handler subprocess; we MUST use the live handler
-        // registry so the `handler:rye/core/identity` ref resolves
+        // registry so the `handler:ryeos/core/identity` ref resolves
         // AND the binary actually runs to reject the bad
         // `composer_config` blob (identity composer rejects any
         // non-empty mapping).
@@ -1253,7 +1253,7 @@ composed_value_contract:
         crate::protocols::descriptor::ProtocolDescriptor {
             kind: "protocol".to_string(),
             name: "test-protocol".to_string(),
-            category: "rye/core".to_string(),
+            category: "ryeos/core".to_string(),
             abi_version: "v1".to_string(),
             description: None,
             stdin: crate::protocols::descriptor::ProtocolStdin {
@@ -1335,7 +1335,7 @@ composed_value_contract:
         let desc = crate::protocols::descriptor::ProtocolDescriptor {
             kind: "protocol".to_string(),
             name: "envelope-req".to_string(),
-            category: "rye/core".to_string(),
+            category: "ryeos/core".to_string(),
             abi_version: "v1".to_string(),
             description: None,
             stdin: crate::protocols::descriptor::ProtocolStdin {

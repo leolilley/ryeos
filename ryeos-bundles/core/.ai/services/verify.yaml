@@ -1,9 +1,9 @@
-# rye:signed:2026-05-05T09:31:55Z:c3645f8698c93e3aa6077ab7c53942cf9bf578c31418170298cb852b3d38b9fd:x0CWN64ppB97jCq3j5/5DMBt1P3C3+kf/GvwaQsOx6uBUbMqJUPhR9mfDfBybWUeuEvJU94X8fKzj5zdgXi6BQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:07Z:24ba5ca8e0073314503445bcf6f403cc6f9fc34e7dbc2dfba0e560e81201ae32:D8SP9z4tvHXg66TfGnE0sT7h/umZBV93tF28stzB11+K2aWRrSrdg/PSpmRXNRlDnVckCgyd60Boe+ZHco5ACA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ""
 name: "verify"
 kind: service
 endpoint: verify
-required_caps: ["rye.execute.service.verify"]
+required_caps: ["ryeos.execute.service.verify"]
 schema:
   item_ref: string
 description: "Resolve and trust-verify an item via the engine"

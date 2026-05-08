@@ -111,12 +111,12 @@ mod tests {
     #[test]
     fn lifts_permissions_into_effective_caps() {
         let view = run(json!({
-            "permissions": ["rye.execute.tool.echo", "rye.execute.tool.read"],
+            "permissions": ["ryeos.execute.tool.echo", "ryeos.execute.tool.read"],
             "config": { "start": "done" }
         }));
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.echo", "rye.execute.tool.read"]
+            vec!["ryeos.execute.tool.echo", "ryeos.execute.tool.read"]
         );
     }
 
@@ -135,11 +135,11 @@ mod tests {
     #[test]
     fn non_string_permissions_are_skipped() {
         let view = run(json!({
-            "permissions": ["rye.execute.tool.echo", 42, null, true],
+            "permissions": ["ryeos.execute.tool.echo", 42, null, true],
         }));
         assert_eq!(
             policy_fact_string_seq(&view, "effective_caps"),
-            vec!["rye.execute.tool.echo"]
+            vec!["ryeos.execute.tool.echo"]
         );
     }
 

@@ -3,7 +3,7 @@
 //!
 //! Mirrors Python `PrimitiveExecutor._resolve_tool_config` /
 //! `_resolve_single_config` / `_deep_merge_config` (see
-//! `ryeos/rye/executor/primitive_executor.py` lines 1125-1229) and the
+//! `ryeos/ryeos/executor/primitive_executor.py` lines 1125-1229) and the
 //! driver wiring at lines 257-285:
 //!
 //!   * On the root chain element (chain[0] / current_index == 0):
@@ -425,10 +425,10 @@ location:
   directory: config
 formats:
   - extensions: [\".yaml\", \".yml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -713,7 +713,7 @@ metadata:
         let chain = vec![
             fake_intermediate("mytool", json!({})),
             fake_intermediate(
-                "rye/core/subprocess/execute",
+                "ryeos/core/subprocess/execute",
                 json!({
                     "execution_params": ["max_steps"],
                     "config_resolve": { "path": "exec.yaml" },
@@ -748,7 +748,7 @@ metadata:
         let chain = vec![
             fake_intermediate("mytool", json!({})),
             fake_intermediate(
-                "rye/core/subprocess/execute",
+                "ryeos/core/subprocess/execute",
                 json!({ "execution_params": ["max_steps"] }),
             ),
         ];

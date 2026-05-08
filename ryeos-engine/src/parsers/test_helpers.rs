@@ -28,17 +28,17 @@ fn mk(handler: &str, parser_config: serde_json::Value) -> ParserDescriptor {
 }
 
 /// All five canonical bundle parser descriptors:
-///   * `parser:rye/core/python/ast`
-///   * `parser:rye/core/yaml/yaml`
-///   * `parser:rye/core/markdown/directive`
-///   * `parser:rye/core/markdown/frontmatter`
-///   * `parser:rye/core/javascript/javascript`
+///   * `parser:ryeos/core/python/ast`
+///   * `parser:ryeos/core/yaml/yaml`
+///   * `parser:ryeos/core/markdown/directive`
+///   * `parser:ryeos/core/markdown/frontmatter`
+///   * `parser:ryeos/core/javascript/javascript`
 pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher {
     let entries = vec![
         (
-            "parser:rye/core/python/ast".to_string(),
+            "parser:ryeos/core/python/ast".to_string(),
             mk(
-                "handler:rye/core/regex-kv",
+                "handler:ryeos/core/regex-kv",
                 json!({
                     "patterns": [{
                         "regex": r#"(?m)^(__\w+__)\s*=\s*"([^"]+)""#,
@@ -49,16 +49,16 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
             ),
         ),
         (
-            "parser:rye/core/yaml/yaml".to_string(),
+            "parser:ryeos/core/yaml/yaml".to_string(),
             mk(
-                "handler:rye/core/yaml-document",
+                "handler:ryeos/core/yaml-document",
                 json!({ "require_mapping": true }),
             ),
         ),
         (
-            "parser:rye/core/markdown/directive".to_string(),
+            "parser:ryeos/core/markdown/directive".to_string(),
             mk(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 json!({
                     "require_header": true,
                     "body_field": "body",
@@ -70,9 +70,9 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
             ),
         ),
         (
-            "parser:rye/core/markdown/frontmatter".to_string(),
+            "parser:ryeos/core/markdown/frontmatter".to_string(),
             mk(
-                "handler:rye/core/yaml-header-document",
+                "handler:ryeos/core/yaml-header-document",
                 json!({
                     "require_header": false,
                     "body_field": null,
@@ -83,9 +83,9 @@ pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher
             ),
         ),
         (
-            "parser:rye/core/javascript/javascript".to_string(),
+            "parser:ryeos/core/javascript/javascript".to_string(),
             mk(
-                "handler:rye/core/regex-kv",
+                "handler:ryeos/core/regex-kv",
                 json!({
                     "patterns": [{
                         "regex": r#"(?m)^const\s+(__\w+__)\s*=\s*"([^"]+)""#,

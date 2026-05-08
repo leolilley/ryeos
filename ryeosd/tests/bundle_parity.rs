@@ -128,7 +128,7 @@ fn synth_project_with_directive(name: &str, body: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let project_dir = std::env::temp_dir().join(format!(
-        "rye_bundle_pipeline_test_{}_{}_{}",
+        "ryeos_bundle_pipeline_test_{}_{}_{}",
         std::process::id(),
         name,
         nanos
