@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lillux::crypto::{DecodePublicKey, VerifyingKey};
+use base64::Engine as _;
 
 use crate::handlers::HandlerRegistry;
 use crate::parsers::descriptor::ParserDescriptor;
@@ -59,27 +60,49 @@ pub fn platform_author_verifying_key() -> VerifyingKey {
         .expect("platform-author public key PEM must decode")
 }
 
-/// Trust store for verifying live core-bundle artifacts. Single-key
-/// model: only the platform-author key (`09674c8...`) is needed,
-/// because every signable artifact in the dev bundle tree is signed
-/// with that one key (kind schemas, descriptor YAMLs, and the binary
-/// `item_source.json` sidecars produced by `rye-bundle-tool
-/// rebuild-manifest --key`).
+/// Dev publisher verifying key (`741a8bc6...`) — the key used by
+/// `populate-bundles.sh` (via `.dev-keys/PUBLISHER_DEV.pem`) to sign
+/// dev-tree bundles. Tests must trust this key because CI and local dev
+/// workflows publish with it.
+pub fn dev_publisher_verifying_key() -> VerifyingKey {
+    // ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk=
+    const B64: &str = "sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk=";
+    let bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(B64)
+        .expect("dev key base64 decode")
+        .try_into()
+        .expect("dev key must be 32 bytes");
+    VerifyingKey::from_bytes(&bytes).expect("dev key must be valid Ed25519")
+}
+
+/// Trust store for verifying live core-bundle artifacts. Includes both
+/// the platform-author key (`09674c8...`) and the dev publisher key
+/// (`741a8bc6...`) so tests work with both official and dev-signed bundles.
 pub fn live_trust_store() -> TrustStore {
     let platform_vk = platform_author_verifying_key();
     let platform_fp = lillux::signature::compute_fingerprint(&platform_vk);
 
-    TrustStore::from_signers(vec![TrustedSigner {
-        fingerprint: platform_fp,
-        verifying_key: platform_vk,
-        label: Some("test-support: platform author".into()),
-    }])
+    let dev_vk = dev_publisher_verifying_key();
+    let dev_fp = lillux::signature::compute_fingerprint(&dev_vk);
+
+    TrustStore::from_signers(vec![
+        TrustedSigner {
+            fingerprint: platform_fp,
+            verifying_key: platform_vk,
+            label: Some("test-support: platform author".into()),
+        },
+        TrustedSigner {
+            fingerprint: dev_fp,
+            verifying_key: dev_vk,
+            label: Some("test-support: dev publisher".into()),
+        },
+    ])
 }
 
 /// Load the live `HandlerRegistry` from `ryeos-bundles/core/` using
 /// the standard test trust store. Requires that the handler binaries
 /// have been built and the bundle manifest signed (the wave's commit θ
-/// + `rye-bundle-tool rebuild-manifest` left them in that state).
+/// + `ryos publish rebuild-manifest` left them in that state).
 ///
 /// Panics on failure so test bodies stay terse — the registry MUST
 /// load for tests that drive the parser/composer dispatcher.

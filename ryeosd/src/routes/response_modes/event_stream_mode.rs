@@ -107,7 +107,7 @@ impl ResponseMode for EventStreamMode {
 
 // ── Gateway compile ─────────────────────────────────────────────────────
 
-const GATEWAY_REQUIRED_AUTH: &str = "rye_signed";
+const GATEWAY_REQUIRED_AUTH: &str = "ryeos_signed";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,7 +161,7 @@ fn compile_gateway(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfi
 
 // ── Subscription compile ────────────────────────────────────────────────
 
-const SUBSCRIPTION_REQUIRED_AUTH: &str = "rye_signed";
+const SUBSCRIPTION_REQUIRED_AUTH: &str = "ryeos_signed";
 
 fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
     if raw.auth != SUBSCRIPTION_REQUIRED_AUTH {
@@ -457,7 +457,7 @@ mod tests {
             id: id.into(),
             path: path.into(),
             methods: ["POST".into()].into_iter().collect(),
-            auth: "rye_signed".into(),
+            auth: "ryeos_signed".into(),
             auth_config: None,
             limits: RawLimits::default(),
             response: RawResponseSpec {
@@ -485,7 +485,7 @@ mod tests {
             id: id.into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),
-            auth: "rye_signed".into(),
+            auth: "ryeos_signed".into(),
             auth_config: None,
             limits: RawLimits::default(),
             response: RawResponseSpec {
@@ -584,7 +584,7 @@ mod tests {
         let result = EventStreamMode.compile(&raw);
         let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
         let msg = format!("{err}");
-        assert!(msg.contains("requires auth 'rye_signed'"), "got: {msg}");
+        assert!(msg.contains("requires auth 'ryeos_signed'"), "got: {msg}");
     }
 
     #[test]
@@ -699,7 +699,7 @@ mod tests {
         let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
         let msg = format!("{err}");
         assert!(
-            msg.contains("requires auth 'rye_signed'"),
+            msg.contains("requires auth 'ryeos_signed'"),
             "got: {msg}"
         );
     }

@@ -72,7 +72,7 @@ mod tests {
         vec![
             ToolSchema {
                 name: "bash".to_string(),
-                item_id: "rye/bash/bash".to_string(),
+                item_id: "ryeos/bash/bash".to_string(),
                 description: Some("Run a bash command".to_string()),
                 input_schema: Some(json!({
                     "type": "object",
@@ -84,7 +84,7 @@ mod tests {
             },
             ToolSchema {
                 name: "read_file".to_string(),
-                item_id: "rye/core/read".to_string(),
+                item_id: "ryeos/core/read".to_string(),
                 description: Some("Read a file".to_string()),
                 input_schema: None,
             },

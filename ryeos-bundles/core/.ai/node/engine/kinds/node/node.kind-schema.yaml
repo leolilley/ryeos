@@ -1,4 +1,4 @@
-# rye:signed:2026-05-05T09:31:54Z:a35878fac6654c1aff7bc01342816d4ac2745fe700eea8b6ba65503476cf59f1:XjCFhAy+hQ1QvZ0SHDXcJYJ3U6gEkimtKyQ9f+IqrMvb6BcIv8EUNOt/z3lT7JEC9Xfsq1DbyKS3r+535j+ZBA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:7a6e087c61a9b3685e92878cc0ae65a0b6d8d6222efd814b2a5908a17dc22161:M9DzPIytD/M9CnCRQiNaZVO4W/tdwgM1j+P40ojVM5ChsXE610GPeb45h0V+jSNuX9E4pUmlroP2yWa3sH+jAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/node"
 version: "1.0.0"
 # `node` items are signed YAMLs that describe per-node configuration
@@ -12,12 +12,12 @@ location:
   directory: node
 formats:
   - extensions: [".yaml", ".yml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
 # Identity composer — node items are loaded as-is. Per-section parsing
 # is performed by the node-config `SectionTable` after load, not here.
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   # `section` is enforced at load time by the node-config

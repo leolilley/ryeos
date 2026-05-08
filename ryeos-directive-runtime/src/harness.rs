@@ -314,7 +314,7 @@ mod tests {
     fn check_permission_granted() {
         let harness = make_harness(
             HardLimits::default(),
-            vec!["rye.execute.tool.*".to_string()],
+            vec!["ryeos.execute.tool.*".to_string()],
         );
         // effective_caps set but check_permission removed; verify caps are stored
         assert_eq!(harness.effective_caps().len(), 1);
@@ -356,12 +356,12 @@ mod tests {
     fn risk_assessment_blocked_high() {
         let policy = RiskPolicy {
             patterns: vec![RiskPattern {
-                pattern: "rye.execute.tool.*".to_string(),
+                pattern: "ryeos.execute.tool.*".to_string(),
                 level: RiskLevel::High,
                 requires_ack: true,
             }],
         };
-        let assessment = policy.assess("rye.execute.tool.dangerous");
+        let assessment = policy.assess("ryeos.execute.tool.dangerous");
         assert!(assessment.blocked);
     }
 
@@ -369,12 +369,12 @@ mod tests {
     fn risk_assessment_allowed_low() {
         let policy = RiskPolicy {
             patterns: vec![RiskPattern {
-                pattern: "rye.execute.tool.safe".to_string(),
+                pattern: "ryeos.execute.tool.safe".to_string(),
                 level: RiskLevel::Low,
                 requires_ack: false,
             }],
         };
-        let assessment = policy.assess("rye.execute.tool.safe");
+        let assessment = policy.assess("ryeos.execute.tool.safe");
         assert!(!assessment.blocked);
     }
 

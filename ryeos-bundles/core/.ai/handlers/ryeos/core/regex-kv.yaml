@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-08T04:04:07Z:7dfee6be1d3240e20f6e5367187a94be082f1f9bdcb74497b248b006eeb2a16f:ZoE7P3dwu1UBvdO0FeRXPKdGQa93vzkcX/SCqjv8BX+yWIsS9GDgUZcrE2cFb+Q7lieHyvGyfTyxgSiMaqVhCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/core
+name: regex-kv
+kind: handler
+serves: parser
+binary_ref: bin/x86_64-unknown-linux-gnu/rye-parser-regex-kv
+abi_version: "v1"
+required_caps: []
+description: "Regex key-value parser handler"

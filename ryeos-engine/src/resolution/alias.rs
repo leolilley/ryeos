@@ -84,8 +84,8 @@ mod tests {
     #[test]
     fn resolve_non_alias() {
         let resolver = AliasResolver::new(HashMap::new(), 8);
-        let (ref_str, hop) = resolver.resolve("tool:rye/core/foo", "directive").unwrap();
-        assert_eq!(ref_str, "tool:rye/core/foo");
+        let (ref_str, hop) = resolver.resolve("tool:ryeos/core/foo", "directive").unwrap();
+        assert_eq!(ref_str, "tool:ryeos/core/foo");
         assert!(hop.is_none());
     }
 
@@ -107,11 +107,11 @@ mod tests {
     fn resolve_chained_alias() {
         let mut aliases = HashMap::new();
         aliases.insert("@core".to_string(), "@base".to_string());
-        aliases.insert("@base".to_string(), "directive:rye/agent/core/base".to_string());
+        aliases.insert("@base".to_string(), "directive:ryeos/agent/core/base".to_string());
         let resolver = AliasResolver::new(aliases, 8);
 
         let (ref_str, hop) = resolver.resolve("@core", "directive").unwrap();
-        assert_eq!(ref_str, "directive:rye/agent/core/base");
+        assert_eq!(ref_str, "directive:ryeos/agent/core/base");
         assert!(hop.is_some());
         let hop = hop.unwrap();
         assert_eq!(hop.depth, 2);

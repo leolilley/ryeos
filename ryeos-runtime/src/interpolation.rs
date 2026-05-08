@@ -407,9 +407,9 @@ mod tests {
             "params": {"n": "${x}"},
             "other": "${y}"
         });
-        let ctx = json!({"tool": {"id": "rye/tool"}, "x": 1, "y": 2});
+        let ctx = json!({"tool": {"id": "ryeos/tool"}, "x": 1, "y": 2});
         let result = interpolate_action(&action, &ctx).unwrap();
-        assert_eq!(result["item_id"], "rye/tool");
+        assert_eq!(result["item_id"], "ryeos/tool");
         assert_eq!(result["params"]["n"], 1);
         assert_eq!(result["other"], "${y}");
     }

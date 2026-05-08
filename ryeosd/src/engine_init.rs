@@ -85,7 +85,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
 
     // 5. Load kind registry from filesystem (requires trust store for verification)
     let kinds = if schema_roots.is_empty() {
-        anyhow::bail!("no kind schema roots found; set system_space_dir or RYE_SYSTEM_SPACE to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
+        anyhow::bail!("no kind schema roots found; set system_space_dir or RYEOS_SYSTEM_SPACE_DIR to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
     } else {
         KindRegistry::load_base(&schema_roots, &trust_store).context("failed to load kind schemas")?
     };

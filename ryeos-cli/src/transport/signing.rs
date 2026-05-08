@@ -50,7 +50,7 @@ impl Signer {
     }
 
     /// Build canonical request matching ryeosd/src/auth.rs exactly and produce
-    /// the four `x-rye-*` headers.
+    /// the four `x-ryeos-*` headers.
     ///
     /// Canonical string:
     ///   "ryeos-request-v1\n{METHOD}\n{canonical_path}\n{sha256(body)}\n{timestamp}\n{nonce}\n{audience}"

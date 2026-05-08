@@ -108,10 +108,10 @@ execution:
   resolution: []
 formats:
   - extensions: [".yaml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {{}}
@@ -196,7 +196,7 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // V5.4 P2.1 note: the `standard` bundle now ships
     // `ryeos-directive-runtime` and `ryeos-graph-runtime` in its
     // SourceManifest, but this harness uses `ryeos-bundles/core` as
-    // RYE_SYSTEM_SPACE (see `ryeosd/tests/common/mod.rs::workspace_core_dir`)
+    // RYEOS_SYSTEM_SPACE_DIR (see `ryeosd/tests/common/mod.rs::workspace_core_dir`)
     // and `core` has no `bin/` directory. Real coverage would plant a
     // signed `bundles` registration under
     // `<workspace_core_dir>/.ai/node/bundles/standard.yaml` so the engine
@@ -260,9 +260,15 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     // Plant TWO runtimes both declaring `serves: dup_kind, default: true`.
     // RuntimeRegistry::build_from_bundles must error; engine_init.rs
     // propagates the error; daemon child exits non-zero.
-    let state_dir_outer = tempfile::tempdir().expect("state dir");
+    //
+    // The system_space_dir must contain real kind schemas so the daemon
+    // can parse the planted runtime YAMLs as kind=runtime items. We copy
+    // the workspace core bundle to a writable tempdir and use that as
+    // both --system-space-dir AND the location to drop additional state
+    // (post-config resolution unifies CLI --system-space-dir with the
+    // daemon's writable system_data_dir).
     let user_space = tempfile::tempdir().expect("user space");
-    let state_path = state_dir_outer.path().join("state");
+    let (_core_tmp, state_path) = common::copy_core_to_temp();
 
     // Pre-populate via fast fixture (no --init-if-missing on the daemon
     // command below). populate_initialized_state writes the deterministic
@@ -303,7 +309,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
         .arg("--uds-path")
         .arg(&uds_path)
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
+        .env("RYEOS_SYSTEM_SPACE_DIR", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .stdout(Stdio::null())
@@ -717,7 +723,7 @@ config:
       node_type: return
 "#;
         // Graph YAMLs use `#` for signature comments (matching
-        // `parser:rye/core/yaml/yaml`).
+        // `parser:ryeos/core/yaml/yaml`).
         let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
         std::fs::write(dir.join("flow.yaml"), signed)?;
         Ok(())

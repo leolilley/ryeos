@@ -2,6 +2,13 @@ use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
+/// Canonical prefix for the Ed25519 signature envelope.
+///
+/// Every signed item carries this marker so the loader can distinguish
+/// signature lines from body content. Changing this value invalidates
+/// all existing signatures — only change between major versions.
+pub const SIGNATURE_PREFIX: &str = "ryeos:signed:";
+
 #[derive(Debug, Clone)]
 pub struct SignatureHeader {
     pub timestamp: String,
@@ -43,8 +50,8 @@ pub fn sign_content_at(
     let fp = compute_fingerprint(&signing_key.verifying_key());
 
     let sig_line = match suffix {
-        Some(s) => format!("{prefix} rye:signed:{signed_at}:{hash}:{sig_b64}:{fp} {s}"),
-        None => format!("{prefix} rye:signed:{signed_at}:{hash}:{sig_b64}:{fp}"),
+        Some(s) => format!("{prefix} {SIGNATURE_PREFIX}{signed_at}:{hash}:{sig_b64}:{fp} {s}"),
+        None => format!("{prefix} {SIGNATURE_PREFIX}{signed_at}:{hash}:{sig_b64}:{fp}"),
     };
 
     format!("{sig_line}\n{body}")
@@ -68,7 +75,7 @@ pub fn parse_signature_line(
 
     let after_prefix = trimmed.strip_prefix(prefix)?.trim_start();
 
-    let payload_area = after_prefix.strip_prefix("rye:signed:")?;
+    let payload_area = after_prefix.strip_prefix(SIGNATURE_PREFIX)?;
 
     let payload = match suffix {
         Some(s) => payload_area.trim_end().strip_suffix(s)?.trim_end(),
@@ -92,7 +99,7 @@ pub fn strip_signature_lines(content: &str) -> String {
     let has_trailing_newline = content.ends_with('\n');
     let result: String = content
         .lines()
-        .filter(|line| !line.contains("rye:signed:"))
+        .filter(|line| !line.contains(SIGNATURE_PREFIX))
         .collect::<Vec<_>>()
         .join("\n");
     if has_trailing_newline && !result.is_empty() {
@@ -106,8 +113,8 @@ pub fn strip_signature_lines(content: &str) -> String {
 ///
 /// Only strips signature lines whose comment envelope matches the
 /// supplied `prefix` (and `suffix`, when present). Lines containing the
-/// `rye:signed:` marker but wrapped in a *different* envelope (e.g. a
-/// `# rye:signed:...` comment in the body of a markdown file whose
+/// `ryeos:signed:` marker but wrapped in a *different* envelope (e.g. a
+/// `# ryeos:signed:...` comment in the body of a markdown file whose
 /// envelope is `<!-- ... -->`) are left intact.
 ///
 /// This is the version every parser dispatcher should use: each kind
@@ -216,7 +223,7 @@ fn is_signature_line(line: &str, prefix: &str, suffix: Option<&str>) -> bool {
         None => after_prefix.trim_end(),
     };
 
-    payload_area.starts_with("rye:signed:")
+    payload_area.starts_with(SIGNATURE_PREFIX)
 }
 
 #[cfg(test)]
@@ -243,7 +250,7 @@ mod tests {
         let body = "# Hello\n";
         let signed = sign_content(body, &sk, "<!--", Some("-->"));
         let first_line = signed.lines().next().unwrap();
-        assert!(first_line.starts_with("<!-- rye:signed:"));
+        assert!(first_line.starts_with("<!-- ryeos:signed:"));
         assert!(first_line.ends_with("-->"));
         let header = parse_signature_line(first_line, "<!--", Some("-->")).unwrap();
         assert_eq!(header.content_hash, content_hash(body));
@@ -251,7 +258,7 @@ mod tests {
 
     #[test]
     fn strip_signature_lines_removes_signed_lines() {
-        let content = "# rye:signed:2026-04-10T00:00:00Z:abc:sig:fp\nprint('hello')\n";
+        let content = "# ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp\nprint('hello')\n";
         assert_eq!(strip_signature_lines(content), "print('hello')\n");
     }
 
@@ -318,7 +325,7 @@ mod tests {
             let sig: ed25519_dalek::Signature = sk.sign(hash.as_bytes());
             let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
             let fp = compute_fingerprint(&sk.verifying_key());
-            format!("# rye:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}")
+            format!("# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}")
         };
         let content = format!("#!/usr/bin/env python3\n{sig_line}\n{body}");
         let hash = content_hash_after_signature(&content, "#", None, true).unwrap();

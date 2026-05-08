@@ -4,11 +4,11 @@
 //! The daemon allocates a per-thread checkpoint directory under
 //! `<config.system_space_dir>/threads/<thread_id>/checkpoints/` at spawn time
 //! (when the spec declares `runtime.handlers.native_resume`) and
-//! injects its path as the `RYE_CHECKPOINT_DIR` env var. Tools call
+//! injects its path as the `RYEOS_CHECKPOINT_DIR` env var. Tools call
 //! `CheckpointWriter::from_env()` to attach to that directory and
 //! periodically `write()` their replay state to it; on daemon restart
-//! the resume path re-spawns the tool with `RYE_RESUME=1` and the same
-//! `RYE_CHECKPOINT_DIR`, and the tool calls `load_latest()` to recover.
+//! the resume path re-spawns the tool with `RYEOS_RESUME=1` and the same
+//! `RYEOS_CHECKPOINT_DIR`, and the tool calls `load_latest()` to recover.
 //!
 //! Atomicity: every `write` goes to `latest.json.tmp.<pid>.<rand>`
 //! first, then `rename()`s into place. A crash during write therefore
@@ -38,19 +38,19 @@ impl CheckpointWriter {
     }
 
     /// Attach to the daemon-allocated checkpoint dir via the
-    /// `RYE_CHECKPOINT_DIR` env var. Returns `None` when the env is
+    /// `RYEOS_CHECKPOINT_DIR` env var. Returns `None` when the env is
     /// unset, which means the tool was not launched with `native_resume`
     /// (or is running outside the daemon entirely — e.g. unit tests).
     pub fn from_env() -> Option<Self> {
-        std::env::var("RYE_CHECKPOINT_DIR")
+        std::env::var("RYEOS_CHECKPOINT_DIR")
             .ok()
             .map(|s| Self::new(PathBuf::from(s)))
     }
 
-    /// True iff the daemon launched this run as a resume (`RYE_RESUME=1`).
+    /// True iff the daemon launched this run as a resume (`RYEOS_RESUME=1`).
     /// Tools should check this on startup and `load_latest()` if true.
     pub fn is_resume() -> bool {
-        std::env::var("RYE_RESUME").ok().as_deref() == Some("1")
+        std::env::var("RYEOS_RESUME").ok().as_deref() == Some("1")
     }
 
     pub fn dir(&self) -> &Path {
@@ -167,26 +167,26 @@ mod tests {
     #[test]
     fn from_env_returns_none_without_var() {
         // SAFELY isolate from any caller env.
-        let prev = std::env::var("RYE_CHECKPOINT_DIR").ok();
-        std::env::remove_var("RYE_CHECKPOINT_DIR");
+        let prev = std::env::var("RYEOS_CHECKPOINT_DIR").ok();
+        std::env::remove_var("RYEOS_CHECKPOINT_DIR");
         let w = CheckpointWriter::from_env();
         assert!(w.is_none());
         if let Some(v) = prev {
-            std::env::set_var("RYE_CHECKPOINT_DIR", v);
+            std::env::set_var("RYEOS_CHECKPOINT_DIR", v);
         }
     }
 
     #[test]
     fn is_resume_reads_env_flag() {
-        let prev = std::env::var("RYE_RESUME").ok();
-        std::env::set_var("RYE_RESUME", "1");
+        let prev = std::env::var("RYEOS_RESUME").ok();
+        std::env::set_var("RYEOS_RESUME", "1");
         assert!(CheckpointWriter::is_resume());
-        std::env::set_var("RYE_RESUME", "0");
+        std::env::set_var("RYEOS_RESUME", "0");
         assert!(!CheckpointWriter::is_resume());
-        std::env::remove_var("RYE_RESUME");
+        std::env::remove_var("RYEOS_RESUME");
         assert!(!CheckpointWriter::is_resume());
         if let Some(v) = prev {
-            std::env::set_var("RYE_RESUME", v);
+            std::env::set_var("RYEOS_RESUME", v);
         }
     }
 }

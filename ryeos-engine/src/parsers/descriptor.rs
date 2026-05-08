@@ -2,7 +2,7 @@
 //!
 //! Parsers are their own kind. The kind identity is implicit in where
 //! the file lives (under the `parser` kind's `location.directory`,
-//! typically `.ai/parsers/rye/core/...`) — there is no discriminator
+//! typically `.ai/parsers/ryeos/core/...`) — there is no discriminator
 //! field on the descriptor. The boot-time `ParserRegistry` loader uses
 //! the raw signed-YAML loader (same shape as the `KindRegistry`'s
 //! loader) so the cycle of "you need a parser to load parsers" is
@@ -25,7 +25,7 @@ pub struct ParserDescriptor {
     pub category: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// Canonical handler ref, e.g. `"handler:rye/core/yaml-document"`.
+    /// Canonical handler ref, e.g. `"handler:ryeos/core/yaml-document"`.
     pub handler: String,
     pub parser_api_version: u32,
     /// Opaque-to-the-engine config blob; the native handler validates

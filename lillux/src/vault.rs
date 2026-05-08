@@ -66,7 +66,7 @@ const DEK_NONCE_DOMAIN: &[u8] = b"ryeos-vault-v1-wrap-nonce";
 /// Long-lived X25519 secret key for vault decryption.
 ///
 /// Wraps `x25519_dalek::StaticSecret` so callers don't have to import
-/// the curve crate directly. Keys are generated once at `rye init`
+/// the curve crate directly. Keys are generated once at `ryeos init`
 /// time and persisted at `<state>/.ai/node/vault/private_key.pem`.
 #[derive(Clone)]
 pub struct VaultSecretKey(StaticSecret);
@@ -295,7 +295,7 @@ pub fn open(vault_sk: &VaultSecretKey, env: &SealedEnvelope) -> Result<Vec<u8>> 
     if env.vault_pubkey_fingerprint != our_fp {
         bail!(
             "vault: envelope sealed to fingerprint {} but our vault key is {} \
-             — wrong key, or a `rye vault rewrap` is needed after rotation",
+             — wrong key, or a `ryeos vault rewrap` is needed after rotation",
             env.vault_pubkey_fingerprint,
             our_fp
         );

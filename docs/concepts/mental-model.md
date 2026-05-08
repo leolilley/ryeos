@@ -15,9 +15,9 @@ Everything the system operates on is an **item**: a signed file in a well-known 
 
 Items are addressed by **canonical ref**: `kind:path/without/ext`. Examples:
 
-- `directive:rye/core/init` → `.ai/directives/rye/core/init.md`
-- `tool:rye/core/identity/public_key` → `.ai/tools/rye/core/identity/public_key.py`
-- `knowledge:rye/core/signing` → `.ai/knowledge/rye/core/signing.md`
+- `directive:ryeos/core/init` → `.ai/directives/ryeos/core/init.md`
+- `tool:ryeos/core/identity/public_key` → `.ai/tools/ryeos/core/identity/public_key.py`
+- `knowledge:ryeos/core/signing` → `.ai/knowledge/ryeos/core/signing.md`
 
 ## 2. Spaces
 
@@ -39,7 +39,7 @@ When you execute `directive:my/workflow`, the engine searches project `.ai/direc
 
 A **bundle** is a directory tree with a signed manifest that the daemon registers and indexes. Bundles extend the system with new item types, handlers, and runtimes.
 
-- **Core bundle** — kind schemas, parser tools, subprocess handlers, protocols. Installed by `rye init`.
+- **Core bundle** — kind schemas, parser tools, subprocess handlers, protocols. Installed by `ryeos init`.
 - **Standard bundle** — directives, tools, knowledge for everyday use. Registered during init.
 
 Bundles are **content-addressed**: every file is stored as a CAS blob, and the manifest records the hash. The daemon verifies signatures and hashes before admitting any bundle content.
@@ -61,7 +61,7 @@ Threads have persistent state stored in an append-only CAS chain. This means:
 
 ## 5. Trust
 
-Every signable item must carry an Ed25519 signature in a `# rye:signed:...` header. The trust model is:
+Every signable item must carry an Ed25519 signature in a `# ryeos:signed:...` header. The trust model is:
 
 - **Node key** — the daemon's identity, generated at init
 - **User key** — the operator's identity, generated at init
@@ -72,7 +72,7 @@ At boot, the daemon loads the trust store and verifies every bundle, kind schema
 ## Putting it together
 
 ```
-You type:  rye execute directive:my/workflow with {"target": "prod"}
+You type:  ryeos execute directive:my/workflow with {"target": "prod"}
 
 Daemon:
   1. Resolve my/workflow through project → user → system spaces

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T11:06:42Z:09c2ba78fd430359b916f6ef186a627fe0906ffcb7e3296e3c4d616a12215bd8:eSUCC-Ns1U7-Rf8HaZztmT6t_JAOSBpwiIUqUKWU3qL4gKGQogKUNRnc61WbiyUcE5k8mxuattHha-OMcKTeDg==:621189bcb4ef815b -->
+<!-- ryeos:signed:2026-03-11T11:06:42Z:09c2ba78fd430359b916f6ef186a627fe0906ffcb7e3296e3c4d616a12215bd8:eSUCC-Ns1U7-Rf8HaZztmT6t_JAOSBpwiIUqUKWU3qL4gKGQogKUNRnc61WbiyUcE5k8mxuattHha-OMcKTeDg==:621189bcb4ef815b -->
 ```yaml
 id: graphs-code-analysis-pipeline-1773227201
 title: "Graph: graphs/code-analysis-pipeline"

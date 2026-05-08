@@ -23,13 +23,13 @@ fn workspace_root() -> PathBuf {
 
 /// Parse YAML frontmatter from a signed directive .md file.
 /// Returns the YAML content between the two `---` delimiters, or None
-/// if no frontmatter is found. Handles the `<!-- rye:signed:... -->`
+/// if no frontmatter is found. Handles the `<!-- ryeos:signed:... -->`
 /// envelope line.
 fn extract_frontmatter(content: &str) -> Option<String> {
     // Strip signed envelope line if present.
     let content = content
         .lines()
-        .skip_while(|line| line.starts_with("<!-- rye:signed:") || line.trim().is_empty())
+        .skip_while(|line| line.starts_with("<!-- ryeos:signed:") || line.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
 

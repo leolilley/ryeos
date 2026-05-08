@@ -153,12 +153,12 @@ impl RuntimeRegistry {
 
         // Typed-view validation: when a runtime's `serves` kind declares
         // an explicit terminator (not a delegate), that terminator MUST be
-        // Subprocess with protocol `protocol:rye/core/runtime_v1`.
+        // Subprocess with protocol `protocol:ryeos/core/runtime_v1`.
         // Kinds that use `delegate: via: runtime_registry` (no terminator)
         // are inherently compatible — they explicitly delegate to the
         // runtime registry. Kinds with an incompatible terminator would
         // produce confusing dispatch errors downstream.
-        const EXPECTED_PROTOCOL: &str = "protocol:rye/core/runtime_v1";
+        const EXPECTED_PROTOCOL: &str = "protocol:ryeos/core/runtime_v1";
         for (kind, list) in &by_kind {
             let schema = match kinds.get(kind) {
                 Some(s) => s,

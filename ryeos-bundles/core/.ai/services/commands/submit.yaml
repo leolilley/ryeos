@@ -1,9 +1,9 @@
-# rye:signed:2026-05-05T09:31:55Z:a2ebb00bfd9c83e67d4c9e2412a14ae57d2e624fb285ddd373e381889333a847:9guoWs9uJNDBNmerelmWCh1+7NIEPrqcarODCxupSPkz1rMZAkjLoZm+3NTnppoy9QTG22GfH5TvuS9HhqtlAA==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:c14ec83e75be65434eb7e40cd396a63354c9065397d76aff6e218fe057fc61ff:r2Dz0HrPEjlP9G7Nyc/sBcH9Hb0oqIqPpawmi6oIExmNW5Tn/aqcBwK5+KT4cxlbAxkv0XIB26+6HykyqbZlCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "submit"
 kind: service
 endpoint: commands.submit
-required_caps: ["rye.execute.service.commands/submit"]
+required_caps: ["ryeos.execute.service.commands/submit"]
 schema:
   thread_id: string
   command_type: string

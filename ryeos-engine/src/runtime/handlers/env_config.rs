@@ -158,7 +158,7 @@ impl RuntimeHandler for EnvConfigHandler {
             let InterpreterConfig::LocalBinary { var, .. } = ic;
             if let Some(v) = var {
                 if v.starts_with(RESERVED_ENV_PREFIX) {
-                    // RYE_PYTHON et al. are explicitly *intended* to
+                    // RYEOS_PYTHON et al. are explicitly *intended* to
                     // be set here by the runtime, so they bypass the
                     // reserved-prefix check that applies to user-
                     // declared `env:` entries below.

@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{run_service_standalone_fresh};
+use common::{run_service_standalone_fresh, copy_core_to_temp, populate_user_space, ryeosd_binary};
 
 // ── 5.1 rebuild standalone — succeeds on fresh state ────────────────────
 
@@ -48,12 +48,32 @@ async fn standalone_rebuild_runs_on_fresh_state() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_bundle_install_then_list_then_remove() {
-    // 1. Init a state dir via a no-op standalone call (system.status).
-    let (init_out, sd, us) = run_service_standalone_fresh("service:system/status", None)
-        .await
-        .expect("run-service init");
+    // The daemon's `--system-space-dir` is treated as writable system
+    // space (init writes node identity, vault, signed bundle items into
+    // `.ai/node/...`). Use a writable copy of the core bundle as the
+    // shared system_space_dir across init / install / remove so state
+    // persists between standalone invocations.
+    let (_core_tmp, system_space_dir) = copy_core_to_temp();
+    let user_space = tempfile::tempdir().expect("user_space tempdir");
+    populate_user_space(user_space.path());
+
+    let uds_path = system_space_dir.join("ryeosd.sock");
+
+    // 1. Init via a no-op standalone call (system.status) using the
+    //    writable core copy as system_space_dir.
+    let init_out = std::process::Command::new(ryeosd_binary())
+        .arg("--init-if-missing")
+        .arg("--system-space-dir").arg(&system_space_dir)
+        .arg("--uds-path").arg(&uds_path)
+        .arg("run-service")
+        .arg("service:system/status")
+        .env("HOSTNAME", "testhost")
+        .env("USER_SPACE", user_space.path())
+        .env("HOME", user_space.path())
+        .output()
+        .expect("init");
     assert!(init_out.status.success(),
-        "init failed: stdout={} stderr={}",
+        "init failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&init_out.stdout),
         String::from_utf8_lossy(&init_out.stderr));
 
@@ -64,25 +84,17 @@ async fn standalone_bundle_install_then_list_then_remove() {
     std::fs::write(src.path().join(".ai/marker.txt"), b"hello").unwrap();
     let src_path = src.path().to_str().unwrap().to_string();
 
-    // 3. Install. We need to reuse the SAME system_space_dir across calls so the
-    //    install persists. Re-using sd/us tempdirs requires a non-fresh
-    //    helper, which the harness doesn't expose today. The simplest
-    //    path: call the daemon binary directly with --system-space-dir = sd.path().
-    //    Look at `run_service_standalone_fresh` in `common/mod.rs` to see
-    //    the exact ryeosd invocation; replicate it inline here, but use
-    //    the existing sd/us tempdirs so state survives between calls.
-    let install_out = std::process::Command::new(common::ryeosd_binary())
-        .arg("--init-if-missing")
-        .arg("--system-space-dir").arg(sd.path().join("state"))
-        .arg("--uds-path").arg(sd.path().join("state/ryeosd.sock"))
+    // 3. Install against the same system_space_dir.
+    let install_out = std::process::Command::new(ryeosd_binary())
+        .arg("--system-space-dir").arg(&system_space_dir)
+        .arg("--uds-path").arg(&uds_path)
         .arg("run-service")
         .arg("service:bundle/install")
         .arg("--params")
         .arg(format!(r#"{{"name":"testbundle","source_path":"{src_path}"}}"#))
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
-        .env("USER_SPACE", us.path())
-        .env("HOME", us.path())
+        .env("USER_SPACE", user_space.path())
+        .env("HOME", user_space.path())
         .output()
         .expect("install");
     assert!(install_out.status.success(),
@@ -91,28 +103,27 @@ async fn standalone_bundle_install_then_list_then_remove() {
         String::from_utf8_lossy(&install_out.stderr));
 
     // 4. Verify the bundle was actually copied to disk.
-    let installed = sd.path().join("state/.ai/bundles/testbundle/.ai/marker.txt");
+    let installed = system_space_dir.join(".ai/bundles/testbundle/.ai/marker.txt");
     assert!(installed.exists(),
         "expected installed marker at {} (install handler didn't copy)",
         installed.display());
 
     // 5. Verify the signed node-config item was written.
-    let node_item = sd.path().join("state/.ai/node/bundles/testbundle.yaml");
+    let node_item = system_space_dir.join(".ai/node/bundles/testbundle.yaml");
     assert!(node_item.exists(),
         "expected node-config item at {}", node_item.display());
 
     // 6. Remove and verify both paths are gone.
-    let remove_out = std::process::Command::new(common::ryeosd_binary())
-        .arg("--system-space-dir").arg(sd.path().join("state"))
-        .arg("--uds-path").arg(sd.path().join("state/ryeosd.sock"))
+    let remove_out = std::process::Command::new(ryeosd_binary())
+        .arg("--system-space-dir").arg(&system_space_dir)
+        .arg("--uds-path").arg(&uds_path)
         .arg("run-service")
         .arg("service:bundle/remove")
         .arg("--params")
         .arg(r#"{"name":"testbundle"}"#)
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
-        .env("USER_SPACE", us.path())
-        .env("HOME", us.path())
+        .env("USER_SPACE", user_space.path())
+        .env("HOME", user_space.path())
         .output()
         .expect("remove");
     assert!(remove_out.status.success(),

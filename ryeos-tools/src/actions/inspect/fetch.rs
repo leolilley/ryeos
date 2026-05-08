@@ -1,4 +1,4 @@
-//! `rye-inspect fetch` — resolve and read an item through the engine.
+//! `ryos-core-tools fetch` — resolve and read an item through the engine.
 
 use std::path::Path;
 

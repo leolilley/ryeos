@@ -1,11 +1,11 @@
-# rye:signed:2026-05-05T09:31:54Z:e3691a80c8529628bc7ecfa194b7021ecc74cd17b518826758aa897ffb52ddac:xXJ1epda80vBaLmezrGhbYy4tze8xzu9SLZwxEEZYudtGCfIPXubakx72u1oML3fhTF7C25NNMvWapDCfV4OCg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:21d71f4b645debdc9c7fb3561871c2b4e69a3030dd87eac59069a861757b0790:UV4+eiqRzcEFIFxEgAvV51p5+4IJszLHatMF+KA4e2yrYYDtRHnbsHTThSgNF4iEPfkyXn0U9xtJqS4sTI0YBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "routes"
 section: routes
 id: execute/stream
 path: /execute/stream
 methods:
   - POST
-auth: rye_signed
+auth: ryeos_signed
 limits:
   body_bytes_max: 1048576
   timeout_ms: 0

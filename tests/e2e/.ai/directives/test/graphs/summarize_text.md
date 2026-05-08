@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:0cfde65873b8fec596dcf0f7c52916993e448c60ef9a1311c7b6a144a8d7da5f:yVBpXNlaWl53SHBW-wiD_kKHryVkfsjZFqimLGwMq6ahuu9np5EIszMSzvGpN6LAlmsKohS6VDdV6O0jkz1WDQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:0cfde65873b8fec596dcf0f7c52916993e448c60ef9a1311c7b6a144a8d7da5f:yVBpXNlaWl53SHBW-wiD_kKHryVkfsjZFqimLGwMq6ahuu9np5EIszMSzvGpN6LAlmsKohS6VDdV6O0jkz1WDQ==:4b987fd4e40303ac -->
 <!-- -->
 
 # Summarize Text

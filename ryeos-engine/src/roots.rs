@@ -8,9 +8,9 @@
 //!     (parents of each `<system>/.ai/`, e.g. core + standard)
 //!
 //! All callers needing roots — daemon bootstrap, CLI verbs,
-//! `rye-inspect`, engine subprocess executors — go through this
+//! `ryos-core-tools`, engine subprocess executors — go through this
 //! module. Never call `directories::BaseDirs` or read
-//! `USER_SPACE`/`RYE_SYSTEM_SPACE` ad-hoc.
+//! `USER_SPACE`/`RYEOS_SYSTEM_SPACE_DIR` ad-hoc.
 
 use std::path::PathBuf;
 
@@ -51,7 +51,7 @@ pub fn state_root(system_space_dir: &std::path::Path) -> PathBuf {
 ///
 /// Precedence (each appended in order, deduplicated):
 ///
-///   1. `RYE_SYSTEM_SPACE` env (single path)
+///   1. `RYEOS_SYSTEM_SPACE_DIR` env (single path)
 ///   2. `additional_roots` (caller-supplied — e.g. node-config
 ///      `bundles` registrations)
 ///   3. `BaseDirs::data_dir()/ryeos` (default XDG core install)
@@ -66,7 +66,7 @@ pub fn system_roots(additional_roots: &[PathBuf]) -> Vec<PathBuf> {
             out.push(p);
         }
     };
-    if let Some(p) = std::env::var_os("RYE_SYSTEM_SPACE") {
+    if let Some(p) = std::env::var_os("RYEOS_SYSTEM_SPACE_DIR") {
         push(PathBuf::from(p));
     }
     for r in additional_roots {
@@ -93,7 +93,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
-    // Process-wide mutex; USER_SPACE / RYE_SYSTEM_SPACE are shared global state.
+    // Process-wide mutex; USER_SPACE / RYEOS_SYSTEM_SPACE_DIR are shared global state.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn system_roots_dedupes_and_orders() {
         let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("RYE_SYSTEM_SPACE", "/tmp/sys-a");
+        std::env::set_var("RYEOS_SYSTEM_SPACE_DIR", "/tmp/sys-a");
         let extra = vec![PathBuf::from("/tmp/sys-a"), PathBuf::from("/tmp/sys-b")];
         let r = system_roots(&extra);
         // /tmp/sys-a appears first (env), de-duplicated when seen again
@@ -148,6 +148,6 @@ mod tests {
         // No duplicate /tmp/sys-a.
         let count = r.iter().filter(|p| **p == Path::new("/tmp/sys-a")).count();
         assert_eq!(count, 1);
-        std::env::remove_var("RYE_SYSTEM_SPACE");
+        std::env::remove_var("RYEOS_SYSTEM_SPACE_DIR");
     }
 }

@@ -96,7 +96,7 @@ fn clamp_f64(value: f64, cap: f64) -> f64 {
     if value > cap { cap } else { value }
 }
 
-/// Load limits config from the project's `.ai/config/rye-runtime/limits.yaml`.
+/// Load limits config from the project's `.ai/config/ryeos-runtime/limits.yaml`.
 ///
 /// Returns `Ok(None)` if the file doesn't exist (limits config is optional).
 /// Returns `Err` if the file exists but is malformed — no silent fallback.
@@ -104,7 +104,7 @@ pub fn load_limits_config(project_root: &Path) -> anyhow::Result<Option<LimitsCo
     let config_path = project_root
         .join(".ai")
         .join("config")
-        .join("rye-runtime")
+        .join("ryeos-runtime")
         .join("limits.yaml");
 
     if !config_path.is_file() {

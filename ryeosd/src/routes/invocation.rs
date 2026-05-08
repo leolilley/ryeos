@@ -30,7 +30,7 @@ pub struct RoutePrincipal {
     pub id: String,
     /// Granted capability scopes.
     pub scopes: Vec<String>,
-    /// Which auth handler verified this (e.g., "none", "rye_signed", "hmac").
+    /// Which auth handler verified this (e.g., "none", "ryeos_signed", "hmac").
     pub verifier_key: &'static str,
     /// Whether the principal was cryptographically verified.
     pub verified: bool,

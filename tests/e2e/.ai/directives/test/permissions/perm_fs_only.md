@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:902c883794a4746e8cfb210d3445cf45a719e0863b797fe622f6940e0599a302:huDTDrA-QAffPNTaFc2c4SZVWf081bvkT5GfmomUieHL7p7tF9uAW9D980GFR5hyUA_1aY4C16N39oO6LLCuDA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:902c883794a4746e8cfb210d3445cf45a719e0863b797fe622f6940e0599a302:huDTDrA-QAffPNTaFc2c4SZVWf081bvkT5GfmomUieHL7p7tF9uAW9D980GFR5hyUA_1aY4C16N39oO6LLCuDA==:4b987fd4e40303ac -->
 # Permission Test: FS Only
 
 Has file-system execute permission only. Write should succeed, search should be denied.

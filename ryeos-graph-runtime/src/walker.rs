@@ -317,7 +317,7 @@ impl Walker {
         let hook_list: Vec<Value> = self.graph.config.hooks.clone().unwrap_or_default();
 
         // Resume state injected by main.rs (from CheckpointWriter or replay fallback).
-        // No silent cold-start when RYE_RESUME=1 — main.rs handles that.
+        // No silent cold-start when RYEOS_RESUME=1 — main.rs handles that.
         if let Some(resume_val) = params.get("resume_state") {
             if let Some(node) = resume_val.get("current_node").and_then(|v| v.as_str()) {
                 current = node.to_string();

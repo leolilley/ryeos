@@ -1,4 +1,4 @@
-# rye:signed:2026-05-05T09:31:54Z:1e4afc5ca025e75844fffb0861e4cee416f0ce88c65d157d13ecfbf16bb2bd29:srYoIzA/58/QUydw/tjEkSmmdnSjp7AaLLig0SMdnNTJsy/fLSt+txfClELX3KEExdHzdZEsEMmCp+bhUW/JBQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:c49189081884d57c04a11c8bd20c69b9f77a83f927b5c2c8eae152033a71f2f2:Xzr25JZLsFs7S5zDVC8u0qkMhF+4fY+P/o+fy3Ngt31juFKAkC7INaC8Xj54LeT/xMBiO4HGFzxsHUSZ/xNWCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -33,12 +33,12 @@ execution:
         after: 2000
 formats:
   - extensions: [".md"]
-    parser: parser:rye/core/markdown/directive
+    parser: parser:ryeos/core/markdown/directive
     signature:
       prefix: "<!--"
       suffix: "-->"
 inventory_kinds: [tool]
-composer: handler:rye/core/extends-chain
+composer: handler:ryeos/core/extends-chain
 composer_config:
   extends_field: extends
   fields:

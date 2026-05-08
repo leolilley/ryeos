@@ -92,10 +92,10 @@ execution:
   resolution: []
 formats:
   - extensions: [".yaml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -166,7 +166,7 @@ async fn synth_tool_request(
     std::fs::create_dir_all(&tools_dir).expect("mkdir tools");
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
-__executor_id__ = "tool:rye/core/runtimes/python/script"
+__executor_id__ = "tool:ryeos/core/runtimes/python/script"
 __category__ = "hello_pin"
 __description__ = "V5.3 dispatch_pin tool"
 
@@ -494,7 +494,7 @@ async fn pin_tool_over_tcp_succeeds() {
     );
     assert_eq!(
         thread.get("executor_ref").and_then(|v| v.as_str()),
-        Some("tool:rye/core/runtimes/python/script"),
+        Some("tool:ryeos/core/runtimes/python/script"),
         "thread.executor_ref points at the runtime: {body}"
     );
     assert_eq!(

@@ -1,6 +1,6 @@
 # Environment Variables Reference
 
-Complete catalogue of every environment variable read by `ryeosd`, `rye` (CLI),
+Complete catalogue of every environment variable read by `ryeosd`, `ryeos` (CLI),
 `ryeos-directive-runtime`, `ryeos-graph-runtime`, `ryeos-engine`, and
 `ryeos-tools`.
 
@@ -28,8 +28,8 @@ and are optional for a standard installation.
 | Variable | Default | Required | Description |
 |---|---|---|---|
 | `XDG_RUNTIME_DIR` | `/tmp/ryeosd-<uid>` | No | Used to locate the UDS socket path (`$XDG_RUNTIME_DIR/ryeosd.sock`). Fallback to a temp directory keyed by UID when unset. |
-| `RYE_SIGNING_KEY_PATH` | `<state_dir>/.ai/node/identity/private_key.pem` | No | Override the operator (user) signing key path. Used as a fallback when `config.yaml` omits `user_signing_key_path`. |
-| `RYE_SYSTEM_SPACE` | `$XDG_DATA_DIR/ryeos` | No | Override the system data directory (where system bundles live). Takes precedence over `--system-data-dir` CLI flag and `config.yaml`. |
+| `RYEOS_PUBLISHER_KEY_PATH` | `<state_dir>/.ai/node/identity/private_key.pem` | No | Override the operator (user) signing key path. Used as a fallback when `config.yaml` omits `user_signing_key_path`. |
+| `RYEOS_SYSTEM_SPACE_DIR` | `$XDG_DATA_DIR/ryeos` | No | Override the system data directory (where system bundles live). Takes precedence over `--system-data-dir` CLI flag and `config.yaml`. |
 | `RUST_LOG` | — | No | `tracing` / `env_logger` filter directive. Propagated to spawned subprocesses via the allowlist. |
 | `RUST_BACKTRACE` | — | No | Rust backtrace control. Propagated to spawned subprocesses. |
 
@@ -41,17 +41,17 @@ and are optional for a standard installation.
 
 ---
 
-## 3. CLI configuration (`rye`)
+## 3. CLI configuration (`ryeos`)
 
 Variables read by the CLI binary to locate keys, sockets, and state.
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `RYEOS_STATE_DIR` | `$XDG_STATE_DIR/ryeosd` | No | Daemon state directory. Used by `rye` verbs (`sign`, `inspect`, `vault`, local verbs, dispatcher) to discover bundles, identity, and config. Falls back to the XDG state directory. |
+| `RYEOS_STATE_DIR` | `$XDG_STATE_DIR/ryeosd` | No | Daemon state directory. Used by `ryeos` verbs (`sign`, `inspect`, `vault`, local verbs, dispatcher) to discover bundles, identity, and config. Falls back to the XDG state directory. |
 | `RYEOS_CLI_KEY_PATH` | `<state_dir>/.ai/node/identity/private_key.pem` | No | Path to the Ed25519 private key the CLI uses to sign requests. Falls back to the daemon's node signing key. |
 | `RYEOSD_SOCKET_PATH` | `$XDG_RUNTIME_DIR/ryeosd.sock` (else `/tmp/ryeosd-<uid>/ryeosd.sock`) | No | Path to the daemon's Unix domain socket. Used by the CLI and runtime libraries to reach the daemon's JSON-RPC endpoint. |
-| `RYE_SIGNING_KEY` | `$HOME/.ai/config/keys/signing/private_key.pem` | No | Path to the operator signing key used by `rye sign` and test fixtures. Falls back to `$HOME/.ai/config/keys/signing/private_key.pem`. |
-| `HOME` | — | Conditional | Required by `rye sign` to locate the default signing key when `RYE_SIGNING_KEY` is unset. Also used as a fallback for user root discovery. |
+| `RYEOS_PUBLISHER_KEY` | `$HOME/.ai/config/keys/signing/private_key.pem` | No | Path to the operator signing key used by `ryeos sign` and test fixtures. Falls back to `$HOME/.ai/config/keys/signing/private_key.pem`. |
+| `HOME` | — | Conditional | Required by `ryeos sign` to locate the default signing key when `RYEOS_PUBLISHER_KEY` is unset. Also used as a fallback for user root discovery. |
 
 ---
 
@@ -69,20 +69,20 @@ time; operators do not set them directly.
 | `RYEOSD_SOCKET_PATH` | — | **Yes** (runtimes) | Path to the daemon UDS socket. Injected by the protocol builder. Runtimes use this (with `RYEOSD_CALLBACK_TOKEN`) to build a `CallbackClient`. |
 | `RYEOSD_THREAD_ID` | — | Injected | Thread identifier injected by the protocol builder's `env_injections`. |
 | `RYEOSD_PROJECT_PATH` | — | Injected | Project root path injected by the protocol builder. |
-| `RYE_THREAD_ID` | `graph-default` | Injected | Thread ID injected by the engine's `dispatch_subprocess` for tool primitives. Also used as clap `env` default for `--thread-id` in `ryeos-graph-runtime`. |
-| `RYE_CHAIN_ROOT_ID` | — | Injected | Chain root identifier injected by the engine's `dispatch_subprocess` for tool primitives. |
-| `RYE_ITEM_PATH` | — | Injected | Source path of the resolved item. Injected by the plan builder for tool primitives. |
-| `RYE_ITEM_KIND` | — | Injected | Kind of the resolved item (e.g. `tool`, `directive`). |
-| `RYE_ITEM_REF` | — | Injected | Canonical reference of the resolved item. |
-| `RYE_PROJECT_ROOT` | — | Injected | Materialized project root for the execution. |
-| `RYE_SITE_ID` | — | Injected | Current site identifier for the execution context. |
-| `RYE_ORIGIN_SITE_ID` | — | Injected | Origin site identifier for the execution context. |
+| `RYEOS_THREAD_ID` | `graph-default` | Injected | Thread ID injected by the engine's `dispatch_subprocess` for tool primitives. Also used as clap `env` default for `--thread-id` in `ryeos-graph-runtime`. |
+| `RYEOS_CHAIN_ROOT_ID` | — | Injected | Chain root identifier injected by the engine's `dispatch_subprocess` for tool primitives. |
+| `RYEOS_ITEM_PATH` | — | Injected | Source path of the resolved item. Injected by the plan builder for tool primitives. |
+| `RYEOS_ITEM_KIND` | — | Injected | Kind of the resolved item (e.g. `tool`, `directive`). |
+| `RYEOS_ITEM_REF` | — | Injected | Canonical reference of the resolved item. |
+| `RYEOS_PROJECT_ROOT` | — | Injected | Materialized project root for the execution. |
+| `RYEOS_SITE_ID` | — | Injected | Current site identifier for the execution context. |
+| `RYEOS_ORIGIN_SITE_ID` | — | Injected | Origin site identifier for the execution context. |
 | `USER_SPACE` | — | Injected | User-space root path. Set by the daemon in the subprocess allowlist to ensure consistent root discovery. Also read by `ryeos-engine/roots` when resolving user root. |
-| `RYE_SYSTEM_SPACE` | — | Injected | System-space root path. Set by the daemon in the subprocess allowlist and read by `ryeos-engine/roots` for system root discovery. |
-| `RYE_CHECKPOINT_DIR` | — | Injected | Per-thread checkpoint directory allocated by the daemon for `native_resume` tools. Read by `CheckpointWriter::from_env()`. |
-| `RYE_RESUME` | — | Injected | Set to `1` when the daemon re-spawns a tool as a resume. Checked via `CheckpointWriter::is_resume()`. |
-| `RYE_CACHE_DIR` | `$TMPDIR/rye-graph-cache` | No | Graph runtime node cache directory. Defaults to a temp directory when unset. |
-| `RYE_STATE` | — | No (tools lib) | Daemon state root used by `ryeos-tools::get_state_root()`. Required for tools that operate on the daemon's CAS state directory (e.g. GC, rebuild). |
+| `RYEOS_SYSTEM_SPACE_DIR` | — | Injected | System-space root path. Set by the daemon in the subprocess allowlist and read by `ryeos-engine/roots` for system root discovery. |
+| `RYEOS_CHECKPOINT_DIR` | — | Injected | Per-thread checkpoint directory allocated by the daemon for `native_resume` tools. Read by `CheckpointWriter::from_env()`. |
+| `RYEOS_RESUME` | — | Injected | Set to `1` when the daemon re-spawns a tool as a resume. Checked via `CheckpointWriter::is_resume()`. |
+| `RYEOS_CACHE_DIR` | `$TMPDIR/rye-graph-cache` | No | Graph runtime node cache directory. Defaults to a temp directory when unset. |
+| `RYEOS_STATE` | — | No (tools lib) | Daemon state root used by `ryeos-tools::get_state_root()`. Required for tools that operate on the daemon's CAS state directory (e.g. GC, rebuild). |
 
 ### Subprocess allowlist
 
@@ -90,7 +90,7 @@ The daemon propagates the following OS-level env vars to every spawned
 subprocess (in addition to the injected variables above):
 
 `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER_SPACE`,
-`RYE_SYSTEM_SPACE`, `RUST_LOG`, `RUST_BACKTRACE`, `RYEOSD_TEST_STDERR_DIR`.
+`RYEOS_SYSTEM_SPACE_DIR`, `RUST_LOG`, `RUST_BACKTRACE`, `RYEOSD_TEST_STDERR_DIR`.
 
 ---
 
@@ -123,8 +123,8 @@ required in production.
 | Variable | Default | Required | Description |
 |---|---|---|---|
 | `RYEOSD_TEST_STDERR_DIR` | — | Test-only | When set, the daemon test harness mirrors daemon stderr to files under this directory for diagnostic capture. Propagated to spawned subprocesses via the allowlist. |
-| `RYE_SIGNING_KEY` | `$HOME/.ai/config/keys/signing/private_key.pem` | Test-only | Used by `ryeos-tools` test fixtures (`test_support::signing_key_path`) to locate the platform-author signing key for isolated bundle re-signing. |
-| `HOME` | — | Test-only | Used by `ryeos-tools` test support as a fallback to locate the signing key when `RYE_SIGNING_KEY` is unset. |
+| `RYEOS_PUBLISHER_KEY` | `$HOME/.ai/config/keys/signing/private_key.pem` | Test-only | Used by `ryeos-tools` test fixtures (`test_support::signing_key_path`) to locate the platform-author signing key for isolated bundle re-signing. |
+| `HOME` | — | Test-only | Used by `ryeos-tools` test support as a fallback to locate the signing key when `RYEOS_PUBLISHER_KEY` is unset. |
 
 ---
 
@@ -141,18 +141,18 @@ auditing purposes.
 | `RYEOSD_SOCKET_PATH` | Daemon (protocol builder) | Daemon's UDS path, injected so the runtime can reach the callback endpoint. |
 | `RYEOSD_THREAD_ID` | Daemon (protocol builder) | Thread identifier for the launched execution. |
 | `RYEOSD_PROJECT_PATH` | Daemon (protocol builder) | Project root for the launched execution. |
-| `RYE_THREAD_ID` | Engine (`dispatch_subprocess`) | Thread ID injected into tool primitive subprocess env. |
-| `RYE_CHAIN_ROOT_ID` | Engine (`dispatch_subprocess`) | Chain root ID for tool primitive subprocesses. |
-| `RYE_ITEM_PATH` | Engine (`plan_builder`) | Resolved item source path. |
-| `RYE_ITEM_KIND` | Engine (`plan_builder`) | Resolved item kind. |
-| `RYE_ITEM_REF` | Engine (`plan_builder`) | Canonical item reference. |
-| `RYE_PROJECT_ROOT` | Engine (`plan_builder`) | Materialized project root (set when applicable). |
-| `RYE_SITE_ID` | Engine (`plan_builder`) | Current site ID for plan execution. |
-| `RYE_ORIGIN_SITE_ID` | Engine (`plan_builder`) | Origin site ID for plan execution. |
+| `RYEOS_THREAD_ID` | Engine (`dispatch_subprocess`) | Thread ID injected into tool primitive subprocess env. |
+| `RYEOS_CHAIN_ROOT_ID` | Engine (`dispatch_subprocess`) | Chain root ID for tool primitive subprocesses. |
+| `RYEOS_ITEM_PATH` | Engine (`plan_builder`) | Resolved item source path. |
+| `RYEOS_ITEM_KIND` | Engine (`plan_builder`) | Resolved item kind. |
+| `RYEOS_ITEM_REF` | Engine (`plan_builder`) | Canonical item reference. |
+| `RYEOS_PROJECT_ROOT` | Engine (`plan_builder`) | Materialized project root (set when applicable). |
+| `RYEOS_SITE_ID` | Engine (`plan_builder`) | Current site ID for plan execution. |
+| `RYEOS_ORIGIN_SITE_ID` | Engine (`plan_builder`) | Origin site ID for plan execution. |
 | `USER_SPACE` | Daemon (`build_spawn_env`) | Resolved user-space root, set on every subprocess. |
-| `RYE_SYSTEM_SPACE` | Daemon (`build_spawn_env`) | Resolved system-space root, set on every subprocess. |
-| `RYE_CHECKPOINT_DIR` | Daemon (spawn logic) | Per-thread checkpoint directory for `native_resume` tools. |
-| `RYE_RESUME` | Daemon (resume spawn) | Set to `"1"` on resume re-spawns. |
+| `RYEOS_SYSTEM_SPACE_DIR` | Daemon (`build_spawn_env`) | Resolved system-space root, set on every subprocess. |
+| `RYEOS_CHECKPOINT_DIR` | Daemon (spawn logic) | Per-thread checkpoint directory for `native_resume` tools. |
+| `RYEOS_RESUME` | Daemon (resume spawn) | Set to `"1"` on resume re-spawns. |
 
 ### Dynamic env vars injected by the protocol builder
 
@@ -175,14 +175,14 @@ needed.
 ### Dynamic env vars injected by the plan builder
 
 Tool primitive env is built by the engine's `plan_builder` (step 3), then
-augmented by `dispatch_subprocess` which adds `RYE_THREAD_ID` and
-`RYE_CHAIN_ROOT_ID`.
+augmented by `dispatch_subprocess` which adds `RYEOS_THREAD_ID` and
+`RYEOS_CHAIN_ROOT_ID`.
 
 ### `env_config` interpreter override
 
 Runtime handler `env_config` supports an `interpreter.var` field. When set, the
 engine reads `std::env::var(<var>)` to override the resolved interpreter binary.
-This is typically a `RYE_PYTHON`-style variable whose name is declared in the
+This is typically a `RYEOS_PYTHON`-style variable whose name is declared in the
 runtime's YAML config.
 
 ---

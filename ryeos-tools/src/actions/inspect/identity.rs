@@ -1,4 +1,4 @@
-//! `rye-inspect identity` — return the node's public identity document.
+//! `ryos-core-tools identity` — return the node's public identity document.
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -35,7 +35,7 @@ pub fn run_identity(params: IdentityParams) -> Result<Value> {
 
     let data = std::fs::read(&identity_path).with_context(|| {
         format!(
-            "public identity not found at {} — run 'rye daemon init' first",
+            "public identity not found at {} — run 'ryeos init' first",
             identity_path.display()
         )
     })?;

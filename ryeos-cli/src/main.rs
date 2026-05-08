@@ -26,7 +26,7 @@ async fn main() {
         Ok(()) => std::process::exit(0),
         Err(e) => {
             let code = e.exit_code();
-            eprintln!("rye: {e}");
+            eprintln!("ryeos: {e}");
             std::process::exit(code);
         }
     }

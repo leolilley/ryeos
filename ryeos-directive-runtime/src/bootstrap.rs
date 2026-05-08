@@ -384,7 +384,7 @@ fn resolve_model_target(
         .ok_or_else(|| {
             anyhow!(
                 "provider config not found: `{config_id}` — expected \
-                 `.ai/config/rye-runtime/{config_id}.yaml` under one of \
+                 `.ai/config/ryeos-runtime/{config_id}.yaml` under one of \
                  system / user / project roots (resolved from {})",
                 info.source
             )

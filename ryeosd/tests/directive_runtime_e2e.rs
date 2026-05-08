@@ -24,11 +24,11 @@ use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
 /// Plant the `model-providers/mock` config under
-/// `<user>/.ai/config/rye-runtime/model-providers/mock.yaml`.
+/// `<user>/.ai/config/ryeos-runtime/model-providers/mock.yaml`.
 /// `auth: {}` keeps the adapter's `Authorization` header skipped
 /// (see `ryeos-directive-runtime/src/adapter.rs:38-43`).
 fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime/model-providers");
+    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"
@@ -46,7 +46,7 @@ pricing:
 
 /// Plant `model_routing` mapping `tier: general` to provider `mock`.
 fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime");
+    let dir = user_space.join(".ai/config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
   general:
@@ -120,7 +120,7 @@ model:
 }
 
 /// Plant a synth Python tool at `<user>/.ai/tools/<rel>.py`. The body
-/// chains to the bundled `tool:rye/core/runtimes/python/script` runtime
+/// chains to the bundled `tool:ryeos/core/runtimes/python/script` runtime
 /// so the daemon's subprocess terminator can actually execute it (we
 /// reuse the dispatch_pin.rs::synth_tool_request pattern). The
 /// directive-runtime's `bootstrap::scan_tools` walks
@@ -139,7 +139,7 @@ fn plant_python_echo_tool(user_space: &Path, rel: &str) -> anyhow::Result<()> {
     let path = dir.join(format!("{rel}.py"));
     let body = r#"#!/usr/bin/env python3
 __version__ = "1.0.0"
-__executor_id__ = "tool:rye/core/runtimes/python/script"
+__executor_id__ = "tool:ryeos/core/runtimes/python/script"
 __category__ = "{dir_relative}"
 __description__ = "P3b echo tool — prints its single arg back"
 
@@ -406,14 +406,14 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
         plant_mock_provider(user, &mock_url, &fixture.publisher)?;
         plant_model_routing(user, &fixture.publisher)?;
         plant_python_echo_tool(user, "echo")?;
-        // Wildcard cap: the dispatcher checks `rye.execute.tool.<canonical_ref>`
+        // Wildcard cap: the dispatcher checks `ryeos.execute.tool.<canonical_ref>`
         // (see dispatcher.rs::resolve). The runner no longer does a separate
         // name-based pre-check — permission is the dispatcher's job.
         plant_directive(
             user,
             "test/round_trip",
             "Call the echo tool, then summarise.",
-            &["rye.execute.tool.*"],
+            &["ryeos.execute.tool.*"],
             &fixture.publisher,
         )?;
         Ok(())
@@ -528,7 +528,7 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
             user,
             "test/denied",
             "Try to call echo; you should be denied.",
-            &["rye.execute.tool.allowed_only"],
+            &["ryeos.execute.tool.allowed_only"],
             &fixture.publisher,
         )?;
         Ok(())

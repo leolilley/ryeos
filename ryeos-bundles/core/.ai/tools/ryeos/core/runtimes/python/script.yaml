@@ -1,0 +1,57 @@
+# ryeos:signed:2026-05-08T04:04:07Z:6834c90240795dafe1f3f6b29edd61d99af6f82021e00515be8912082e3d2680:EeH9uIyxWHR8e4WrXNXTXRc9ZbdLuxVzl7CHc+t+LHcKGzhE5zkwDMyFF0+aAB+/+OokpPQSpOxRmgRCafcsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/runtimes/python"
+version: "1.0.0"
+executor_id: "@subprocess"
+description: "Python script runtime - runs Python scripts that manage their own __main__ entry point"
+
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: [".venv/bin", ".venv/Scripts"]
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONUNBUFFERED: "1"
+    PROJECT_VENV_PYTHON: "{interpreter}"
+  env_paths:
+    PYTHONPATH:
+      prepend: ["{tool_dir}", "{runtime_dir}/lib"]
+
+verify_deps:
+  enabled: true
+  scope: tool_dir
+  recursive: true
+  extensions: [".py", ".yaml", ".yml", ".json"]
+  exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+
+config_resolve:
+  type: single
+  spec:
+    path: "execution/execution.yaml"
+    mode: "deep_merge"
+
+config:
+  command: "{interpreter}"
+  args:
+    - "{tool_path}"
+    - "--project-path"
+    - "{project_path}"
+  input_data: "{params_json}"
+  timeout_secs: 300
+
+config_schema:
+  type: object
+  properties:
+    script:
+      type: string
+      description: Python script path or inline code
+    args:
+      type: array
+      items:
+        type: string
+      description: Script arguments
+    module:
+      type: string
+      description: "Module to run with -m flag"

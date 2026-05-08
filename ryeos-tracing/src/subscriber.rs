@@ -9,7 +9,7 @@
 //! # Environment Variables
 //!
 //! - `RUST_LOG` — standard tracing filter (e.g. `"ryeosd=debug,ryeos_engine=info"`)
-//! - `RYE_TRACE_JSON` — if set, output structured JSON instead of pretty human format
+//! - `RYEOS_TRACE_JSON` — if set, output structured JSON instead of pretty human format
 
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -37,7 +37,7 @@ impl Default for SubscriberConfig {
     fn default() -> Self {
         Self {
             default_filter: "info".into(),
-            json_output: std::env::var("RYE_TRACE_JSON").is_ok(),
+            json_output: std::env::var("RYEOS_TRACE_JSON").is_ok(),
             with_target: true,
             with_file: false,
             with_thread_ids: false,
@@ -127,7 +127,7 @@ impl SubscriberConfig {
         }
     }
 
-    /// Config suitable for CLI tools (rye-fetch, rye-sign, etc.).
+    /// Config suitable for CLI tools (ryeos-core-tools, etc.).
     pub fn for_cli_tool() -> Self {
         Self {
             default_filter: "info".into(),

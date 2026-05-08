@@ -1,6 +1,6 @@
 //! GC lock — advisory file locking via flock().
 //!
-//! Prevents concurrent `rye gc` invocations from corrupting state.
+//! Prevents concurrent `ryeos gc` invocations from corrupting state.
 //! Uses RAII: lock acquired on creation, released on drop.
 //!
 //! Lock file at `state_root/gc.lock`.

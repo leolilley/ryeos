@@ -33,7 +33,7 @@ struct Cli {
     #[arg(long)]
     daemon_socket: Option<String>,
 
-    #[arg(long, env = "RYE_THREAD_ID", default_value = "graph-default")]
+    #[arg(long, env = "RYEOS_THREAD_ID", default_value = "graph-default")]
     thread_id: String,
 
     #[arg(long)]
@@ -100,8 +100,8 @@ fn main() -> anyhow::Result<()> {
     let checkpoint = CheckpointWriter::from_env();
 
     // Resume precedence (D10):
-    // 1. RYE_RESUME=1 + local checkpoint → checkpoint wins
-    // 2. RYE_RESUME=1 + no local checkpoint → explicit fallback to replay
+    // 1. RYEOS_RESUME=1 + local checkpoint → checkpoint wins
+    // 2. RYEOS_RESUME=1 + no local checkpoint → explicit fallback to replay
     // 3. Both unavailable + resume requested → fail loud
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
@@ -132,10 +132,10 @@ fn main() -> anyhow::Result<()> {
 
     // V5.5 D10 resume precedence (the rule itself lives in
     // `resume::decide_resume_source` — pure function, unit-tested):
-    //   1. RYE_RESUME=1 + local CheckpointWriter payload → checkpoint wins.
-    //   2. RYE_RESUME=1 + no local checkpoint → fall back to replay-events.
-    //   3. RYE_RESUME=1 + neither available → fail loud (NO silent cold-start).
-    //   4. RYE_RESUME unset → cold start (None).
+    //   1. RYEOS_RESUME=1 + local CheckpointWriter payload → checkpoint wins.
+    //   2. RYEOS_RESUME=1 + no local checkpoint → fall back to replay-events.
+    //   3. RYEOS_RESUME=1 + neither available → fail loud (NO silent cold-start).
+    //   4. RYEOS_RESUME unset → cold start (None).
     let resume_requested = CheckpointWriter::is_resume();
     let local_checkpoint: Option<Value> = if resume_requested {
         checkpoint
@@ -153,7 +153,7 @@ fn main() -> anyhow::Result<()> {
         // partition; matched event payload reconstructs the run_id.
         tracing::warn!(
             thread_id = %resolved.thread_id,
-            "RYE_RESUME=1 but no local checkpoint; falling back to replay-events resume"
+            "RYEOS_RESUME=1 but no local checkpoint; falling back to replay-events resume"
         );
         rt.block_on(resume::load_resume_state(
             &callback,
@@ -182,7 +182,7 @@ fn main() -> anyhow::Result<()> {
         ),
         resume::        ResumeSource::NoSourceAvailable => {
             anyhow::bail!(
-                "RYE_RESUME=1 but no resume source is available for thread '{}': \
+                "RYEOS_RESUME=1 but no resume source is available for thread '{}': \
                  local checkpoint absent and replay-events reconstruction found \
                  no graph_step_started for this thread; \
                  refusing silent cold-start (V5.5 D10)",

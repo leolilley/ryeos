@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn require_returns_not_registered_for_missing() {
         let reg = ProtocolRegistry::empty();
-        let result = reg.require("protocol:rye/core/opaque");
+        let result = reg.require("protocol:ryeos/core/opaque");
         assert!(result.is_err());
         match result.unwrap_err() {
             ProtocolError::NotRegistered { .. } => {}

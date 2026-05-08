@@ -1,0 +1,33 @@
+# ryeos:signed:2026-05-08T04:04:07Z:dacd67a593ddc111a5580e59767aa9a160d8b8692de878a736f307ba8a41e08f:ZYPYW1ctoS84sXJarcnv72q4Y1p4OPmPFFke26F4GIW9jN3RsQTmdZ5BxWSiE1JqpbC4o+EidMzIVAE28c0MDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core"
+name: "fetch"
+executor_id: "@subprocess"
+required_caps: ["bundle.read"]
+description: "Resolve, optionally verify, and read an item via the engine"
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "fetch"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 60
+
+config_schema:
+  type: object
+  properties:
+    item_ref:
+      type: string
+      description: "Canonical ref to fetch (e.g. tool:ryeos/core/fetch)"
+    with_content:
+      type: boolean
+      description: "Include the full file content in the report"
+      default: false
+    verify:
+      type: boolean
+      description: "Also verify trust status"
+      default: false
+    project_path:
+      type: string
+      description: "Project root path"
+  required: [item_ref]

@@ -225,7 +225,7 @@ mod tests {
             id: "test-route".into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),
-            auth: "rye_signed".into(),
+            auth: "ryeos_signed".into(),
             auth_config: None,
             limits: RawLimits::default(),
             response: RawResponseSpec {
@@ -274,7 +274,7 @@ mod tests {
         let mode = JsonMode;
         let raw = make_raw(
             "/test",
-            Some("tool:rye/core/execute"),
+            Some("tool:ryeos/core/execute"),
             serde_json::json!({ "project_path": "/tmp/test", "parameters": {} }),
         );
         let result = mode.compile(&raw);
@@ -310,7 +310,7 @@ mod tests {
         let mode = JsonMode;
         let raw = make_raw(
             "/test",
-            Some("tool:rye/core/execute"),
+            Some("tool:ryeos/core/execute"),
             serde_json::json!({ "parameters": {} }),
         );
         let result = mode.compile(&raw);
@@ -383,7 +383,7 @@ mod tests {
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),
-            auth: "rye_signed".into(),
+            auth: "ryeos_signed".into(),
             auth_config: None,
             limits: RawLimits::default(),
             response: RawResponseSpec {
@@ -419,7 +419,7 @@ mod tests {
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),
-            auth: "rye_signed".into(),
+            auth: "ryeos_signed".into(),
             auth_config: None,
             limits: RawLimits::default(),
             response: RawResponseSpec {

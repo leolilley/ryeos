@@ -1,0 +1,24 @@
+# ryeos:signed:2026-05-08T04:04:07Z:f7f936fecbbbd805a0f45c78facc81ee787f926a5ea32ace2e361837e27687e4:/bGFaBmXZ7YA3RGc1GOyP23v3Gj22Hshf/8YZlG9ySFEXuLnfpvRJ2i00dqduyVbkxjo4OEdbjuXOOC4ArVoDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: runtime_v1
+category: ryeos/core
+abi_version: v1
+description: Native runtime spawn. LaunchEnvelope on stdin, RuntimeResult on stdout, callback channel.
+stdin:
+  shape: launch_envelope_v1
+stdout:
+  shape: runtime_result_v1
+  mode: terminal
+env_injections:
+  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }
+  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
+  - { name: RYEOSD_THREAD_ID, source: thread_id }
+  - { name: RYEOSD_PROJECT_PATH, source: project_path }
+  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: http_v1

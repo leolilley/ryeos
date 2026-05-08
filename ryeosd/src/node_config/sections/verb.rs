@@ -10,7 +10,7 @@ use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
 /// A parsed verb definition loaded from `.ai/node/verbs/<name>.yaml`.
 ///
 /// Verbs are security-canonical: their name appears in capability strings
-/// (`rye.<verb>.<kind>.<subject>`), and their `execute` field defines what
+/// (`ryeos.<verb>.<kind>.<subject>`), and their `execute` field defines what
 /// runs when the verb is dispatched. Token routing (CLI aliases) lives in
 /// the separate `aliases` section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +117,7 @@ mod tests {
             "section": "verbs",
             "name": "sign",
             "description": "Sign an item",
-            "execute": "tool:rye/core/sign"
+            "execute": "tool:ryeos/core/sign"
         })
     }
 
@@ -129,7 +129,7 @@ mod tests {
         let boxed = result.unwrap();
         let record = boxed.as_any().downcast_ref::<VerbRecord>().unwrap();
         assert_eq!(record.name, "sign");
-        assert_eq!(record.execute.as_deref(), Some("tool:rye/core/sign"));
+        assert_eq!(record.execute.as_deref(), Some("tool:ryeos/core/sign"));
     }
 
     #[test]

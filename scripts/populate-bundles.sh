@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Populate ryeos-bundles/{core,standard}/.ai/bin/<triple>/ with freshly built
-# binaries, then rebuild the bundle CAS manifests.
+# binaries, then publish both bundles (sign items + rebuild CAS manifests).
 #
 # Use this whenever bundle bin/ contents are missing or stale:
 #   - after a fresh checkout (binaries are .gitignored)
@@ -9,28 +9,59 @@
 #
 # Idempotent. Safe to re-run.
 #
+# Usage:
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label>
+#
 # Env:
 #   CARGO              cargo binary (default: cargo from PATH)
 #   TRIPLE             host triple (default: x86_64-unknown-linux-gnu)
-#   RYE_SIGNING_KEY    PEM path for bundle signing (default: ~/.ai/config/keys/signing/private_key.pem)
-#                      If neither this nor the default file exists, falls back
-#                      to deterministic --seed 1 (dev-only, not for production).
-#   RYE_SIGNING_SEED   Seed for the deterministic fallback (default: 1)
 
 set -euo pipefail
+
+# ── CLI parsing ──────────────────────────────────────────────────────
+
+KEY=""
+OWNER=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --key)   KEY="$2";   shift 2 ;;
+    --owner) OWNER="$2"; shift 2 ;;
+    *) echo "populate-bundles.sh: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$KEY"   ]]; then echo "populate-bundles.sh: --key <pem-path> is required"   >&2; exit 2; fi
+if [[ -z "$OWNER" ]]; then echo "populate-bundles.sh: --owner <label> is required"    >&2; exit 2; fi
+if [[ ! -s "$KEY" ]]; then echo "populate-bundles.sh: key file is empty or missing: $KEY" >&2; exit 2; fi
+
+# ── Setup ────────────────────────────────────────────────────────────
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 TRIPLE="${TRIPLE:-x86_64-unknown-linux-gnu}"
-KEY_PATH="${RYE_SIGNING_KEY:-$HOME/.ai/config/keys/signing/private_key.pem}"
-SEED="${RYE_SIGNING_SEED:-1}"
 
 CORE="$ROOT/ryeos-bundles/core"
 STD="$ROOT/ryeos-bundles/standard"
+
+# ── Clean derived state from both bundles ────────────────────────────
+# Wipe everything that will be regenerated so stale artifacts (old
+# binaries, old manifests, old trust docs) don't leak through.
+
+for BUNDLE in core standard; do
+  BUNDLE_DIR="$ROOT/ryeos-bundles/$BUNDLE"
+  rm -rf "$BUNDLE_DIR/.ai/bin"
+  rm -rf "$BUNDLE_DIR/.ai/objects"
+  rm -rf "$BUNDLE_DIR/.ai/refs"
+  rm -f  "$BUNDLE_DIR/PUBLISHER_TRUST.toml"
+done
+
 CORE_BIN="$CORE/.ai/bin/$TRIPLE"
 STD_BIN="$STD/.ai/bin/$TRIPLE"
 
 mkdir -p "$CORE_BIN" "$STD_BIN"
+
+# ── Build ────────────────────────────────────────────────────────────
 
 echo "[populate-bundles] building all release binaries (workspace)…"
 "$CARGO" build --release \
@@ -39,16 +70,16 @@ echo "[populate-bundles] building all release binaries (workspace)…"
   -p ryeos-graph-runtime \
   -p ryeos-knowledge-runtime \
   -p ryeos-handler-bins \
-  -p ryeos-cli
-"$CARGO" build --release -p ryeos-tools \
-  --bin rye-bundle-tool --bin rye-inspect --bin rye-sign
+  -p ryeos-cli \
+  -p ryeos-tools
+
+# ── Stage binaries (only what each bundle owns) ──────────────────────
 
 echo "[populate-bundles] installing standard bundle binaries → $STD_BIN"
 install -m 0755 \
   "$ROOT/target/release/ryeos-directive-runtime" \
   "$ROOT/target/release/ryeos-graph-runtime" \
   "$ROOT/target/release/ryeos-knowledge-runtime" \
-  "$ROOT/target/release/rye" \
   "$STD_BIN/"
 
 echo "[populate-bundles] installing core bundle binaries → $CORE_BIN"
@@ -59,26 +90,21 @@ install -m 0755 \
   "$ROOT/target/release/rye-composer-extends-chain" \
   "$ROOT/target/release/rye-composer-graph-permissions" \
   "$ROOT/target/release/rye-composer-identity" \
-  "$ROOT/target/release/rye-inspect" \
-  "$ROOT/target/release/rye-sign" \
-  "$ROOT/target/release/rye-tool-streaming-demo" \
+  "$ROOT/target/release/ryeos-core-tools" \
   "$CORE_BIN/"
 
-# Pick signing key — prefer real PEM, fall back to deterministic seed.
-if [[ -f "$KEY_PATH" ]]; then
-  SIGN_ARGS=(--key "$KEY_PATH")
-  echo "[populate-bundles] signing with key: $KEY_PATH"
-else
-  SIGN_ARGS=(--seed "$SEED")
-  echo "[populate-bundles] no key at $KEY_PATH — using deterministic --seed $SEED (dev-only)"
-fi
+# ── Publish ──────────────────────────────────────────────────────────
 
-echo "[populate-bundles] rebuilding standard bundle manifest…"
-"$ROOT/target/release/rye-bundle-tool" rebuild-manifest \
-  --source "$STD" "${SIGN_ARGS[@]}" >/dev/null
+echo "[populate-bundles] publishing core bundle…"
+"$ROOT/target/release/ryeos" publish "$CORE" \
+  --registry-root "$CORE" \
+  --key "$KEY" \
+  --owner "$OWNER" >/dev/null
 
-echo "[populate-bundles] rebuilding core bundle manifest…"
-"$ROOT/target/release/rye-bundle-tool" rebuild-manifest \
-  --source "$CORE" "${SIGN_ARGS[@]}" >/dev/null
+echo "[populate-bundles] publishing standard bundle…"
+"$ROOT/target/release/ryeos" publish "$STD" \
+  --registry-root "$CORE" \
+  --key "$KEY" \
+  --owner "$OWNER" >/dev/null
 
 echo "[populate-bundles] done"

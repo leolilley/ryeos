@@ -61,7 +61,7 @@ impl Dispatcher {
             .find_tool(tool_name)
             .ok_or_else(|| format!("unknown tool: {}", tool_name))?;
 
-        let required_cap = format!("rye.execute.tool.{}", canonical_ref);
+        let required_cap = format!("ryeos.execute.tool.{}", canonical_ref);
         if !self.check_permission(&required_cap) {
             return Err(format!(
                 "permission denied: {} (no matching capability)",
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn resolve_known_tool() {
-        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()]);
+        let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
         let result = d.resolve("read_file", r#"{"path": "/tmp"}"#, None).unwrap();
         assert_eq!(result.arguments["path"], "/tmp");
         assert_eq!(result.canonical_ref, "tool:read_file");
@@ -132,25 +132,25 @@ mod tests {
 
     #[test]
     fn resolve_unknown_tool_fails() {
-        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()]);
+        let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
         assert!(d.resolve("nonexistent", "{}", None).is_err());
     }
 
     #[test]
     fn resolve_permission_denied() {
-        let d = make_dispatcher(vec!["rye.execute.tool.read_file".to_string()]);
+        let d = make_dispatcher(vec!["ryeos.execute.tool.read_file".to_string()]);
         assert!(d.resolve("write_file", "{}", None).is_err());
     }
 
     #[test]
     fn resolve_permission_wildcard() {
-        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()]);
+        let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
         assert!(d.resolve("write_file", "{}", None).is_ok());
     }
 
     #[test]
     fn resolve_passes_call_id() {
-        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()]);
+        let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
         let result = d.resolve("read_file", r#"{"path": "/tmp"}"#, Some("call_42".to_string())).unwrap();
         assert_eq!(result.call_id.as_deref(), Some("call_42"));
     }
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn arg_repair_on_invalid_json_bails_typed() {
-        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()]);
+        let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
         let err = d
             .resolve("read_file", r#"{path: "/tmp"}"#, None)
             .unwrap_err();
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn resolve_emits_span() {
-        let d = make_dispatcher(vec!["rye.execute.tool.*".to_string()]);
+        let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
         let (_, spans) = trace_test::capture_traces(|| {
             let _ = d.resolve("read_file", r#"{"path": "/tmp"}"#, None);
         });

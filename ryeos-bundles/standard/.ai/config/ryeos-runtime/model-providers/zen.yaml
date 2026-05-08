@@ -1,0 +1,28 @@
+# ryeos:signed:2026-05-08T04:04:07Z:5a01bab696082d236bfdeb402a2383234443fbae03c02d9493656e14d450fa5f:u4H+/RXIsG4siVxucJ1SHoEdzzAJNt4O86VYhrwcJTlULeR51gZ9Bf2JD/JWtHBaBL9x1h/reYOeN0D/9ECxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime/model-providers"
+base_url: "https://opencode.ai/zen/v1"
+auth:
+  env_var: ZEN_API_KEY
+  header_name: Authorization
+  prefix: "Bearer "
+headers:
+  Content-Type: application/json
+schemas:
+  messages:
+    role_map:
+      user: user
+      assistant: assistant
+      system: system
+      tool: tool
+    content_key: content
+    system_message:
+      mode: message_role
+    tool_result:
+      wrap_key: content
+  streaming:
+    mode: delta_merge
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+extra:
+  stream_url: "/chat/completions"

@@ -1,6 +1,6 @@
 //! V5.2 closeout end-to-end gate.
 //!
-//! These tests spawn the actual `ryeosd` binary (and optionally `rye`)
+//! These tests spawn the actual `ryeosd` binary (and optionally `ryeos`)
 //! as real subprocesses and exercise them over HTTP/TCP and via
 //! `run-service`. They catch the regressions that the prior in-process
 //! "e2e" file (now `cleanup_invariants.rs`) could not.
@@ -22,7 +22,7 @@
 mod common;
 
 use common::{
-    rye_binary, run_service_standalone_fresh, ryeosd_binary, DaemonHarness,
+    ryos_binary, run_service_standalone_fresh, ryeosd_binary, DaemonHarness,
 };
 
 // ── Test 1: live /execute over TCP ─────────────────────────────────────
@@ -60,18 +60,20 @@ async fn standalone_run_service_system_status() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_daemon_up_uses_execute() {
     let h = DaemonHarness::start().await.expect("start daemon");
-    let rye = rye_binary();
+    let ryos = ryos_binary();
 
-    let out = tokio::process::Command::new(&rye)
+    let out = tokio::process::Command::new(&ryos)
         .arg("execute")
         .arg("service:system/status")
+        .env("RYEOS_SYSTEM_SPACE_DIR", &h.state_path)
         .env("RYEOSD_BIN", ryeosd_binary())
+        .env("HOME", h.user_space.path())
         .output()
         .await
-        .expect("spawn rye");
+        .expect("spawn ryos");
     assert!(
         out.status.success(),
-        "rye exit={:?}\nstdout={}\nstderr={}",
+        "ryos exit={:?}\nstdout={}\nstderr={}",
         out.status.code(),
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
@@ -79,7 +81,7 @@ async fn cli_daemon_up_uses_execute() {
 }
 
 // ── Test 4: CLI fails fast when daemon is down (no silent fallback) ────
-//   Asserts the post-cli-impl contract: `rye execute` always tries the
+//   Asserts the post-cli-impl contract: `ryeos execute` always tries the
 //   daemon. If `daemon.json` is absent (daemon down), it exits 75
 //   (EX_TEMPFAIL) with a typed error, NOT a silent fallback to spawning
 //   `ryeosd run-service`. The offline path is now an explicit, separate
@@ -93,18 +95,18 @@ async fn cli_daemon_down_fails_fast_with_exit_75() {
     let user_space = tempfile::tempdir().expect("user tempdir");
     common::populate_user_space(user_space.path());
 
-    let rye = rye_binary();
-    let out = tokio::process::Command::new(&rye)
+    let ryos = ryos_binary();
+    let out = tokio::process::Command::new(&ryos)
         .arg("execute")
         .arg("service:system/status")
         // RYEOSD_BIN intentionally NOT set — the new contract has no
         // fallback that would consult it; presence or absence is moot.
-        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
+        .env("RYEOS_SYSTEM_SPACE_DIR", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .output()
         .await
-        .expect("spawn rye");
+        .expect("spawn ryos");
     assert_eq!(
         out.status.code(),
         Some(75),
@@ -184,32 +186,31 @@ async fn daemon_only_service_errors_via_run_service() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_execute_defaults_project_path_to_dot() {
     let h = DaemonHarness::start().await.expect("start daemon");
-    let rye = rye_binary();
+    let ryos = ryos_binary();
 
     // The CLI sends raw tokens (`["status"]`) to the daemon's /execute
     // endpoint. The daemon resolves via its AliasRegistry (loaded from
-    // the core bundle's `node/aliases/`). RYE_SYSTEM_SPACE locates the
-    // daemon's bind socket. HOME points the user tier at the harness
+    // the core bundle's `node/aliases/`). RYEOS_SYSTEM_SPACE_DIR locates
+    // the daemon's bind socket. HOME points the user tier at the harness
     // user space (where `populate_user_space` pre-loaded the
     // trusted-signers fixture).
-    let standard_bundle = common::workspace_root().join("ryeos-bundles/standard");
-    let out = tokio::process::Command::new(&rye)
+    let out = tokio::process::Command::new(&ryos)
         .arg("status") // alias → service:system/status, no --project-path
-        .env("RYE_SYSTEM_SPACE", &standard_bundle)
+        .env("RYEOS_SYSTEM_SPACE_DIR", &h.state_path)
         .env("HOME", h.user_space.path())
         .output()
         .await
-        .expect("spawn rye");
+        .expect("spawn ryos");
     assert!(
         out.status.success(),
-        "rye status (no --project-path) failed; if daemon rejected, the CLI may have dropped project_path. exit={:?}\nstdout={}\nstderr={}",
+        "ryos status (no --project-path) failed; if daemon rejected, the CLI may have dropped project_path. exit={:?}\nstdout={}\nstderr={}",
         out.status.code(),
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
 }
 
-// ── Test 8: --init-only must NEVER mutate RYE_SYSTEM_SPACE ─────────────
+// ── Test 8: --init-only must NEVER mutate RYEOS_SYSTEM_SPACE_DIR ─────────────
 //   (Catches the V5.2-CLOSEOUT bug that polluted ryeos-bundles/core.)
 
 #[tokio::test(flavor = "multi_thread")]
@@ -269,7 +270,7 @@ async fn init_only_does_not_mutate_system_space() {
         .arg("--init-only")
         .arg("--system-space-dir").arg(&state_path)
         .arg("--uds-path").arg(state_path.join("ryeosd.sock"))
-        .env("RYE_SYSTEM_SPACE", &sys_root)
+        .env("RYEOS_SYSTEM_SPACE_DIR", &sys_root)
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .output()
@@ -283,7 +284,7 @@ async fn init_only_does_not_mutate_system_space() {
     let after = snapshot(&sys_root);
     assert_eq!(
         before, after,
-        "RYE_SYSTEM_SPACE was mutated by --init-only — daemon bootstrap must NEVER touch operator-managed bundle content"
+        "RYEOS_SYSTEM_SPACE_DIR was mutated by --init-only — daemon bootstrap must NEVER touch operator-managed bundle content"
     );
 }
 
@@ -380,7 +381,7 @@ async fn state_lock_prevents_concurrent_daemons() {
         .arg("--bind").arg(bind.to_string())
         .arg("--uds-path").arg(&uds_path)
         .env("HOSTNAME", "testhost")
-        .env("RYE_SYSTEM_SPACE", common::workspace_core_dir())
+        .env("RYEOS_SYSTEM_SPACE_DIR", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .stdout(std::process::Stdio::piped())

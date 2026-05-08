@@ -150,7 +150,7 @@ mod tests {
             },
             crate::verb_registry::VerbDef {
                 name: "sign".into(),
-                execute: Some("tool:rye/core/sign".into()),
+                execute: Some("tool:ryeos/core/sign".into()),
             },
         ])
         .unwrap();

@@ -39,7 +39,7 @@ fn synth_project_with_schema_tool() -> PathBuf {
         .unwrap()
         .as_nanos();
     let project_dir = std::env::temp_dir().join(format!(
-        "rye_config_schema_e2e_{}_{}",
+        "ryeos_config_schema_e2e_{}_{}",
         std::process::id(),
         nanos
     ));
@@ -47,7 +47,7 @@ fn synth_project_with_schema_tool() -> PathBuf {
     fs::create_dir_all(&tools_dir).unwrap();
 
     let body = r#"version: "1.0.0"
-executor_id: "tool:rye/core/subprocess/execute"
+executor_id: "tool:ryeos/core/subprocess/execute"
 category: ""
 description: "schema-checked demo"
 
@@ -137,7 +137,7 @@ fn build_plan_accepts_params_conforming_to_config_schema() {
     // here without bringing the full bundle's runtime config into
     // the test. Instead, prove the conforming-params path by
     // resolving a real bundle tool that ships with config_schema
-    // (`tool:rye/core/subprocess/execute` requires `command`) and
+    // (`tool:ryeos/core/subprocess/execute` requires `command`) and
     // confirming that the validator does NOT block valid params.
     //
     // The rejection test above already proves the negative path
@@ -148,7 +148,7 @@ fn build_plan_accepts_params_conforming_to_config_schema() {
     let ctx = plan_ctx(&project_dir);
 
     let item =
-        CanonicalRef::parse("tool:rye/core/subprocess/execute").expect("ref parses");
+        CanonicalRef::parse("tool:ryeos/core/subprocess/execute").expect("ref parses");
     let resolved = engine.resolve(&ctx, &item).expect("resolve bundle tool");
     let verified = engine.verify(&ctx, resolved).expect("verify");
 

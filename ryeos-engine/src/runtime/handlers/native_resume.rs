@@ -3,16 +3,16 @@
 //! Presence of this block on a chain element flags the resulting
 //! subprocess as **replay-aware**: the daemon will allocate a per-thread
 //! checkpoint directory under `<thread_state_dir>/checkpoints/` and
-//! inject `RYE_CHECKPOINT_DIR=<that path>` into the spawn env. On
+//! inject `RYEOS_CHECKPOINT_DIR=<that path>` into the spawn env. On
 //! daemon restart, `reconcile.rs` consults the durable launch manifest
 //! and, when `native_resume` is declared, attempts automatic respawn
-//! with `RYE_RESUME=1` up to `max_auto_resume_attempts` times before
+//! with `RYEOS_RESUME=1` up to `max_auto_resume_attempts` times before
 //! giving up and marking the thread `failed`.
 //!
 //! The tool itself is responsible for:
-//!   - writing checkpoints to `RYE_CHECKPOINT_DIR/latest.json` (use
+//!   - writing checkpoints to `RYEOS_CHECKPOINT_DIR/latest.json` (use
 //!     `ryeos_runtime::CheckpointWriter`),
-//!   - being idempotent / replay-safe when started with `RYE_RESUME=1`.
+//!   - being idempotent / replay-safe when started with `RYEOS_RESUME=1`.
 //!
 //! Phase / cardinality: `DecorateSpec` / `FirstWins`. Resume policy
 //! must be unambiguous; the FIRST chain element that declares the
@@ -35,7 +35,7 @@
 //! `native_resume: false` is a hard error (omit the block to disable).
 //!
 //! Note: unlike `native_async`, this handler does NOT inject any env
-//! at compile time — `RYE_CHECKPOINT_DIR` is allocated and injected by
+//! at compile time — `RYEOS_CHECKPOINT_DIR` is allocated and injected by
 //! the daemon at spawn time (it depends on the spawn-time thread state
 //! dir, which the engine doesn't own). The handler's only job is to
 //! mark the spec so the daemon knows to do that allocation.
@@ -122,7 +122,7 @@ impl RuntimeHandler for NativeResumeHandler {
 
         ctx.spec_overrides.execution.native_resume = Some(spec);
 
-        // Note: `RYE_CHECKPOINT_DIR` is intentionally NOT injected here.
+        // Note: `RYEOS_CHECKPOINT_DIR` is intentionally NOT injected here.
         // It depends on the spawn-time `<thread_state_dir>/checkpoints/`
         // path, which the daemon allocates per-thread at attach time.
         // See `RuntimeLaunchMetadata::checkpoint_dir` and the runner's
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn handler_does_not_inject_env_at_compile_time() {
-        // RYE_CHECKPOINT_DIR is daemon-allocated at spawn time, not
+        // RYEOS_CHECKPOINT_DIR is daemon-allocated at spawn time, not
         // compile-time-derived. Verify the handler leaves env alone.
         let chain = vec![ChainIntermediate {
             executor_id: "tool:demo".into(),
@@ -259,9 +259,9 @@ mod tests {
         };
         NativeResumeHandler.apply(&json!(true), &mut ctx).unwrap();
         assert!(
-            !ctx.env.contains_key("RYE_CHECKPOINT_DIR"),
-            "handler must not inject RYE_CHECKPOINT_DIR; daemon owns that"
+            !ctx.env.contains_key("RYEOS_CHECKPOINT_DIR"),
+            "handler must not inject RYEOS_CHECKPOINT_DIR; daemon owns that"
         );
-        assert!(!ctx.env.contains_key("RYE_RESUME"));
+        assert!(!ctx.env.contains_key("RYEOS_RESUME"));
     }
 }

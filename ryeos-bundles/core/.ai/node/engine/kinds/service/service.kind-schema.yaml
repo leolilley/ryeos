@@ -1,4 +1,4 @@
-# rye:signed:2026-05-05T09:31:54Z:74263ac3f56ca6629e2a4661575dcda51bbcc7bd42be4a2813b2171ebfc798bf:oFfmA8iItZMyfKMxq6qTwN0+eIYfcc4X6MBZ4RHaMXme4CTYe/7anH2uPeuJYRSF1BrePiKySnZnKQdfkw2KCg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:fd96a3d4ddc9be4a2591eb7b39bae615dcd01aedbd8be9764a8421526c45025e:KCf30XTCmXbKfkCTktyy+8pXF2/JcRFUeQOUDbxw1mOm7UraY8DQY9JSU4S011T82ZlLG/XYdTW+xhGeAZD6Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -11,11 +11,11 @@ execution:
   resolution: []
 formats:
   - extensions: [".yaml", ".yml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
 # Identity composer — service items are loaded as-is.
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

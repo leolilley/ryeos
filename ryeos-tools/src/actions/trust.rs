@@ -1,14 +1,18 @@
-//! Operator-side trust pinning — `rye trust pin <fingerprint>`.
+//! Operator-side trust pinning — `ryeos trust pin`.
 //!
-//! Cap-gated on `rye.trust.pin` when invoked through the daemon. The CLI
+//! Two modes:
+//!   - `ryeos trust pin --from <PUBLISHER_TRUST.toml>` — canonical path,
+//!     reads the full trust doc.
+//!   - `ryeos trust pin <fingerprint> --pubkey-file <path>` — lower-level
+//!     escape hatch for raw key files.
+//!
+//! Cap-gated on `ryeos.trust.pin` when invoked through the daemon. The CLI
 //! verb runs locally (no daemon required) because trust state is operator-
 //! tier (`<user>/.ai/config/keys/trusted/`).
 //!
 //! Pinning REQUIRES the public key bytes — the fingerprint alone is not
-//! enough to verify signatures. The operator supplies a `--pubkey-file`
-//! containing either a PEM-encoded Ed25519 public key or a raw
-//! `ed25519:<base64>` line. The fingerprint is recomputed from the bytes
-//! and MUST match `<fingerprint>` to prevent typos / wrong files.
+//! enough to verify signatures. The fingerprint is recomputed from the bytes
+//! and MUST match to prevent typos / wrong files.
 //!
 //! Idempotent: pinning the same fingerprint twice is a no-op.
 
@@ -19,7 +23,59 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use lillux::crypto::{DecodePublicKey, VerifyingKey};
 
-use ryeos_engine::trust::{compute_fingerprint, pin_key};
+use ryeos_engine::trust::{compute_fingerprint, pin_key, PublisherTrustDoc};
+
+// ── Pin from PUBLISHER_TRUST.toml ────────────────────────────────────
+
+#[derive(Debug)]
+pub struct PinFromOptions {
+    /// Operator user space root (parent of `~/.ai/`). Defaults to `$HOME`.
+    pub user_root: PathBuf,
+    /// Path to a PUBLISHER_TRUST.toml file.
+    pub trust_file: PathBuf,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PinReport {
+    pub fingerprint: String,
+    pub trust_doc: PathBuf,
+    pub owner: String,
+    /// `true` if the trust doc already existed (idempotent no-op).
+    pub already_pinned: bool,
+}
+
+/// Pin a publisher key from a `PUBLISHER_TRUST.toml` file.
+pub fn run_pin_from(opts: &PinFromOptions) -> Result<PinReport> {
+    let trust_dir = opts
+        .user_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config")
+        .join("keys")
+        .join("trusted");
+    fs::create_dir_all(&trust_dir)
+        .with_context(|| format!("create trust dir {}", trust_dir.display()))?;
+
+    let content = fs::read_to_string(&opts.trust_file)
+        .with_context(|| format!("read {}", opts.trust_file.display()))?;
+
+    let doc = PublisherTrustDoc::parse(&content).map_err(|e| anyhow!("{e}"))?;
+    let vk = doc.decode_verifying_key().map_err(|e| anyhow!("{e}"))?;
+
+    let target = trust_dir.join(format!("{}.toml", doc.fingerprint));
+    let already = target.exists();
+
+    let pinned = pin_key(&vk, &doc.owner, &trust_dir, None)
+        .map_err(|e| anyhow!("pin trust doc: {e}"))?;
+
+    Ok(PinReport {
+        fingerprint: pinned,
+        trust_doc: target,
+        owner: doc.owner,
+        already_pinned: already,
+    })
+}
+
+// ── Pin from raw key file (escape hatch) ─────────────────────────────
 
 #[derive(Debug)]
 pub struct PinOptions {
@@ -34,15 +90,6 @@ pub struct PinOptions {
     pub pubkey_file: PathBuf,
     /// Owner label written into the trust doc — purely informational.
     pub owner: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct PinReport {
-    pub fingerprint: String,
-    pub trust_doc: PathBuf,
-    pub owner: String,
-    /// `true` if the trust doc already existed (idempotent no-op).
-    pub already_pinned: bool,
 }
 
 pub fn run_pin(opts: &PinOptions) -> Result<PinReport> {
@@ -85,13 +132,6 @@ pub fn run_pin(opts: &PinOptions) -> Result<PinReport> {
 }
 
 /// Parse an Ed25519 public key from one of the accepted text formats.
-///
-/// Supported inputs:
-///   - PEM (`-----BEGIN PUBLIC KEY-----...END PUBLIC KEY-----`)
-///   - One-line `ed25519:<base64>` (with optional whitespace / comments)
-///   - Raw base64 of the 32-byte key (one line, no prefix)
-///   - `PUBLISHER_TRUST.toml`-style TOML emitted by `rye publish` containing
-///     a `public_key = "ed25519:<base64>"` (and optional `fingerprint`) field
 fn parse_public_key_text(text: &str) -> Result<VerifyingKey> {
     let trimmed = text.trim();
 
@@ -100,13 +140,10 @@ fn parse_public_key_text(text: &str) -> Result<VerifyingKey> {
             .map_err(|e| anyhow!("invalid PEM public key: {e}"));
     }
 
-    // PUBLISHER_TRUST.toml-style: parse as TOML if the body assigns
-    // `public_key = "..."`. Comments and stray whitespace at the top
-    // are tolerated. We only consume the `public_key` field; if it's
-    // present we go through the TOML branch, otherwise we fall through
-    // to single-line parsing.
+    // If it looks like a PUBLISHER_TRUST.toml, use the canonical parser.
     if has_public_key_assignment(trimmed) {
-        return parse_publisher_trust_toml(trimmed);
+        let doc = PublisherTrustDoc::parse(trimmed).map_err(|e| anyhow!("{e}"))?;
+        return doc.decode_verifying_key().map_err(|e| anyhow!("{e}"));
     }
 
     let line = first_non_comment_line(trimmed).trim();
@@ -120,51 +157,11 @@ fn parse_public_key_text(text: &str) -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(&arr).map_err(|e| anyhow!("invalid Ed25519 key: {e}"))
 }
 
-/// Heuristic: does the document look like a PUBLISHER_TRUST.toml-style
-/// pointer (i.e. contains a top-level `public_key =` assignment)?
 fn has_public_key_assignment(text: &str) -> bool {
     text.lines().any(|l| {
         let s = l.trim_start();
         s.starts_with("public_key") && s.contains('=')
     })
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PublisherTrustToml {
-    public_key: String,
-    #[serde(default)]
-    fingerprint: Option<String>,
-}
-
-fn parse_publisher_trust_toml(text: &str) -> Result<VerifyingKey> {
-    let parsed: PublisherTrustToml = toml::from_str(text)
-        .map_err(|e| anyhow!("invalid PUBLISHER_TRUST.toml: {e}"))?;
-    let inner = parsed.public_key.trim();
-    let b64 = inner.strip_prefix("ed25519:").unwrap_or(inner);
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| anyhow!("invalid base64 in public_key field: {e}"))?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("public_key field must decode to 32 bytes"))?;
-    let vk = VerifyingKey::from_bytes(&arr)
-        .map_err(|e| anyhow!("invalid Ed25519 key in public_key field: {e}"))?;
-    // If the doc embeds a fingerprint, sanity-check it. The CLI verb
-    // re-checks against the operator-supplied fingerprint anyway, but
-    // catching internal inconsistencies here gives a better error.
-    if let Some(declared) = &parsed.fingerprint {
-        let actual = ryeos_engine::trust::compute_fingerprint(&vk);
-        if declared.trim() != actual {
-            bail!(
-                "PUBLISHER_TRUST.toml self-inconsistent: declared fingerprint {} \
-                 but public_key bytes hash to {}",
-                declared,
-                actual
-            );
-        }
-    }
-    Ok(vk)
 }
 
 fn first_non_comment_line(text: &str) -> &str {
@@ -237,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn run_pin_accepts_publisher_trust_toml_format() {
+    fn run_pin_from_accepts_publisher_trust_toml() {
         let tmp = tempfile::tempdir().unwrap();
         let user_root = tmp.path().join("home");
         let sk = SigningKey::generate(&mut OsRng);
@@ -245,21 +242,21 @@ mod tests {
         let fp = compute_fingerprint(&vk);
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
 
-        // Emit a PUBLISHER_TRUST.toml-style pointer file
-        let pubkey_file = tmp.path().join("PUBLISHER_TRUST.toml");
-        let body = format!(
-            "# Publisher trust pointer.\n\nfingerprint = \"{fp}\"\npublic_key  = \"ed25519:{key_b64}\"\n"
-        );
-        fs::write(&pubkey_file, body).unwrap();
+        let trust_file = tmp.path().join("PUBLISHER_TRUST.toml");
+        let doc = PublisherTrustDoc {
+            public_key: format!("ed25519:{key_b64}"),
+            fingerprint: fp.clone(),
+            owner: "test-publisher".to_string(),
+        };
+        fs::write(&trust_file, doc.to_toml()).unwrap();
 
-        let report = run_pin(&PinOptions {
+        let report = run_pin_from(&PinFromOptions {
             user_root,
-            expected_fingerprint: fp.clone(),
-            pubkey_file,
-            owner: "third-party".to_string(),
+            trust_file,
         })
         .unwrap();
         assert_eq!(report.fingerprint, fp);
+        assert_eq!(report.owner, "test-publisher");
         assert!(!report.already_pinned);
     }
 

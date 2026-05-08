@@ -60,8 +60,21 @@ async fn main() -> Result<()> {
         .join("node")
         .join("vault")
         .join("private_key.pem");
+    // `bootstrap::init` is idempotent — when files exist it's a verify
+    // pass; when they don't it creates them. The previous narrow
+    // condition (only run when node/vault keys are missing) skipped the
+    // step that writes public-identity.json after `ryeos init` already
+    // created the keys, leaving the daemon without a published audience.
+    let public_identity_path = config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("identity")
+        .join("public-identity.json");
     if cli.init_if_missing
-        && (!config.node_signing_key_path.exists() || !vault_secret_path.exists())
+        && (!config.node_signing_key_path.exists()
+            || !vault_secret_path.exists()
+            || !public_identity_path.exists())
     {
         bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;
     }
@@ -242,7 +255,7 @@ async fn main() -> Result<()> {
     // agnostic — `vault.rs` only moves opaque `String -> String` pairs.
     let vault: Arc<dyn ryeosd::vault::NodeVault> = Arc::new(
         ryeosd::vault::SealedEnvelopeVault::load(&config.system_space_dir)
-            .context("load sealed-envelope vault — did `rye init` (or daemon bootstrap) run?")?,
+            .context("load sealed-envelope vault — did `ryeos init` (or daemon bootstrap) run?")?,
     );
 
     let verb_registry = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(
@@ -700,7 +713,7 @@ async fn run_service_standalone(
         webhook_dedupe: Arc::new(routes::webhook_dedupe::WebhookDedupeStore::new()),
         vault: Arc::new(
             ryeosd::vault::SealedEnvelopeVault::load(&config.system_space_dir)
-                .context("load sealed-envelope vault — did `rye init` run?")?,
+                .context("load sealed-envelope vault — did `ryeos init` run?")?,
         ),
         verb_registry: standalone_vr,
         alias_registry: standalone_ar,

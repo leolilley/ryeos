@@ -471,7 +471,7 @@ impl Runner {
                             }
 
                             // Risk assessment before dispatch
-                            let required_cap = format!("rye.execute.tool.{}", dispatch_result.canonical_ref);
+                            let required_cap = format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
                             let risk = self.harness.assess(&required_cap);
                             if risk.blocked {
                                 tracing::warn!(
@@ -926,7 +926,7 @@ mod tests {
 
     fn make_policy() -> EnvelopePolicy {
         EnvelopePolicy {
-            effective_caps: vec!["rye.execute.tool.*".to_string()],
+            effective_caps: vec!["ryeos.execute.tool.*".to_string()],
             hard_limits: HardLimits::default(),
         }
     }

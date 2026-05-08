@@ -1,4 +1,4 @@
-//! Publisher-side `rye publish <bundle-source>` orchestration.
+//! Publisher-side `ryeos publish <bundle-source>` orchestration.
 //!
 //! Runs the full publish dance against a bundle source tree:
 //!
@@ -7,10 +7,10 @@
 //!   2. Sign every other signable item in the bundle (`sign_bundle_items`).
 //!   3. Rebuild the CAS manifest (`rebuild_bundle_manifest`).
 //!   4. Emit a publisher trust doc next to the bundle so downstream
-//!      operators have a one-file pointer to pin via `rye trust pin`.
+//!      operators have a one-file pointer to pin via `ryeos trust pin`.
 //!
 //! Replaces the prior three-step author dance:
-//! `bootstrap example` → `rye-bundle-tool sign-items` → `rebuild-manifest`.
+//! `bootstrap example` → `ryeos publish sign-items` → `rebuild-manifest`.
 //!
 //! Operates entirely on a publisher-provided source tree + signing key.
 //! No daemon, no operator state, no ambient trust assumptions.
@@ -35,9 +35,12 @@ pub struct PublishOptions {
     pub registry_root: PathBuf,
     /// Author signing key used for every signing operation in this run.
     pub signing_key: SigningKey,
+    /// Owner label written into PUBLISHER_TRUST.toml (e.g. "ryeos-official",
+    /// "ryeos-dev"). Required when `emit_trust_doc` is true.
+    pub owner: String,
     /// If `true`, write `<bundle_source>/PUBLISHER_TRUST.toml` summarizing
     /// the author key fingerprint + raw public key bytes for downstream
-    /// operators to pin via `rye trust pin`. Default `true`.
+    /// operators to pin via `ryeos trust pin`. Default `true`.
     pub emit_trust_doc: bool,
 }
 
@@ -67,11 +70,28 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         );
     }
 
-    // ── Phase 1: bootstrap-sign kind schemas + parser tools ──
+    // ── Phase 0: clean derived artifacts from prior publish runs ──
+    clean_derived_cas(&opts.bundle_source)?;
+    // Strip stale signatures so registries load cleanly after bootstrap.
+    strip_all_signatures(&ai_dir)?;
+
+    // ── Phase 1: bootstrap-sign kind schemas + parser + handler descriptors ──
+    // No registry or CAS dependency — signs YAML files in place using only
+    // the signing key. This is the cycle-breaker.
     let (kind_schemas_signed, parsers_signed) =
         bootstrap_sign_kinds_and_parsers(&opts.bundle_source, &opts.signing_key)?;
 
-    // ── Phase 2: sign every other signable item ──
+    // ── Phase 2: rebuild CAS manifest ──
+    // Only needs on-disk binaries under .ai/bin/<triple>/ + signing key.
+    // Produces objects/, refs/bundles/manifest, and *.item_source.json
+    // sidecars. No parser registry needed.
+    let rebuild_report =
+        build_bundle::rebuild_bundle_manifest(&opts.bundle_source, &opts.signing_key)
+            .context("rebuild-manifest phase failed")?;
+
+    // ── Phase 3: sign every other signable item ──
+    // CAS now exists, HandlerRegistry can resolve binaries, parser
+    // dispatcher works, validation runs, items get signed.
     let sign_report = sign_bundle::sign_bundle_items(
         &opts.bundle_source,
         &opts.registry_root,
@@ -93,16 +113,12 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         bail!("{msg}");
     }
 
-    // ── Phase 3: rebuild manifest ──
-    let rebuild_report =
-        build_bundle::rebuild_bundle_manifest(&opts.bundle_source, &opts.signing_key)
-            .context("rebuild-manifest phase failed")?;
-
     // ── Phase 4: emit publisher trust doc ──
     let publisher_trust_doc = if opts.emit_trust_doc {
         Some(write_publisher_trust_doc(
             &opts.bundle_source,
             &opts.signing_key,
+            &opts.owner,
         )?)
     } else {
         None
@@ -119,13 +135,16 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     })
 }
 
-/// Sign every `*.kind-schema.yaml` under `<source>/.ai/node/engine/kinds/`
-/// and every `*.yaml` under `<source>/.ai/parsers/` raw (no engine load).
+/// Sign every `*.kind-schema.yaml` under `<source>/.ai/node/engine/kinds/`,
+/// every `*.yaml` under `<source>/.ai/parsers/`, and every `*.yaml` under
+/// `<source>/.ai/handlers/` raw (no engine load).
 ///
-/// Mirrors `examples/bootstrap_sign_core_kind_schemas.rs` but as a library
-/// function reusable by `run_publish`. Skipped silently if the directories
-/// don't exist (bundles without their own kinds/parsers — only `core`
-/// owns those today).
+/// These must be signed before Phase 2 (`sign_bundle_items`) because the
+/// engine's `KindRegistry`, `ParserRegistry`, and `HandlerRegistry` all
+/// verify signatures on load. Without bootstrap signing, Phase 2 cannot
+/// construct the registries needed for metadata validation.
+///
+/// Skipped silently if directories don't exist.
 fn bootstrap_sign_kinds_and_parsers(
     source: &Path,
     signing_key: &SigningKey,
@@ -148,6 +167,18 @@ fn bootstrap_sign_kinds_and_parsers(
     if parsers_dir.is_dir() {
         let mut files = Vec::new();
         collect_yaml_files_recursive(&parsers_dir, &mut files);
+        for file in files {
+            sign_raw_in_place(&file, signing_key, "#", None)
+                .with_context(|| format!("bootstrap-sign {}", file.display()))?;
+            parsers.push(file.display().to_string());
+        }
+    }
+
+    // Handler descriptors — must be signed before HandlerRegistry::load_base.
+    let handlers_dir = source.join(ryeos_engine::AI_DIR).join("handlers");
+    if handlers_dir.is_dir() {
+        let mut files = Vec::new();
+        collect_yaml_files_recursive(&handlers_dir, &mut files);
         for file in files {
             sign_raw_in_place(&file, signing_key, "#", None)
                 .with_context(|| format!("bootstrap-sign {}", file.display()))?;
@@ -208,29 +239,129 @@ fn collect_yaml_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Write `<bundle_source>/PUBLISHER_TRUST.toml` — a one-file pointer
-/// downstream operators can `rye trust pin` against. NOT a trust doc the
-/// engine consumes; the engine's trust store is `~/.ai/config/keys/trusted/`
-/// and is operator-pinned, never bundle-imported.
-fn write_publisher_trust_doc(bundle_source: &Path, signing_key: &SigningKey) -> Result<PathBuf> {
+/// Remove derived CAS artifacts from a prior publish run so stale objects
+/// don't accumulate across re-publishes.
+///
+/// Called AFTER Phase 2 (sign items) and BEFORE Phase 3 (rebuild manifest)
+/// so that Phase 2's handler registry can still use the old manifest for
+/// binary resolution.
+///
+/// Cleans:
+///   - `<bundle_source>/.ai/objects/`  (CAS blob store)
+///   - `<bundle_source>/.ai/refs/`     (manifest ref pointers)
+///   - `**/MANIFEST.json` under `.ai/bin/` (per-triple sidecars)
+///   - `**/*.item_source.json` under `.ai/bin/` (signed sidecars)
+fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
+    let ai_dir = bundle_source.join(ryeos_engine::AI_DIR);
+
+    // CAS objects
+    let objects_dir = ai_dir.join("objects");
+    if objects_dir.is_dir() {
+        fs::remove_dir_all(&objects_dir)
+            .with_context(|| format!("remove {}", objects_dir.display()))?;
+    }
+
+    // Ref pointers
+    let refs_dir = ai_dir.join("refs");
+    if refs_dir.is_dir() {
+        fs::remove_dir_all(&refs_dir)
+            .with_context(|| format!("remove {}", refs_dir.display()))?;
+    }
+
+    // Per-triple MANIFEST.json + *.item_source.json sidecars
+    let bin_root = ai_dir.join("bin");
+    if bin_root.is_dir() {
+        clean_bin_sidecars(&bin_root)?;
+    }
+
+    Ok(())
+}
+
+fn clean_bin_sidecars(bin_root: &Path) -> Result<()> {
+    let entries = fs::read_dir(bin_root)
+        .with_context(|| format!("read {}", bin_root.display()))?;
+    for entry in entries.flatten() {
+        let triple_dir = entry.path();
+        if !triple_dir.is_dir() {
+            continue;
+        }
+        let files = fs::read_dir(&triple_dir)
+            .with_context(|| format!("read {}", triple_dir.display()))?;
+        for file in files.flatten() {
+            let p = file.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "MANIFEST.json" || name.ends_with(".item_source.json") {
+                fs::remove_file(&p)
+                    .with_context(|| format!("remove {}", p.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Strip signature envelope lines from all signable files under a directory
+/// tree. Handles YAML files (`.yaml`/`.yml`) and markdown directives (`.md`).
+/// This prepares files for re-signing by removing stale signatures that would
+/// cause verification failures during registry loads.
+fn strip_all_signatures(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir)
+        .with_context(|| format!("read {}", dir.display()))?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            strip_all_signatures(&p)?;
+        } else if p.is_file() {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(ext, "yaml" | "yml" | "md") {
+                continue;
+            }
+            let content = match fs::read_to_string(&p) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let stripped = lillux::signature::strip_signature_lines(&content);
+            if stripped != content {
+                let tmp = p.with_extension(format!("strip.tmp.{}", std::process::id()));
+                fs::write(&tmp, &stripped)
+                    .with_context(|| format!("write {}", tmp.display()))?;
+                fs::rename(&tmp, &p)
+                    .with_context(|| format!("rename {} -> {}", tmp.display(), p.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write `<bundle_source>/PUBLISHER_TRUST.toml` — the universal trust
+/// artifact downstream operators pin via `ryeos trust pin --from` or
+/// `ryeos init --trust-file`.
+fn write_publisher_trust_doc(
+    bundle_source: &Path,
+    signing_key: &SigningKey,
+    owner: &str,
+) -> Result<PathBuf> {
     let vk = signing_key.verifying_key();
     let fp = lillux::signature::compute_fingerprint(&vk);
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let body = format!(
-        r#"# Publisher trust pointer — NOT auto-imported by `bundle.install`.
-# Downstream operators pin this fingerprint explicitly:
-#
-#     rye trust pin {fp} \
-#         --pubkey-file PUBLISHER_TRUST.toml \
-#         --owner "<publisher-name>"
-#
-# `rye trust pin` reads the `public_key` field below. This document is
-# informational. The engine's trust store is operator-tier only
-# ($USER/.ai/config/keys/trusted/).
 
-fingerprint = "{fp}"
-public_key  = "ed25519:{key_b64}"
-"#
+    let doc = ryeos_engine::trust::PublisherTrustDoc {
+        public_key: format!("ed25519:{key_b64}"),
+        fingerprint: fp,
+        owner: owner.to_string(),
+    };
+
+    let body = format!(
+        "# Publisher trust pointer — pin with:\n\
+         #     ryeos trust pin --from PUBLISHER_TRUST.toml\n\
+         #     ryeos init --trust-file PUBLISHER_TRUST.toml\n\n\
+         {}",
+        doc.to_toml()
     );
     let target = bundle_source.join("PUBLISHER_TRUST.toml");
     let tmp = target.with_extension("tmp");

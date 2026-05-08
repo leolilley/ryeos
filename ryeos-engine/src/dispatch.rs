@@ -73,7 +73,7 @@ pub fn execute_plan(
 /// Dispatch a subprocess plan node via Lillux.
 ///
 /// Converts a `PlanSubprocessSpec` into a `lillux::SubprocessRequest`,
-/// injecting daemon context bindings (RYE_THREAD_ID, RYE_CHAIN_ROOT_ID).
+/// injecting daemon context bindings (RYEOS_THREAD_ID, RYEOS_CHAIN_ROOT_ID).
 fn dispatch_subprocess(
     spec: &PlanSubprocessSpec,
 
@@ -95,8 +95,8 @@ fn spec_to_request(
         .collect();
 
     // Daemon context bindings (always injected, override any spec values)
-    envs.push(("RYE_THREAD_ID".to_owned(), ctx.thread_id.clone()));
-    envs.push(("RYE_CHAIN_ROOT_ID".to_owned(), ctx.chain_root_id.clone()));
+    envs.push(("RYEOS_THREAD_ID".to_owned(), ctx.thread_id.clone()));
+    envs.push(("RYEOS_CHAIN_ROOT_ID".to_owned(), ctx.chain_root_id.clone()));
 
     Ok(lillux::SubprocessRequest {
         cmd: spec.cmd.clone(),
@@ -388,12 +388,12 @@ mod tests {
         let script = dir.join("env_test.py");
         fs::write(
             &script,
-            "import os, json; print(json.dumps({'tid': os.environ.get('RYE_THREAD_ID', ''), 'ref': os.environ.get('RYE_ITEM_REF', '')}))\n",
+            "import os, json; print(json.dumps({'tid': os.environ.get('RYEOS_THREAD_ID', ''), 'ref': os.environ.get('RYEOS_ITEM_REF', '')}))\n",
         )
         .unwrap();
 
         let mut env = HashMap::new();
-        env.insert("RYE_ITEM_REF".into(), "tool:my_tool".into());
+        env.insert("RYEOS_ITEM_REF".into(), "tool:my_tool".into());
 
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(request.timeout, 60.0);
         // Context bindings must be present
         let env_map: HashMap<String, String> = request.envs.into_iter().collect();
-        assert_eq!(env_map.get("RYE_THREAD_ID").unwrap(), "thread:test");
-        assert_eq!(env_map.get("RYE_CHAIN_ROOT_ID").unwrap(), "chain:test");
+        assert_eq!(env_map.get("RYEOS_THREAD_ID").unwrap(), "thread:test");
+        assert_eq!(env_map.get("RYEOS_CHAIN_ROOT_ID").unwrap(), "chain:test");
     }
 }

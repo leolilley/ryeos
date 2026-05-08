@@ -72,7 +72,7 @@ pub struct RuntimeLaunchMetadata {
 
     /// Resume policy carried over from `SubprocessSpec.execution.native_resume`.
     /// Presence ⇒ this thread is replay-aware. The daemon allocates
-    /// `checkpoint_dir`, injects `RYE_CHECKPOINT_DIR` into the spawn
+    /// `checkpoint_dir`, injects `RYEOS_CHECKPOINT_DIR` into the spawn
     /// env, and on restart consults `reconcile.rs` for auto-resume.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_resume: Option<NativeResumeSpec>,
@@ -357,7 +357,7 @@ mod tests {
             origin_site_id: "site:a".to_string(),
             requested_by: local_principal(),
             execution_hints: ExecutionHints::default(),
-            effective_caps: vec!["rye.execute.tool.test".to_string()],
+            effective_caps: vec!["ryeos.execute.tool.test".to_string()],
         };
         let m = RuntimeLaunchMetadata::default().with_resume_context(ctx);
         let json = serde_json::to_string(&m).unwrap();
@@ -387,7 +387,7 @@ mod tests {
         // reconciler restores the same daemon-enforced cap set.
         assert_eq!(
             back_ctx.effective_caps,
-            vec!["rye.execute.tool.test".to_string()]
+            vec!["ryeos.execute.tool.test".to_string()]
         );
     }
 }

@@ -1,9 +1,9 @@
-# rye:signed:2026-05-05T09:31:55Z:964405f8dfab63609f8761be09c17147865b07a4817b8e0856944bc4f536a14c:RLcIXt9UM118AAENeXh8CgdwP25wPjhL+EsMTA6a4wezSRAYMxFVvTPPqs1P6euFTIOASQZPTYFyZkTU/JIaBg==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:2675cf039d6e830e62a97ed4d9172c3060df7fd53f078b71c2e0424c8cf7f201:3eRF96XYx+0tyRFABF9sVXxgBIKisTRyxMEQNdQyTlAkC6ce+Jee/AZmKr55K2Y9tSJlT4sy0swDsFMclI57Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "bundle"
 name: "remove"
 kind: service
 endpoint: bundle.remove
-required_caps: ["rye.execute.service.bundle/remove"]
+required_caps: ["ryeos.execute.service.bundle/remove"]
 schema:
   name: string
 description: "Remove a bundle: drop <state_dir>/bundles/<name>/ from bundle_roots and delete the directory. OfflineOnly: invoke via `ryeosd run-service service:bundle/remove` while the daemon is stopped."

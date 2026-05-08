@@ -20,16 +20,16 @@ This produces:
 | Binary            | Path                           | Purpose                 |
 | ----------------- | ------------------------------ | ----------------------- |
 | `ryeosd`          | `target/debug/ryeosd`          | The daemon              |
-| `rye`             | `target/debug/rye`             | The CLI                 |
-| `rye-bundle-tool` | `target/debug/rye-bundle-tool` | Bundle manifest tool    |
-| `rye-sign`        | `target/debug/rye-sign`        | Item signing tool       |
-| `rye-inspect`     | `target/debug/rye-inspect`     | Runtime inspection tool |
+| `ryeos`             | `target/debug/ryeos`             | The CLI                 |
+| `ryeos publish` | `target/debug/ryeos publish` | Bundle manifest tool    |
+| `ryeos-core-tools`        | `target/debug/ryeos-core-tools`        | Item signing tool       |
+| `ryeos-core-tools`     | `target/debug/ryeos-core-tools`     | Runtime inspection tool |
 
 Release builds: `cargo build --release`.
 
 ## Initialize a node
 
-`rye init` creates the node identity, user signing key, trust store, and installs the core + standard bundles.
+`ryeos init` creates the node identity, user signing key, trust store, and installs the core + standard bundles.
 
 ```bash
 # From the project root:
@@ -95,7 +95,7 @@ The daemon writes `$STATE_DIR/daemon.json` with the bind address and socket path
 curl http://127.0.0.1:7400/health
 
 # Execute a tool (no LLM provider needed)
-rye execute tool:rye/core/identity/public_key
+ryeos execute tool:ryeos/core/identity/public_key
 ```
 
 ## Development builds and binary hashes
@@ -103,7 +103,7 @@ rye execute tool:rye/core/identity/public_key
 After `cargo build`, the binary hashes in the bundle manifest will be stale. The daemon rejects hash mismatches at runtime. Fix with:
 
 ```bash
-rye-bundle-tool rebuild-manifest \
+ryeos publish rebuild-manifest \
   --source ryeos-bundles/core \
   --key ~/.local/state/ryeosd/.ai/node/identity/private_key.pem
 ```

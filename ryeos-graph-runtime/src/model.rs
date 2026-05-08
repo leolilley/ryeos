@@ -312,8 +312,8 @@ category: test
 version: "1.0.0"
 category: test
 permissions:
-  - rye.execute.tool.echo
-  - rye.execute.tool.read
+  - ryeos.execute.tool.echo
+  - ryeos.execute.tool.read
 config:
   start: a
 "#;
@@ -321,8 +321,8 @@ config:
         assert_eq!(
             def.declared_permissions,
             vec![
-                "rye.execute.tool.echo".to_string(),
-                "rye.execute.tool.read".to_string(),
+                "ryeos.execute.tool.echo".to_string(),
+                "ryeos.execute.tool.read".to_string(),
             ]
         );
     }
@@ -342,7 +342,7 @@ config:
 version: "1.0.0"
 category: test
 permissions:
-  - rye.execute.tool.echo
+  - ryeos.execute.tool.echo
   - [nested, array]
 config:
   start: a

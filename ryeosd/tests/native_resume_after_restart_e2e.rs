@@ -49,7 +49,7 @@ fn unique_project_dir() -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "rye_native_resume_e2e_{}_{}",
+        "ryeos_native_resume_e2e_{}_{}",
         std::process::id(),
         nanos
     ))
@@ -184,14 +184,14 @@ fn launch_metadata_from_spec_carries_native_resume() {
 #[test]
 fn checkpoint_writer_roundtrip_via_env() {
     // Subprocess-side primitive: a tool launched with
-    // RYE_CHECKPOINT_DIR + RYE_RESUME=1 reads back the latest
+    // RYEOS_CHECKPOINT_DIR + RYEOS_RESUME=1 reads back the latest
     // checkpoint via CheckpointWriter::load_latest.
     let dir = tempfile::TempDir::new().unwrap();
     let ckpt_dir = dir.path().to_path_buf();
 
     // First run: not a resume.
-    std::env::set_var("RYE_CHECKPOINT_DIR", &ckpt_dir);
-    std::env::remove_var("RYE_RESUME");
+    std::env::set_var("RYEOS_CHECKPOINT_DIR", &ckpt_dir);
+    std::env::remove_var("RYEOS_RESUME");
     let writer1 = CheckpointWriter::from_env().expect("checkpoint writer from env");
     assert!(
         !CheckpointWriter::is_resume(),
@@ -205,11 +205,11 @@ fn checkpoint_writer_roundtrip_via_env() {
         .expect("write second checkpoint");
 
     // Second run: resume = 1. Latest must come back.
-    std::env::set_var("RYE_RESUME", "1");
+    std::env::set_var("RYEOS_RESUME", "1");
     let writer2 = CheckpointWriter::from_env().expect("checkpoint writer from env");
     assert!(
         CheckpointWriter::is_resume(),
-        "RYE_RESUME=1 should be detected"
+        "RYEOS_RESUME=1 should be detected"
     );
     let latest = writer2
         .load_latest()
@@ -218,6 +218,6 @@ fn checkpoint_writer_roundtrip_via_env() {
     assert_eq!(latest["step"], 2, "load_latest should pick the newest write");
     assert_eq!(latest["data"], "beta");
 
-    std::env::remove_var("RYE_CHECKPOINT_DIR");
-    std::env::remove_var("RYE_RESUME");
+    std::env::remove_var("RYEOS_CHECKPOINT_DIR");
+    std::env::remove_var("RYEOS_RESUME");
 }

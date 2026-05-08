@@ -1,9 +1,9 @@
-//! Shared engine boot utilities for `rye-inspect` subcommands.
+//! Shared engine boot utilities for `ryos-core-tools` subcommands.
 //!
 //! Each subcommand (fetch, verify, identity) needs the same engine
 //! infrastructure: `TrustStore`, `KindRegistry`, `ParserDispatcher`.
 //! This module provides a single `boot()` that builds a fully-loaded
-//! `Engine`, reusing the same discovery logic as `rye-sign` and the daemon.
+//! `Engine`, reusing the same discovery logic as `ryos-core-tools` and the daemon.
 
 pub mod fetch;
 pub mod identity;

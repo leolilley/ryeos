@@ -6,7 +6,7 @@
 //!      directive, route YAML, node signing key, authorized key file
 //!   3. Start daemon
 //!   4. POST /execute to run a directive, capture thread_id
-//!   5. GET /threads/{thread_id}/events/stream with rye_signed auth
+//!   5. GET /threads/{thread_id}/events/stream with ryeos_signed auth
 //!   6. Read SSE events until terminal
 //!   7. Assert events received correctly
 
@@ -22,7 +22,7 @@ use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 
 fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime/model-providers");
+    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"
@@ -39,7 +39,7 @@ pricing:
 }
 
 fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime");
+    let dir = user_space.join(".ai/config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
   general:
@@ -97,7 +97,7 @@ id: thread/events-stream
 path: /threads/{thread_id}/events/stream
 methods:
   - GET
-auth: rye_signed
+auth: ryeos_signed
 limits:
   body_bytes_max: 0
   timeout_ms: 0
@@ -114,7 +114,7 @@ response:
     Ok(())
 }
 
-fn build_rye_signed_auth_headers(
+fn build_ryeos_signed_auth_headers(
     sk: &SigningKey,
     method: &str,
     path: &str,
@@ -144,10 +144,10 @@ fn build_rye_signed_auth_headers(
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
     vec![
-        ("x-rye-key-id".into(), format!("fp:{fp}")),
-        ("x-rye-timestamp".into(), timestamp),
-        ("x-rye-nonce".into(), nonce),
-        ("x-rye-signature".into(), sig_b64),
+        ("x-ryeos-key-id".into(), format!("fp:{fp}")),
+        ("x-ryeos-timestamp".into(), timestamp),
+        ("x-ryeos-nonce".into(), nonce),
+        ("x-ryeos-signature".into(), sig_b64),
     ]
 }
 
@@ -218,10 +218,10 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
         // when the daemon was started with `--require-auth`. Tests
         // here don't enable that flag (it would double-replay-check
         // every request because both the middleware AND the
-        // `rye_signed` route verifier record nonces in the same
+        // `ryeos_signed` route verifier record nonces in the same
         // `REPLAY_GUARD`). So the unauthenticated POST `/execute`
         // gets the daemon's own identity as the caller principal,
-        // and the SSE GET — verified by the route's `rye_signed`
+        // and the SSE GET — verified by the route's `ryeos_signed`
         // verifier — must be signed by that same identity for the
         // thread_events source's `principal_id == requested_by`
         // ownership check to pass.
@@ -294,7 +294,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
     let headers =
-        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
+        build_ryeos_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
 
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
@@ -364,7 +364,7 @@ async fn boot_and_run_directive() -> (DaemonHarness, SigningKey, String, String)
 /// Variant of `boot_and_run_directive` that pre-installs additional
 /// authorized keys at fixture-plant time. Used by the non-owner test
 /// so a second key is recognized by the verifier (avoiding 401 on the
-/// rye_signed verifier path) and the request reaches the source's
+/// ryeos_signed verifier path) and the request reaches the source's
 /// principal-mismatch 404 branch deterministically.
 async fn boot_and_run_directive_with_extra_keys(
     extra_keys: &[SigningKey],
@@ -388,11 +388,11 @@ async fn boot_and_run_directive_with_extra_keys(
         // The hardcoded `/execute` route runs through
         // `auth::auth_middleware`, which only extracts a `Principal`
         // when `--require-auth` is on. The tests here can't enable
-        // it (the global middleware + per-route `rye_signed`
+        // it (the global middleware + per-route `ryeos_signed`
         // verifier would record the same nonce twice and 401 the
         // second check). So /execute runs as the daemon's identity
         // and the SSE GET below — verified by the route's
-        // `rye_signed` verifier — must be signed by that same
+        // `ryeos_signed` verifier — must be signed by that same
         // identity for `principal_id == requested_by` to pass.
         write_authorized_key_signed_by(state_path, &fixture.node, &fixture.node)?;
         for bytes in &extra_key_bytes {
@@ -450,7 +450,7 @@ async fn boot_and_run_directive_with_extra_keys(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_thread_events_returns_404_for_non_owner() {
-    // Pre-install BOTH keys at pre-init time so the rye_signed
+    // Pre-install BOTH keys at pre-init time so the ryeos_signed
     // verifier accepts the second key's request. That puts the
     // request through the source's principal-mismatch branch, which
     // is the path we want to assert returns 404 (not 401).
@@ -464,7 +464,7 @@ async fn sse_thread_events_returns_404_for_non_owner() {
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
     let headers =
-        build_rye_signed_auth_headers(&other_sk, "GET", &sse_path, b"", &audience);
+        build_ryeos_signed_auth_headers(&other_sk, "GET", &sse_path, b"", &audience);
 
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
@@ -494,7 +494,7 @@ async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
 
     // First connect: drain all events, capture their IDs.
     let headers_1 =
-        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
+        build_ryeos_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
 
@@ -529,7 +529,7 @@ async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
 
     // Second connect: same path, with Last-Event-ID = resume_from.
     let headers_2 =
-        build_rye_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
+        build_ryeos_signed_auth_headers(&node_sk, "GET", &sse_path, b"", &audience);
     let mut req2 = client.get(&url);
     for (k, v) in &headers_2 {
         req2 = req2.header(k.as_str(), v.as_str());

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:14:55Z:7a25e241cc82ad50e403efe1d7e2eb08045eb031cfe14f999f36ad8d7529f82a:7U41QbkoUlf6r-gXk-TktjXpYdlSHMqhXc6RbdMg_rDflzRjyDWXbeovn2CcyVoIlTs5KgX9hkWFJY9IuurwCQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:14:55Z:7a25e241cc82ad50e403efe1d7e2eb08045eb031cfe14f999f36ad8d7529f82a:7U41QbkoUlf6r-gXk-TktjXpYdlSHMqhXc6RbdMg_rDflzRjyDWXbeovn2CcyVoIlTs5KgX9hkWFJY9IuurwCQ==:4b987fd4e40303ac -->
 
 # Create and Sign Knowledge Entry
 

@@ -1,0 +1,21 @@
+# ryeos:signed:2026-05-08T04:04:07Z:45aa7b4131edef75dff1cfc7be8174aed1cf321376e6aa214c359b9e6fef0a94:AYF+EaBxWSTaaxHIJg7liMcHXUN9x8inN4fE268Vs7ttSwvLSUXwVlUIPGTwyf6FP2xKanl7agCdK2uiqtbaAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: opaque
+category: ryeos/core
+abi_version: v1
+description: Tool-style subprocess; opaque stdin/stdout, no callback.
+stdin:
+  shape: parameters_json
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections:
+  - { name: RYE_THREAD_ID, source: thread_id }
+  - { name: RYE_PROJECT_PATH, source: project_path }
+capabilities:
+  allows_pushed_head: true
+  allows_target_site: true
+  allows_detached: true
+lifecycle:
+  mode: detached_ok
+callback_channel: none

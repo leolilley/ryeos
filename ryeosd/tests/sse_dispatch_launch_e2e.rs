@@ -35,7 +35,7 @@ use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 
 fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime/model-providers");
+    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"
@@ -52,7 +52,7 @@ pricing:
 }
 
 fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime");
+    let dir = user_space.join(".ai/config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
   general:
@@ -114,7 +114,7 @@ id: execute/stream
 path: /execute/stream
 methods:
   - POST
-auth: rye_signed
+auth: ryeos_signed
 limits:
   body_bytes_max: 1048576
   timeout_ms: 0
@@ -132,7 +132,7 @@ response:
     Ok(())
 }
 
-fn build_rye_signed_auth_headers(
+fn build_ryeos_signed_auth_headers(
     sk: &SigningKey,
     method: &str,
     path: &str,
@@ -162,10 +162,10 @@ fn build_rye_signed_auth_headers(
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
     vec![
-        ("x-rye-key-id".into(), format!("fp:{fp}")),
-        ("x-rye-timestamp".into(), timestamp),
-        ("x-rye-nonce".into(), nonce),
-        ("x-rye-signature".into(), sig_b64),
+        ("x-ryeos-key-id".into(), format!("fp:{fp}")),
+        ("x-ryeos-timestamp".into(), timestamp),
+        ("x-ryeos-nonce".into(), nonce),
+        ("x-ryeos-signature".into(), sig_b64),
     ]
 }
 
@@ -274,7 +274,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
     let headers =
-        build_rye_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
+        build_ryeos_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -377,7 +377,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
     let headers =
-        build_rye_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
+        build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -530,7 +530,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
     let headers =
-        build_rye_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
+        build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -597,7 +597,7 @@ async fn sse_dispatch_launch_rejects_relative_project_path() {
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
     let headers =
-        build_rye_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
+        build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();

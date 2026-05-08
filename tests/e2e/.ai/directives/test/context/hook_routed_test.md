@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:c231c5b231bbda5e6a5818e772f186ffa39ab7fcc25ccda84f1dd2c34a430907:OPfRfuqZ8rfNaFcT01PpomBsgSoLqMcH8eyfkh1q9UHT3YjQ9RvQqi8ierl3nSVJKy3kqwUklJmd3TVc_vxSAg==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:c231c5b231bbda5e6a5818e772f186ffa39ab7fcc25ccda84f1dd2c34a430907:OPfRfuqZ8rfNaFcT01PpomBsgSoLqMcH8eyfkh1q9UHT3YjQ9RvQqi8ierl3nSVJKy3kqwUklJmd3TVc_vxSAg==:4b987fd4e40303ac -->
 # Hook-Routed Test
 
 Tests resolve_extends hook routing (Layer 2). This directive has NO explicit `extends`.

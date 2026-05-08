@@ -46,7 +46,7 @@ fn unique_project_dir(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "rye_native_async_e2e_{}_{}_{}",
+        "ryeos_native_async_e2e_{}_{}_{}",
         label,
         std::process::id(),
         nanos

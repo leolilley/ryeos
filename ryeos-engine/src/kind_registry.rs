@@ -142,7 +142,7 @@ pub struct ExtensionSpec {
     /// File extension including the dot, e.g. `".py"`, `".md"`
     pub ext: String,
     /// Canonical parser tool ref, e.g.
-    /// `"parser:rye/core/python/ast"`. The boot validator
+    /// `"parser:ryeos/core/python/ast"`. The boot validator
     /// guarantees this resolves through `ParserRegistry`.
     pub parser: String,
     /// Signature embedding envelope for this file type
@@ -421,7 +421,7 @@ pub enum TerminatorDecl {
     /// referenced protocol descriptor.
     Subprocess {
         /// Canonical ref into ProtocolRegistry, e.g.
-        /// "protocol:rye/core/runtime_v1".
+        /// "protocol:ryeos/core/runtime_v1".
         #[serde(rename = "protocol")]
         protocol_ref: String,
     },
@@ -680,8 +680,8 @@ pub struct KindSchema {
     /// violations.
     pub composed_value_contract: ValueShape,
     /// Native composer handler ID this kind binds to (e.g.
-    /// `"handler:rye/core/extends-chain"`,
-    /// `"handler:rye/core/identity"`). REQUIRED
+    /// `"handler:ryeos/core/extends-chain"`,
+    /// `"handler:ryeos/core/identity"`). REQUIRED
     /// on every kind schema — there is no silent "no composer" path.
     /// The boot validator guarantees this resolves through
     /// the `HandlerRegistry`; `ComposerRegistry::from_kinds`
@@ -692,7 +692,7 @@ pub struct KindSchema {
     /// dispatcher. The kind's composer handler validates and consumes
     /// it. REQUIRED at the schema layer but defaults to `Value::Null`
     /// when the YAML omits the block — composers that take no config
-    /// (e.g. the `handler:rye/core/identity` composer binary) accept Null.
+    /// (e.g. the `handler:ryeos/core/identity` composer binary) accept Null.
     pub composer_config: Value,
     /// Runtime-handler dispatch declaration (which YAML blocks on
     /// items of this kind are runtime blocks, plus the ignore list).
@@ -1164,14 +1164,14 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             reason: format!(
                 "{display}: kind schema missing required field `composer` \
                  (declare a native composer handler ID, e.g. \
-                 `composer: handler:rye/core/identity` for kinds with no \
-                 composition, or `composer: handler:rye/core/extends-chain`)"
+                 `composer: handler:ryeos/core/identity` for kinds with no \
+                 composition, or `composer: handler:ryeos/core/extends-chain`)"
             ),
         })?;
 
     // `composer_config` is opaque to the engine — composer handlers
     // own validation. Absence ⇒ Value::Null (handlers like
-    // the `handler:rye/core/identity` composer binary explicitly accept Null).
+    // the `handler:ryeos/core/identity` composer binary explicitly accept Null).
     let composer_config = match data.get("composer_config") {
         Some(v) => yaml_to_json(v.clone()).map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("{display}: invalid `composer_config`: {e}"),
@@ -1746,20 +1746,20 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
   - extensions: [\".yaml\", \".yml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
   - extensions: [\".js\", \".ts\"]
-    parser: parser:rye/core/javascript/javascript
+    parser: parser:ryeos/core/javascript/javascript
     signature:
       prefix: \"//\"
   - extensions: [\".sh\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -1780,10 +1780,10 @@ location:
   directory: directives
 execution:
   aliases:
-    \"@directive\": \"tool:rye/directive-runtime/runtime\"
+    \"@directive\": \"tool:ryeos/directive-runtime/runtime\"
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/directive
+    parser: parser:ryeos/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -1809,7 +1809,7 @@ execution:
     - step: resolve_references
 formats:
   - extensions: [\".md\"]
-    parser: parser:rye/core/markdown/directive
+    parser: parser:ryeos/core/markdown/directive
     signature:
       prefix: \"<!--\"
       suffix: \"-->\"
@@ -1843,7 +1843,7 @@ formats:
         let yaml = if yaml.contains("composer:") {
             yaml
         } else {
-            format!("{yaml}composer: handler:rye/core/identity\n")
+            format!("{yaml}composer: handler:ryeos/core/identity\n")
         };
         let signed = lillux::signature::sign_content(&yaml, sk, "#", None);
         fs::write(
@@ -1866,10 +1866,10 @@ location:
   directory: services
 formats:
   - extensions: [\".yaml\", \".yml\"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
@@ -1933,21 +1933,21 @@ metadata:
         assert_eq!(dir.directory, "directives");
         assert_eq!(
             dir.execution.as_ref().and_then(|e| e.aliases.get("@directive")).map(|s| s.as_str()),
-            Some("tool:rye/directive-runtime/runtime")
+            Some("tool:ryeos/directive-runtime/runtime")
         );
         assert_eq!(dir.extension_strs(), vec![".md"]);
 
         // Parser lookups
         let py_spec = reg.spec_for("tool", ".py").unwrap();
-        assert_eq!(py_spec.parser, "parser:rye/core/python/ast");
+        assert_eq!(py_spec.parser, "parser:ryeos/core/python/ast");
 
         let ts_spec = reg.spec_for("tool", ".ts").unwrap();
-        assert_eq!(ts_spec.parser, "parser:rye/core/javascript/javascript");
+        assert_eq!(ts_spec.parser, "parser:ryeos/core/javascript/javascript");
         assert_eq!(ts_spec.signature.prefix, "//");
         assert!(!ts_spec.signature.after_shebang);
 
         let md_spec = reg.spec_for("directive", ".md").unwrap();
-        assert_eq!(md_spec.parser, "parser:rye/core/markdown/directive");
+        assert_eq!(md_spec.parser, "parser:ryeos/core/markdown/directive");
         assert_eq!(md_spec.signature.prefix, "<!--");
         assert_eq!(md_spec.signature.suffix.as_deref(), Some("-->"));
 
@@ -1970,7 +1970,7 @@ metadata:
         assert_eq!(reg.directory("directive"), Some("directives"));
         assert_eq!(
             reg.get("directive").unwrap().execution.as_ref().and_then(|e| e.aliases.get("@directive")).map(|s| s.as_str()),
-            Some("tool:rye/directive-runtime/runtime")
+            Some("tool:ryeos/directive-runtime/runtime")
         );
         assert_eq!(
             reg.get("tool").unwrap().execution.as_ref().and_then(|e| e.aliases.get("@subprocess")).map(|s| s.as_str()),
@@ -2001,7 +2001,7 @@ metadata:
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let fmt = reg.resolved_format_for("tool", ".py").unwrap();
         assert_eq!(fmt.extension, ".py");
-        assert_eq!(fmt.parser, "parser:rye/core/python/ast");
+        assert_eq!(fmt.parser, "parser:ryeos/core/python/ast");
         assert_eq!(fmt.signature.prefix, "#");
         assert!(fmt.signature.after_shebang);
 
@@ -2027,7 +2027,7 @@ metadata:
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(
             tool_dir.join("tool.kind-schema.yaml"),
-            "location:\n  directory: tools\nformats:\n  - extensions: [\".py\"]\n    parser: parser:rye/core/python/ast\n    signature:\n      prefix: \"#\"\n",
+            "location:\n  directory: tools\nformats:\n  - extensions: [\".py\"]\n    parser: parser:ryeos/core/python/ast\n    signature:\n      prefix: \"#\"\n",
         )
         .unwrap();
 
@@ -2093,7 +2093,7 @@ metadata:
         let prefix_and_ts = parts[3];
         let bad_sig = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
         let bad_line = format!(
-            "{} rye:signed:{}:{}:{}:{}",
+            "{} ryeos:signed:{}:{}:{}:{}",
             "#",
             prefix_and_ts,
             hash,
@@ -2123,7 +2123,7 @@ metadata:
         let yaml = "\
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -2188,7 +2188,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
 ";
         sign_and_write_schema(&tmp, "tool", yaml, &sk);
 
@@ -2256,7 +2256,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -2310,20 +2310,20 @@ formats:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/opaque
+    protocol: protocol:ryeos/core/opaque
   aliases:
-    \"@subprocess\": \"tool:rye/core/subprocess/execute\"
+    \"@subprocess\": \"tool:ryeos/core/subprocess/execute\"
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert_eq!(
             exec.terminator,
             Some(TerminatorDecl::Subprocess {
-                protocol_ref: "protocol:rye/core/opaque".into()
+                protocol_ref: "protocol:ryeos/core/opaque".into()
             })
         );
         assert_eq!(
             exec.aliases.get("@subprocess").map(|s| s.as_str()),
-            Some("tool:rye/core/subprocess/execute")
+            Some("tool:ryeos/core/subprocess/execute")
         );
     }
 
@@ -2350,13 +2350,13 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime_v1
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert_eq!(
             exec.terminator,
             Some(TerminatorDecl::Subprocess {
-                protocol_ref: "protocol:rye/core/runtime_v1".into()
+                protocol_ref: "protocol:ryeos/core/runtime_v1".into()
             })
         );
     }
@@ -2457,7 +2457,7 @@ execution:
 execution:
   terminator:
     kind: wasm_sandbox
-    protocol: protocol:rye/core/opaque
+    protocol: protocol:ryeos/core/opaque
 ";
         let err = parse_exec(yaml).unwrap_err();
         match err {
@@ -2642,7 +2642,7 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime_v1
   operations:
     - name: compose
       side_effects: none
@@ -2701,7 +2701,7 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime_v1
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.operations.is_empty());
@@ -2786,7 +2786,7 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:rye/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime_v1
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.launch_augmentations.is_empty());
@@ -2839,7 +2839,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -2892,7 +2892,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
 metadata:
@@ -2921,7 +2921,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
 metadata:
@@ -2950,7 +2950,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:rye/core/python/ast
+    parser: parser:ryeos/core/python/ast
     signature:
       prefix: \"#\"
 metadata:
@@ -3003,8 +3003,8 @@ metadata:
     #[test]
     fn anchoring_happy_path_with_category() {
         let ai_root = Path::new("/proj/.ai");
-        let file = Path::new("/proj/.ai/tools/rye/core/sign.py");
-        let parsed = serde_json::json!({"category": "rye/core"});
+        let file = Path::new("/proj/.ai/tools/ryeos/core/sign.py");
+        let parsed = serde_json::json!({"category": "ryeos/core"});
         let mut rules = HashMap::new();
         rules.insert(
             "name".to_string(),
@@ -3052,9 +3052,9 @@ metadata:
     #[test]
     fn anchoring_rejects_path_mismatch() {
         let ai_root = Path::new("/proj/.ai");
-        let file = Path::new("/proj/.ai/tools/rye/core/sign.py");
-        // metadata says "rye/wrong" but path is "rye/core"
-        let parsed = serde_json::json!({"category": "rye/wrong"});
+        let file = Path::new("/proj/.ai/tools/ryeos/core/sign.py");
+        // metadata says "ryeos/wrong" but path is "ryeos/core"
+        let parsed = serde_json::json!({"category": "ryeos/wrong"});
         let mut rules = HashMap::new();
         rules.insert(
             "category".to_string(),
@@ -3071,7 +3071,7 @@ metadata:
                 ref path_value,
                 ref metadata_value,
                 ..
-            } if path_value == "rye/core" && metadata_value == "rye/wrong"),
+            } if path_value == "ryeos/core" && metadata_value == "ryeos/wrong"),
             "expected PathMismatch, got: {err:?}"
         );
     }

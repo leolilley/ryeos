@@ -1,11 +1,11 @@
 [package]
 name = "ryeos-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "CLI for Rye OS"
 
 [[bin]]
-name = "rye"
+name = "ryeos"
 path = "src/main.rs"
 
 [dependencies]

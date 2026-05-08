@@ -2,10 +2,10 @@
 //!
 //! V5.5 D10 precedence:
 //!
-//! 1. `RYE_RESUME=1` + a writable local `CheckpointWriter` payload →
+//! 1. `RYEOS_RESUME=1` + a writable local `CheckpointWriter` payload →
 //!    `from_checkpoint_value` (the typed source of truth: cursor +
 //!    state both come back atomically).
-//! 2. `RYE_RESUME=1` + no local checkpoint → fall back to this
+//! 2. `RYEOS_RESUME=1` + no local checkpoint → fall back to this
 //!    module's `load_resume_state`, which reconstructs the **cursor
 //!    only** by replaying the durable event log. Graph state cannot
 //!    be reconstructed this way (state mutations don't surface in
@@ -14,7 +14,7 @@
 //!    the rare path (typically a daemon restart before the first
 //!    checkpoint write).
 //! 3. Both unavailable + resume requested → `main.rs` must fail
-//!    loudly. Silent cold-start when `RYE_RESUME=1` is forbidden.
+//!    loudly. Silent cold-start when `RYEOS_RESUME=1` is forbidden.
 //!
 //! The previous facet-keyed implementation (`graph_checkpoint:*`,
 //! `graph_ref:*`) has been removed — facets are runtime-thread
@@ -53,7 +53,7 @@ pub struct ResumeState {
 ///
 /// Returns `Ok(None)` when no `graph_step_started` exists.
 /// `main.rs` is responsible for turning that into a hard failure
-/// when `RYE_RESUME=1`.
+/// when `RYEOS_RESUME=1`.
 pub async fn load_resume_state(
     callback: &CallbackClient,
     thread_id: &str,
@@ -138,13 +138,13 @@ pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
 
 /// Result of evaluating the V5.5 D10 resume precedence.
 ///
-/// `main.rs` reduces the (`RYE_RESUME=1`?, local-checkpoint?, replay?)
+/// `main.rs` reduces the (`RYEOS_RESUME=1`?, local-checkpoint?, replay?)
 /// triple into one of these four variants. Hoisting the decision into
 /// a pure function keeps the precedence rule unit-testable without
 /// having to spin up a real `CheckpointWriter` + callback transport.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResumeSource {
-    /// `RYE_RESUME` was unset → cold start. Walker boots from
+    /// `RYEOS_RESUME` was unset → cold start. Walker boots from
     /// `cfg.start`.
     ColdStart,
     /// Local `CheckpointWriter` payload was present. Wins over
@@ -154,7 +154,7 @@ pub enum ResumeSource {
     /// Carries cursor only — graph state is lost on this path
     /// (documented v1 limitation).
     ReplayFallback,
-    /// `RYE_RESUME=1` but neither source is available. `main.rs`
+    /// `RYEOS_RESUME=1` but neither source is available. `main.rs`
     /// MUST surface this as a hard error — silent cold-start when
     /// resume is requested is forbidden by D10.
     NoSourceAvailable,
@@ -166,10 +166,10 @@ pub enum ResumeSource {
 /// the payload — this function makes no I/O.
 ///
 /// V5.5 D10:
-/// 1. `RYE_RESUME=1` + local checkpoint → `LocalCheckpoint`
-/// 2. `RYE_RESUME=1` + no local + replay hit → `ReplayFallback`
-/// 3. `RYE_RESUME=1` + neither → `NoSourceAvailable` (caller MUST fail loud)
-/// 4. `RYE_RESUME` unset → `ColdStart`
+/// 1. `RYEOS_RESUME=1` + local checkpoint → `LocalCheckpoint`
+/// 2. `RYEOS_RESUME=1` + no local + replay hit → `ReplayFallback`
+/// 3. `RYEOS_RESUME=1` + neither → `NoSourceAvailable` (caller MUST fail loud)
+/// 4. `RYEOS_RESUME` unset → `ColdStart`
 pub fn decide_resume_source(
     resume_requested: bool,
     local_checkpoint_present: bool,
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn decide_resume_cold_start_when_resume_unset() {
-        // Without RYE_RESUME=1, presence of either source MUST NOT
+        // Without RYEOS_RESUME=1, presence of either source MUST NOT
         // cause an unintended resume — the walker is supposed to
         // cold-start.
         assert_eq!(
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(
             decide_resume_source(false, true, false),
             ResumeSource::ColdStart,
-            "checkpoint presence MUST be ignored when RYE_RESUME unset",
+            "checkpoint presence MUST be ignored when RYEOS_RESUME unset",
         );
         assert_eq!(
             decide_resume_source(false, true, true),
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn no_source_available_fails_loud() {
-        // D10 step 3: RYE_RESUME=1 but neither source has a payload.
+        // D10 step 3: RYEOS_RESUME=1 but neither source has a payload.
         // `main.rs` MUST translate this into a hard `bail!`. Pure
         // function returns the variant; caller surfaces the error.
         assert_eq!(

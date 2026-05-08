@@ -1,6 +1,6 @@
 //! Verb registry — security-canonical capability gates.
 //!
-//! A verb is the second component of a `rye.<verb>.<kind>.<subject>`
+//! A verb is the second component of a `ryeos.<verb>.<kind>.<subject>`
 //! capability string (e.g. `execute`, `fetch`, `sign`). Each verb
 //! optionally has a canonical ref (what it executes).
 //!
@@ -77,16 +77,16 @@ impl VerbRegistry {
     /// Validate that the verb component of a capability string refers to a
     /// known verb.
     ///
-    /// Accepts full caps like `rye.sign.directive.*` or bare patterns like
-    /// `rye.sign.*`. Wildcards (`*`) in the verb position pass — the check
+    /// Accepts full caps like `ryeos.sign.directive.*` or bare patterns like
+    /// `ryeos.sign.*`. Wildcards (`*`) in the verb position pass — the check
     /// is about typos and drift, not about policy semantics.
     ///
     /// Returns `Ok(())` if the verb is known or wildcarded. Returns a
     /// structured error otherwise.
     pub fn validate_cap_verb(&self, cap: &str) -> Result<(), UnknownVerbInCap> {
         let parts: Vec<&str> = cap.split('.').collect();
-        if parts.len() < 2 || parts[0] != "rye" {
-            // Not a `rye.*` cap — not our concern.
+        if parts.len() < 2 || parts[0] != "ryeos" {
+            // Not a `ryeos.*` cap — not our concern.
             return Ok(());
         }
         let verb = parts[1];
@@ -128,7 +128,7 @@ mod tests {
             },
             VerbDef {
                 name: "sign".into(),
-                execute: Some("tool:rye/core/sign".into()),
+                execute: Some("tool:ryeos/core/sign".into()),
             },
         ]
     }
@@ -150,7 +150,7 @@ mod tests {
         let reg = test_registry();
         let sign = reg.get_verb("sign").unwrap();
         assert_eq!(sign.name, "sign");
-        assert_eq!(sign.execute.as_deref(), Some("tool:rye/core/sign"));
+        assert_eq!(sign.execute.as_deref(), Some("tool:ryeos/core/sign"));
     }
 
     #[test]
@@ -206,20 +206,20 @@ mod tests {
     #[test]
     fn validate_cap_known_verb() {
         let reg = test_registry();
-        assert!(reg.validate_cap_verb("rye.sign.directive.*").is_ok());
-        assert!(reg.validate_cap_verb("rye.execute.service.bundle/install").is_ok());
+        assert!(reg.validate_cap_verb("ryeos.sign.directive.*").is_ok());
+        assert!(reg.validate_cap_verb("ryeos.execute.service.bundle/install").is_ok());
     }
 
     #[test]
     fn validate_cap_wildcard_verb_passes() {
         let reg = test_registry();
-        assert!(reg.validate_cap_verb("rye.*").is_ok());
+        assert!(reg.validate_cap_verb("ryeos.*").is_ok());
     }
 
     #[test]
     fn validate_cap_unknown_verb_rejected() {
         let reg = test_registry();
-        let result = reg.validate_cap_verb("rye.nonexistent.service.*");
+        let result = reg.validate_cap_verb("ryeos.nonexistent.service.*");
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("unknown verb"), "got: {msg}");

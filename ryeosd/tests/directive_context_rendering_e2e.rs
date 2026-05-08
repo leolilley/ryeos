@@ -20,7 +20,7 @@ use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
 fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime/model-providers");
+    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"
@@ -37,7 +37,7 @@ pricing:
 }
 
 fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime");
+    let dir = user_space.join(".ai/config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
   general:
@@ -52,7 +52,7 @@ fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result
 
 /// Plant a knowledge item at `<user>/.ai/knowledge/<rel>.md`.
 /// Knowledge items use ```yaml code fences for metadata (parsed by
-/// parser:rye/core/markdown/frontmatter), not --- frontmatter.
+/// parser:ryeos/core/markdown/frontmatter), not --- frontmatter.
 fn plant_knowledge_item(
     user_space: &Path,
     rel_path: &str,

@@ -68,7 +68,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             status: "running".to_string(),
             item_ref: "directive:my/agent".to_string(),
-            capabilities: vec!["rye.execute.tool.*".to_string()],
+            capabilities: vec!["ryeos.execute.tool.*".to_string()],
             limits: serde_json::json!({"turns": 25}),
             model: Some("anthropic/claude".to_string()),
             started_at: "2026-04-19T00:00:00Z".to_string(),

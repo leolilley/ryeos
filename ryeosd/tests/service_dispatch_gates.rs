@@ -314,7 +314,7 @@ fn gate_service_kind_in_bundle() {
 ///
 /// Was 17 prior to the service→tool conversion of `fetch`,
 /// `verify`, and `identity/public_key`. Each of those is now an
-/// external tool (`tool:rye/core/...`) invoked via `bin:rye-inspect`,
+/// external tool (`tool:ryeos/core/...`) invoked via `bin:ryos-core-tools`,
 /// not an in-process daemon handler.
 #[test]
 fn gate_service_count_matches_expected() {

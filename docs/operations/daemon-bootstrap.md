@@ -16,18 +16,18 @@ Config resolution happens in `Config::load()` (`ryeosd/src/config.rs`). The daem
 |---|---|---|---|---|
 | `bind` | `--bind` | — | `bind` | `127.0.0.1:7400` |
 | `state_dir` | `--state_dir` | — | `state_dir` | `$XDG_STATE_DIR/ryeosd` |
-| `system_data_dir` | `--system_data_dir` | `RYE_SYSTEM_SPACE` | `system_data_dir` | `$XDG_DATA_DIR/ryeos` |
+| `system_data_dir` | `--system_data_dir` | `RYEOS_SYSTEM_SPACE_DIR` | `system_data_dir` | `$XDG_DATA_DIR/ryeos` |
 | `uds_path` | `--uds_path` | — | `uds_path` | `$XDG_RUNTIME_DIR/ryeosd.sock` |
 | `db_path` | `--db_path` | — | `db_path` | `<state_dir>/.ai/state/runtime.sqlite3` |
 | `node_signing_key_path` | — | — | `node_signing_key_path` | `<state_dir>/.ai/node/identity/private_key.pem` |
-| `user_signing_key_path` | — | `RYE_SIGNING_KEY_PATH` | `user_signing_key_path` | `~/.ai/config/keys/signing/private_key.pem` |
+| `user_signing_key_path` | — | `RYEOS_PUBLISHER_KEY_PATH` | `user_signing_key_path` | `~/.ai/config/keys/signing/private_key.pem` |
 | `authorized_keys_dir` | `--authorized_keys_dir` | — | `authorized_keys_dir` | `<state_dir>/.ai/node/auth/authorized_keys` |
 | `require_auth` | `--require_auth` | — | `require_auth` | `false` |
 
 For most keys, the precedence is: **CLI flag > config file value > compiled default.** Notable exceptions:
 
-- `system_data_dir`: `RYE_SYSTEM_SPACE` env var takes priority over `--system_data_dir` CLI flag, which takes priority over the config file.
-- `user_signing_key_path`: `RYE_SIGNING_KEY_PATH` env var takes priority over the config file (no CLI flag).
+- `system_data_dir`: `RYEOS_SYSTEM_SPACE_DIR` env var takes priority over `--system_data_dir` CLI flag, which takes priority over the config file.
+- `user_signing_key_path`: `RYEOS_PUBLISHER_KEY_PATH` env var takes priority over the config file (no CLI flag).
 - `bind`: if both CLI and config file specify `--bind` and they disagree, the daemon refuses to start unless `--force` is also passed. When `--force` is used, the CLI value wins and the config file is rewritten.
 
 The config file is loaded from the path given by `--config`, falling back to `<state_dir>/.ai/node/config.yaml` if it exists. This means `state_dir` must be resolved first (from CLI or default) before the config file path can be determined.
@@ -41,7 +41,7 @@ After resolution, the daemon creates the db parent directory and the UDS parent 
 - `failed to parse config file <path>` — YAML syntax error in the config file.
 - `conflict between CLI --bind (...) and stored config.yaml (...)` — both specify `bind` with different values and `--force` was not passed.
 
-**Controls:** `--config`, `--state_dir`, `--bind`, `--system_data_dir`, `--db_path`, `--uds_path`, `--require_auth`, `--authorized_keys_dir`, `--force`, `RYE_SYSTEM_SPACE`, `RYE_SIGNING_KEY_PATH`
+**Controls:** `--config`, `--state_dir`, `--bind`, `--system_data_dir`, `--db_path`, `--uds_path`, `--require_auth`, `--authorized_keys_dir`, `--force`, `RYEOS_SYSTEM_SPACE_DIR`, `RYEOS_PUBLISHER_KEY_PATH`
 
 ---
 
@@ -73,7 +73,7 @@ If `--init-if-missing` is passed and either the node signing key or vault privat
 
 **What can go wrong:**
 
-- `refusing --force: existing signed node-config items would become unverifiable` — you have signed YAMLs under `.ai/node/` and tried `--force`. Use `rye daemon rotate-key` instead, which re-signs everything.
+- `refusing --force: existing signed node-config items would become unverifiable` — you have signed YAMLs under `.ai/node/` and tried `--force`. Use `ryeos daemon rotate-key` instead, which re-signs everything.
 - `signing key already exists at <path>` — the key file exists but `--force` was not passed. (This should not happen in the `--init-if-missing` path since that path only calls init when the key is absent.)
 
 **Controls:** `--init-only`, `--init-if-missing`, `--force`
@@ -107,7 +107,7 @@ Each `.toml` file in these directories declares a trusted verifying key. The tru
 **What can go wrong:**
 
 - `failed to load bootstrap trust store for node-config verification` — the trust dir exists but contains malformed TOML, or I/O errors prevented reading.
-- `ignoring bundle-internal trust dir` — a legacy trust directory was found inside a system root. This is a warning, not an error. Pin the publisher key with `rye trust pin <fingerprint>` instead.
+- `ignoring bundle-internal trust dir` — a legacy trust directory was found inside a system root. This is a warning, not an error. Pin the publisher key with `ryeos trust pin <fingerprint>` instead.
 
 **Controls:** `USER_SPACE` env var (overrides user root for testing)
 
@@ -130,7 +130,7 @@ Phase 1 of the two-phase node-config bootstrap determines which bundle roots the
 Each `.yaml`/`.yml` file in these directories must:
 
 - Be a regular file (symlinks are rejected).
-- Have a valid `# rye:signed:...` signature header.
+- Have a valid `# ryeos:signed:...` signature header.
 - Verify against the trust store (must reach `TrustClass::Trusted`).
 - Declare `section: bundles` matching its parent directory name.
 - Contain a `path:` field pointing to an existing directory (canonicalized).
@@ -141,13 +141,13 @@ The resulting effective bundle roots are the `path` values from all verified rec
 
 **What can go wrong:**
 
-- `node config item at <path> has no valid signature line` — the YAML is unsigned. Sign it with `rye sign <path>`.
+- `node config item at <path> has no valid signature line` — the YAML is unsigned. Sign it with `ryeos sign <path>`.
 - `node config item at <path> is not trusted (trust_class: Untrusted)` — the signer is not in the trust store. Pin the signer key.
 - `bundle '<name>' path '<path>' does not exist or is not a directory` — the bundle root directory is missing.
 - `node config section 'bundles' has duplicate name '<name>'` — two registrations with the same name.
 - `node config section 'bundles' has duplicate canonical path '<path>'` — two registrations pointing to the same directory.
 
-**Controls:** `RYE_SYSTEM_SPACE`, `--system_data_dir`, `--state_dir`
+**Controls:** `RYEOS_SYSTEM_SPACE_DIR`, `--system_data_dir`, `--state_dir`
 
 **Log line for healthy boot:**
 ```
@@ -188,14 +188,14 @@ With the effective bundle roots in hand, `engine_init::build_engine()` (`ryeosd/
 
 **What can go wrong:**
 
-- `no kind schema roots found; set system_data_dir or RYE_SYSTEM_SPACE` — the system data directory has no `.ai/node/engine/kinds/` subdirectory. Point `--system_data_dir` to a directory containing bundled kind schemas.
+- `no kind schema roots found; set system_data_dir or RYEOS_SYSTEM_SPACE_DIR` — the system data directory has no `.ai/node/engine/kinds/` subdirectory. Point `--system_data_dir` to a directory containing bundled kind schemas.
 - `failed to load kind schemas` — a schema file failed verification (untrusted signer) or YAML parsing.
 - `boot validation failed:` — one or more cross-registry issues (missing handler, unknown parser ref, etc.). Read the listed issues.
 - `protocol builder validation failed:` — a protocol descriptor has invalid config (unknown env source, duplicate key, etc.).
 - `kind '<name>' declares protocol '<ref>' but no such protocol is registered` — a kind schema references a protocol that doesn't exist in the protocol registry.
 - `failed to build runtime registry` — a `kind: runtime` YAML is unsigned or untrusted.
 
-**Controls:** `RYE_SYSTEM_SPACE`, `--system_data_dir`, `USER_SPACE`
+**Controls:** `RYEOS_SYSTEM_SPACE_DIR`, `--system_data_dir`, `USER_SPACE`
 
 **Log lines for healthy boot:**
 ```

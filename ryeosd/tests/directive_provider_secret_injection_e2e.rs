@@ -3,7 +3,7 @@
 //! Exercises the full chain that turns a YAML model-provider config into
 //! a live HTTP request with the operator's secret in the auth header:
 //!
-//! 1. Daemon loads `.ai/config/rye-runtime/model-providers/<id>.yaml`
+//! 1. Daemon loads `.ai/config/ryeos-runtime/model-providers/<id>.yaml`
 //!    via the verified-loader (signature + trust-class checked at boot).
 //! 2. Directive declares `model.tier: general`; `model_routing.yaml`
 //!    maps that tier to provider `mock`.
@@ -54,7 +54,7 @@ fn plant_mock_provider_with_auth(
     prefix: Option<&str>,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime/model-providers");
+    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let mut auth_lines = format!("  env_var: \"{env_var}\"\n");
     if let Some(h) = header_name {
@@ -78,7 +78,7 @@ pricing:
 }
 
 fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/rye-runtime");
+    let dir = user_space.join(".ai/config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
   general:
@@ -240,7 +240,7 @@ async fn run_directive_and_capture_first_request_headers(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_injection_with_custom_header_and_prefix() {
-    let env_var = "RYE_TEST_PROVIDER_SECRET_CUSTOM";
+    let env_var = "RYEOS_TEST_PROVIDER_SECRET_CUSTOM";
     let secret = "sk-test-custom-9f8e7d6c5b4a3210";
     let header_name = "X-Provider-Auth";
     let prefix = "Token ";
@@ -284,7 +284,7 @@ async fn secret_injection_with_custom_header_and_prefix() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_injection_with_default_authorization_bearer() {
-    let env_var = "RYE_TEST_PROVIDER_SECRET_DEFAULT";
+    let env_var = "RYEOS_TEST_PROVIDER_SECRET_DEFAULT";
     let secret = "sk-test-default-deadbeefcafebabe";
 
     // Omit header_name + prefix → adapter defaults to
@@ -451,7 +451,7 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
     //   ExecutionParams.vault_bindings → spawn_item spec.env →
     //   Command::env() → directive-runtime subprocess →
     //   std::env::var(provider.auth.env_var) → outbound auth header.
-    let env_var = "RYE_TEST_VAULT_DEFAULT";
+    let env_var = "RYEOS_TEST_VAULT_DEFAULT";
     let secret = "sk-vault-default-cafef00dbaadf00d";
 
     let headers = run_directive_with_vault_secret(env_var, secret, None, None).await;
@@ -481,7 +481,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     // `required_secrets` and threads the result through
     // `vault_bindings` → spec.env → directive-runtime subprocess →
     // outbound auth header.
-    let env_var = "RYE_TEST_DOTENV_AUTH";
+    let env_var = "RYEOS_TEST_DOTENV_AUTH";
     let secret = "sk-dotenv-only-feedfacefeedface";
 
     let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
@@ -624,7 +624,7 @@ async fn vault_blocked_name_fails_request_loud() {
         plant_mock_provider_with_auth(
             user,
             &mock_url,
-            "RYE_TEST_VAULT_BLOCKED",
+            "RYEOS_TEST_VAULT_BLOCKED",
             None,
             None,
             &fixture.publisher,
@@ -638,7 +638,7 @@ async fn vault_blocked_name_fails_request_loud() {
             user,
             "test/vault_blocked",
             "noop",
-            &["RYE_TEST_VAULT_BLOCKED"],
+            &["RYEOS_TEST_VAULT_BLOCKED"],
             &fixture.publisher,
         )?;
 
@@ -649,7 +649,7 @@ async fn vault_blocked_name_fails_request_loud() {
         // required" error.
         plant_poisoned_sealed_store(
             state_path,
-            "RYE_TEST_VAULT_BLOCKED = \"ok\"\nPATH = \"/evil:/path\"\n",
+            "RYEOS_TEST_VAULT_BLOCKED = \"ok\"\nPATH = \"/evil:/path\"\n",
         )?;
         Ok(())
     };

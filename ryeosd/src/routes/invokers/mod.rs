@@ -2,7 +2,7 @@
 //!
 //! Every route source becomes a compiled invoker at route-table-build time:
 //! - `service:` refs → `CompiledServiceInvocation` (generic wrapper)
-//! - Auth verifiers → `CompiledNoneVerifier`, `CompiledRyeSignedVerifier`, `CompiledHmacVerifier`
+//! - Auth verifiers → `CompiledNoneVerifier`, `CompiledRyeosSignedVerifier`, `CompiledHmacVerifier`
 //! - Streaming sources → `CompiledGatewayLaunch`, `CompiledThreadsEventsStream`
 //! - Launch mode → `CompiledLaunchInvocation`
 
@@ -11,7 +11,7 @@ pub mod gateway_stream_invocation;
 pub mod hmac_invocation;
 pub mod launch_invocation;
 pub mod none_invocation;
-pub mod rye_signed_invocation;
+pub mod ryeos_signed_invocation;
 pub mod service_invocation;
 pub mod stream_helpers;
 pub mod subscription_stream_invocation;
@@ -25,7 +25,7 @@ use crate::routes::invocation::CompiledRouteInvocation;
 
 /// Compile an auth invoker from the route's `auth` field.
 ///
-/// The `auth` field is a short key ("none", "rye_signed", "hmac") or a
+/// The `auth` field is a short key ("none", "ryeos_signed", "hmac") or a
 /// canonical ref. This function validates config and returns a compiled
 /// invoker that produces `RouteInvocationResult::Principal`.
 pub fn compile_auth_invoker(
@@ -35,7 +35,7 @@ pub fn compile_auth_invoker(
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
     match auth_key {
         "none" => Ok(Arc::new(none_invocation::CompiledNoneVerifier)),
-        "rye_signed" => Ok(Arc::new(rye_signed_invocation::CompiledRyeSignedVerifier)),
+        "ryeos_signed" => Ok(Arc::new(ryeos_signed_invocation::CompiledRyeosSignedVerifier)),
         "hmac" => {
             let config = auth_config.ok_or_else(|| RouteConfigError::InvalidSourceConfig {
                 id: route_id.into(),
@@ -169,8 +169,8 @@ mod tests {
     }
 
     #[test]
-    fn compile_auth_invoker_rye_signed_succeeds() {
-        let invoker = compile_auth_invoker("rye_signed", None, "r1").unwrap();
+    fn compile_auth_invoker_ryeos_signed_succeeds() {
+        let invoker = compile_auth_invoker("ryeos_signed", None, "r1").unwrap();
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn canonical_ref_compiler_accepts_tool() {
-        let invoker = compile_canonical_ref_invoker("tool:rye/core/execute", "r1").unwrap();
+        let invoker = compile_canonical_ref_invoker("tool:ryeos/core/execute", "r1").unwrap();
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,

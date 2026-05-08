@@ -59,7 +59,7 @@ use ryeos_engine::roots;
 
 // Vault key-name policy + write helpers live in
 // `ryeos_tools::actions::vault` so they can be shared with the CLI
-// `rye vault {put,list,remove,rewrap}` verbs without a circular
+// `ryeos vault {put,list,remove,rewrap}` verbs without a circular
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
 pub use ryeos_tools::actions::vault::{
@@ -139,7 +139,7 @@ pub fn read_required_secrets(
             "vault: missing declared secret(s) for principal `{principal}`: [{}]. \
              The item declares these in `required_secrets` but neither the \
              operator vault nor any `.env` overlay provides them. Add them via \
-             `rye vault put`, drop them into a `.env` next to the project, or \
+             `ryeos vault put`, drop them into a `.env` next to the project, or \
              remove the declaration.",
             missing.join(", ")
         );
@@ -186,7 +186,7 @@ impl NodeVault for EmptyVault {
 ///
 /// Storage layout:
 ///   - Vault X25519 secret key: `<state>/.ai/node/vault/private_key.pem`
-///     (generated at `rye init` time, file mode 0600).
+///     (generated at `ryeos init` time, file mode 0600).
 ///   - Encrypted store: `<state>/.ai/state/secrets/store.enc`. Single
 ///     TOML file containing the [`lillux::vault::SealedEnvelope`].
 ///     The decrypted plaintext is a TOML map of `KEY = "VALUE"`.
@@ -194,7 +194,7 @@ impl NodeVault for EmptyVault {
 /// Trust boundary: the daemon process holds the vault secret key in
 /// memory for the lifetime of the daemon. Subprocesses inherit
 /// secrets via env, NOT the key itself. Vault-key rotation is an
-/// explicit `rye vault rewrap` operation; the daemon refuses to read
+/// explicit `ryeos vault rewrap` operation; the daemon refuses to read
 /// envelopes whose `vault_pubkey_fingerprint` doesn't match.
 #[derive(Debug, Clone)]
 pub struct SealedEnvelopeVault {

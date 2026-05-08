@@ -36,7 +36,7 @@ What this creates:
 After `cargo build`, binary hashes change. The daemon rejects hash mismatches. Fix:
 
 ```bash
-cargo run -p rye-bundle-tool -- \
+cargo run -p ryeos publish -- \
   rebuild-manifest \
   --source ryeos-bundles/core \
   --key ~/.local/state/ryeosd/.ai/node/identity/private_key.pem
@@ -56,7 +56,7 @@ The daemon binds to `127.0.0.1:7400` by default. It writes a discovery file at
 | Symptom | Fix |
 |---------|-----|
 | `HOSTNAME not set` | `export HOSTNAME=$(hostname)` |
-| `no kind schema roots found` | Missing core bundle. Re-run `rye init --core-source` |
+| `no kind schema roots found` | Missing core bundle. Re-run `ryeos init --core-source` |
 | `hash mismatch` | Run `rebuild-manifest` (Step 3) |
 | `failed to acquire state lock` | Another `ryeosd` is running. Stop it first |
 
@@ -67,7 +67,7 @@ The daemon binds to `127.0.0.1:7400` by default. It writes a discovery file at
 curl http://127.0.0.1:7400/health
 
 # Execute a built-in tool (no LLM provider needed)
-cargo run -p ryeos-cli -- execute tool:rye/core/identity/public_key
+cargo run -p ryeos-cli -- execute tool:ryeos/core/identity/public_key
 ```
 
 ## Step 6: Execute a directive
@@ -83,7 +83,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 Then execute:
 
 ```bash
-cargo run -p ryeos-cli -- execute directive:rye/core/init
+cargo run -p ryeos-cli -- execute directive:ryeos/core/init
 ```
 
 ## Development shortcuts
@@ -95,8 +95,8 @@ export PATH="$HOME/.local/share/cargo/bin:$PATH"
 
 # After cargo build, link binaries somewhere convenient:
 ln -sf $(pwd)/target/debug/ryeosd ~/.local/bin/
-ln -sf $(pwd)/target/debug/rye ~/.local/bin/
-ln -sf $(pwd)/target/debug/rye-bundle-tool ~/.local/bin/
+ln -sf $(pwd)/target/debug/ryeos ~/.local/bin/
+ln -sf $(pwd)/target/debug/ryeos publish ~/.local/bin/
 ```
 
 ## What's next

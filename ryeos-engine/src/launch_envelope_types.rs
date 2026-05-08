@@ -197,7 +197,7 @@ mod tests {
                 depth: 0,
             },
             policy: EnvelopePolicy {
-                effective_caps: vec!["rye.execute.tool.*".to_string()],
+                effective_caps: vec!["ryeos.execute.tool.*".to_string()],
                 hard_limits: HardLimits::default(),
             },
             callback: EnvelopeCallback {

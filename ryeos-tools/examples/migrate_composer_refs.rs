@@ -3,8 +3,8 @@
 //! Reads each *.kind-schema.yaml under
 //! ryeos-bundles/core/.ai/node/engine/kinds/, strips the signature
 //! line, rewrites the `composer:` field from the legacy native-handler
-//! ID style (`rye/core/<name_with_underscores>`) to the canonical
-//! handler ref (`handler:rye/core/<name-with-hyphens>`), and re-signs
+//! ID style (`ryeos/core/<name_with_underscores>`) to the canonical
+//! handler ref (`handler:ryeos/core/<name-with-hyphens>`), and re-signs
 //! with the platform-author key.
 //!
 //! Run with:
@@ -30,12 +30,12 @@ fn main() {
     ];
 
     let mappings = [
-        ("rye/core/extends_chain", "handler:rye/core/extends-chain"),
+        ("ryeos/core/extends_chain", "handler:ryeos/core/extends-chain"),
         (
-            "rye/core/graph_permissions",
-            "handler:rye/core/graph-permissions",
+            "ryeos/core/graph_permissions",
+            "handler:ryeos/core/graph-permissions",
         ),
-        ("rye/core/identity", "handler:rye/core/identity"),
+        ("ryeos/core/identity", "handler:ryeos/core/identity"),
     ];
 
     for kind in kinds {

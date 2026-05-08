@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:c879c65df35da3f925e2a09961cd6ad7110ba0cd6ac94858b35e9543fd0443e0:75LGw5xEZVi1Q1oYYELqLIMOkDCEuebSllFPNFmAGnWvsCL-LoDScY64HzepOUbqm1l3_dEbEtsgSfkEZ2pZDA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:c879c65df35da3f925e2a09961cd6ad7110ba0cd6ac94858b35e9543fd0443e0:75LGw5xEZVi1Q1oYYELqLIMOkDCEuebSllFPNFmAGnWvsCL-LoDScY64HzepOUbqm1l3_dEbEtsgSfkEZ2pZDA==:4b987fd4e40303ac -->
 # Budget Cascade Test
 
 Test that child thread spend cascades back to parent budget. Parent has $0.50 budget, spawns a child — child's actual spend should be reflected in parent's actual_spend.

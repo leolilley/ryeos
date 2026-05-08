@@ -9,7 +9,7 @@
 //!
 //! For each per-triple bin directory the action also writes a
 //! human-readable `MANIFEST.json` alongside the binaries, mirroring the
-//! shape that `rye dev build-bundle` originally produced.
+//! shape that `ryeos build-bundle` originally produced.
 //!
 //! This is an explicit operator workflow. The daemon never invokes it.
 
@@ -27,12 +27,6 @@ use lillux::signature::{compute_fingerprint, sign_content};
 /// Helper: load a signing key from a PEM file (delegates to lillux).
 pub fn load_signing_key(path: &Path) -> Result<SigningKey> {
     lillux::crypto::load_signing_key(path)
-}
-
-/// Helper: deterministic signing key from a single seed byte. Convenience
-/// for operator workflows that prefer not to manage a PEM file.
-pub fn signing_key_from_seed(seed: u8) -> SigningKey {
-    SigningKey::from_bytes(&[seed; 32])
 }
 use ryeos_state::objects::{ItemSource, SourceManifest};
 

@@ -1,4 +1,4 @@
-# rye:signed:2026-05-05T09:31:54Z:c25adc37ef5baa06450e5dd2c71f98231315d1a5ceeb086eee46697784124b65:3WxTGgaXGTWitTUEeL6XmQz7dW5xjw8pV1AfvBsSa42XRGcJ+dJNisOBynSv/6CReHjgdjRiZHySb9LllMC0AQ==:09674c8998e9dd01bfc40ec9f8c4b6b2c1bd01333842582a9c34b3c7db5aa86c
+# ryeos:signed:2026-05-08T04:04:06Z:14cd9aeb19de4658b79b462381b99955a2ea28167a64301c5112d7954dfc7ff6:tDGqikn4SWAEmwkL4xg6GEOCnGbr9rVPzjZpaQjG/44meAZJU1YJzpKxIsbP8uH/iMYd2RgI53E+A6tTi6XTAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -43,19 +43,19 @@ execution:
     - step: resolve_references
 formats:
   - extensions: [".md"]
-    parser: parser:rye/core/markdown/frontmatter
+    parser: parser:ryeos/core/markdown/frontmatter
     signature:
       prefix: "<!--"
       suffix: "-->"
   - extensions: [".yaml", ".yml"]
-    parser: parser:rye/core/yaml/yaml
+    parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
 # Knowledge items have no structural shape requirement at the kind
 # level — consumers pull arbitrary structured data from markdown
 # frontmatter or yaml documents.
 # Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
-composer: handler:rye/core/identity
+composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}

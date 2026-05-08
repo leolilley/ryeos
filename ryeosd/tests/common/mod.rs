@@ -25,27 +25,27 @@ pub fn ryeosd_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ryeosd"))
 }
 
-/// Path to the built `rye` CLI binary, which lives in the same `target/<profile>/`
+/// Path to the built `ryeos` CLI binary, which lives in the same `target/<profile>/`
 /// directory as `ryeosd`. We build it on demand if it's not present, since
 /// Cargo only auto-builds bins from the same package as the integration test.
-pub fn rye_binary() -> PathBuf {
+pub fn ryos_binary() -> PathBuf {
     let candidate = ryeosd_binary()
         .parent()
         .expect("ryeosd binary has parent dir")
-        .join("rye");
+        .join("ryeos");
     if !candidate.exists() {
         // Build it. This blocks the test until cargo finishes; it should
         // be a no-op once the binary is up-to-date.
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = std::process::Command::new(&cargo)
-            .args(["build", "-p", "ryeos-cli", "--bin", "rye"])
+            .args(["build", "-p", "ryeos-cli", "--bin", "ryeos"])
             .status()
             .expect("failed to invoke `cargo build -p ryeos-cli`");
         assert!(status.success(), "cargo build -p ryeos-cli failed");
     }
     assert!(
         candidate.exists(),
-        "rye binary not found at {} after cargo build",
+        "ryos binary not found at {} after cargo build",
         candidate.display()
     );
     candidate
@@ -65,7 +65,7 @@ pub fn workspace_root() -> PathBuf {
 /// Returns the workspace's core bundle directory — used as a read-only
 /// daemon's system space dir.
 ///
-/// This IS safe to use for `RYE_SYSTEM_SPACE` (read-only bundle
+/// This IS safe to use for `RYEOS_SYSTEM_SPACE_DIR` (read-only bundle
 /// discovery) and as a source for `copy_dir_all`.
 pub fn workspace_core_dir() -> PathBuf {
     workspace_root().join("ryeos-bundles/core")
@@ -74,11 +74,173 @@ pub fn workspace_core_dir() -> PathBuf {
 /// Copy the core bundle to an isolated temp dir and return `(tempdir, path)`.
 /// The daemon can safely write into the copy without polluting the workspace.
 pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
+    ensure_bundles_fresh();
     let tmp = tempfile::tempdir().expect("tempdir for core bundle copy");
     let src = workspace_core_dir();
     let dst = tmp.path().join("core");
     copy_dir_recursive(&src, &dst).expect("copy core bundle to temp");
     (tmp, dst)
+}
+
+/// Ensure published bundle artifacts under `ryeos-bundles/{core,standard}/`
+/// reflect the current source tree. If any tracked source file is newer
+/// than the standard bundle's published manifest, re-run
+/// `scripts/populate-bundles.sh` to rebuild release binaries, restage
+/// them, and re-sign + republish both bundles.
+///
+/// This guards against the silent stale-artifact failure mode that
+/// otherwise bites every E2E that resolves runtimes through bundle CAS:
+/// touch a runtime crate, forget to republish, watch tests fail with
+/// confusing config / verification errors. Runs at most once per test
+/// process via [`std::sync::OnceLock`].
+///
+/// Set `RYEOS_TEST_SKIP_BUNDLE_REFRESH=1` to opt out (e.g. in CI where
+/// the bundles were already published in an earlier step).
+pub fn ensure_bundles_fresh() {
+    use std::sync::OnceLock;
+    static GUARD: OnceLock<()> = OnceLock::new();
+    GUARD.get_or_init(|| {
+        if std::env::var("RYEOS_TEST_SKIP_BUNDLE_REFRESH").as_deref() == Ok("1") {
+            return;
+        }
+        let root = workspace_root();
+        // Use the timestamp embedded in a signed bundle item as the
+        // "last publish" reference point. The signature envelope format
+        // is `# ryeos:signed:<RFC3339>:<digest>:<sig>:<fp>`, so the
+        // timestamp is content-derived — survives `git checkout`,
+        // `touch`, `rsync`, container rebuilds, etc., unlike file
+        // mtimes. Compare source crate mtimes against this reference;
+        // if any source is newer, the bundle is stale.
+        let representative = root.join(
+            "ryeos-bundles/standard/.ai/runtimes/directive-runtime.yaml",
+        );
+        let publish_time = read_signature_timestamp(&representative);
+        let needs_refresh = match publish_time {
+            None => true,
+            Some(m) => bundle_inputs_newer_than(&root, m),
+        };
+        if !needs_refresh {
+            return;
+        }
+        eprintln!("[ryeosd-tests] bundle artifacts stale — running populate-bundles.sh");
+        let key = root.join(".dev-keys/PUBLISHER_DEV.pem");
+        let status = std::process::Command::new("bash")
+            .arg(root.join("scripts/populate-bundles.sh"))
+            .arg("--key").arg(&key)
+            .arg("--owner").arg("ryeos-dev")
+            .current_dir(&root)
+            .status()
+            .expect("failed to invoke scripts/populate-bundles.sh");
+        assert!(
+            status.success(),
+            "populate-bundles.sh failed (exit {status}); fix the build or set RYEOS_TEST_SKIP_BUNDLE_REFRESH=1",
+        );
+    });
+}
+
+/// Parse the `# ryeos:signed:<RFC3339>:...` envelope from a signed
+/// bundle file and return the embedded publish timestamp. Returns
+/// `None` if the file is missing, unsigned, or the timestamp is
+/// unparseable.
+fn read_signature_timestamp(path: &Path) -> Option<std::time::SystemTime> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let line = content.lines().find(|l| l.starts_with("# ryeos:signed:"))?;
+    // Format: `# ryeos:signed:<RFC3339>:<digest>:<sig>:<fp>` where the
+    // timestamp itself contains 2 colons (`2026-05-07T08:09:10Z`).
+    // Strip the prefix, then take the first 3 colon-separated segments
+    // of the remainder and reconstruct the RFC3339 string.
+    let body = line.strip_prefix("# ryeos:signed:")?;
+    let mut parts = body.splitn(4, ':');
+    let date_h = parts.next()?;  // "2026-05-07T08"
+    let mi = parts.next()?;      // "09"
+    let se_z = parts.next()?;    // "10Z"
+    let ts = format!("{date_h}:{mi}:{se_z}");
+    rfc3339_to_systemtime(&ts)
+}
+
+/// Tiny RFC3339 → SystemTime parser (UTC `Z` only — that's all the
+/// signing format emits). Returns `None` on any malformed input.
+fn rfc3339_to_systemtime(s: &str) -> Option<std::time::SystemTime> {
+    // Expect: `YYYY-MM-DDTHH:MM:SSZ`
+    let s = s.strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let y: i64 = date_parts.next()?.parse().ok()?;
+    let mo: u32 = date_parts.next()?.parse().ok()?;
+    let d: u32 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let h: u32 = time_parts.next()?.parse().ok()?;
+    let mi: u32 = time_parts.next()?.parse().ok()?;
+    let se: u32 = time_parts.next()?.parse().ok()?;
+
+    // Days since 1970-01-01 using Howard Hinnant's algorithm
+    // (handles Gregorian leap years correctly through 9999).
+    let y_adj = y - if mo <= 2 { 1 } else { 0 };
+    let era = y_adj.div_euclid(400);
+    let yoe = (y_adj - era * 400) as i64;
+    let doy = ((153 * (if mo > 2 { mo - 3 } else { mo + 9 } as i64) + 2) / 5 + d as i64 - 1) as i64;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_since_epoch = era * 146097 + doe - 719468;
+    let total_secs = days_since_epoch * 86400 + (h as i64) * 3600 + (mi as i64) * 60 + se as i64;
+    if total_secs < 0 {
+        return None;
+    }
+    Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(total_secs as u64))
+}
+
+/// Walk the source roots that affect bundle binary contents and return
+/// `true` if any `.rs` / `Cargo.toml` file under them has an mtime
+/// newer than `published`. We only check source crates (not bundle
+/// item YAMLs): YAMLs are always rewritten by the publish step, so
+/// comparing them against the publish timestamp would be circular.
+/// A user editing a bundle YAML directly without republishing is a
+/// known-acceptable hole — that path is rare and republishing is one
+/// command.
+fn bundle_inputs_newer_than(root: &Path, published: std::time::SystemTime) -> bool {
+    const SOURCE_CRATES: &[&str] = &[
+        "ryeos-runtime",
+        "ryeos-directive-runtime",
+        "ryeos-graph-runtime",
+        "ryeos-knowledge-runtime",
+        "ryeos-handler-bins",
+        "ryeos-tools",
+        "ryeos-cli",
+        "ryeosd",
+    ];
+    for crate_name in SOURCE_CRATES {
+        let src_dir = root.join(crate_name).join("src");
+        if dir_has_newer(&src_dir, published) {
+            return true;
+        }
+        let cargo_toml = root.join(crate_name).join("Cargo.toml");
+        if std::fs::metadata(&cargo_toml)
+            .and_then(|m| m.modified())
+            .map(|m| m > published)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else { return false; };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if dir_has_newer(&p, published) {
+                return true;
+            }
+        } else if let Ok(m) = entry.metadata() {
+            if let Ok(modified) = m.modified() {
+                if modified > published {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Recursive directory copy (Unix, no special handling).

@@ -82,7 +82,7 @@ pub struct Config {
     /// System space root — the single directory containing the `.ai/` tree.
     /// Holds node identity, vault, runtime DB, bundles, node-config, and
     /// all bundle content. Defaults to `~/.local/share/ryeos/`.
-    /// Override with `--system-space-dir` or `RYE_SYSTEM_SPACE` env var.
+    /// Override with `--system-space-dir` or `RYEOS_SYSTEM_SPACE_DIR` env var.
     pub system_space_dir: PathBuf,
     /// Daemon-internal signing key.
     /// Defaults to `<system_space_dir>/.ai/node/identity/private_key.pem`.
@@ -153,7 +153,7 @@ impl Config {
         let system_space_dir = cli
             .system_space_dir
             .clone()
-            .or_else(|| env::var_os("RYE_SYSTEM_SPACE").map(PathBuf::from))
+            .or_else(|| env::var_os("RYEOS_SYSTEM_SPACE_DIR").map(PathBuf::from))
             .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.system_space_dir.clone()))
             .unwrap_or_else(|| defaults.system_space_dir.clone());
 
@@ -179,7 +179,7 @@ impl Config {
             user_signing_key_path: file_cfg
                 .as_ref()
                 .and_then(|cfg| cfg.user_signing_key_path.clone())
-                .or_else(|| env::var_os("RYE_SIGNING_KEY_PATH").map(PathBuf::from))
+                .or_else(|| env::var_os("RYEOS_SIGNING_KEY_PATH").map(PathBuf::from))
                 .unwrap_or_else(|| defaults.user_signing_key_path.clone()),
             require_auth: cli.require_auth
                 || file_cfg

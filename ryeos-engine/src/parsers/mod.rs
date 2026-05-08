@@ -1,11 +1,11 @@
 //! Parsers as tools — subprocess-dispatched via `HandlerRegistry`.
 //!
 //! Parsers are a kind. Descriptors live at `.ai/parsers/**/*.yaml` and
-//! are addressed by canonical refs of the form `parser:rye/core/...`.
+//! are addressed by canonical refs of the form `parser:ryeos/core/...`.
 //! The kind identity is implicit from location — there is no
 //! discriminator field on the descriptor.
 //!
-//! Each descriptor names a `handler:rye/core/<name>` ref; the
+//! Each descriptor names a `handler:ryeos/core/<name>` ref; the
 //! `ParserDispatcher` resolves that through `HandlerRegistry` and
 //! spawns the handler binary as an env-cleared subprocess
 //! (via `lillux::exec::lib_run`). There are no in-process native

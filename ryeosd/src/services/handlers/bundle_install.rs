@@ -79,7 +79,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Trust source: operator-tier ONLY (project + user). System bundles
     // (`system_space_dir`) contribute kind schemas + parser tools, never
     // trust docs. Bundles whose signers aren't already trusted are
-    // rejected — operators must `rye trust pin <fingerprint>` first.
+    // rejected — operators must `ryeos trust pin <fingerprint>` first.
     let user_root = roots::user_root().ok();
     preflight_verify_bundle(
         &req.source_path,
@@ -158,7 +158,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/install",
     endpoint: "bundle.install",
     availability: ServiceAvailability::OfflineOnly,
-    required_caps: &["rye.execute.service.bundle/install"],
+    required_caps: &["ryeos.execute.service.bundle/install"],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)

@@ -8,9 +8,9 @@ pub struct NodeCache {
 
 impl NodeCache {
     pub fn new(graph_id: &str) -> Self {
-        let dir = std::env::var("RYE_CACHE_DIR")
+        let dir = std::env::var("RYEOS_CACHE_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir().join("rye-graph-cache"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("ryeos-graph-cache"))
             .join(graph_id);
         Self { cache_dir: dir }
     }
