@@ -955,6 +955,8 @@ mod tests {
                 models: Default::default(),
             }),
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -990,6 +992,8 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1027,6 +1031,8 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1068,6 +1074,8 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -1108,6 +1116,8 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1159,6 +1169,8 @@ mod tests {
                 models,
             }),
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1202,6 +1214,8 @@ mod tests {
                 models: Default::default(),
             }),
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 

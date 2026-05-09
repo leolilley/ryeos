@@ -249,6 +249,8 @@ mod tests {
             content_wrap: None,
             system_message: Some(SystemMessageConfig {
                 mode: Some("body_inject".to_string()),
+                field: None,
+                template: None,
             }),
             tool_result: None,
             tool_list_wrap: None,
@@ -272,6 +274,8 @@ mod tests {
             content_wrap: None,
             system_message: Some(SystemMessageConfig {
                 mode: Some("message_role".to_string()),
+                field: None,
+                template: None,
             }),
             tool_result: None,
             tool_list_wrap: None,
