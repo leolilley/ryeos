@@ -215,3 +215,167 @@ pub fn validate_schedule_id(id: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_expression ──────────────────────────────────────
+
+    #[test]
+    fn validate_cron_every_minute() {
+        assert!(validate_expression("cron", "* * * * * *").is_ok());
+    }
+
+    #[test]
+    fn validate_cron_every_hour() {
+        assert!(validate_expression("cron", "0 * * * * *").is_ok());
+    }
+
+    #[test]
+    fn validate_cron_invalid() {
+        assert!(validate_expression("cron", "not-a-cron").is_err());
+    }
+
+    #[test]
+    fn validate_interval_positive() {
+        assert!(validate_expression("interval", "60").is_ok());
+    }
+
+    #[test]
+    fn validate_interval_zero() {
+        assert!(validate_expression("interval", "0").is_err());
+    }
+
+    #[test]
+    fn validate_interval_negative() {
+        assert!(validate_expression("interval", "-1").is_err());
+    }
+
+    #[test]
+    fn validate_interval_non_numeric() {
+        assert!(validate_expression("interval", "abc").is_err());
+    }
+
+    #[test]
+    fn validate_at_valid_rfc3339() {
+        assert!(validate_expression("at", "2026-01-01T00:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn validate_at_invalid() {
+        assert!(validate_expression("at", "not-a-date").is_err());
+    }
+
+    #[test]
+    fn validate_unknown_type() {
+        assert!(validate_expression("unknown", "anything").is_err());
+    }
+
+    // ── compute_next_fire ────────────────────────────────────────
+
+    #[test]
+    fn next_interval_first_fire() {
+        let now = 1000_000;
+        let result = compute_next_fire("interval", "60", "UTC", now, None).unwrap();
+        assert_eq!(result, Some(now + 60_000));
+    }
+
+    #[test]
+    fn next_interval_subsequent_fire() {
+        let now = 1000_000;
+        let last = 900_000;
+        let result = compute_next_fire("interval", "60", "UTC", now, Some(last)).unwrap();
+        assert!(result.unwrap() > now);
+    }
+
+    #[test]
+    fn next_at_future() {
+        let now = 1000_000;
+        let future = now + 600_000;
+        let ts = chrono::DateTime::from_timestamp_millis(future)
+            .unwrap()
+            .to_rfc3339();
+        let result = compute_next_fire("at", &ts, "UTC", now, None).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn next_at_past() {
+        let now = 1800000000000; // ~2027 — well after 2020
+        let past_ts = "2020-01-01T00:00:00Z";
+        let result = compute_next_fire("at", past_ts, "UTC", now, None).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn next_cron_basic() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let result = compute_next_fire("cron", "0 * * * * *", "UTC", now, None).unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap() > now);
+    }
+
+    // ── validate_timezone ────────────────────────────────────────
+
+    #[test]
+    fn valid_timezone_utc() {
+        assert!(validate_timezone("UTC").is_ok());
+    }
+
+    #[test]
+    fn valid_timezone_america_new_york() {
+        assert!(validate_timezone("America/New_York").is_ok());
+    }
+
+    #[test]
+    fn invalid_timezone() {
+        assert!(validate_timezone("Invalid/Zone").is_err());
+    }
+
+    // ── validate_schedule_id ─────────────────────────────────────
+
+    #[test]
+    fn valid_schedule_id() {
+        assert!(validate_schedule_id("my-schedule").is_ok());
+        assert!(validate_schedule_id("schedule_123").is_ok());
+    }
+
+    #[test]
+    fn invalid_schedule_id_empty() {
+        assert!(validate_schedule_id("").is_err());
+    }
+
+    #[test]
+    fn invalid_schedule_id_slash() {
+        assert!(validate_schedule_id("bad/id").is_err());
+    }
+
+    #[test]
+    fn invalid_schedule_id_dot() {
+        assert!(validate_schedule_id(".").is_err());
+        assert!(validate_schedule_id("..").is_err());
+    }
+
+    #[test]
+    fn invalid_schedule_id_whitespace() {
+        assert!(validate_schedule_id("has space").is_err());
+    }
+
+    // ── is_at_past ───────────────────────────────────────────────
+
+    #[test]
+    fn at_is_past_old_timestamp() {
+        assert!(is_at_past("2020-01-01T00:00:00Z", lillux::time::timestamp_millis()));
+    }
+
+    #[test]
+    fn at_is_not_past_future_timestamp() {
+        let future = chrono::DateTime::from_timestamp_millis(
+            lillux::time::timestamp_millis() + 600_000,
+        )
+        .unwrap()
+        .to_rfc3339();
+        assert!(!is_at_past(&future, lillux::time::timestamp_millis()));
+    }
+}

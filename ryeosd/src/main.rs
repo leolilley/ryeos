@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
         kind_profiles.clone(),
         events.clone(),
     )?);
-    threads.set_scheduler_db(scheduler_db.clone());
+    threads.set_scheduler_db(scheduler_db.clone(), config.system_space_dir.clone());
     let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
     let thread_auth = Arc::new(execution::callback_token::ThreadAuthStore::new());
@@ -712,7 +712,7 @@ async fn run_service_standalone(
         kind_profiles.clone(),
         events.clone(),
     )?);
-    threads.set_scheduler_db(scheduler_db.clone());
+    threads.set_scheduler_db(scheduler_db.clone(), config.system_space_dir.clone());
     let commands = Arc::new(services::command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,

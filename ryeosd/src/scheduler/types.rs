@@ -101,3 +101,63 @@ pub fn thread_id_from_fire(fire_id: &str) -> String {
     let hash = lillux::cas::sha256_hex(fire_id.as_bytes());
     format!("sched-{}", &hash[..32])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fire_id_format() {
+        let fid = fire_id("test-sched", 1700000000000);
+        assert_eq!(fid, "test-sched@1700000000000");
+    }
+
+    #[test]
+    fn fire_id_deterministic() {
+        let a = fire_id("my-schedule", 1000);
+        let b = fire_id("my-schedule", 1000);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fire_id_different_times() {
+        let a = fire_id("my-schedule", 1000);
+        let b = fire_id("my-schedule", 2000);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fire_id_different_schedules() {
+        let a = fire_id("schedule-a", 1000);
+        let b = fire_id("schedule-b", 1000);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn thread_id_has_sched_prefix() {
+        let tid = thread_id_from_fire("test@1000");
+        assert!(tid.starts_with("sched-"));
+    }
+
+    #[test]
+    fn thread_id_is_32_hex_chars() {
+        let tid = thread_id_from_fire("test@1000");
+        let hex_part = &tid[6..]; // after "sched-"
+        assert_eq!(hex_part.len(), 32);
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn thread_id_deterministic() {
+        let a = thread_id_from_fire("test@1000");
+        let b = thread_id_from_fire("test@1000");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn thread_id_different_fires() {
+        let a = thread_id_from_fire("sched@1000");
+        let b = thread_id_from_fire("sched@2000");
+        assert_ne!(a, b);
+    }
+}

@@ -59,18 +59,18 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
             .flatten()
             .map(|f| f.scheduled_at);
 
-        if let Some(last_at) = last_fire_at {
-            let missed = misfire::detect_misfires(spec, last_at, now, &state.scheduler_db)?;
-            if !missed.is_empty() {
-                let pending = misfire::evaluate_misfires(spec, state, now).await;
-                for p in pending {
-                    intents.push(ResumeIntent {
-                        fire_id: p.fire_id,
-                        spec: spec.clone(),
-                        scheduled_at: p.scheduled_at,
-                        trigger_reason: p.reason,
-                    });
-                }
+        // evaluate_misfires internally calls detect_misfires and handles
+        // the gap detection + policy evaluation. Only call it if we have
+        // a previous fire (otherwise there's no gap to evaluate).
+        if last_fire_at.is_some() {
+            let pending = misfire::evaluate_misfires(spec, state, now).await;
+            for p in pending {
+                intents.push(ResumeIntent {
+                    fire_id: p.fire_id,
+                    spec: spec.clone(),
+                    scheduled_at: p.scheduled_at,
+                    trigger_reason: p.reason,
+                });
             }
         }
     }

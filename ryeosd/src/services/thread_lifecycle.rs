@@ -28,6 +28,7 @@ pub struct ThreadLifecycleService {
     _events: Arc<EventStoreService>,
     current_site_id: String,
     scheduler_db: std::sync::RwLock<Option<Arc<crate::scheduler::db::SchedulerDb>>>,
+    system_space_dir: std::sync::RwLock<Option<std::path::PathBuf>>,
 }
 
 impl std::fmt::Debug for ThreadLifecycleService {
@@ -187,13 +188,15 @@ impl ThreadLifecycleService {
             _events,
             current_site_id: format!("site:{hostname}"),
             scheduler_db: std::sync::RwLock::new(None),
+            system_space_dir: std::sync::RwLock::new(None),
         })
     }
 
     /// Wire the scheduler DB for thread completion tracking.
     /// Called once after construction, once the scheduler DB is available.
-    pub fn set_scheduler_db(&self, db: Arc<crate::scheduler::db::SchedulerDb>) {
+    pub fn set_scheduler_db(&self, db: Arc<crate::scheduler::db::SchedulerDb>, system_space_dir: std::path::PathBuf) {
         *self.scheduler_db.write().unwrap() = Some(db);
+        *self.system_space_dir.write().unwrap() = Some(system_space_dir);
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {
@@ -422,9 +425,19 @@ impl ThreadLifecycleService {
                         "failed"
                     };
                     let outcome_str = params.outcome_code.as_deref().unwrap_or(fire_status);
+                    let now = lillux::time::timestamp_millis();
+
+                    // Clone fields needed for JSONL before the move
+                    let jsonl_fire_id = fire.fire_id.clone();
+                    let jsonl_schedule_id = fire.schedule_id.clone();
+                    let jsonl_scheduled_at = fire.scheduled_at;
+                    let jsonl_fired_at = fire.fired_at;
+                    let jsonl_signer_fp = fire.signer_fingerprint.clone();
+
                     let updated = crate::scheduler::types::FireRecord {
                         status: fire_status.to_string(),
                         outcome: Some(outcome_str.to_string()),
+                        fired_at: Some(now),
                         ..fire
                     };
                     if let Err(e) = db.upsert_fire(&updated) {
@@ -433,6 +446,33 @@ impl ThreadLifecycleService {
                             error = %e,
                             "scheduler: failed to update fire status on thread completion"
                         );
+                    }
+
+                    // Append completion to JSONL
+                    if let Ok(dir_guard) = self.system_space_dir.read() {
+                        if let Some(ref sys_dir) = *dir_guard {
+                            let entry = serde_json::json!({
+                                "entry_type": fire_status,
+                                "fire_id": jsonl_fire_id,
+                                "schedule_id": jsonl_schedule_id,
+                                "scheduled_at": jsonl_scheduled_at,
+                                "fired_at": jsonl_fired_at,
+                                "thread_id": params.thread_id,
+                                "completed_at": now,
+                                "outcome": outcome_str,
+                                "signer_fingerprint": jsonl_signer_fp,
+                            });
+                            let fires_path = sys_dir
+                                .join(".ai").join("state").join("schedules")
+                                .join(&jsonl_schedule_id).join("fires.jsonl");
+                            if let Err(e) = crate::scheduler::projection::append_jsonl_entry(&fires_path, &entry) {
+                                tracing::warn!(
+                                    thread_id = %params.thread_id,
+                                    error = %e,
+                                    "scheduler: failed to append completion to JSONL"
+                                );
+                            }
+                        }
                     }
                 }
             }

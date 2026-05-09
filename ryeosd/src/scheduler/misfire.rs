@@ -259,3 +259,80 @@ fn append_fire_entry(state_root: &std::path::Path, schedule_id: &str, entry: &se
         tracing::error!(schedule_id = %schedule_id, error = %e, "failed to append fire entry");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_spec(misfire_policy: &str, schedule_type: &str) -> ScheduleSpecRecord {
+        ScheduleSpecRecord {
+            schedule_id: "test".to_string(),
+            item_ref: "directive:test".to_string(),
+            params: "{}".to_string(),
+            schedule_type: schedule_type.to_string(),
+            expression: "60".to_string(),
+            timezone: "UTC".to_string(),
+            misfire_policy: misfire_policy.to_string(),
+            overlap_policy: "skip".to_string(),
+            enabled: true,
+            project_root: None,
+            signer_fingerprint: "fp:test".to_string(),
+            spec_hash: "abc".to_string(),
+            last_modified: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_skip() {
+        let spec = make_spec("skip", "cron");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::Skip);
+    }
+
+    #[test]
+    fn resolve_fire_once_now() {
+        let spec = make_spec("fire_once_now", "cron");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::FireOnceNow);
+    }
+
+    #[test]
+    fn resolve_catch_up_bounded() {
+        let spec = make_spec("catch_up_bounded:5", "cron");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::CatchUpBounded(5));
+    }
+
+    #[test]
+    fn resolve_catch_up_within_secs() {
+        let spec = make_spec("catch_up_within_secs:300", "cron");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::CatchUpWithinSecs(300));
+    }
+
+    #[test]
+    fn resolve_default_cron_is_skip() {
+        let spec = make_spec("", "cron");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::Skip);
+    }
+
+    #[test]
+    fn resolve_default_interval_is_fire_once_now() {
+        let spec = make_spec("", "interval");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::FireOnceNow);
+    }
+
+    #[test]
+    fn resolve_default_at_is_skip() {
+        let spec = make_spec("", "at");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::Skip);
+    }
+
+    #[test]
+    fn resolve_invalid_policy_defaults_to_skip() {
+        let spec = make_spec("totally_invalid", "cron");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::Skip);
+    }
+
+    #[test]
+    fn resolve_catch_up_bounded_invalid_number_defaults_to_skip() {
+        let spec = make_spec("catch_up_bounded:not_a_number", "cron");
+        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::Skip);
+    }
+}

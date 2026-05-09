@@ -88,3 +88,71 @@ pub async fn check_overlap(spec: &ScheduleSpecRecord, state: &crate::state::AppS
 fn thread_is_terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_spec(overlap_policy: &str) -> ScheduleSpecRecord {
+        ScheduleSpecRecord {
+            schedule_id: "test".to_string(),
+            item_ref: "directive:test".to_string(),
+            params: "{}".to_string(),
+            schedule_type: "cron".to_string(),
+            expression: "* * * * * *".to_string(),
+            timezone: "UTC".to_string(),
+            misfire_policy: "skip".to_string(),
+            overlap_policy: overlap_policy.to_string(),
+            enabled: true,
+            project_root: None,
+            signer_fingerprint: "fp:test".to_string(),
+            spec_hash: "abc".to_string(),
+            last_modified: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_allow() {
+        assert_eq!(resolve_overlap_policy(&make_spec("allow")), OverlapPolicy::Allow);
+    }
+
+    #[test]
+    fn resolve_skip() {
+        assert_eq!(resolve_overlap_policy(&make_spec("skip")), OverlapPolicy::Skip);
+    }
+
+    #[test]
+    fn resolve_cancel_previous() {
+        assert_eq!(resolve_overlap_policy(&make_spec("cancel_previous")), OverlapPolicy::CancelPrevious);
+    }
+
+    #[test]
+    fn resolve_empty_defaults_to_skip() {
+        assert_eq!(resolve_overlap_policy(&make_spec("")), OverlapPolicy::Skip);
+    }
+
+    #[test]
+    fn resolve_unknown_defaults_to_skip() {
+        assert_eq!(resolve_overlap_policy(&make_spec("invalid")), OverlapPolicy::Skip);
+    }
+
+    #[test]
+    fn thread_is_terminal_completed() {
+        assert!(thread_is_terminal("completed"));
+    }
+
+    #[test]
+    fn thread_is_terminal_failed() {
+        assert!(thread_is_terminal("failed"));
+    }
+
+    #[test]
+    fn thread_is_not_terminal_running() {
+        assert!(!thread_is_terminal("running"));
+    }
+
+    #[test]
+    fn thread_is_not_terminal_pending() {
+        assert!(!thread_is_terminal("pending"));
+    }
+}
