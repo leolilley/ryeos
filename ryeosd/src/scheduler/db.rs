@@ -416,3 +416,311 @@ fn row_to_fire(row: &rusqlite::Row<'_>) -> FireRecord {
         signer_fingerprint: row.get("signer_fingerprint").unwrap(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_db() -> SchedulerDb {
+        SchedulerDb::open(&PathBuf::from(":memory:")).expect("open in-memory scheduler db")
+    }
+
+    fn make_spec(id: &str) -> ScheduleSpecRecord {
+        ScheduleSpecRecord {
+            schedule_id: id.to_string(),
+            item_ref: "directive:test".to_string(),
+            params: r#"{"key":"value"}"#.to_string(),
+            schedule_type: "interval".to_string(),
+            expression: "60".to_string(),
+            timezone: "UTC".to_string(),
+            misfire_policy: "skip".to_string(),
+            overlap_policy: "skip".to_string(),
+            enabled: true,
+            project_root: None,
+            signer_fingerprint: "fp:test".to_string(),
+            spec_hash: "abc123".to_string(),
+            last_modified: 1000,
+        }
+    }
+
+    fn make_fire(schedule_id: &str, scheduled_at: i64, status: &str) -> FireRecord {
+        FireRecord {
+            fire_id: format!("{}@{}", schedule_id, scheduled_at),
+            schedule_id: schedule_id.to_string(),
+            scheduled_at,
+            fired_at: Some(1001),
+            thread_id: Some(format!("sched-{:032x}", scheduled_at)),
+            status: status.to_string(),
+            trigger_reason: "normal".to_string(),
+            outcome: None,
+            signer_fingerprint: Some("fp:test".to_string()),
+        }
+    }
+
+    // ── Spec CRUD ──────────────────────────────────────────────
+
+    #[test]
+    fn upsert_and_get_spec() {
+        let db = test_db();
+        let spec = make_spec("test-sched");
+        db.upsert_spec(&spec).unwrap();
+
+        let got = db.get_spec("test-sched").unwrap().unwrap();
+        assert_eq!(got.schedule_id, "test-sched");
+        assert_eq!(got.item_ref, "directive:test");
+        assert_eq!(got.expression, "60");
+        assert!(got.enabled);
+    }
+
+    #[test]
+    fn get_spec_nonexistent() {
+        let db = test_db();
+        assert!(db.get_spec("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_spec_updates_existing() {
+        let db = test_db();
+        let mut spec = make_spec("sched");
+        spec.expression = "30".to_string();
+        db.upsert_spec(&spec).unwrap();
+
+        let mut spec2 = make_spec("sched");
+        spec2.expression = "120".to_string();
+        db.upsert_spec(&spec2).unwrap();
+
+        let got = db.get_spec("sched").unwrap().unwrap();
+        assert_eq!(got.expression, "120");
+    }
+
+    #[test]
+    fn delete_spec() {
+        let db = test_db();
+        db.upsert_spec(&make_spec("sched")).unwrap();
+        assert!(db.delete_spec("sched").unwrap());
+        assert!(db.get_spec("sched").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_spec_nonexistent() {
+        let db = test_db();
+        assert!(!db.delete_spec("nope").unwrap());
+    }
+
+    #[test]
+    fn load_enabled_specs() {
+        let db = test_db();
+        db.upsert_spec(&make_spec("a")).unwrap();
+        db.upsert_spec(&make_spec("b")).unwrap();
+
+        let mut spec_c = make_spec("c");
+        spec_c.enabled = false;
+        db.upsert_spec(&spec_c).unwrap();
+
+        let specs = db.load_enabled_specs().unwrap();
+        assert_eq!(specs.len(), 2);
+        let ids: Vec<&str> = specs.iter().map(|s| s.schedule_id.as_str()).collect();
+        assert!(ids.contains(&"a"));
+        assert!(ids.contains(&"b"));
+        assert!(!ids.contains(&"c"));
+    }
+
+    #[test]
+    fn list_specs_with_type_filter() {
+        let db = test_db();
+        let mut cron_spec = make_spec("cron-sched");
+        cron_spec.schedule_type = "cron".to_string();
+        cron_spec.expression = "* * * * * *".to_string();
+        db.upsert_spec(&cron_spec).unwrap();
+        db.upsert_spec(&make_spec("interval-sched")).unwrap();
+
+        let specs = db.list_specs(false, Some("cron")).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].schedule_type, "cron");
+    }
+
+    #[test]
+    fn list_specs_enabled_only() {
+        let db = test_db();
+        db.upsert_spec(&make_spec("enabled")).unwrap();
+        let mut disabled = make_spec("disabled");
+        disabled.enabled = false;
+        db.upsert_spec(&disabled).unwrap();
+
+        let specs = db.list_specs(true, None).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].schedule_id, "enabled");
+    }
+
+    #[test]
+    fn delete_stale_specs() {
+        let db = test_db();
+        db.upsert_spec(&make_spec("keep-me")).unwrap();
+        db.upsert_spec(&make_spec("remove-me")).unwrap();
+
+        let removed = db.delete_stale_specs(&["keep-me"]).unwrap();
+        assert_eq!(removed, 1);
+        assert!(db.get_spec("keep-me").unwrap().is_some());
+        assert!(db.get_spec("remove-me").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_stale_specs_empty_live() {
+        let db = test_db();
+        db.upsert_spec(&make_spec("a")).unwrap();
+        db.upsert_spec(&make_spec("b")).unwrap();
+
+        let removed = db.delete_stale_specs(&[]).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(db.load_enabled_specs().unwrap().len(), 0);
+    }
+
+    // ── Fire CRUD ──────────────────────────────────────────────
+
+    #[test]
+    fn upsert_and_get_fire() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "dispatched");
+        db.upsert_fire(&fire).unwrap();
+
+        let got = db.get_fire("sched@1000").unwrap().unwrap();
+        assert_eq!(got.fire_id, "sched@1000");
+        assert_eq!(got.status, "dispatched");
+    }
+
+    #[test]
+    fn get_fire_nonexistent() {
+        let db = test_db();
+        assert!(db.get_fire("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_fire_updates_status() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "dispatched");
+        db.upsert_fire(&fire).unwrap();
+
+        let updated = FireRecord {
+            status: "completed".to_string(),
+            outcome: Some("success".to_string()),
+            ..fire
+        };
+        db.upsert_fire(&updated).unwrap();
+
+        let got = db.get_fire("sched@1000").unwrap().unwrap();
+        assert_eq!(got.status, "completed");
+        assert_eq!(got.outcome.unwrap(), "success");
+    }
+
+    #[test]
+    fn get_last_fire() {
+        let db = test_db();
+        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
+
+        let last = db.get_last_fire("sched").unwrap().unwrap();
+        assert_eq!(last.scheduled_at, 2000);
+    }
+
+    #[test]
+    fn get_last_fire_empty() {
+        let db = test_db();
+        assert!(db.get_last_fire("sched").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_inflight_fires() {
+        let db = test_db();
+        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("other", 3000, "dispatched")).unwrap();
+
+        let inflight = db.get_inflight_fires().unwrap();
+        assert_eq!(inflight.len(), 2);
+    }
+
+    #[test]
+    fn get_inflight_for_schedule() {
+        let db = test_db();
+        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("other", 3000, "dispatched")).unwrap();
+
+        let inflight = db.get_inflight_for_schedule("sched").unwrap().unwrap();
+        assert_eq!(inflight.scheduled_at, 2000);
+    }
+
+    #[test]
+    fn get_inflight_for_schedule_none() {
+        let db = test_db();
+        assert!(db.get_inflight_for_schedule("sched").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_fire_by_thread() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "dispatched");
+        db.upsert_fire(&fire).unwrap();
+
+        let found = db.find_fire_by_thread(fire.thread_id.as_ref().unwrap()).unwrap().unwrap();
+        assert_eq!(found.fire_id, "sched@1000");
+    }
+
+    #[test]
+    fn find_fire_by_thread_completed_not_found() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "completed");
+        db.upsert_fire(&fire).unwrap();
+
+        let found = db.find_fire_by_thread(fire.thread_id.as_ref().unwrap()).unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn delete_fires_for_schedule() {
+        let db = test_db();
+        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("other", 3000, "dispatched")).unwrap();
+
+        let removed = db.delete_fires_for_schedule("sched").unwrap();
+        assert_eq!(removed, 2);
+        assert!(db.get_fire("sched@1000").unwrap().is_none());
+        assert!(db.get_fire("other@3000").unwrap().is_some());
+    }
+
+    #[test]
+    fn list_fires_with_status_filter() {
+        let db = test_db();
+        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("sched", 3000, "completed")).unwrap();
+
+        let (fires, total) = db.list_fires("sched", Some("completed"), 10).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(fires.len(), 2);
+    }
+
+    #[test]
+    fn list_fires_with_limit() {
+        let db = test_db();
+        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 3000, "completed")).unwrap();
+
+        let (fires, total) = db.list_fires("sched", None, 2).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(fires.len(), 2);
+        assert_eq!(fires[0].scheduled_at, 3000);
+        assert_eq!(fires[1].scheduled_at, 2000);
+    }
+
+    #[test]
+    fn list_fires_empty() {
+        let db = test_db();
+        let (fires, total) = db.list_fires("sched", None, 10).unwrap();
+        assert_eq!(total, 0);
+        assert!(fires.is_empty());
+    }
+}

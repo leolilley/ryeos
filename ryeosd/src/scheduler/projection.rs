@@ -280,3 +280,206 @@ fn parse_signer_fingerprint(content: &str) -> Option<String> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_db() -> SchedulerDb {
+        SchedulerDb::open(&PathBuf::from(":memory:")).expect("open in-memory scheduler db")
+    }
+
+    // ── append_jsonl_entry ─────────────────────────────────────
+
+    #[test]
+    fn append_jsonl_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fires.jsonl");
+
+        let entry = serde_json::json!({"fire_id": "test@1000", "status": "dispatched"});
+        append_jsonl_entry(&path, &entry).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("test@1000"));
+    }
+
+    #[test]
+    fn append_jsonl_appends_multiple() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fires.jsonl");
+
+        append_jsonl_entry(&path, &serde_json::json!({"fire_id": "a"})).unwrap();
+        append_jsonl_entry(&path, &serde_json::json!({"fire_id": "b"})).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    // ── rebuild_specs_from_dir ─────────────────────────────────
+
+    #[test]
+    fn rebuild_from_dir_reads_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let yaml_content = r#"spec_version: 1
+section: schedules
+schedule_id: my-schedule
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+"#;
+        fs::write(sched_dir.join("my-schedule.yaml"), yaml_content).unwrap();
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+
+        assert_eq!(live_ids, vec!["my-schedule"]);
+        let spec = db.get_spec("my-schedule").unwrap().unwrap();
+        assert_eq!(spec.schedule_type, "interval");
+        assert_eq!(spec.expression, "60");
+    }
+
+    #[test]
+    fn rebuild_from_dir_skips_non_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+        fs::write(sched_dir.join("readme.txt"), "not a schedule").unwrap();
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+        assert!(live_ids.is_empty());
+    }
+
+    #[test]
+    fn rebuild_from_dir_skips_mismatched_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let yaml = r#"spec_version: 1
+section: schedules
+schedule_id: wrong-id
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+"#;
+        fs::write(sched_dir.join("my-schedule.yaml"), yaml).unwrap();
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+        assert!(live_ids.is_empty());
+    }
+
+    #[test]
+    fn rebuild_from_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+        assert!(live_ids.is_empty());
+    }
+
+    #[test]
+    fn rebuild_from_nonexistent_dir() {
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(Path::new("/nonexistent/path"), &db).unwrap();
+        assert!(live_ids.is_empty());
+    }
+
+    // ── rebuild_fires_from_dir ─────────────────────────────────
+
+    #[test]
+    fn rebuild_fires_from_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("my-schedule");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let jsonl = r#"{"fire_id":"s@1000","schedule_id":"s","scheduled_at":1000,"fired_at":1001,"thread_id":"t1","status":"completed","trigger_reason":"normal","outcome":"success"}
+{"fire_id":"s@2000","schedule_id":"s","scheduled_at":2000,"fired_at":2001,"thread_id":"t2","status":"dispatched","trigger_reason":"normal"}
+"#;
+        fs::write(sched_dir.join("fires.jsonl"), jsonl).unwrap();
+
+        let db = test_db();
+        rebuild_fires_from_dir(dir.path(), &db).unwrap();
+
+        let fire1 = db.get_fire("s@1000").unwrap().unwrap();
+        assert_eq!(fire1.status, "completed");
+        let fire2 = db.get_fire("s@2000").unwrap().unwrap();
+        assert_eq!(fire2.status, "dispatched");
+    }
+
+    #[test]
+    fn rebuild_fires_last_entry_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("my-schedule");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let jsonl = r#"{"fire_id":"s@1000","schedule_id":"s","scheduled_at":1000,"status":"dispatched"}
+{"fire_id":"s@1000","schedule_id":"s","scheduled_at":1000,"status":"completed","outcome":"success"}
+"#;
+        fs::write(sched_dir.join("fires.jsonl"), jsonl).unwrap();
+
+        let db = test_db();
+        rebuild_fires_from_dir(dir.path(), &db).unwrap();
+
+        let fire = db.get_fire("s@1000").unwrap().unwrap();
+        assert_eq!(fire.status, "completed");
+        assert_eq!(fire.outcome.unwrap(), "success");
+    }
+
+    #[test]
+    fn rebuild_fires_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db();
+        rebuild_fires_from_dir(dir.path(), &db).unwrap();
+        // No panic = success
+    }
+
+    // ── strip_signature ────────────────────────────────────────
+
+    #[test]
+    fn strip_signature_removes_header() {
+        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:sig==:fp:abc\nspec_version: 1\nschedule_id: test";
+        let body = strip_signature(content);
+        assert!(!body.starts_with("# ryeos:signed:"));
+        assert!(body.contains("spec_version: 1"));
+    }
+
+    #[test]
+    fn strip_signature_no_header() {
+        let content = "spec_version: 1\nschedule_id: test";
+        let body = strip_signature(content);
+        assert!(body.contains("spec_version: 1"));
+    }
+
+    // ── parse_signer_fingerprint ────────────────────────────────
+
+    #[test]
+    fn parse_fingerprint_valid() {
+        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:c2ln:b64==:fp:test:abc123\nrest";
+        let fp = parse_signer_fingerprint(content).unwrap();
+        assert_eq!(fp, "abc123");
+    }
+
+    #[test]
+    fn parse_fingerprint_no_signature() {
+        let content = "no signature here";
+        let fp = parse_signer_fingerprint(content);
+        assert!(fp.is_none());
+    }
+
+    // ── parse_signer_fingerprint_from_str ───────────────────────
+
+    #[test]
+    fn public_wrapper_works() {
+        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc:Sig==:fp:test:hello\nrest";
+        assert_eq!(parse_signer_fingerprint_from_str(content), Some("hello".to_string()));
+    }
+}
