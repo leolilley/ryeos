@@ -22,12 +22,20 @@ use ryeos_engine::contracts::{
 };
 use ryeos_engine::engine::Engine;
 
-#[derive(Debug, Clone)]
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
     kind_profiles: Arc<KindProfileRegistry>,
     _events: Arc<EventStoreService>,
     current_site_id: String,
+    scheduler_db: std::sync::RwLock<Option<Arc<crate::scheduler::db::SchedulerDb>>>,
+}
+
+impl std::fmt::Debug for ThreadLifecycleService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadLifecycleService")
+            .field("current_site_id", &self.current_site_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -178,7 +186,14 @@ impl ThreadLifecycleService {
             kind_profiles,
             _events,
             current_site_id: format!("site:{hostname}"),
+            scheduler_db: std::sync::RwLock::new(None),
         })
+    }
+
+    /// Wire the scheduler DB for thread completion tracking.
+    /// Called once after construction, once the scheduler DB is available.
+    pub fn set_scheduler_db(&self, db: Arc<crate::scheduler::db::SchedulerDb>) {
+        *self.scheduler_db.write().unwrap() = Some(db);
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {
@@ -395,6 +410,33 @@ impl ThreadLifecycleService {
                 final_cost: params.final_cost.clone(),
             },
         )?;
+
+        // Update scheduler fire record if this thread was scheduler-dispatched.
+        if let Ok(guard) = self.scheduler_db.read() {
+            if let Some(ref db) = *guard {
+                if let Ok(Some(fire)) = db.find_fire_by_thread(&params.thread_id) {
+                    let terminal_status = normalize_terminal_status(&params.status)?;
+                    let fire_status = if terminal_status == "completed" {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
+                    let outcome_str = params.outcome_code.as_deref().unwrap_or(fire_status);
+                    let updated = crate::scheduler::types::FireRecord {
+                        status: fire_status.to_string(),
+                        outcome: Some(outcome_str.to_string()),
+                        ..fire
+                    };
+                    if let Err(e) = db.upsert_fire(&updated) {
+                        tracing::warn!(
+                            thread_id = %params.thread_id,
+                            error = %e,
+                            "scheduler: failed to update fire status on thread completion"
+                        );
+                    }
+                }
+            }
+        }
 
         self.get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))

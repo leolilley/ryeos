@@ -16,7 +16,7 @@ use ryeosd::services::event_store::EventStoreService;
 use ryeosd::services::thread_lifecycle::ThreadLifecycleService;
 use ryeosd::state::AppState;
 use ryeosd::{
-    api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, service_executor,
+    api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, scheduler, service_executor,
     service_registry, services, state, state_lock, state_store, uds,
 };
 
@@ -226,6 +226,60 @@ async fn main() -> Result<()> {
         .context("StateStore initialization failed")?);
     tracing::info!("StateStore initialized successfully");
 
+    // Open scheduler DB
+    let scheduler_db_path = config.system_space_dir.join(".ai").join("state").join("scheduler.sqlite3");
+    let scheduler_db = Arc::new(
+        scheduler::db::SchedulerDb::open(&scheduler_db_path)
+            .context("SchedulerDb initialization failed")?,
+    );
+    tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
+
+    // Sync schedule specs from node-config snapshot to scheduler DB
+    {
+        let schedules_dir = config.system_space_dir.join(".ai").join("node").join("schedules");
+        let live_ids = scheduler::projection::rebuild_specs_from_dir(&schedules_dir, &scheduler_db)?;
+        let live_refs: Vec<&str> = live_ids.iter().map(|s| s.as_str()).collect();
+        let removed = scheduler_db.delete_stale_specs(&live_refs)?;
+        if removed > 0 {
+            tracing::info!(removed, "removed stale schedule spec projections");
+        }
+        for sched in &node_config_snapshot.schedules {
+            let yaml_path = schedules_dir.join(format!("{}.yaml", sched.schedule_id));
+            let content = match std::fs::read_to_string(&yaml_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
+            let mtime = std::fs::metadata(&yaml_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_else(lillux::time::timestamp_millis);
+            let signer_fp = scheduler::projection::parse_signer_fingerprint_from_str(&content)
+                .unwrap_or_else(|| identity.fingerprint().to_string());
+            let rec = scheduler::types::ScheduleSpecRecord {
+                schedule_id: sched.schedule_id.clone(),
+                item_ref: sched.item_ref.clone(),
+                params: serde_json::to_string(&sched.params).unwrap_or_default(),
+                schedule_type: sched.schedule_type.clone(),
+                expression: sched.expression.clone(),
+                timezone: sched.timezone.clone(),
+                misfire_policy: sched.misfire_policy.clone().unwrap_or_default(),
+                overlap_policy: sched.overlap_policy.clone().unwrap_or_else(|| "skip".to_string()),
+                enabled: sched.enabled,
+                project_root: sched.project_root.clone(),
+                signer_fingerprint: signer_fp,
+                spec_hash,
+                last_modified: mtime,
+            };
+            if let Err(e) = scheduler_db.upsert_spec(&rec) {
+                tracing::warn!(schedule_id = %sched.schedule_id, error = %e, "failed to upsert schedule spec");
+            }
+        }
+        tracing::info!(count = node_config_snapshot.schedules.len(), "schedule specs synced to DB");
+    }
+
     // Acquire operator state lock — prevents standalone services from
     // running while the daemon is up. Released on process exit (Drop).
     let _state_lock = state_lock::StateLock::acquire(
@@ -241,6 +295,7 @@ async fn main() -> Result<()> {
         kind_profiles.clone(),
         events.clone(),
     )?);
+    threads.set_scheduler_db(scheduler_db.clone());
     let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
     let thread_auth = Arc::new(execution::callback_token::ThreadAuthStore::new());
@@ -305,7 +360,7 @@ async fn main() -> Result<()> {
 
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone()));
 
-    let app_state = AppState {
+    let mut app_state = AppState {
         config: Arc::new(config.clone()),
         state_store,
         engine: engine.clone(),
@@ -328,6 +383,8 @@ async fn main() -> Result<()> {
         verb_registry,
         alias_registry,
         authorizer,
+        scheduler_db,
+        scheduler_reload_tx: None,
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -456,6 +513,21 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // ── Scheduler reconciliation + timer start ──
+    let (scheduler_reload_tx, scheduler_reload_rx) = tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
+    app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
+
+    let scheduler_intents = scheduler::reconcile::reconcile(&Arc::new(app_state.clone())).await?;
+    for intent in scheduler_intents {
+        let st = Arc::new(app_state.clone());
+        tokio::spawn(async move {
+            scheduler::timer::dispatch_recovery_fire(st, intent).await;
+        });
+    }
+
+    tokio::spawn(scheduler::timer::run(Arc::new(app_state.clone()), scheduler_reload_rx));
+    tracing::info!("scheduler: timer loop started");
 
     tokio::select! {
         result = http_task => {
@@ -629,12 +701,18 @@ async fn run_service_standalone(
         state_root, runtime_db_path, signer, write_barrier.clone(),
     )?);
 
+    let scheduler_db_path = config.system_space_dir.join(".ai").join("state").join("scheduler.sqlite3");
+    let scheduler_db = Arc::new(
+        scheduler::db::SchedulerDb::open(&scheduler_db_path)?,
+    );
+
     let events = Arc::new(services::event_store::EventStoreService::new(state_store.clone()));
     let threads = Arc::new(services::thread_lifecycle::ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
     )?);
+    threads.set_scheduler_db(scheduler_db.clone());
     let commands = Arc::new(services::command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,
@@ -718,6 +796,8 @@ async fn run_service_standalone(
         verb_registry: standalone_vr,
         alias_registry: standalone_ar,
         authorizer: standalone_auth,
+        scheduler_db: scheduler_db.clone(),
+        scheduler_reload_tx: None,
     };
 
     let params: serde_json::Value = match params_json {

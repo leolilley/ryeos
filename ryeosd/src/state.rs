@@ -15,6 +15,8 @@ use crate::execution::callback_token::{CallbackCapabilityStore, ThreadAuthStore}
 use crate::identity::NodeIdentity;
 use crate::node_config::NodeConfigSnapshot;
 use crate::routes::RouteTable;
+use crate::scheduler::db::SchedulerDb;
+use crate::scheduler::ReloadSignal;
 use crate::service_registry::ServiceRegistry;
 use crate::state_store::StateStore;
 use crate::services::command_service::CommandService;
@@ -74,6 +76,8 @@ pub struct AppState {
     /// All enforcement sites use this shared instance instead of constructing
     /// per-request.
     pub authorizer: Arc<Authorizer>,
+    pub scheduler_db: Arc<SchedulerDb>,
+    pub scheduler_reload_tx: Option<tokio::sync::mpsc::Sender<ReloadSignal>>,
 }
 
 #[derive(Debug, Serialize)]

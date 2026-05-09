@@ -21,6 +21,12 @@ pub mod events_replay;
 pub mod maintenance_gc;
 pub mod rebuild;
 pub mod node_sign;
+pub mod scheduler_deregister;
+pub mod scheduler_list;
+pub mod scheduler_pause;
+pub mod scheduler_register;
+pub mod scheduler_resume;
+pub mod scheduler_show_fires;
 pub mod system_status;
 pub mod threads_chain;
 pub mod threads_children;
@@ -45,4 +51,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     maintenance_gc::DESCRIPTOR,
     rebuild::DESCRIPTOR,
     node_sign::DESCRIPTOR,
+    scheduler_register::DESCRIPTOR,
+    scheduler_deregister::DESCRIPTOR,
+    scheduler_list::DESCRIPTOR,
+    scheduler_show_fires::DESCRIPTOR,
+    scheduler_pause::DESCRIPTOR,
+    scheduler_resume::DESCRIPTOR,
 ];
