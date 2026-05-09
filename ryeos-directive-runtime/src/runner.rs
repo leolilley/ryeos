@@ -276,6 +276,15 @@ impl Runner {
                     // sequence after the stream finishes. Live SSE
                     // broadcast on the daemon side then re-publishes
                     // these durable events.
+                    // Filter tools by effective_caps so the LLM only sees
+                    // tools it can actually call (saves context, avoids the
+                    // "model names a tool the dispatcher would reject" path).
+                    let visible_tools = crate::provider_adapter::tools::filter_tools_by_caps(
+                        &self.tools,
+                        self.harness.effective_caps(),
+                    );
+                    // Map borrowed refs back to owned slice for the adapter.
+                    let visible_tools_owned: Vec<_> = visible_tools.into_iter().cloned().collect();
                     match crate::provider_adapter::call_provider_streaming(
                         crate::provider_adapter::StreamingCallInput {
                             client: &client,
@@ -284,7 +293,7 @@ impl Runner {
                             execution: &self.execution,
                             model: &self.model_name,
                             messages: &self.messages,
-                            tools: &self.tools,
+                            tools: &visible_tools_owned,
                             callback: &self.callback,
                             turn,
                             sampling: self.sampling.as_ref(),
@@ -853,15 +862,15 @@ impl Runner {
     }
 
     fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> f64 {
-        if let Some(ref pricing) = self.provider_config.pricing {
-            let input_cost = (input_tokens as f64 / 1_000_000.0)
-                * pricing.input_per_million.unwrap_or(0.0);
-            let output_cost = (output_tokens as f64 / 1_000_000.0)
-                * pricing.output_per_million.unwrap_or(0.0);
-            input_cost + output_cost
-        } else {
-            0.0
-        }
+        let Some(ref pricing) = self.provider_config.pricing else {
+            return 0.0;
+        };
+        let Some(rates) = pricing.for_model(&self.model_name) else {
+            return 0.0;
+        };
+        let input_cost = (input_tokens as f64 / 1_000_000.0) * rates.input_per_million;
+        let output_cost = (output_tokens as f64 / 1_000_000.0) * rates.output_per_million;
+        input_cost + output_cost
     }
 
     /// Drain the run-loop's accumulated warnings into a finished
@@ -909,6 +918,7 @@ mod tests {
     use super::*;
     use ryeos_runtime::callback_client::CallbackClient;
     use crate::directive::PricingConfig;
+    use ryeos_runtime::model_resolution::ModelPricing;
     use crate::harness::Harness;
     use ryeos_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
     use std::path::PathBuf;
@@ -942,8 +952,10 @@ mod tests {
             pricing: Some(PricingConfig {
                 input_per_million: Some(3.0),
                 output_per_million: Some(15.0),
+                models: Default::default(),
             }),
             extra: Default::default(),
+            profiles: vec![],
         };
 
         let runner = Runner::new(RunnerConfig {
@@ -978,6 +990,7 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            profiles: vec![],
         };
 
         let runner = Runner::new(RunnerConfig {
@@ -1014,6 +1027,7 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            profiles: vec![],
         };
 
         let runner = Runner::new(RunnerConfig {
@@ -1054,6 +1068,7 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
             name: "answer".to_string(),
@@ -1093,6 +1108,7 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            profiles: vec![],
         };
 
         let runner = Runner::new(RunnerConfig {
@@ -1119,5 +1135,99 @@ mod tests {
         let s = runner.sampling.unwrap();
         assert!((s.temperature.unwrap() - 0.3).abs() < f64::EPSILON);
         assert_eq!(s.seed.unwrap(), 42);
+    }
+
+    #[test]
+    fn compute_cost_uses_per_model_pricing_override() {
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "claude-haiku-4-5".to_string(),
+            ModelPricing {
+                input_per_million: 0.80,
+                output_per_million: 4.00,
+            },
+        );
+        let provider = crate::directive::ProviderConfig {
+            category: None,
+            base_url: "http://localhost".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: Some(PricingConfig {
+                input_per_million: Some(0.0), // would yield $0 if used
+                output_per_million: Some(0.0),
+                models,
+            }),
+            extra: Default::default(),
+            profiles: vec![],
+        };
+
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            budget: BudgetTracker::new(100.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            provider_config: provider,
+            provider_id: "zen".to_string(),
+            execution: ExecutionConfig::default(),
+            model_name: "claude-haiku-4-5".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+            outputs: None,
+            sampling: None,
+        });
+
+        // 1M input + 1M output → 0.80 + 4.00 = 4.80
+        let cost = runner.compute_cost(1_000_000, 1_000_000);
+        assert!(
+            (cost - 4.80).abs() < f64::EPSILON,
+            "expected $4.80 for per-model pricing, got ${cost}"
+        );
+    }
+
+    #[test]
+    fn compute_cost_falls_back_to_provider_default_when_no_model_entry() {
+        let provider = crate::directive::ProviderConfig {
+            category: None,
+            base_url: "http://localhost".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: Some(PricingConfig {
+                input_per_million: Some(1.0),
+                output_per_million: Some(5.0),
+                models: Default::default(),
+            }),
+            extra: Default::default(),
+            profiles: vec![],
+        };
+
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            budget: BudgetTracker::new(100.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            provider_config: provider,
+            provider_id: "zen".to_string(),
+            execution: ExecutionConfig::default(),
+            model_name: "unknown-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+            outputs: None,
+            sampling: None,
+        });
+
+        // Falls back to provider defaults: 1M input + 1M output → 1.0 + 5.0 = 6.0
+        let cost = runner.compute_cost(1_000_000, 1_000_000);
+        assert!(
+            (cost - 6.0).abs() < f64::EPSILON,
+            "expected $6.00 for provider default pricing, got ${cost}"
+        );
     }
 }

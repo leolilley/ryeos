@@ -1,0 +1,26 @@
+# ryeos:signed:2026-05-09T10:22:05Z:4ea6e2ae6f2eee60f808a0be28e24d7b5b48b67dad106df1d732ac3cb597aec1:J5VTX/1XmhaAKS35HR5HtZGOCzRhPG+wQUBmh9AlwppvBaRULw7t/h8AhuNCplU3Zl1JYZvkBa6w1UoZvgLeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime/model-providers"
+base_url: "https://api.anthropic.com/v1/messages"
+auth:
+  env_var: ANTHROPIC_API_KEY
+  header_name: x-api-key
+  prefix: ""
+headers:
+  Content-Type: application/json
+  anthropic-version: "2023-06-01"
+schemas:
+  messages:
+    role_map: {user: user, assistant: assistant, system: system, tool: user}
+    content_key: content
+    system_message: {mode: body_field}
+    tool_result: {wrap_key: content}
+  streaming: {mode: event_typed}
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+  models:
+    claude-haiku-4-5-20251001:  {input_per_million: 1.00, output_per_million: 5.00}
+    claude-sonnet-4-5-20250929: {input_per_million: 3.00, output_per_million: 15.00}
+    claude-opus-4-1-20250805:   {input_per_million: 15.00, output_per_million: 75.00}
+extra:
+  stream_url: ""

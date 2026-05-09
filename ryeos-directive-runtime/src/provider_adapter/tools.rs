@@ -9,6 +9,30 @@ pub fn serialize_tools(tools: &[ToolSchema], schemas: &Option<MessageSchemas>) -
     }
 }
 
+/// Filter `tools` down to those the directive's effective_caps actually
+/// permit calling. Anything the dispatcher would reject at call time
+/// is removed here so the LLM never sees it. Saves context, removes
+/// confusion, prevents the "model tries to call something it can't"
+/// error path from being entered at all.
+pub fn filter_tools_by_caps<'a>(
+    tools: &'a [ToolSchema],
+    effective_caps: &[String],
+) -> Vec<&'a ToolSchema> {
+    tools
+        .iter()
+        .filter(|t| {
+            let required = format!("ryeos.execute.tool.{}", t.item_id);
+            effective_caps
+                .iter()
+                .any(|cap| ryeos_runtime::cap_matches(cap, &required))
+        })
+        .collect()
+}
+
+fn empty_object_schema() -> Value {
+    json!({"type": "object", "properties": {}})
+}
+
 fn serialize_openai_tools(tools: &[ToolSchema]) -> Value {
     json!(tools
         .iter()
@@ -18,7 +42,7 @@ fn serialize_openai_tools(tools: &[ToolSchema]) -> Value {
                 "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.input_schema,
+                    "parameters": t.input_schema.clone().unwrap_or_else(empty_object_schema),
                 }
             })
         })
@@ -39,9 +63,7 @@ fn serialize_with_schemas(tools: &[ToolSchema], schemas: &MessageSchemas) -> Val
                 "name": t.name,
                 "description": t.description,
             });
-            if let Some(ref schema) = t.input_schema {
-                func_obj[param_key] = schema.clone();
-            }
+            func_obj[param_key] = t.input_schema.clone().unwrap_or_else(empty_object_schema);
             func_obj
         })
         .collect();
@@ -107,8 +129,11 @@ mod tests {
             arr[0]["function"]["parameters"]["type"],
             "object"
         );
-        assert_eq!(arr[1]["function"]["name"], "read_file");
-        assert_eq!(arr[1]["function"]["parameters"], Value::Null);
+    assert_eq!(arr[1]["function"]["name"], "read_file");
+    assert_eq!(
+        arr[1]["function"]["parameters"]["type"], "object",
+        "tools without input_schema should get empty-object default, not null"
+    );
     }
 
     #[test]
@@ -167,5 +192,97 @@ mod tests {
         let tools_list = result.get("tools").unwrap().as_array().unwrap();
         assert_eq!(tools_list[0]["inputSchema"]["type"], "object");
         assert!(tools_list[0].get("parameters").is_none());
+    }
+
+    #[test]
+    fn openai_tool_with_no_schema_gets_empty_object_default() {
+        let tools = vec![ToolSchema {
+            name: "no_schema_tool".to_string(),
+            item_id: "test/no-schema".to_string(),
+            description: Some("A tool with no schema".to_string()),
+            input_schema: None,
+        }];
+        let result = serialize_tools(&tools, &None);
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr[0]["function"]["parameters"]["type"], "object");
+        assert!(arr[0]["function"]["parameters"]["properties"].is_object());
+    }
+
+    #[test]
+    fn schemas_path_tool_with_no_schema_gets_empty_object_default() {
+        let tools = vec![ToolSchema {
+            name: "no_schema_tool".to_string(),
+            item_id: "test/no-schema".to_string(),
+            description: Some("A tool with no schema".to_string()),
+            input_schema: None,
+        }];
+        let schemas = MessageSchemas {
+            role_map: None,
+            content_key: Some("inputSchema".to_string()),
+            content_wrap: None,
+            system_message: None,
+            tool_result: None,
+            tool_list_wrap: None,
+        };
+        let result = serialize_tools(&tools, &Some(schemas));
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr[0]["function"]["inputSchema"]["type"], "object");
+        assert!(arr[0]["function"]["inputSchema"]["properties"].is_object());
+    }
+
+    #[test]
+    fn permission_filter_keeps_only_matching_tools() {
+        let tools = vec![
+            ToolSchema {
+                name: "read".to_string(),
+                item_id: "ryeos/file-system/read".to_string(),
+                description: Some("Read a file".to_string()),
+                input_schema: None,
+            },
+            ToolSchema {
+                name: "write".to_string(),
+                item_id: "ryeos/file-system/write".to_string(),
+                description: Some("Write a file".to_string()),
+                input_schema: None,
+            },
+        ];
+        let caps = vec!["ryeos.execute.tool.ryeos/file-system/read".to_string()];
+        let filtered = filter_tools_by_caps(&tools, &caps);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "read");
+    }
+
+    #[test]
+    fn permission_filter_wildcard_allows_all() {
+        let tools = vec![
+            ToolSchema {
+                name: "read".to_string(),
+                item_id: "ryeos/file-system/read".to_string(),
+                description: Some("Read".to_string()),
+                input_schema: None,
+            },
+            ToolSchema {
+                name: "write".to_string(),
+                item_id: "ryeos/file-system/write".to_string(),
+                description: Some("Write".to_string()),
+                input_schema: None,
+            },
+        ];
+        let caps = vec!["ryeos.execute.tool.*".to_string()];
+        let filtered = filter_tools_by_caps(&tools, &caps);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn permission_filter_no_caps_removes_all() {
+        let tools = vec![ToolSchema {
+            name: "read".to_string(),
+            item_id: "ryeos/file-system/read".to_string(),
+            description: Some("Read".to_string()),
+            input_schema: None,
+        }];
+        let caps: Vec<String> = vec![];
+        let filtered = filter_tools_by_caps(&tools, &caps);
+        assert!(filtered.is_empty());
     }
 }

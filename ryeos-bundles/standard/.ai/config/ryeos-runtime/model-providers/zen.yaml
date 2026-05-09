@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-09T08:36:14Z:5a01bab696082d236bfdeb402a2383234443fbae03c02d9493656e14d450fa5f:u4H+/RXIsG4siVxucJ1SHoEdzzAJNt4O86VYhrwcJTlULeR51gZ9Bf2JD/JWtHBaBL9x1h/reYOeN0D/9ECxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-09T10:22:05Z:1a5ee84b2d73846c7a83686d25cf6cd12cfef69b9344660ee11878895737d880:uUF1wNNRbuAPGM1KGVuZQFQ31vJsZlPkS+Ex947s4QPGZfMbtiwabAIQOcIXIz6h7W2o3RDMD5ONmUfAVHojCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 base_url: "https://opencode.ai/zen/v1"
 auth:
@@ -9,20 +9,96 @@ headers:
   Content-Type: application/json
 schemas:
   messages:
-    role_map:
-      user: user
-      assistant: assistant
-      system: system
-      tool: tool
+    role_map: {user: user, assistant: assistant, system: system, tool: tool}
     content_key: content
-    system_message:
-      mode: message_role
-    tool_result:
-      wrap_key: content
-  streaming:
-    mode: delta_merge
+    system_message: {mode: message_role}
+    tool_result: {wrap_key: content}
+  streaming: {mode: delta_merge}
 pricing:
   input_per_million: 0.0
   output_per_million: 0.0
+  models:
+    # Claude
+    claude-haiku-4-5:    {input_per_million: 0.80, output_per_million: 4.00}
+    claude-sonnet-4:     {input_per_million: 3.00, output_per_million: 15.00}
+    claude-sonnet-4-5:   {input_per_million: 3.00, output_per_million: 15.00}
+    claude-sonnet-4-6:   {input_per_million: 3.00, output_per_million: 15.00}
+    claude-opus-4-1:     {input_per_million: 15.00, output_per_million: 75.00}
+    claude-opus-4-5:     {input_per_million: 15.00, output_per_million: 75.00}
+    claude-opus-4-6:     {input_per_million: 15.00, output_per_million: 75.00}
+    claude-opus-4-7:     {input_per_million: 15.00, output_per_million: 75.00}
+    # OpenAI
+    gpt-5.4-nano:        {input_per_million: 0.10, output_per_million: 0.40}
+    gpt-5.4-mini:        {input_per_million: 0.30, output_per_million: 1.20}
+    gpt-5.4:             {input_per_million: 1.25, output_per_million: 10.00}
+    gpt-5.4-pro:         {input_per_million: 5.00, output_per_million: 30.00}
+    gpt-5.5:             {input_per_million: 1.25, output_per_million: 10.00}
+    gpt-5.5-pro:         {input_per_million: 5.00, output_per_million: 30.00}
+    # Open-weights (free or near-free)
+    minimax-m2.5-free:   {input_per_million: 0.00, output_per_million: 0.00}
+    big-pickle:          {input_per_million: 0.00, output_per_million: 0.00}
+    trinity-large-preview-free: {input_per_million: 0.00, output_per_million: 0.00}
+    nemotron-3-super-free: {input_per_million: 0.00, output_per_million: 0.00}
+    hy3-preview-free:    {input_per_million: 0.00, output_per_million: 0.00}
+    minimax-m2.5:        {input_per_million: 1.10, output_per_million: 4.40}
+    glm-5:               {input_per_million: 0.50, output_per_million: 2.00}
+    glm-5.1:             {input_per_million: 0.50, output_per_million: 2.00}
+    kimi-k2.5:           {input_per_million: 1.10, output_per_million: 4.40}
+    kimi-k2.6:           {input_per_million: 1.10, output_per_million: 4.40}
+    qwen3.5-plus:        {input_per_million: 2.00, output_per_million: 8.00}
+    qwen3.6-plus:        {input_per_million: 2.00, output_per_million: 8.00}
+    # Gemini (via Zen's Gemini routing)
+    gemini-3-flash:      {input_per_million: 0.10, output_per_million: 0.40}
+    gemini-3.1-pro:      {input_per_million: 1.25, output_per_million: 10.00}
+
+profiles:
+  # Claude family — Zen converts our /chat/completions calls to
+  # Anthropic's Messages API server-side; we don't need to call /messages
+  # directly. This profile exists so Anthropic-specific stream framing
+  # can be set if Zen ever exposes it.
+  - name: anthropic
+    match: ["claude-*"]
+    # Inherits everything from base (URL, auth, schemas, headers).
+
+  # OpenAI-compat — explicit profile for clarity even though it equals
+  # the base config. Future per-model overrides slot here cleanly.
+  - name: openai_compat
+    match:
+      - "gpt-*"
+      - "minimax-*"
+      - "glm-*"
+      - "kimi-*"
+      - "qwen*"
+      - "big-pickle"
+      - "trinity-*"
+      - "nemotron-*"
+      - "hy3-*"
+
+  # Gemini — Zen routes Gemini through GCP's API which rejects the
+  # default `Authorization: Bearer ...` header and demands
+  # `x-goog-api-key`. Profile swaps the auth header without changing
+  # the env var (still ZEN_API_KEY in the vault).
+  - name: gemini
+    match: ["gemini-*"]
+    base_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent"
+    auth:
+      env_var: ZEN_API_KEY
+      header_name: x-goog-api-key
+      prefix: ""
+    extra:
+      stream_url: ""   # base_url is the full endpoint
+
 extra:
   stream_url: "/chat/completions"
+  available_models:
+    claude: [claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1,
+             claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5]
+    openai: [gpt-5.5, gpt-5.5-pro, gpt-5.4, gpt-5.4-pro, gpt-5.4-mini, gpt-5.4-nano,
+             gpt-5.3-codex-spark, gpt-5.3-codex, gpt-5.2, gpt-5.2-codex,
+             gpt-5.1, gpt-5.1-codex-max, gpt-5.1-codex, gpt-5.1-codex-mini,
+             gpt-5, gpt-5-codex, gpt-5-nano]
+    open_weights: [glm-5.1, glm-5, minimax-m2.7, minimax-m2.5, kimi-k2.6,
+                   kimi-k2.5, qwen3.6-plus, qwen3.5-plus]
+    gemini: [gemini-3.1-pro, gemini-3-flash]
+    free: [big-pickle, minimax-m2.5-free, hy3-preview-free,
+           trinity-large-preview-free, nemotron-3-super-free]
