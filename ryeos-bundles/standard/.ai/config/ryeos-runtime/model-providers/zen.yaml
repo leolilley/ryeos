@@ -1,4 +1,3 @@
-# ryeos:signed:2026-05-09T10:22:05Z:1a5ee84b2d73846c7a83686d25cf6cd12cfef69b9344660ee11878895737d880:uUF1wNNRbuAPGM1KGVuZQFQ31vJsZlPkS+Ex947s4QPGZfMbtiwabAIQOcIXIz6h7W2o3RDMD5ONmUfAVHojCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 base_url: "https://opencode.ai/zen/v1"
 auth:
@@ -14,6 +13,13 @@ schemas:
     system_message: {mode: message_role}
     tool_result: {wrap_key: content}
   streaming: {mode: delta_merge}
+body_template:
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
+  stream_options:
+    include_usage: true
 pricing:
   input_per_million: 0.0
   output_per_million: 0.0
@@ -52,16 +58,42 @@ pricing:
     gemini-3.1-pro:      {input_per_million: 1.25, output_per_million: 10.00}
 
 profiles:
-  # Claude family — Zen converts our /chat/completions calls to
-  # Anthropic's Messages API server-side; we don't need to call /messages
-  # directly. This profile exists so Anthropic-specific stream framing
-  # can be set if Zen ever exposes it.
+  # Claude family — Anthropic Messages API via Zen's /v1/messages
+  # endpoint. Zen handles Anthropic's auth; we swap the header to
+  # x-api-key + anthropic-version, and set the body shape.
   - name: anthropic
     match: ["claude-*"]
-    # Inherits everything from base (URL, auth, schemas, headers).
+    base_url: "https://opencode.ai/zen/v1/messages"
+    auth:
+      env_var: ZEN_API_KEY
+      header_name: x-api-key
+      prefix: ""
+    headers:
+      anthropic-version: "2023-06-01"
+    body_template:
+      model: "{model}"
+      max_tokens: "{max_tokens}"
+      messages: "{messages}"
+      tools: "{tools}"
+      stream: "{stream}"
+    body_extra:
+      max_tokens: 8192
+    schemas:
+      messages:
+        role_map: {user: user, assistant: assistant}
+        content_key: content
+        system_message:
+          mode: body_field
+          field: system
+        tool_result:
+          wrap_key: content
+      streaming:
+        mode: event_typed
+    extra:
+      stream_url: ""
 
-  # OpenAI-compat — explicit profile for clarity even though it equals
-  # the base config. Future per-model overrides slot here cleanly.
+  # OpenAI-compat — Zen's default /chat/completions endpoint.
+  # Uses the base body_template (same shape) with no overrides.
   - name: openai_compat
     match:
       - "gpt-*"
@@ -74,19 +106,53 @@ profiles:
       - "nemotron-*"
       - "hy3-*"
 
-  # Gemini — Zen routes Gemini through GCP's API which rejects the
-  # default `Authorization: Bearer ...` header and demands
-  # `x-goog-api-key`. Profile swaps the auth header without changing
-  # the env var (still ZEN_API_KEY in the vault).
+  # Gemini — Zen routes Gemini through GCP's native API which
+  # rejects OpenAI shape. Body is `{contents: [{role, parts: [{text}]}]}`,
+  # auth is `x-goog-api-key`, system prompt goes into
+  # `systemInstruction.parts[0].text`. Streaming endpoint uses
+  # `?alt=sse` and emits one complete chunk per data: frame.
   - name: gemini
     match: ["gemini-*"]
-    base_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent"
+    base_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
     auth:
       env_var: ZEN_API_KEY
       header_name: x-goog-api-key
       prefix: ""
+    body_template:
+      contents: "{messages}"
+      tools: "{tools}"
+    body_extra:
+      generationConfig:
+        maxOutputTokens: 4096
+        thinkingConfig:
+          includeThoughts: true
+          thinkingLevel: "low"
+    schemas:
+      messages:
+        role_map: {user: user, assistant: model}
+        content_key: parts
+        content_wrap: parts
+        system_message:
+          mode: body_inject
+          template:
+            systemInstruction:
+              parts:
+                - text: "{system}"
+      streaming:
+        mode: complete_chunks
+        paths:
+          content_path: "candidates.0.content.parts"
+          text_field: "text"
+          thought_field: "thought"
+          tool_call_field: "functionCall"
+          tool_call_name_path: "functionCall.name"
+          tool_call_args_path: "functionCall.args"
+          usage_path: "usageMetadata"
+          input_tokens_field: "promptTokenCount"
+          output_tokens_field: "candidatesTokenCount"
+          finish_reason_path: "candidates.0.finishReason"
     extra:
-      stream_url: ""   # base_url is the full endpoint
+      stream_url: ""
 
 extra:
   stream_url: "/chat/completions"

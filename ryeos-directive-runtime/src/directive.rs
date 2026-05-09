@@ -6,9 +6,10 @@ use serde_json::Value;
 // Re-export types now canonically owned by the shared model-resolution
 // module in ryeos-runtime. Existing `use crate::directive::*` imports
 // in the directive-runtime continue to resolve these names.
+#[allow(unused_imports)]
 pub use ryeos_runtime::model_resolution::{
     MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig, ProviderConfig,
-    SamplingConfig, SystemMessageConfig, ToolResultConfig,
+    SamplingConfig, SchemasConfig, StreamPaths, SystemMessageConfig, ToolResultConfig,
 };
 
 /// Typed runtime view of a directive's effective header *after* the

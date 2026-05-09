@@ -20,7 +20,7 @@ use ryeos_runtime::callback_client::CallbackClient;
 #[cfg(test)]
 fn parse_sse_events(data: &str, mode: Option<&str>) -> Vec<StreamEvent> {
     let mut tool_call_state: HashMap<String, String> = HashMap::new();
-    parse_sse_events_with_state(data, mode, &mut tool_call_state)
+    parse_sse_events_with_state(data, mode, None, &mut tool_call_state)
 }
 
 /// State-preserving variant of `parse_sse_events`. The caller threads
@@ -31,6 +31,7 @@ fn parse_sse_events(data: &str, mode: Option<&str>) -> Vec<StreamEvent> {
 pub fn parse_sse_events_with_state(
     data: &str,
     mode: Option<&str>,
+    stream_paths: Option<&crate::directive::StreamPaths>,
     tool_call_state: &mut HashMap<String, String>,
 ) -> Vec<StreamEvent> {
     let raw_events = split_sse_events(data);
@@ -61,7 +62,7 @@ pub fn parse_sse_events_with_state(
                 parse_delta_merge(&parsed, &mut events, tool_call_state);
             }
             Some("complete_chunks") => {
-                parse_complete_chunks(&parsed, &mut events);
+                parse_complete_chunks(&parsed, &mut events, stream_paths);
             }
             _ => {}
         }
@@ -264,58 +265,109 @@ fn parse_delta_merge(
     }
 }
 
-fn parse_complete_chunks(parsed: &Value, events: &mut Vec<StreamEvent>) {
-    if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
-        if let Some(choice) = choices.first() {
-            if let Some(content) = choice.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
-                events.push(StreamEvent::Delta(content.to_string()));
-            }
-            if let Some(tool_calls) = choice.get("tool_calls").and_then(|tc| tc.as_array()) {
-                for tc in tool_calls {
-                    let id = tc
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let name = tc
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let arguments = tc
-                        .get("function")
-                        .and_then(|f| f.get("arguments"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("{}");
+fn parse_complete_chunks(
+    parsed: &Value,
+    events: &mut Vec<StreamEvent>,
+    paths: Option<&crate::directive::StreamPaths>,
+) {
+    use ryeos_runtime::template::resolve_path;
 
-                    // Log and skip tool calls with missing critical fields
-                    // rather than crashing the entire parse. Providers
-                    // may include tool calls in partial/non-final chunks.
-                    if id.is_empty() {
-                        tracing::warn!(
-                            name = name,
-                            "SSE complete_chunks: tool call missing 'id', skipping"
-                        );
-                        continue;
-                    }
+    // No paths config → can't drive a schema-aware parse.
+    let Some(p) = paths else {
+        tracing::warn!(
+            "SSE complete_chunks: no streaming.paths config; cannot parse frame"
+        );
+        return;
+    };
+
+    // Walk the content_path to get the array of blocks.
+    let blocks = match resolve_path(parsed, &p.content_path) {
+        Some(Value::Array(arr)) => arr,
+        Some(other) => {
+            tracing::warn!(
+                content_path = p.content_path,
+                kind = ?other,
+                "SSE complete_chunks: content_path did not resolve to an array"
+            );
+            return;
+        }
+        None => {
+            // Frame may be a metadata/usage-only chunk with no
+            // content. Not an error.
+            return;
+        }
+    };
+
+    for block in blocks {
+        // Tool-call detection takes precedence over text.
+        if let Some(ref tc_field) = p.tool_call_field {
+            if block.get(tc_field).is_some() {
+                if let (Some(name_path), Some(args_path)) =
+                    (&p.tool_call_name_path, &p.tool_call_args_path)
+                {
+                    let name = resolve_path(block, name_path)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let args = resolve_path(block, args_path)
+                        .cloned()
+                        .unwrap_or(Value::Object(Default::default()));
                     if name.is_empty() {
                         tracing::warn!(
-                            id = id,
-                            "SSE complete_chunks: tool call missing 'function.name', skipping"
+                            "complete_chunks: tool_call block missing name; skipping"
                         );
                         continue;
                     }
-                    events.push(StreamEvent::ToolUse {
-                        id: id.to_string(),
-                        name: name.to_string(),
-                        arguments: arguments.to_string(),
-                    });
+                    // Gemini does not assign tool_call ids; synthesize one.
+                    let id = format!("tc_{}", uuid_like(&name));
+                    let arguments = serde_json::to_string(&args)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    events.push(StreamEvent::ToolUse { id, name, arguments });
+                    continue;
                 }
             }
-            if let Some("stop") = choice.get("finish_reason").and_then(|f| f.as_str()) {
+        }
+
+        // Thinking blocks: count as text in token usage but DO NOT
+        // emit as user-visible deltas.
+        if let Some(ref thought_field) = p.thought_field {
+            if block.get(thought_field).and_then(|v| v.as_bool()) == Some(true) {
+                continue;
+            }
+        }
+
+        // Text block.
+        if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str()) {
+            if !text.is_empty() {
+                events.push(StreamEvent::Delta(text.to_string()));
+            }
+        }
+    }
+
+    // Finish reason → emit Done.
+    if let Some(ref fr_path) = p.finish_reason_path {
+        if let Some(reason) = resolve_path(parsed, fr_path).and_then(|v| v.as_str()) {
+            if !reason.is_empty() {
                 events.push(StreamEvent::Done);
             }
         }
     }
+}
+
+/// Cheap, deterministic id derived from a tool name.
+/// Gemini doesn't return tool_call_ids; the runner needs SOME id
+/// to thread tool results back.
+fn uuid_like(name: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    name.hash(&mut h);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        .hash(&mut h);
+    format!("{:x}", h.finish())
 }
 
 /// Streaming provider call. Issues a streaming POST (`stream: true` +
@@ -389,20 +441,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         ),
     };
 
-    let mut body = json!({
-        "model": model,
-        "messages": converted_messages,
-        "stream": true,
-        "stream_options": { "include_usage": true },
-    });
-
-    if let Some(sys) = &system_prompt {
-        body["system"] = json!(sys);
-    }
-
-    if !tools.is_empty() {
-        body["tools"] = tools_val;
-    }
+    let mut body = build_request_body(
+        provider,
+        model,
+        &converted_messages,
+        system_prompt.as_deref(),
+        &tools_val,
+        !tools.is_empty(),
+    );
 
     // Sampling parameters — gated by provider capabilities so we
     // never send a field the upstream API will reject with a 400.
@@ -456,8 +502,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         .as_ref()
         .and_then(|s| s.streaming.as_ref())
         .and_then(|st| st.mode.as_deref())
-        .unwrap_or("delta_merge")
-        .to_string();
+         .unwrap_or("delta_merge")
+         .to_string();
+
+    let stream_paths = provider
+        .schemas
+        .as_ref()
+        .and_then(|s| s.streaming.as_ref())
+        .and_then(|st| st.paths.as_ref());
 
     let mut byte_stream = resp.bytes_stream();
     let mut buffer = String::new();
@@ -489,7 +541,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
             // Pull provider-side usage + finish_reason from the raw
             // chunk JSON regardless of stream_mode (the existing
             // parse_* helpers don't surface these typed pieces).
-            harvest_chunk_meta(&block, &mut last_usage, &mut last_finish);
+            harvest_chunk_meta(&block, &mut last_usage, &mut last_finish, stream_paths);
 
             // Re-frame the block as a complete SSE buffer for the
             // existing parser (which expects `\n\n` framing). Threads
@@ -499,6 +551,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
             let new_events = parse_sse_events_with_state(
                 &framed,
                 Some(&stream_mode),
+                stream_paths,
                 &mut tool_state,
             );
 
@@ -570,10 +623,11 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     // Final flush: any trailing block without terminal blank line.
     if !buffer.trim().is_empty() {
         let framed = format!("{}\n\n", buffer);
-        harvest_chunk_meta(&buffer, &mut last_usage, &mut last_finish);
+        harvest_chunk_meta(&buffer, &mut last_usage, &mut last_finish, stream_paths);
         let final_events = parse_sse_events_with_state(
             &framed,
             Some(&stream_mode),
+            stream_paths,
             &mut tool_state,
         );
         for ev in final_events {
@@ -662,11 +716,18 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
 /// `parse_delta_merge` helpers only emit `StreamEvent`s; we still need
 /// to surface `TokenUsage` + `finish_reason` for cost accounting and
 /// the runner's State::ParsingResponse routing.
+///
+/// When `stream_paths` is provided, Gemini-style paths are used for
+/// usage and finish_reason extraction. Otherwise OpenAI/Anthropic-style
+/// paths are tried.
 fn harvest_chunk_meta(
     block: &str,
     last_usage: &mut Option<TokenUsage>,
     last_finish: &mut Option<String>,
+    stream_paths: Option<&crate::directive::StreamPaths>,
 ) {
+    use ryeos_runtime::template::resolve_path;
+
     for line in block.lines() {
         let line = line.trim_end_matches('\r');
         let Some(rest) = line.strip_prefix("data:") else {
@@ -684,33 +745,64 @@ fn harvest_chunk_meta(
             }
         };
 
-        if let Some(u) = parsed.get("usage") {
-            let input = u
-                .get("prompt_tokens")
-                .or_else(|| u.get("input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let output = u
-                .get("completion_tokens")
-                .or_else(|| u.get("output_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if input > 0 || output > 0 {
-                *last_usage = Some(TokenUsage {
-                    input_tokens: input,
-                    output_tokens: output,
-                });
+        // Usage extraction: try StreamPaths first (Gemini), then
+        // OpenAI/Anthropic-style paths.
+        if let Some(sp) = stream_paths {
+            if let Some(ref usage_path) = sp.usage_path {
+                if let Some(u) = resolve_path(&parsed, usage_path) {
+                    let input = sp.input_tokens_field.as_ref()
+                        .and_then(|f| u.get(f))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let output = sp.output_tokens_field.as_ref()
+                        .and_then(|f| u.get(f))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    if input > 0 || output > 0 {
+                        *last_usage = Some(TokenUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                        });
+                    }
+                }
             }
-        }
+            if let Some(ref fr_path) = sp.finish_reason_path {
+                if let Some(reason) = resolve_path(&parsed, fr_path).and_then(|v| v.as_str()) {
+                    if !reason.is_empty() {
+                        *last_finish = Some(reason.to_string());
+                    }
+                }
+            }
+        } else {
+            // OpenAI / Anthropic style
+            if let Some(u) = parsed.get("usage") {
+                let input = u
+                    .get("prompt_tokens")
+                    .or_else(|| u.get("input_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let output = u
+                    .get("completion_tokens")
+                    .or_else(|| u.get("output_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if input > 0 || output > 0 {
+                    *last_usage = Some(TokenUsage {
+                        input_tokens: input,
+                        output_tokens: output,
+                    });
+                }
+            }
 
-        if let Some(reason) = parsed
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("finish_reason"))
-            .and_then(|f| f.as_str())
-        {
-            if !reason.is_empty() {
-                *last_finish = Some(reason.to_string());
+            if let Some(reason) = parsed
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("finish_reason"))
+                .and_then(|f| f.as_str())
+            {
+                if !reason.is_empty() {
+                    *last_finish = Some(reason.to_string());
+                }
             }
         }
     }
@@ -777,7 +869,118 @@ fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
             supports_temperature: true,
             supports_seed: false,
         },
-        _ => ProviderCapabilities::default(),
+         _ => ProviderCapabilities::default(),
+     }
+ }
+
+/// Build the request body from the resolved provider config.
+///
+/// Uses `body_template` with `apply_template` to render the body from
+/// a context containing `model`, `messages`, `tools`, `stream`, and
+/// `max_tokens`. Then deep-merges `body_extra`, injects the system
+/// prompt per `schemas.messages.system_message` rules, and adds tools
+/// if the template didn't already place them.
+///
+/// Panics if `body_template` is not set — every provider config must
+/// declare its body shape explicitly.
+fn build_request_body(
+    provider: &ProviderConfig,
+    model: &str,
+    converted_messages: &[Value],
+    system_prompt: Option<&str>,
+    tools_val: &Value,
+    has_tools: bool,
+) -> Value {
+    use ryeos_runtime::template::{apply_template, deep_merge};
+
+    let template = provider.body_template.as_ref().unwrap_or_else(|| {
+        panic!(
+            "provider config for model '{}' has no body_template — \
+             this is a required field. Add body_template to the provider \
+             config or matching profile.",
+            model
+        )
+    });
+
+    let mut ctx: HashMap<String, Value> = HashMap::new();
+    ctx.insert("model".to_string(), Value::String(model.to_string()));
+    ctx.insert("messages".to_string(), Value::Array(converted_messages.to_vec()));
+    ctx.insert("tools".to_string(), tools_val.clone());
+    ctx.insert("stream".to_string(), Value::Bool(true));
+    ctx.insert("max_tokens".to_string(), Value::Number(4096.into()));
+
+    let mut body = apply_template(template, &ctx);
+
+    // Apply body_extra (static fragment) before system prompt
+    // injection so that body_extra can set defaults that
+    // system-prompt logic might override.
+    if let Some(extra) = &provider.body_extra {
+        deep_merge(&mut body, extra);
+    }
+
+    // System prompt placement.
+    if let Some(sys) = system_prompt {
+        inject_system_prompt(&mut body, sys, provider);
+    }
+
+    // Tools — only set if the template didn't already place them
+    // and we have tools to send. A template that includes
+    // `"tools": "{tools}"` will already have them; we leave that
+    // alone.
+    if has_tools && body.get("tools").is_none_or(|v| v.is_null()) {
+        body["tools"] = tools_val.clone();
+    }
+
+    body
+}
+
+/// Inject the system prompt into the body using the rules in
+/// `provider.schemas.messages.system_message`.
+fn inject_system_prompt(body: &mut Value, system: &str, provider: &ProviderConfig) {
+    use ryeos_runtime::template::{apply_template, deep_merge};
+
+    let sys_config = provider
+        .schemas
+        .as_ref()
+        .and_then(|s| s.messages.as_ref())
+        .and_then(|m| m.system_message.as_ref());
+
+    let mode = sys_config
+        .and_then(|s| s.mode.as_deref())
+        .unwrap_or("body_field");
+
+    match mode {
+        "body_field" => {
+            let field = sys_config
+                .and_then(|s| s.field.as_deref())
+                .unwrap_or("system");
+            body[field] = json!(system);
+        }
+        "body_inject" => {
+            if let Some(template) = sys_config.and_then(|s| s.template.as_ref()) {
+                let mut ctx: HashMap<String, Value> = HashMap::new();
+                ctx.insert("system".to_string(), Value::String(system.to_string()));
+                let rendered = apply_template(template, &ctx);
+                deep_merge(body, &rendered);
+            } else {
+                tracing::warn!(
+                    "system_message.mode = body_inject but no template provided — \
+                     system prompt dropped"
+                );
+            }
+        }
+        "message_role" => {
+            // Already handled in messages::convert_messages, which
+            // prepends a system-role message. Nothing to inject in
+            // the body itself.
+        }
+        other => {
+            tracing::warn!(
+                mode = other,
+                "unknown system_message.mode; defaulting to body_field"
+            );
+            body["system"] = json!(system);
+        }
     }
 }
 
@@ -874,17 +1077,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             assert_eq!(name, "bash");
             assert_eq!(arguments, r#"{"cmd":"ls"}"#);
         }
-    }
-
-    #[test]
-    fn sse_complete_chunks() {
-        let data = r#"data: {"choices":[{"message":{"role":"assistant","content":"Full response"},"finish_reason":"stop"}]}
-"#;
-        let events = parse_sse_events(data, Some("complete_chunks"));
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], StreamEvent::Delta(s) if s == "Full response"));
-        assert!(matches!(&events[1], StreamEvent::Done));
-    }
+     }
 
     #[test]
     fn done_sentinel() {
@@ -1033,5 +1226,225 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
         inject_sampling(&mut body, "openai", None);
         assert!(body.get("temperature").is_none());
         assert!(body.get("seed").is_none());
+    }
+
+    // ── Body template tests ────────────────────────────────────────
+
+    #[test]
+    fn build_request_body_renders_template() {
+        let provider = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: Some(json!({
+                "contents": "{messages}",
+                "model_pinned": "{model}",
+            })),
+            body_extra: None,
+            profiles: vec![],
+        };
+        let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
+        let body = super::build_request_body(&provider, "gemini-3-flash", &msgs, None, &json!([]), false);
+        assert_eq!(body["model_pinned"], "gemini-3-flash");
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
+        // No legacy keys when template is used.
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn build_request_body_deep_merges_body_extra() {
+        let provider = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: Some(json!({"contents": "{messages}"})),
+            body_extra: Some(json!({"generationConfig": {"maxOutputTokens": 1024}})),
+            profiles: vec![],
+        };
+        let body = super::build_request_body(&provider, "gemini-3-flash", &[], None, &json!([]), false);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 1024);
+        assert!(body["contents"].is_array());
+    }
+
+    #[test]
+    #[should_panic(expected = "no body_template")]
+    fn build_request_body_panics_when_no_template() {
+        let provider = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: None,
+            body_extra: None,
+            profiles: vec![],
+        };
+        let _ = super::build_request_body(&provider, "test-model", &[], None, &json!([]), false);
+    }
+
+    #[test]
+    fn inject_system_prompt_body_field_default() {
+        let provider = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: None,
+            body_extra: None,
+            profiles: vec![],
+        };
+        let mut body = json!({});
+        super::inject_system_prompt(&mut body, "you are helpful", &provider);
+        assert_eq!(body["system"], "you are helpful");
+    }
+
+    #[test]
+    fn inject_system_prompt_body_inject_renders_gemini_shape() {
+        use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
+        let provider = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: Some(SchemasConfig {
+                messages: Some(MessageSchemas {
+                    role_map: None,
+                    content_key: None,
+                    content_wrap: None,
+                    system_message: Some(SystemMessageConfig {
+                        mode: Some("body_inject".to_string()),
+                        field: None,
+                        template: Some(json!({
+                            "systemInstruction": {
+                                "parts": [{"text": "{system}"}]
+                            }
+                        })),
+                    }),
+                    tool_result: None,
+                    tool_list_wrap: None,
+                }),
+                streaming: None,
+            }),
+            pricing: None,
+            extra: Default::default(),
+            body_template: None,
+            body_extra: None,
+            profiles: vec![],
+        };
+        let mut body = json!({"contents": []});
+        super::inject_system_prompt(&mut body, "be brief", &provider);
+        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be brief");
+        // contents preserved
+        assert!(body["contents"].is_array());
+    }
+
+    #[test]
+    fn parse_complete_chunks_extracts_gemini_text_delta() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: Some("thought".to_string()),
+            tool_call_field: Some("functionCall".to_string()),
+            tool_call_name_path: Some("functionCall.name".to_string()),
+            tool_call_args_path: Some("functionCall.args".to_string()),
+            usage_path: Some("usageMetadata".to_string()),
+            input_tokens_field: Some("promptTokenCount".to_string()),
+            output_tokens_field: Some("candidatesTokenCount".to_string()),
+            finish_reason_path: Some("candidates.0.finishReason".to_string()),
+        };
+        let frame = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "Hi there"}]}
+            }]
+        });
+        let mut events = vec![];
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::Delta(s) => assert_eq!(s, "Hi there"),
+            other => panic!("expected Delta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_complete_chunks_filters_thinking_blocks() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: Some("thought".to_string()),
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        let frame = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"thought": true, "text": "let me think"},
+                    {"text": "the answer is 42"}
+                ]}
+            }]
+        });
+        let mut events = vec![];
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::Delta(s) => assert_eq!(s, "the answer is 42"),
+            other => panic!("expected Delta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_complete_chunks_emits_done_on_finish_reason() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: None,
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: Some("candidates.0.finishReason".to_string()),
+        };
+        let frame = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "done."}]},
+                "finishReason": "STOP"
+            }]
+        });
+        let mut events = vec![];
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths));
+        // 1 Delta + 1 Done
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[1], StreamEvent::Done));
+    }
+
+    #[test]
+    fn parse_complete_chunks_no_paths_emits_warning_and_zero_events() {
+        let frame = json!({"candidates": []});
+        let mut events = vec![];
+        super::parse_complete_chunks(&frame, &mut events, None);
+        assert!(events.is_empty());
     }
 }

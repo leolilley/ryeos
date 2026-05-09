@@ -101,6 +101,21 @@ pub struct ProviderConfig {
     pub pricing: Option<PricingConfig>,
     #[serde(default)]
     pub extra: HashMap<String, Value>,
+    /// JSON template for the request body. Placeholders of the form
+    /// `"{key}"` are substituted at call time using a context that
+    /// always includes `model`, `messages`, `tools`, `stream`,
+    /// `max_tokens`.
+    ///
+    /// REQUIRED — every provider config (base or profile) must set
+    /// this. The adapter does not guess a body shape.
+    #[serde(default)]
+    pub body_template: Option<Value>,
+    /// Static body fragment deep-merged INTO the templated body
+    /// after substitution. Use for provider-required constants
+    /// like Gemini's `generationConfig.thinkingConfig.includeThoughts`
+    /// that don't depend on per-call inputs.
+    #[serde(default)]
+    pub body_extra: Option<Value>,
     /// Profile-by-model overlay. Profiles are tried in declaration
     /// order; the first whose `match` glob list contains a pattern
     /// matching the model name wins. The matched profile is
@@ -124,6 +139,15 @@ pub struct ProviderProfile {
     pub schemas: Option<SchemasConfig>,
     #[serde(default)]
     pub extra: Option<HashMap<String, Value>>,
+    /// See `ProviderConfig::body_template`. When set on a profile,
+    /// **replaces** any base body_template wholesale (not deep-merged).
+    #[serde(default)]
+    pub body_template: Option<Value>,
+    /// See `ProviderConfig::body_extra`. Profile body_extra is
+    /// deep-merged over base body_extra (so both can contribute,
+    /// with profile winning on key collisions).
+    #[serde(default)]
+    pub body_extra: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -166,8 +190,28 @@ pub struct MessageSchemas {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemMessageConfig {
+    /// Where the adapter places the system prompt.
+    /// - `"body_field"` — set `body[field]` to the system string
+    ///   (Anthropic Messages: `body["system"]`). `field` defaults
+    ///   to `"system"`.
+    /// - `"body_inject"` — deep-merge a templated structure into
+    ///   the body. The template's `{system}` placeholder is filled
+    ///   with the system prompt string. Used by Gemini whose system
+    ///   prompt lives at `body.systemInstruction.parts[0].text`.
+    /// - `"message_role"` — prepend a `{role: "system", content:
+    ///   <prompt>}` message to the converted message list (OpenAI).
+    /// - `None` — falls back to `"body_field"` for backwards compat.
     #[serde(default)]
     pub mode: Option<String>,
+    /// For `mode = "body_field"`: the body key to set. Defaults to
+    /// `"system"`.
+    #[serde(default)]
+    pub field: Option<String>,
+    /// For `mode = "body_inject"`: a JSON template that gets
+    /// rendered with `{"system": <prompt>}` and deep-merged into
+    /// the request body.
+    #[serde(default)]
+    pub template: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,8 +224,65 @@ pub struct ToolResultConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamingConfig {
+    /// Stream envelope shape. One of:
+    /// - `"delta_merge"` — OpenAI-style: incremental `delta.content`
+    ///   text fragments concatenated into the assistant message.
+    /// - `"event_typed"` — Anthropic-style: SSE `event:` typed
+    ///   frames (`content_block_start`, `content_block_delta`,
+    ///   `content_block_stop`, `message_stop`).
+    /// - `"complete_chunks"` — Gemini-style: each `data:` frame is
+    ///   a complete partial response with `candidates[0].content.
+    ///   parts[]`. Uses `paths` to extract text/tool_calls/usage.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Path config for `complete_chunks` mode. Ignored otherwise.
+    /// Each field is a dot-path into one streamed JSON frame.
+    #[serde(default)]
+    pub paths: Option<StreamPaths>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamPaths {
+    /// Path to the array of content blocks in each frame.
+    /// Gemini: `"candidates.0.content.parts"`.
+    pub content_path: String,
+    /// Field name on a content block that, when present, marks
+    /// the block as text. Gemini: `"text"`.
+    pub text_field: String,
+    /// Optional field that, when present and truthy, marks the
+    /// block as a thinking block (filtered out of user-visible
+    /// text but counted in token usage). Gemini: `"thought"`.
+    #[serde(default)]
+    pub thought_field: Option<String>,
+    /// Optional field that, when present, marks the block as a
+    /// tool call. Gemini: `"functionCall"`.
+    #[serde(default)]
+    pub tool_call_field: Option<String>,
+    /// Path within a tool_call block to the function name.
+    /// Gemini: `"functionCall.name"`.
+    #[serde(default)]
+    pub tool_call_name_path: Option<String>,
+    /// Path within a tool_call block to the function arguments
+    /// (JSON object). Gemini: `"functionCall.args"`.
+    #[serde(default)]
+    pub tool_call_args_path: Option<String>,
+    /// Path to usage object in the frame.
+    /// Gemini: `"usageMetadata"`.
+    #[serde(default)]
+    pub usage_path: Option<String>,
+    /// Field on the usage object for input/prompt tokens.
+    /// Gemini: `"promptTokenCount"`.
+    #[serde(default)]
+    pub input_tokens_field: Option<String>,
+    /// Field on the usage object for output/completion tokens.
+    /// Gemini: `"candidatesTokenCount"`.
+    #[serde(default)]
+    pub output_tokens_field: Option<String>,
+    /// Path to the finish reason string in the frame.
+    /// Gemini: `"candidates.0.finishReason"`.
+    #[serde(default)]
+    pub finish_reason_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +372,19 @@ impl ProviderConfig {
         if let Some(s) = &p.schemas { out.schemas = Some(s.clone()); }
         if let Some(e) = &p.extra {
             for (k, v) in e { out.extra.insert(k.clone(), v.clone()); }
+        }
+        if let Some(bt) = &p.body_template {
+            // Wholesale replacement, not merge — see ProviderProfile docs.
+            out.body_template = Some(bt.clone());
+        }
+        if let Some(be) = &p.body_extra {
+            // Deep-merge profile body_extra onto base body_extra.
+            match &mut out.body_extra {
+                Some(existing) => {
+                    crate::template::deep_merge(existing, be);
+                }
+                None => out.body_extra = Some(be.clone()),
+            }
         }
         // profiles is intentionally *not* carried — the resolved view
         // is flat and the runtime never recurses.
@@ -571,6 +685,8 @@ mod tests {
             schemas: None,
             pricing: None,
             extra: HashMap::new(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![
                 ProviderProfile {
                     name: "claude".to_string(),
@@ -588,6 +704,8 @@ mod tests {
                     }),
                     schemas: None,
                     extra: None,
+                    body_template: None,
+                    body_extra: None,
                 },
                 ProviderProfile {
                     name: "gpt".to_string(),
@@ -601,6 +719,8 @@ mod tests {
                     }),
                     schemas: None,
                     extra: None,
+                    body_template: None,
+                    body_extra: None,
                 },
                 ProviderProfile {
                     name: "gemini".to_string(),
@@ -614,6 +734,8 @@ mod tests {
                     headers: None,
                     schemas: None,
                     extra: None,
+                    body_template: None,
+                    body_extra: None,
                 },
             ],
         }
