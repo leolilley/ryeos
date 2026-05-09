@@ -827,11 +827,11 @@ pub(crate) async fn dispatch_op(
                 .unwrap_or(r.ai_root.clone())
         })
         .collect();
-    let materialize_dir = request.project_path.to_path_buf();
+    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
         &system_roots,
         &executor_ref,
-        &materialize_dir,
+        &cache_root,
         &state.engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
@@ -841,22 +841,23 @@ pub(crate) async fn dispatch_op(
     })?;
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
+    let envs = crate::process::build_subprocess_envs(
+        &std::collections::BTreeMap::new(),
+        &[],
+    )
+    .map_err(|e| DispatchError::Internal(e.into()))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
             cwd: None,
-            envs: vec![],
+            envs,
             stdin_data: Some(stdin_data),
             timeout: 120.0,
         })
     })
     .await
     .map_err(|e| DispatchError::Internal(e.into()))?;
-
-    // Invalidate callback token (cleanup, matching launch.rs pattern).
-    state.callback_tokens.invalidate(&cap.token);
-    state.callback_tokens.invalidate_for_thread(&thread_id);
 
     if !result.success {
         // Try to parse a BatchOpResult from stdout for structured error.
@@ -1329,17 +1330,36 @@ async fn dispatch_managed_subprocess(
             pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         },
     ).await.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("manifest") || msg.contains("binary") || msg.contains("blob")
-            || msg.contains("materializ") || msg.contains("native executor")
-            || msg.contains("arch check")
-        {
-            DispatchError::RuntimeMaterializationFailed {
-                executor_ref: executor_ref.clone(),
-                detail: msg,
+        match &e {
+            launch::BuildAndLaunchError::Materialization(
+                launch::MaterializationError::ProviderSecretMissing {
+                    provider_id,
+                    env_var,
+                    item_ref,
+                },
+            ) => DispatchError::RequiredSecretMissing {
+                item_ref: item_ref.clone(),
+                env_var: env_var.clone(),
+                source_kind: "provider".to_string(),
+                source_name: provider_id.clone(),
+                remediation: format!(
+                    "ryeos-core-tools vault put --name {env_var} --value-stdin"
+                ),
+            },
+            _ => {
+                let msg = e.to_string();
+                if msg.contains("manifest") || msg.contains("binary") || msg.contains("blob")
+                    || msg.contains("materializ") || msg.contains("native executor")
+                    || msg.contains("arch check")
+                {
+                    DispatchError::RuntimeMaterializationFailed {
+                        executor_ref: executor_ref.clone(),
+                        detail: msg,
+                    }
+                } else {
+                    DispatchError::Internal(e.into())
+                }
             }
-        } else {
-            DispatchError::Internal(e.into())
         }
     })?;
 
@@ -1434,10 +1454,11 @@ async fn dispatch_streaming_subprocess(
         })?;
     let executor_ref = format!("native:{executor_id}");
 
+    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
         &system_roots,
         &executor_ref,
-        request.project_path,
+        &cache_root,
         &state.engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
@@ -1447,12 +1468,17 @@ async fn dispatch_streaming_subprocess(
     })?;
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
+    let envs = crate::process::build_subprocess_envs(
+        &std::collections::BTreeMap::new(),
+        &[],
+    )
+    .map_err(|e| DispatchError::Internal(e.into()))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
             cwd: None,
-            envs: vec![],
+            envs,
             stdin_data: Some(stdin_data),
             timeout: 120.0,
         })

@@ -319,13 +319,8 @@ pub async fn execute(
         // status code + body shape are byte-stable across this refactor.
         Err(e) => {
             let status = e.http_status();
-            let body = match &e {
-                crate::dispatch_error::DispatchError::MissingCap { required } => {
-                    json!({ "error": e.to_string(), "required_cap": required })
-                }
-                _ => json!({ "error": e.to_string() }),
-            };
-            Err((status, Json(body)))
+            let payload = crate::structured_error::StructuredErrorPayload::from(&e);
+            Err((status, Json(payload.to_value())))
         }
     }
 }

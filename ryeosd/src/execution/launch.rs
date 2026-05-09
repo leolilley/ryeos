@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use rand::Rng;
 use serde_json::{json, Value};
 
 use super::arch_check;
@@ -41,6 +42,15 @@ pub enum MaterializationError {
         trust_class: ryeos_engine::resolution::TrustClass,
         fingerprint: Option<String>,
     },
+    #[error("provider secret `{env_var}` (for provider `{provider_id}`) is not in vault — \
+             run: ryeos-core-tools vault put --name {env_var} --value-stdin")]
+    ProviderSecretMissing {
+        provider_id: String,
+        env_var: String,
+        item_ref: String,
+    },
+    #[error("{0}")]
+    Internal(String),
 }
 
 /// Typed error returned by [`build_and_launch`]. Materialization
@@ -87,22 +97,39 @@ fn host_triple() -> String {
 /// PR1b2 writes this ref during bundle build.
 const BUNDLE_MANIFEST_REF: &str = "refs/bundles/manifest";
 
+/// Content-addressed cache target for a native executor binary.
+///
+/// Returns `<cache_root>/cache/executors/<blob_hash>/<bare>`.
+fn executor_cache_target(
+    cache_root: &Path,
+    blob_hash: &str,
+    bare: &str,
+) -> PathBuf {
+    cache_root
+        .join("cache")
+        .join("executors")
+        .join(blob_hash)
+        .join(bare)
+}
+
 /// Resolve a native executor from the system bundle's CAS.
 ///
 /// Looks up the system bundle manifest via `refs/bundles/manifest`,
 /// resolves `bin/<host_triple>/<bare>` in the manifest, verifies
 /// trust on the binary's `item_source` record, checks architecture,
-/// and materializes the binary to the target directory.
+/// and materializes the binary to a content-addressed cache under
+/// `cache_root/cache/executors/<blob_hash>/<bare>`.
+///
+/// Content-addressed: a given blob hash always lands at the same path.
+/// Extract once per (binary version, host), re-exec from cache forever
+/// after. Cache lives under daemon-owned system space, not under the
+/// project tree — read-only project mounts work.
 ///
 /// Returns the path to the materialized binary.
-///
-/// This function implements the full verified-chain path per the
-/// PR1b1 design: no PATH lookup, no fallback. If the bundle manifest
-/// doesn't exist (pre-PR1b2), resolution fails with a clear error.
 pub fn resolve_native_executor_path(
     system_roots: &[PathBuf],
     executor_ref: &str,
-    materialize_dir: &Path,
+    cache_root: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
     root_trust_class: ryeos_engine::resolution::TrustClass,
 ) -> Result<PathBuf, MaterializationError> {
@@ -259,29 +286,209 @@ pub fn resolve_native_executor_path(
             detail: e.to_string(),
         })?;
 
-    // 7. Materialize to target directory
-    let bin_dir = materialize_dir.join("bin");
-    std::fs::create_dir_all(&bin_dir)
+    // 7. Materialize to content-addressed cache under daemon state.
+    //    Path: <cache_root>/cache/executors/<blob_hash>/<bare>
+    //    Content-addressed → extract once, re-exec forever.
+    let target_path = executor_cache_target(cache_root, &resolved.blob_hash, bare);
+
+    if target_path.is_file() {
+        // Cache hit — skip extraction.
+        tracing::debug!(
+            executor_ref,
+            target = %target_path.display(),
+            "native executor cache hit"
+        );
+        return Ok(target_path);
+    }
+
+    // Stage atomically — first writer wins.
+    let staging_dir = target_path
+        .parent()
+        .unwrap()
+        .with_file_name(format!(
+            "{}.staging.{}.{}",
+            resolved.blob_hash,
+            std::process::id(),
+            rand::thread_rng().gen::<u32>()
+        ));
+    std::fs::create_dir_all(&staging_dir)
         .map_err(|e| MaterializationError::MaterializationFailed {
             executor_ref: bare.to_string(),
-            detail: format!("failed to create bin dir: {e}"),
+            detail: format!("failed to create staging dir: {e}"),
         })?;
-    let target_path = bin_dir.join(bare);
-
-    lillux::cas::materialize_executable(&target_path, &blob_bytes, resolved.mode)
-        .map_err(|e| MaterializationError::MaterializationFailed {
-            executor_ref: bare.to_string(),
-            detail: format!("failed to materialize executable: {e}"),
+    let staged_bin = staging_dir.join(bare);
+    lillux::cas::materialize_executable(&staged_bin, &blob_bytes, resolved.mode)
+        .map_err(|e| {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            MaterializationError::MaterializationFailed {
+                executor_ref: bare.to_string(),
+                detail: format!("failed to materialize executable: {e}"),
+            }
         })?;
 
-    tracing::info!(
-        executor_ref,
-        target = %target_path.display(),
-        mode = format!("{:o}", resolved.mode),
-        "native executor materialized"
-    );
+    // Atomic publish — first writer wins.
+    //
+    // We rename the staging directory to its final content-addressed
+    // location. If `rename` fails, we MUST verify the target exists
+    // before returning Ok — otherwise a permissions error / dirty
+    // cache dir / FS corruption would silently produce a path that
+    // has no binary in it and the caller's exec would later fail
+    // with a confusing ENOENT.
+    let target_parent = target_path.parent().unwrap();
+    if let Some(grandparent) = target_parent.parent() {
+        std::fs::create_dir_all(grandparent)
+            .map_err(|e| MaterializationError::MaterializationFailed {
+                executor_ref: bare.to_string(),
+                detail: format!("failed to create cache root dir: {e}"),
+            })?;
+    }
+    match std::fs::rename(&staging_dir, target_parent) {
+        Ok(_) => {
+            tracing::info!(
+                executor_ref,
+                target = %target_path.display(),
+                "native executor published to cache"
+            );
+        }
+        Err(rename_err) => {
+            let winner_present = target_path.is_file();
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            if !winner_present {
+                return Err(MaterializationError::MaterializationFailed {
+                    executor_ref: bare.to_string(),
+                    detail: format!(
+                        "failed to publish executor to cache at {} \
+                         (rename error: {rename_err}; no winner present)",
+                        target_path.display()
+                    ),
+                });
+            }
+            tracing::debug!(
+                executor_ref,
+                target = %target_path.display(),
+                "native executor publish lost benign race; using winner's binary"
+            );
+        }
+    }
 
     Ok(target_path)
+}
+
+/// Extract the model spec from the composed view produced by the
+/// engine's resolution pipeline. The composed view contains the
+/// directive's parsed header; we pull the `model` key out without
+/// re-parsing the directive YAML.
+fn extract_model_spec_from_resolved(
+    composed: &ryeos_engine::resolution::KindComposedView,
+) -> anyhow::Result<Option<ryeos_runtime::model_resolution::ModelSpec>> {
+    let model_value = composed.composed.get("model");
+    match model_value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => {
+            let spec: ryeos_runtime::model_resolution::ModelSpec =
+                serde_json::from_value(v.clone())
+                    .map_err(|e| anyhow::anyhow!("failed to parse model spec from composed view: {e}"))?;
+            Ok(Some(spec))
+        }
+    }
+}
+
+/// Build a `VerifiedLoader` over the same root ordering the spawned
+/// runtime will see. This ensures the daemon's preflight resolve
+/// produces the same answer the runtime would get.
+fn build_verified_loader_for_thread(
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
+    let project_root = engine_roots
+        .ordered
+        .iter()
+        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::Project)
+        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()))
+        .ok_or_else(|| anyhow::anyhow!("no project root in engine resolution roots"))?;
+
+    let user_root = engine_roots
+        .ordered
+        .iter()
+        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::User)
+        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()));
+
+    let system_roots: Vec<PathBuf> = engine_roots
+        .ordered
+        .iter()
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
+        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()))
+        .collect();
+
+    Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
+        project_root,
+        user_root,
+        system_roots,
+    ))
+}
+
+/// Resolve which provider this directive will use and inject its
+/// vault secret (if any) into `bindings`. Used by both launch and
+/// resume — keep the contract identical.
+///
+/// Returns `Err(MaterializationError::ProviderSecretMissing)` if the
+/// resolved provider declares an `auth.env_var` and that env var is
+/// not present in the vault.
+pub(crate) fn preflight_inject_provider_secret(
+    composed: &ryeos_engine::resolution::KindComposedView,
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    vault: &dyn crate::vault::NodeVault,
+    acting_principal: &str,
+    item_ref_str: &str,
+    bindings: &mut std::collections::HashMap<String, String>,
+) -> Result<(), MaterializationError> {
+    let header = ryeos_runtime::model_resolution::DirectiveModelHeader {
+        model: extract_model_spec_from_resolved(composed)
+            .map_err(|e| MaterializationError::Internal(e.to_string()))?,
+    };
+    let loader = build_verified_loader_for_thread(engine_roots)
+        .map_err(|e| MaterializationError::Internal(e.to_string()))?;
+    let resolved_target = ryeos_runtime::model_resolution::preflight_resolve(
+        &header, &loader,
+    ).map_err(|e| MaterializationError::Internal(e.to_string()))?;
+
+    if let Some(env_var) = resolved_target.provider.auth.env_var.as_deref() {
+        // If the secret is already present in bindings (e.g. from
+        // `read_required_secrets` which layers vault + dotenv overlay),
+        // skip the vault read — the dispatch path already resolved it.
+        if bindings.contains_key(env_var) {
+            tracing::debug!(
+                provider_id = %resolved_target.provider_id,
+                env_var = %env_var,
+                "vault: provider secret already in bindings (likely from dotenv overlay)"
+            );
+        } else {
+            match crate::vault::read_named_secret(vault, acting_principal, env_var)
+                .map_err(|e| MaterializationError::Internal(e.to_string()))?
+            {
+                Some(value) => {
+                    bindings.insert(env_var.to_string(), value);
+                    tracing::debug!(
+                        provider_id = %resolved_target.provider_id,
+                        env_var = %env_var,
+                        "vault: injected selected provider secret"
+                    );
+                }
+                None => {
+                    return Err(MaterializationError::ProviderSecretMissing {
+                        provider_id: resolved_target.provider_id,
+                        env_var: env_var.to_string(),
+                        item_ref: item_ref_str.to_string(),
+                    });
+                }
+            }
+        }
+    } else {
+        tracing::debug!(
+            provider_id = %resolved_target.provider_id,
+            "provider declares no auth env var — no vault injection needed"
+        );
+    }
+    Ok(())
 }
 
 pub struct NativeLaunchResult {
@@ -557,13 +764,27 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     )
     .map_err(|e| anyhow::anyhow!("inventory build failed: {e}"))?;
 
+    // 6c. Narrow preflight: resolve which provider this directive will use,
+    //     inject only that provider's secret from the vault. Fail loud here
+    //     so the operator gets a clear remediation hint before spawn.
+    let mut effective_vault = vault_bindings.clone();
+    preflight_inject_provider_secret(
+        &resolution.composed,
+        &engine_roots,
+        state.vault.as_ref(),
+        acting_principal,
+        &resolved.item_ref,
+        &mut effective_vault,
+    )?;
+
     // 7. Resolve the native executor from the system bundle's CAS.
-    //    This is the verified-chain path: the binary is materialized from
-    //    CAS, trust-verified, arch-checked — no PATH lookup.
+    //    Materialized to content-addressed cache under system space,
+    //    not the project tree (works with read-only mounts).
+    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
     let materialized_binary = resolve_native_executor_path(
         &system_roots,
         executor_ref,
-        project_path,
+        &cache_root,
         &state.engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedSystem, // executor binaries ship in system bundles
     )?;
@@ -644,7 +865,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // generic plan-node subprocesses. Without this, operator secrets
     // never reach the runtime — the trait machinery in `vault.rs`
     // gets called and discarded.
-    let vault_owned: Vec<(String, String)> = vault_bindings
+    let vault_owned: Vec<(String, String)> = effective_vault
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();

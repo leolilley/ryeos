@@ -93,6 +93,21 @@ pub enum DispatchError {
     /// could not be resolved from the bundle CAS.
     #[error("runtime materialization failed for '{executor_ref}': {detail}")]
     RuntimeMaterializationFailed { executor_ref: String, detail: String },
+    /// A declared required secret was not in the operator vault.
+    /// Generic at the dispatch layer; the `source_kind`/`source_name`
+    /// fields attribute *which* subsystem demanded the secret (today
+    /// only `"provider"` from LLM preflight; future kinds e.g. `"tool"`
+    /// or `"runtime"` slot in without changing the wire shape).
+    /// Operator-actionable: run
+    /// `ryeos-core-tools vault put --name <env_var> --value-stdin`.
+    #[error("required secret missing for '{item_ref}': set vault entry '{env_var}' (source: {source_kind}/{source_name})")]
+    RequiredSecretMissing {
+        item_ref: String,
+        env_var: String,
+        source_kind: String,
+        source_name: String,
+        remediation: String,
+    },
     /// Project source push-first — the project has not been pushed to
     /// the daemon's CAS before execution was requested. The Display
     /// is the bare wording (e.g. `"no pushed HEAD for project '<path>' \
@@ -246,6 +261,7 @@ impl DispatchError {
             | Self::SubprocessExecutorMissing { .. }
             | Self::SubprocessRunFailed { .. }
             | Self::RuntimeMaterializationFailed { .. }
+            | Self::RequiredSecretMissing { .. }
             | Self::ProjectSourceCheckoutFailed(_)
             | Self::OpFailed { .. }
             | Self::OpNotImplemented { .. } => StatusCode::BAD_GATEWAY,
@@ -277,6 +293,7 @@ impl DispatchError {
             Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
+            Self::RequiredSecretMissing { .. } => "required_secret_missing",
             Self::ProjectSourcePushFirst(_) => "project_source_push_first",
             Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
             Self::MissingCap { .. } => "missing_cap",

@@ -3,6 +3,14 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Re-export types now canonically owned by the shared model-resolution
+// module in ryeos-runtime. Existing `use crate::directive::*` imports
+// in the directive-runtime continue to resolve these names.
+pub use ryeos_runtime::model_resolution::{
+    MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig, ProviderConfig,
+    SamplingConfig, SystemMessageConfig, ToolResultConfig,
+};
+
 /// Typed runtime view of a directive's effective header *after* the
 /// daemon-side composer has produced
 /// `KindComposedView::ExtendsChain(...).composed`.
@@ -61,33 +69,6 @@ pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelSpec {
-    #[serde(default)]
-    pub tier: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub context_window: Option<u64>,
-    #[serde(default)]
-    pub sampling: Option<SamplingConfig>,
-}
-
-/// LLM sampling parameters for best-effort replay. Not all providers
-/// support every field — e.g. OpenAI supports `seed`, Anthropic does
-/// not. The provider adapter silently omits unsupported fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SamplingConfig {
-    #[serde(default)]
-    pub temperature: Option<f64>,
-    #[serde(default)]
-    pub seed: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PermissionsSpec {
     #[serde(default)]
     pub execute: Vec<String>,
@@ -133,95 +114,6 @@ pub struct ToolSchema {
     pub description: Option<String>,
     #[serde(default)]
     pub input_schema: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderConfig {
-    /// Kind-schema metadata header (e.g. `"ryeos-runtime/model-providers"`)
-    /// surfaced on the typed struct so `deny_unknown_fields` keeps
-    /// holding the line. Not consumed by the runtime; logged at
-    /// bootstrap for parity with the other config structs.
-    #[serde(default)]
-    pub category: Option<String>,
-    pub base_url: String,
-    #[serde(default)]
-    pub auth: AuthConfig,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-    #[serde(default)]
-    pub schemas: Option<SchemasConfig>,
-    #[serde(default)]
-    pub pricing: Option<PricingConfig>,
-    #[serde(default)]
-    pub extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    #[serde(default)]
-    pub env_var: Option<String>,
-    #[serde(default)]
-    pub header_name: Option<String>,
-    #[serde(default)]
-    pub prefix: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SchemasConfig {
-    #[serde(default)]
-    pub messages: Option<MessageSchemas>,
-    #[serde(default)]
-    pub streaming: Option<StreamingConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MessageSchemas {
-    #[serde(default)]
-    pub role_map: Option<HashMap<String, String>>,
-    #[serde(default)]
-    pub content_key: Option<String>,
-    #[serde(default)]
-    pub content_wrap: Option<String>,
-    #[serde(default)]
-    pub system_message: Option<SystemMessageConfig>,
-    #[serde(default)]
-    pub tool_result: Option<ToolResultConfig>,
-    #[serde(default)]
-    pub tool_list_wrap: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SystemMessageConfig {
-    #[serde(default)]
-    pub mode: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ToolResultConfig {
-    #[serde(default)]
-    pub wrap_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StreamingConfig {
-    #[serde(default)]
-    pub mode: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PricingConfig {
-    #[serde(default)]
-    pub input_per_million: Option<f64>,
-    #[serde(default)]
-    pub output_per_million: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,27 +173,6 @@ pub struct BootstrapConfig {
     pub outputs: Option<Vec<OutputSpec>>,
     #[serde(skip)]
     pub risk_policy: Option<crate::harness::RiskPolicy>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelRoutingConfig {
-    /// Kind-schema metadata header (e.g. `"ryeos-runtime"`) surfaced so
-    /// `deny_unknown_fields` keeps holding the line. Not consumed by
-    /// the runtime.
-    #[serde(default)]
-    pub category: Option<String>,
-    #[serde(default)]
-    pub tiers: HashMap<String, TierConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TierConfig {
-    pub provider: String,
-    pub model: String,
-    #[serde(default)]
-    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

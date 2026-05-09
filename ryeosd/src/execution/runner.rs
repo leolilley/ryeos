@@ -36,6 +36,27 @@ use crate::services::thread_lifecycle::{
 use crate::state::AppState;
 use super::callback_token::compute_ttl;
 
+// ── Resume-specific error type ────────────────────────────────────
+
+/// Typed error for the resume path (`run_existing_detached`).
+///
+/// Each variant maps to a distinct `outcome_code` via `guard.fail_thread()`.
+/// The `Preflight` variant preserves the structured
+/// `MaterializationError::ProviderSecretMissing` payload so downstream
+/// consumers (loggers, future HTTP surfaces) can extract `env_var`,
+/// `provider_name`, and `remediation` without string parsing.
+#[derive(Debug, thiserror::Error)]
+pub enum ResumeError {
+    #[error("cas context failed: {0}")]
+    CasContext(#[source] anyhow::Error),
+    #[error("vault read failed: {0}")]
+    VaultRead(#[source] anyhow::Error),
+    #[error("preflight failed: {0}")]
+    Preflight(#[from] crate::execution::launch::MaterializationError),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 /// All inputs needed to run an execution.
 pub struct ExecutionParams {
     pub resolved: ResolvedExecutionRequest,
@@ -127,6 +148,11 @@ impl ExecutionGuard {
     /// Fail the tracked thread if it hasn't been finalized yet.
     /// Also revokes the callback and thread-auth tokens.
     fn fail_thread(&mut self, outcome_code: &str) {
+        self.fail_thread_with_error(outcome_code, json!({ "code": outcome_code }));
+    }
+
+    /// Like [`fail_thread`] but with a custom error JSON body.
+    fn fail_thread_with_error(&mut self, outcome_code: &str, error: serde_json::Value) {
         self.revoke_callback_token();
         self.revoke_thread_auth_token();
         if self.thread_finalized {
@@ -138,7 +164,7 @@ impl ExecutionGuard {
                 status: "failed".to_string(),
                 outcome_code: Some(outcome_code.to_string()),
                 result: None,
-                error: Some(json!({ "code": outcome_code })),
+                error: Some(error),
                 metadata: None,
                 artifacts: Vec::new(),
                 final_cost: None,
@@ -1276,17 +1302,21 @@ pub fn execution_params_from_resume_context(
     state: &AppState,
     resume: &ResumeContext,
 ) -> Result<ExecutionParams> {
-    // Pin resolution to the original snapshot when one was captured.
-    let project_context = match resume.original_snapshot_hash.as_deref() {
-        Some(hash) => ProjectContext::SnapshotHash {
-            hash: hash.to_string(),
-        },
-        None => resume.project_context.clone(),
-    };
-
+    // Always use the original project_context (LocalPath) for item
+    // resolution. The engine's resolve() only searches project space
+    // when project_context is LocalPath; SnapshotHash has no filesystem
+    // path for the engine to walk.
+    //
+    // The snapshot hash is carried separately via
+    // `ExecutionParams::snapshot_hash` and used by
+    // `prepare_cas_context` inside `run_existing_detached` to check
+    // out the pinned snapshot. After checkout the plan_context is
+    // updated to point at the materialized checkout directory, so the
+    // effective runtime sees the exact project version captured at
+    // spawn time.
     let plan_ctx = PlanContext {
         requested_by: resume.requested_by.clone(),
-        project_context: project_context.clone(),
+        project_context: resume.project_context.clone(),
         current_site_id: resume.current_site_id.clone(),
         origin_site_id: resume.origin_site_id.clone(),
         execution_hints: resume.execution_hints.clone(),
@@ -1340,27 +1370,17 @@ pub fn execution_params_from_resume_context(
         .requested_by_name()
         .unwrap_or_else(|| "fp:resume".to_string());
 
-    // Resume must see the same operator-secret view as the original
-    // spawn — but scoped to what the item declares, not the entire
-    // vault. Vault is read fresh — if the operator has rotated a
-    // secret since the original spawn, the new value flows through.
-    // If a previously-declared required secret has been removed from
-    // the operator vault, resume fails-loud (better than a silent
-    // upstream auth error).
-    let dotenv_dirs = crate::vault::dotenv_search_dirs(project_path.as_deref());
-    let vault_bindings = crate::vault::read_required_secrets(
-        state.vault.as_ref(),
-        &acting_principal,
-        &resolved.resolved_item.metadata.required_secrets,
-        &dotenv_dirs,
-    )
-    .map_err(|e| anyhow::anyhow!("resume: vault read failed: {e}"))?;
+    // NOTE: read_required_secrets and preflight_inject_provider_secret
+    // are NOT called here. They run later, inside run_existing_detached(),
+    // AFTER prepare_cas_context() returns the effective_path — so that
+    // dotenv overlay and provider resolution see the snapshot checkout,
+    // not the live project tree.
 
     Ok(ExecutionParams {
         resolved,
         acting_principal,
         project_path,
-        vault_bindings,
+        vault_bindings: HashMap::new(), // populated later in run_existing_detached
         snapshot_hash: resume.original_snapshot_hash.clone(),
         parameters: resume.parameters.clone(),
         temp_dir: None,
@@ -1405,7 +1425,7 @@ pub async fn run_existing_detached(
     chain_root_id: String,
     mut params: ExecutionParams,
     prior_status: String,
-) -> Result<()> {
+) -> Result<(), ResumeError> {
     let mut guard = ExecutionGuard::new(state.clone());
     guard.track_thread(&thread_id);
     if let Some(ref d) = params.temp_dir {
@@ -1425,7 +1445,7 @@ pub async fn run_existing_detached(
         Err(err) => {
             guard.fail_thread("cas_context_failed");
             guard.cleanup();
-            return Err(err);
+            return Err(ResumeError::CasContext(err));
         }
     };
 
@@ -1435,6 +1455,90 @@ pub async fn run_existing_detached(
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),
         };
+    }
+
+    // ── Vault + narrow preflight (post-CAS) ─────────────────────────
+    // These MUST run after prepare_cas_context so dotenv overlay and
+    // provider resolution see the snapshot checkout, not the live tree.
+    {
+        // Dotenv search dirs derived from effective_path (the snapshot
+        // checkout), matching launch's behavior which uses the execution
+        // root for dotenv discovery.
+        let dotenv_dirs = crate::vault::dotenv_search_dirs(Some(&effective_path));
+        let vault_bindings = crate::vault::read_required_secrets(
+            state.vault.as_ref(),
+            &params.acting_principal,
+            &params.resolved.resolved_item.metadata.required_secrets,
+            &dotenv_dirs,
+        )
+        .map_err(|e| {
+            guard.fail_thread("vault_read_failed");
+            guard.cleanup();
+            ResumeError::VaultRead(e)
+        })?;
+
+        // Narrow preflight: resolve provider and inject its secret.
+        // Uses effective_path for engine roots so model_routing.yaml
+        // and provider configs are read from the snapshot checkout.
+        let engine_roots = state.engine.resolution_roots(Some(effective_path.clone()));
+        let effective_parsers = state
+            .engine
+            .effective_parser_dispatcher(Some(&effective_path))
+        .map_err(|e| {
+            guard.fail_thread("preflight_failed");
+            guard.cleanup();
+            ResumeError::Other(anyhow::anyhow!("resume: effective parser dispatcher: {e}"))
+        })?;
+
+        let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+            &params.resolved.resolved_item.canonical_ref,
+            &state.engine.kinds,
+            &effective_parsers,
+            &engine_roots,
+            &state.engine.trust_store,
+            &state.engine.composers,
+        )
+        .map_err(|e| {
+            guard.fail_thread("preflight_failed");
+            guard.cleanup();
+            ResumeError::Other(anyhow::anyhow!("resume: resolution pipeline for preflight: {e}"))
+        })?;
+
+        let mut vault_bindings = vault_bindings;
+        crate::execution::launch::preflight_inject_provider_secret(
+            &resolution.composed,
+            &engine_roots,
+            state.vault.as_ref(),
+            &params.acting_principal,
+            &params.resolved.item_ref,
+            &mut vault_bindings,
+        )
+        .map_err(|e| {
+            let code = match &e {
+                crate::execution::launch::MaterializationError::ProviderSecretMissing {
+                    provider_id,
+                    env_var,
+                    ..
+                } => {
+                    let payload = crate::structured_error::StructuredErrorPayload::required_secret_missing(
+                        e.to_string(),
+                        env_var,
+                        "provider",
+                        provider_id,
+                        format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
+                    );
+                    guard.fail_thread_with_error("required_secret_missing", payload.to_value());
+                    guard.cleanup();
+                    return ResumeError::Preflight(e);
+                }
+                _ => "preflight_failed",
+            };
+            guard.fail_thread(code);
+            guard.cleanup();
+            ResumeError::Preflight(e)
+        })?;
+
+        params.vault_bindings = vault_bindings;
     }
 
     // Mint FRESH callback + thread-auth tokens for the resumed

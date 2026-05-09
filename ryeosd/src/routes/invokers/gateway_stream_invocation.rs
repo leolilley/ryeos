@@ -267,7 +267,24 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                 return;
                             }
                             Ok(Err(e)) => {
-                                yield Ok(sse_error_event(e.code(), &format!("launch failed: {e}")));
+                                let extras = match &e {
+                                    crate::routes::launch::LaunchSpawnError::Dispatch(de) => {
+                                        let payload = crate::structured_error::StructuredErrorPayload::from(de);
+                                        // Strip `code` and `error` so the SSE helper's explicit args win.
+                                        let mut value = payload.to_value();
+                                        if let Some(map) = value.as_object_mut() {
+                                            map.remove("code");
+                                            map.remove("error");
+                                        }
+                                        Some(value)
+                                    }
+                                    _ => None,
+                                };
+                                yield Ok(sse_error_event_with(
+                                    e.code(),
+                                    &format!("launch failed: {e}"),
+                                    extras,
+                                ));
                                 return;
                             }
                             Err(_) => {

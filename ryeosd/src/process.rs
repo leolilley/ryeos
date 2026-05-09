@@ -124,6 +124,10 @@ const SPAWN_ENV_ALLOWLIST: &[&str] = &[
     "RYEOS_SYSTEM_SPACE_DIR", // root discovery (set by daemon)
     "RUST_LOG", "RUST_BACKTRACE",
     "RYEOSD_TEST_STDERR_DIR",
+    // Proxy + CA infrastructure — not secrets, needed for egress.
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+    "https_proxy", "http_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
 ];
 
 /// Build the env map for a daemon-spawned subprocess.
@@ -162,6 +166,31 @@ pub fn build_spawn_env(
     }
 
     Ok(env.into_iter().collect())
+}
+
+/// Build the env contract for a daemon-spawned subprocess that is
+/// NOT a directive-runtime launch (those go through the model-target
+/// preflight in `execution/launch.rs`).
+///
+/// Composition:
+///   * allowlisted parent env (PATH/HOME/proxy/CA/...) via
+///     `build_spawn_env`
+///   * caller-supplied per-spawn env (e.g. `RYEOSD_THREAD_AUTH_TOKEN`)
+///     — wins over allowlist
+///
+/// This helper deliberately does NOT consult the vault or auto-discover
+/// provider secrets. Provider-secret injection is owned by directive
+/// launch preflight, where the resolved provider id is known.
+pub fn build_subprocess_envs(
+    declared_secrets: &std::collections::BTreeMap<String, String>,
+    per_spawn_env: &[(String, String)],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut env = build_spawn_env(declared_secrets)?;
+    let preset: std::collections::HashSet<String> =
+        per_spawn_env.iter().map(|(k, _)| k.clone()).collect();
+    env.retain(|(k, _)| !preset.contains(k));
+    env.extend(per_spawn_env.iter().cloned());
+    Ok(env)
 }
 
 #[cfg(test)]

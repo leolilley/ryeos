@@ -564,14 +564,20 @@ impl StateStore {
             });
         }
 
+        let mut terminal_payload = json!({
+            "outcome_code": update.outcome_code,
+            "has_error": update.error_json.is_some(),
+            "artifact_count": update.artifacts.len(),
+        });
+        if let Some(err) = &update.error_json {
+            if let Some(map) = terminal_payload.as_object_mut() {
+                map.insert("error".to_string(), err.clone());
+            }
+        }
         events_to_append.push(NewEventRecord {
             event_type: terminal_event_type(&update.status)?.to_string(),
             storage_class: "indexed".to_string(),
-            payload: json!({
-                "outcome_code": update.outcome_code,
-                "has_error": update.error_json.is_some(),
-                "artifact_count": update.artifacts.len(),
-            }),
+            payload: terminal_payload,
         });
 
         let te = convert_events(&events_to_append, &thread_row.chain_root_id, thread_id);
