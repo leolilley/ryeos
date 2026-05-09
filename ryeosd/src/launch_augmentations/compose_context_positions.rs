@@ -181,10 +181,11 @@ pub async fn run(
                 .unwrap_or(r.ai_root.clone())
         })
         .collect();
+    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
         &system_roots,
         &executor_ref,
-        project_path,
+        &cache_root,
         &engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
@@ -192,9 +193,10 @@ pub async fn run(
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
     let stdin_data = serde_json::to_string(&envelope)?;
-    let envs = vec![
-        ("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned),
-    ];
+    let envs = crate::process::build_subprocess_envs(
+        &std::collections::BTreeMap::new(),
+        &vec![("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
+    ).map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,

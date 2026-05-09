@@ -19,6 +19,29 @@ use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
+/// Plant ZEN_API_KEY in the sealed vault so the preflight passes.
+/// The graph's top-level execution goes through the directive dispatch
+/// path which runs `preflight_inject_provider_secret`. Without this
+/// vault entry the preflight fails with `required_secret_missing`.
+fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    let sk = common::fast_fixture::vault_secret_key();
+    let pub_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("public_key.pem");
+    // The fast fixture already writes the public key; just seal secrets.
+    let pub_key = lillux::vault::read_public_key(&pub_path)?;
+    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
+    let secrets = HashMap::from([(
+        "ZEN_API_KEY".to_string(),
+        "test-zen-api-key-value".to_string(),
+    )]);
+    ryeosd::vault::write_sealed_secrets(&store_path, &pub_key, &secrets)?;
+    Ok(())
+}
+
 /// Plant a Python tool at `.ai/tools/echo.py`.
 ///
 /// Unsigned — Unsigned trust class is accepted by the engine for tool
@@ -112,6 +135,7 @@ config:
 async fn graph_action_completes_with_permitted_cap() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
 
@@ -215,6 +239,7 @@ async fn graph_action_completes_with_permitted_cap() {
 async fn graph_action_denied_without_permitted_cap() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
 

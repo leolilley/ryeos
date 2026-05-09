@@ -16,6 +16,24 @@ use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
+/// Plant ZEN_API_KEY in the sealed vault so the preflight passes.
+fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    let pub_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("public_key.pem");
+    let pub_key = lillux::vault::read_public_key(&pub_path)?;
+    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
+    let secrets = HashMap::from([(
+        "ZEN_API_KEY".to_string(),
+        "test-zen-api-key-value".to_string(),
+    )]);
+    ryeosd::vault::write_sealed_secrets(&store_path, &pub_key, &secrets)?;
+    Ok(())
+}
+
 /// Plant a trivial return-only graph in the project's `.ai/graphs/`
 /// directory. No action nodes, so no callback cap enforcement needed.
 fn plant_smoke_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
@@ -38,6 +56,7 @@ config:
 async fn graph_spawn_smoke_returns_valid_result() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
 

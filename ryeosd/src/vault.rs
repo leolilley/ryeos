@@ -264,6 +264,18 @@ impl NodeVault for SealedEnvelopeVault {
     }
 }
 
+/// Read a single named secret from the vault. Returns `Ok(Some(value))`
+/// when present, `Ok(None)` when absent. Use this for the narrow
+/// provider-secret injection path after model-target preflight.
+pub fn read_named_secret(
+    vault: &dyn NodeVault,
+    principal: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    let map = vault.read_all(principal)?;
+    Ok(map.get(name).cloned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,5 +561,41 @@ mod tests {
         let dirs = vec![tmp.path().to_path_buf()];
         let bindings = read_required_secrets(&v, "op", &[], &dirs).unwrap();
         assert!(bindings.is_empty());
+    }
+
+    // ── read_named_secret tests ──────────────────────────────────
+
+    #[test]
+    fn read_named_secret_present() {
+        let mut map = HashMap::new();
+        map.insert("ZEN_API_KEY".to_string(), "sk-zen".to_string());
+        map.insert("OTHER".to_string(), "other-val".to_string());
+        let v = FixedVault(map);
+
+        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        assert_eq!(result, Some("sk-zen".to_string()));
+    }
+
+    #[test]
+    fn read_named_secret_absent() {
+        let mut map = HashMap::new();
+        map.insert("OTHER".to_string(), "other-val".to_string());
+        let v = FixedVault(map);
+
+        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn read_named_secret_only_asked_one_back() {
+        let mut map = HashMap::new();
+        map.insert("ZEN_API_KEY".to_string(), "sk-zen".to_string());
+        map.insert("OPENROUTER_API_KEY".to_string(), "sk-or".to_string());
+        let v = FixedVault(map);
+
+        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        assert_eq!(result, Some("sk-zen".to_string()));
+        // Confirm we only got the one we asked for — no multi-key
+        // injection in the return value.
     }
 }

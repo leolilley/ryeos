@@ -188,9 +188,8 @@ fn read_sealed_secrets(
 #[derive(Debug)]
 pub struct PutOptions {
     pub system_space_dir: PathBuf,
-    /// `KEY=VALUE` pairs to merge into the store. Later pairs override
-    /// earlier pairs for the same key (rare but well-defined).
-    pub assignments: Vec<String>,
+    /// Pre-parsed `(name, value)` entries to merge into the store.
+    pub entries: Vec<(String, String)>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -243,12 +242,18 @@ pub struct RewrapReport {
 
 // ── Verb implementations ─────────────────────────────────────────────
 
-/// `ryeos vault put KEY=VALUE [KEY=VALUE...]` — merge new entries into
+/// `ryeos vault put --name KEY --value-stdin` — merge new entries into
 /// the sealed store. Decrypts, applies the merge, validates, and
 /// re-writes atomically with the same vault keypair.
 pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
-    if opts.assignments.is_empty() {
-        bail!("ryeos vault put: at least one KEY=VALUE assignment required");
+    if opts.entries.is_empty() {
+        bail!("ryeos vault put: at least one entry required");
+    }
+    for (k, v) in &opts.entries {
+        validate_key_name(k)?;
+        if v.is_empty() {
+            bail!("refusing to store empty value for vault key '{k}'");
+        }
     }
     let key_path = default_vault_secret_key_path(&opts.system_space_dir);
     let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
@@ -262,11 +267,10 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
     let store_path = default_sealed_store_path(&opts.system_space_dir);
 
     let mut current = read_sealed_secrets(&store_path, &sk)?;
-    let mut keys_written = Vec::with_capacity(opts.assignments.len());
-    for raw in &opts.assignments {
-        let (k, v) = parse_assignment(raw)?;
+    let mut keys_written = Vec::with_capacity(opts.entries.len());
+    for (k, v) in &opts.entries {
         keys_written.push(k.clone());
-        current.insert(k, v);
+        current.insert(k.clone(), v.clone());
     }
 
     write_sealed_secrets(&store_path, &pk, &current)?;
@@ -586,35 +590,24 @@ fn strip_matching_quotes(s: &str) -> &str {
     }
 }
 
-/// Parse a single `KEY=VALUE` token. Splits on the first `=`. Refuses
-/// empty keys, missing `=`, and applies the same key-name policy that
-/// [`validate_decrypted_keys`] enforces post-decrypt — so the operator
-/// can't accidentally write a `PATH=` entry that would later trip the
-/// daemon's read path.
-fn parse_assignment(raw: &str) -> Result<(String, String)> {
-    let Some(eq) = raw.find('=') else {
-        bail!(
-            "vault put: malformed assignment {raw:?} — expected `KEY=VALUE` \
-             with a literal `=`"
-        );
-    };
-    let key = raw[..eq].trim().to_string();
-    let value = raw[eq + 1..].to_string();
+/// Validate a vault key name. Refuses empty keys, non `[A-Za-z0-9_]+`
+/// patterns, and names on the OS-protected blocked list.
+pub fn validate_key_name(key: &str) -> Result<()> {
     if key.is_empty() {
-        bail!("vault put: empty key in assignment {raw:?}");
+        bail!("vault put: empty key name");
     }
     if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         bail!(
             "vault put: invalid key `{key}` (must match [A-Za-z0-9_]+)"
         );
     }
-    if BLOCKED_NAMES.contains(&key.as_str()) {
+    if BLOCKED_NAMES.contains(&key) {
         bail!(
             "vault put: key `{key}` is on the OS-protected blocked list and \
              would shadow inherited environment"
         );
     }
-    Ok((key, value))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -636,9 +629,9 @@ mod tests {
         let (state, _sk) = fresh_state_with_keypair();
         let report = run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec![
-                "OPENAI_API_KEY=sk-1".into(),
-                "DATABASE_URL=postgres://h/db".into(),
+            entries: vec![
+                ("OPENAI_API_KEY".into(), "sk-1".into()),
+                ("DATABASE_URL".into(), "postgres://h/db".into()),
             ],
         })
         .unwrap();
@@ -657,12 +650,12 @@ mod tests {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["A=1".into()],
+            entries: vec![("A".into(), "1".into())],
         })
         .unwrap();
         let report = run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["B=2".into()],
+            entries: vec![("B".into(), "2".into())],
         })
         .unwrap();
         assert_eq!(report.total_keys_after_put, 2);
@@ -673,12 +666,12 @@ mod tests {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["FOO=old".into()],
+            entries: vec![("FOO".into(), "old".into())],
         })
         .unwrap();
         run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["FOO=new".into()],
+            entries: vec![("FOO".into(), "new".into())],
         })
         .unwrap();
 
@@ -695,7 +688,7 @@ mod tests {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["PATH=/evil".into()],
+            entries: vec![("PATH".into(), "/evil".into())],
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("PATH"));
@@ -706,29 +699,18 @@ mod tests {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["FOO-BAR=baz".into()],
+            entries: vec![("FOO-BAR".into(), "baz".into())],
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("invalid key"));
     }
 
     #[test]
-    fn put_rejects_no_equals() {
+    fn put_requires_at_least_one_entry() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["JUSTAKEY".into()],
-        })
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("malformed assignment"));
-    }
-
-    #[test]
-    fn put_requires_at_least_one_assignment() {
-        let (state, _sk) = fresh_state_with_keypair();
-        let err = run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
-            assignments: vec![],
+            entries: vec![],
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("at least one"));
@@ -749,7 +731,7 @@ mod tests {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["A=1".into(), "B=2".into()],
+            entries: vec![("A".into(), "1".into()), ("B".into(), "2".into())],
         })
         .unwrap();
 
@@ -778,7 +760,7 @@ mod tests {
         let (state, old_sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["FOO=bar".into(), "BAZ=qux".into()],
+            entries: vec![("FOO".into(), "bar".into()), ("BAZ".into(), "qux".into())],
         })
         .unwrap();
         let old_fingerprint = old_sk.public_key().fingerprint();
@@ -854,7 +836,7 @@ mod tests {
         let (state, _old_sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
             system_space_dir: state.path().to_path_buf(),
-            assignments: vec!["ONLY=value".into()],
+            entries: vec![("ONLY".into(), "value".into())],
         })
         .unwrap();
         run_remove(&RemoveOptions {

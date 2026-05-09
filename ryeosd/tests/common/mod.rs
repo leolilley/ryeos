@@ -587,6 +587,232 @@ impl DaemonHarness {
         self.state_path.join(".ai/state/audit/standalone.ndjson")
     }
 
+    /// SIGKILL the daemon child and wait for it to exit and for the
+    /// UDS socket to disappear. Does **not** re-spawn — call
+    /// [`respawn_with`] afterward.
+    ///
+    /// This split enables the caller to perform actions (e.g. kill
+    /// an orphaned subprocess) between daemon death and respawn, so
+    /// the new daemon's reconciler sees the correct process state.
+    pub async fn kill_daemon(&mut self) -> anyhow::Result<()> {
+        self.child
+            .start_kill()
+            .map_err(|e| anyhow::anyhow!("failed to SIGKILL daemon child: {e}"))?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) => {
+                    if Instant::now() > deadline {
+                        anyhow::bail!("daemon child did not exit within 5s after SIGKILL");
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if !self.uds_path.exists() {
+                break;
+            }
+            if Instant::now() > deadline {
+                let _ = std::fs::remove_file(&self.uds_path);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Ok(())
+    }
+
+    /// Re-spawn the daemon against the same `state_path`, `user_space`,
+    /// `bind`, and `uds_path`. The caller passes a `tweak` closure to
+    /// set env vars or args (e.g. `RUST_LOG`).
+    ///
+    /// Must be called after [`kill_daemon`]. The reconciler runs
+    /// automatically at startup and picks up any orphaned threads.
+    ///
+    /// **No `--init-if-missing`** is passed — state is already initialized.
+    pub async fn respawn_with<F: FnOnce(&mut Command)>(
+        &mut self,
+        tweak: F,
+    ) -> anyhow::Result<()> {
+        let mut cmd = Command::new(ryeosd_binary());
+        cmd.arg("--system-space-dir")
+            .arg(&self.state_path)
+            .arg("--bind")
+            .arg(self.bind.to_string())
+            .arg("--uds-path")
+            .arg(&self.uds_path)
+            .env("HOSTNAME", "testhost")
+            .env("USER_SPACE", self.user_space.path())
+            .env("HOME", self.user_space.path())
+            .stdout(Stdio::null())
+            .stderr(
+                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
+                    .and_then(|d| {
+                        let path = std::path::PathBuf::from(d)
+                            .join(format!("daemon-{}.stderr.log", self.bind.port()));
+                        std::fs::File::create(&path).ok().map(Stdio::from)
+                    })
+                    .unwrap_or_else(Stdio::piped),
+            )
+            .kill_on_drop(true);
+
+        tweak(&mut cmd);
+
+        self.child = cmd.spawn()?;
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/health", self.bind);
+        let connect_deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if client
+                .get(&url)
+                .timeout(Duration::from_millis(200))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            if Instant::now() > connect_deadline {
+                let mut buf = String::new();
+                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
+                    let path = std::path::PathBuf::from(dir)
+                        .join(format!("daemon-{}.stderr.log", self.bind.port()));
+                    buf = std::fs::read_to_string(&path).unwrap_or_default();
+                }
+                anyhow::bail!(
+                    "restarted daemon /health never became reachable at {url} — stderr:\n{buf}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Ok(())
+    }
+
+    /// Kill the daemon child, wait for cleanup, and re-spawn against
+    /// the same `state_path`, `user_space`, `bind`, and `uds_path`.
+    /// The caller passes a `tweak` closure to set any additional env
+    /// vars or args (e.g. `RUST_LOG`).
+    ///
+    /// After restart, the reconciler runs automatically and picks up
+    /// any orphaned threads from the previous daemon run.
+    ///
+    /// **No `--init-if-missing`** is passed — the state directory is
+    /// already initialized from the original spawn.
+    ///
+    /// For tests that need to kill orphaned subprocesses between
+    /// daemon death and respawn, use [`kill_daemon`] + [`respawn_with`]
+    /// instead.
+    pub async fn restart_with<F: FnOnce(&mut Command)>(
+        &mut self,
+        tweak: F,
+    ) -> anyhow::Result<()> {
+        // 1. SIGKILL the current child.
+        self.child
+            .start_kill()
+            .map_err(|e| anyhow::anyhow!("failed to SIGKILL daemon child: {e}"))?;
+
+        // 2. Wait for the child to exit.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) => {
+                    if Instant::now() > deadline {
+                        anyhow::bail!("daemon child did not exit within 5s after SIGKILL");
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(_) => break, // Child already reaped.
+            }
+        }
+
+        // 3. Wait for UDS socket file to disappear (or force-remove).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if !self.uds_path.exists() {
+                break;
+            }
+            if Instant::now() > deadline {
+                let _ = std::fs::remove_file(&self.uds_path);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 4. Re-spawn with the same configuration (no --init-if-missing).
+        let mut cmd = Command::new(ryeosd_binary());
+        cmd.arg("--system-space-dir")
+            .arg(&self.state_path)
+            .arg("--bind")
+            .arg(self.bind.to_string())
+            .arg("--uds-path")
+            .arg(&self.uds_path)
+            .env("HOSTNAME", "testhost")
+            .env("USER_SPACE", self.user_space.path())
+            .env("HOME", self.user_space.path())
+            .stdout(Stdio::null())
+            .stderr(
+                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
+                    .and_then(|d| {
+                        let path = std::path::PathBuf::from(d)
+                            .join(format!("daemon-{}.stderr.log", self.bind.port()));
+                        std::fs::File::create(&path).ok().map(Stdio::from)
+                    })
+                    .unwrap_or_else(Stdio::piped),
+            )
+            .kill_on_drop(true);
+
+        tweak(&mut cmd);
+
+        self.child = cmd.spawn()?;
+
+        // 5. Wait for the daemon to be responsive (deadline is generous
+        //    because the reconciler runs before the HTTP listener binds).
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/health", self.bind);
+        let connect_deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if client
+                .get(&url)
+                .timeout(Duration::from_millis(200))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            if Instant::now() > connect_deadline {
+                // Drain stderr for diagnostics.
+                let mut buf = String::new();
+                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
+                    let path = std::path::PathBuf::from(dir)
+                        .join(format!("daemon-{}.stderr.log", self.bind.port()));
+                    buf = std::fs::read_to_string(&path).unwrap_or_default();
+                }
+                anyhow::bail!(
+                    "restarted daemon /health never became reachable at {url} — stderr:\n{buf}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Ok(())
+    }
+
+    /// Convenience wrapper around [`restart_with`] that passes an
+    /// identity tweak (no additional env vars / args).
+    pub async fn restart(&mut self) -> anyhow::Result<()> {
+        self.restart_with(|_| {}).await
+    }
+
     /// Drain whatever has accumulated on the child's stderr handle
     /// **without blocking** on EOF. Used by tests that need to print
     /// diagnostics on assertion failure without waiting for the

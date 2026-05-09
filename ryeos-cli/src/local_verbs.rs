@@ -214,14 +214,24 @@ fn run_trust_pin_verb(argv: &[String]) -> Result<()> {
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos vault put",
-    about = "Add or overwrite KEY=VALUE entries in the sealed secret store",
+    about = "Add or overwrite a secret in the sealed secret store",
     no_binary_name = true
 )]
 struct VaultPutArgs {
-    /// `KEY=VALUE` pairs. The key must match `[A-Za-z0-9_]+` and must
-    /// not be on the OS-protected blocked list (PATH, HOME, …).
-    #[arg(required = true)]
-    assignments: Vec<String>,
+    /// Name of the secret (e.g. `ZEN_API_KEY`).
+    #[arg(long)]
+    name: String,
+
+    /// Read the secret value from stdin (default).
+    /// Mutually exclusive with `--value-string`.
+    #[arg(long, conflicts_with = "value_string")]
+    value_stdin: bool,
+
+    /// Pass the secret value directly on the command line.
+    /// **Insecure** — leaks to shell history / argv / process listings.
+    /// Use only in scripted contexts where stdin is unavailable.
+    #[arg(long, conflicts_with = "value_stdin")]
+    value_string: Option<String>,
 
     /// System space root. Defaults to XDG data dir / ryeos.
     #[arg(long)]
@@ -230,10 +240,25 @@ struct VaultPutArgs {
 
 fn run_vault_put_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultPutArgs>(argv)?;
+    let _ = args.value_stdin;
+
+    let value: String = if let Some(v) = args.value_string {
+        v
+    } else {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| anyhow::anyhow!("failed to read secret from stdin: {e}"))?;
+        if buf.ends_with('\n') { buf.pop(); }
+        if buf.ends_with('\r') { buf.pop(); }
+        buf
+    };
+
     let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
     let report = run_vault_put(&PutOptions {
-        system_space_dir: system_space_dir,
-        assignments: args.assignments,
+        system_space_dir,
+        entries: vec![(args.name, value)],
     })
     .context("ryeos vault put failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);

@@ -826,7 +826,7 @@ docker run -d \
   -v ryeos-data:/data \
   -v /host/path/to/network-tv-tracker:/data/projects/network-tv-tracker:ro \
   -p 7400:8000 \
-  ghcr.io/leolilley/ryeosd-full:0.2.0
+  ghcr.io/leolilley/ryeosd-full:0.2.1
 ```
 
 **Docker Compose:**
@@ -880,7 +880,45 @@ ryeos-core-tools authorize-client \
 The backend's `RYEOS_CLI_KEY_PATH` should point to `tv-tracker-backend.pem`.
 The signing code in Step 2a uses this key to produce the `x-ryeos-*` headers.
 
-### Step 5: Configure the backend
+### Step 5: Provision provider API keys in the vault
+
+Provider keys (e.g. `ZEN_API_KEY`, `OPENROUTER_API_KEY`) must be stored in
+the daemon's encrypted vault — they never live in container env, image build
+args, or `.env` files mounted into the project. The daemon auto-discovers
+which keys are needed by scanning the provider configs that ship in the
+system bundle and injects them into the directive runtime's env at spawn
+time.
+
+```bash
+# Put the provider key in the vault (run inside the container)
+# Repeat for each provider key the daemon's provider configs declare.
+echo "$ZEN_API_KEY" | docker exec -i ryeosd \
+  ryeos-core-tools vault put \
+  --system-space-dir /data/core \
+  ZEN_API_KEY=-
+```
+
+> **Note:** The `vault put` subcommand accepts `KEY=VALUE` pairs as
+> positional arguments. To pipe a value from stdin, use
+> `KEY=$(cat)` syntax in the shell. Alternatively, pass the value
+> directly:
+> ```bash
+> docker exec ryeosd ryeos-core-tools vault put \
+>   --system-space-dir /data/core \
+>   ZEN_API_KEY=sk-actual-key-value
+> ```
+
+Verify the key is stored:
+
+```bash
+docker exec ryeosd ryeos-core-tools vault list \
+  --system-space-dir /data/core
+```
+
+The output lists key names (never values). The key persists across
+container redeploys — no re-`vault put` needed.
+
+### Step 6: Configure the backend
 
 Set these environment variables on the backend:
 
@@ -889,9 +927,13 @@ Set these environment variables on the backend:
 | `RYEOSD_URL` | `http://ryeosd:8000` | Daemon address (container network) |
 | `RYEOS_CLI_KEY_PATH` | `/path/to/tv-tracker-backend.pem` | Client signing key |
 | `RYEOS_PROJECT_PATH` | `/data/projects/network-tv-tracker` | In-container project path |
-| `DEEPSEEK_API_KEY` | (your key) | LLM provider key (vault or env) |
 
-### Step 6: Verify end-to-end
+> **Provider API keys** (e.g. `ZEN_API_KEY`) do NOT go in the backend's
+> env. They live in the daemon's encrypted vault (see Step 5). The daemon
+> auto-discovers which keys the provider configs need and injects them
+> into the runtime subprocess at spawn time.
+
+### Step 7: Verify end-to-end
 
 ```bash
 # From a machine that can reach the daemon
@@ -1061,19 +1103,20 @@ request. See the `signRequest` function in Step 2a for the signing protocol.
 
 ### Change 3: Provider config (required)
 
-The directive needs an LLM provider. This is configured as a provider item
-in the project or via node config. The daemon passes API keys from the vault
-or environment to the runtime subprocess.
+The directive needs an LLM provider. Provider configs ship in the system
+bundle (e.g. `zen.yaml`, `openai.yaml` under
+`.ai/config/ryeos-runtime/model-providers/`). Each config declares which
+env var holds the auth key (e.g. `auth.env_var: ZEN_API_KEY`).
 
-```yaml
-# In the node config or as a provider item
-providers:
-  - name: deepseek
-    model: deepseek-chat
-    auth:
-      env_var: DEEPSEEK_API_KEY
-    base_url: https://api.deepseek.com
-```
+The daemon auto-discovers provider auth env vars from these configs at
+spawn time and injects the corresponding vault entries into the runtime
+subprocess. The operator provisions keys via `ryeos-core-tools vault put`
+(see Step 5 above). Directives do not need to declare `required_secrets`
+for provider keys — the daemon handles this automatically.
+
+If the operator has not provisioned a key the runtime needs, the runtime
+fails with a typed error naming the missing env var and the remediation
+command.
 
 ### Change 4: Tool handler for `.py` files (required if using Python tool)
 

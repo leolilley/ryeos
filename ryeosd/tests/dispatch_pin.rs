@@ -287,6 +287,7 @@ async fn pin_native_runtime_with_detached() {
     assert_eq!(
         body,
         serde_json::json!({
+            "code": "capability_rejected",
             "error": "detached mode not yet supported for native runtimes"
         }),
         "exact error body shape (V5.3 Task 0b's ProtocolCapabilities reproduces this)"
@@ -309,6 +310,7 @@ async fn pin_native_runtime_with_target_site_id() {
     assert_eq!(
         body,
         serde_json::json!({
+            "code": "capability_rejected",
             "error": "remote execution not yet supported for native runtimes"
         }),
         "exact error body shape (V5.3 Task 0b's ProtocolCapabilities reproduces this)"

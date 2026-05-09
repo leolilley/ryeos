@@ -103,6 +103,67 @@ enum Cmd {
         #[arg(long, default_value = "cli-authorized")]
         label: String,
     },
+
+    /// Manage sealed secrets in the daemon vault.
+    Vault {
+        #[command(subcommand)]
+        cmd: VaultCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum VaultCmd {
+    /// Put a secret into the sealed vault store.
+    ///
+    /// By default the value is read from stdin (so it never touches argv,
+    /// shell history, or process listings). For non-interactive scripts
+    /// you may pass `--value-string`.
+    Put {
+        /// Name of the secret (e.g. `ZEN_API_KEY`).
+        #[arg(long)]
+        name: String,
+
+        /// Read the secret value from stdin (default).
+        /// Mutually exclusive with `--value-string`.
+        #[arg(long, conflicts_with = "value_string")]
+        value_stdin: bool,
+
+        /// Pass the secret value directly on the command line.
+        /// **Insecure** — leaks to shell history / argv / process listings.
+        /// Use only in scripted contexts where stdin is unavailable.
+        #[arg(long, conflicts_with = "value_stdin")]
+        value_string: Option<String>,
+
+        /// System space directory.
+        #[arg(long)]
+        system_space_dir: Option<String>,
+    },
+
+    /// List key names in the sealed vault store (values are not printed).
+    List {
+        /// System space directory.
+        #[arg(long)]
+        system_space_dir: Option<String>,
+    },
+
+    /// Remove keys from the sealed vault store.
+    Rm {
+        /// Key names to remove.
+        #[arg(required = true)]
+        keys: Vec<String>,
+
+        /// System space directory.
+        #[arg(long)]
+        system_space_dir: Option<String>,
+    },
+
+    /// Re-encrypt every entry in the sealed vault store under a
+    /// freshly-generated vault keypair.
+    Rewrap {
+        /// System space directory.
+        #[arg(long)]
+        system_space_dir: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -197,6 +258,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             scopes,
             label,
         } => run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json),
+        Cmd::Vault { cmd } => run_vault(cmd),
     }
 }
 
@@ -247,6 +309,82 @@ fn default_source() -> String {
     "project".to_string()
 }
 
+fn resolve_system_space_dir(opt: Option<String>) -> anyhow::Result<std::path::PathBuf> {
+    opt.map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("RYEOS_SYSTEM_SPACE_DIR").ok().map(std::path::PathBuf::from))
+        .ok_or_else(|| anyhow::anyhow!("--system-space-dir or RYEOS_SYSTEM_SPACE_DIR required"))
+}
+
+fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
+    match cmd {
+        VaultCmd::Put {
+            name,
+            value_stdin,
+            value_string,
+            system_space_dir,
+        } => {
+            let ssd = resolve_system_space_dir(system_space_dir)?;
+            let _ = value_stdin;
+
+            let value: String = if let Some(v) = value_string {
+                v
+            } else {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| anyhow::anyhow!("failed to read secret from stdin: {e}"))?;
+                if buf.ends_with('\n') { buf.pop(); }
+                if buf.ends_with('\r') { buf.pop(); }
+                buf
+            };
+
+            let report = ryeos_tools::actions::vault::run_put(
+                &ryeos_tools::actions::vault::PutOptions {
+                    system_space_dir: ssd,
+                    entries: vec![(name, value)],
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        VaultCmd::List { system_space_dir } => {
+            let ssd = resolve_system_space_dir(system_space_dir)?;
+            let report = ryeos_tools::actions::vault::run_list(
+                &ryeos_tools::actions::vault::ListOptions {
+                    system_space_dir: ssd,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        VaultCmd::Rm {
+            keys,
+            system_space_dir,
+        } => {
+            let ssd = resolve_system_space_dir(system_space_dir)?;
+            let report = ryeos_tools::actions::vault::run_remove(
+                &ryeos_tools::actions::vault::RemoveOptions {
+                    system_space_dir: ssd,
+                    keys,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        VaultCmd::Rewrap { system_space_dir } => {
+            let ssd = resolve_system_space_dir(system_space_dir)?;
+            let report = ryeos_tools::actions::vault::run_rewrap(
+                &ryeos_tools::actions::vault::RewrapOptions {
+                    system_space_dir: ssd,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+    }
+}
+
 fn run_authorize_client(
     system_space_dir: Option<String>,
     public_key: Option<String>,
@@ -282,12 +420,7 @@ fn run_authorize_client(
 
     let (ssd, pk_b64, scopes_str, label) = params;
 
-    let system_space_dir = ssd
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var("RYEOS_SYSTEM_SPACE_DIR").ok().map(std::path::PathBuf::from)
-        })
-        .ok_or_else(|| anyhow::anyhow!("--system-space-dir or RYEOS_SYSTEM_SPACE_DIR required"))?;
+    let system_space_dir = resolve_system_space_dir(ssd)?;
 
     let pk_bytes = base64::engine::general_purpose::STANDARD
         .decode(&pk_b64)

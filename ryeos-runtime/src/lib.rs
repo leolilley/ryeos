@@ -14,6 +14,7 @@ pub mod framing;
 pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod interpolation;
+pub mod model_resolution;
 pub mod op_wire;
 pub mod paths;
 pub mod progress;
