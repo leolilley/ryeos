@@ -58,10 +58,7 @@ pub fn compute_scheduled_at(
         }
         "interval" => {
             let interval_ms = expression.parse::<i64>().ok()? * 1000;
-            match last_fire_at {
-                Some(last) => Some(last + interval_ms),
-                None => None, // first fire handled by timer (now + interval)
-            }
+            last_fire_at.map(|last| last + interval_ms)
         }
         "at" => {
             parse_iso_ts(expression)
@@ -77,7 +74,7 @@ fn next_cron_fire(expression: &str, timezone: &str, after_ms: i64) -> Result<Opt
         .with_context(|| format!("invalid cron expression: {}", expression))?;
 
     let after = chrono::DateTime::from_timestamp_millis(after_ms)
-        .unwrap_or_else(|| chrono::Utc::now());
+        .unwrap_or_else(chrono::Utc::now);
 
     let tz: chrono_tz::Tz = timezone.parse()
         .with_context(|| format!("invalid IANA timezone: {}", timezone))?;
@@ -189,7 +186,7 @@ pub fn validate_expression(schedule_type: &str, expression: &str) -> Result<()> 
 
 /// Check if an `at` schedule's timestamp is in the past.
 pub fn is_at_past(expression: &str, now_ms: i64) -> bool {
-    parse_iso_ts(expression).map_or(true, |ts| ts <= now_ms)
+    parse_iso_ts(expression).is_none_or(|ts| ts <= now_ms)
 }
 
 /// Validate a timezone string.

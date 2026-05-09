@@ -23,7 +23,7 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let limit = req.limit.min(500).max(1);
+    let limit = req.limit.clamp(1, 500);
     let (fires, total) = state.scheduler_db.list_fires(
         &req.schedule_id,
         req.status.as_deref(),
