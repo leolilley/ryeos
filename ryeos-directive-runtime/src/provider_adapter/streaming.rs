@@ -370,15 +370,22 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         crate::provider_adapter::tools::serialize_tools(tools, &schemas.cloned());
 
     let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
+    // Resolve {model} template in base_url (e.g. gemini profiles use
+    // `{model}:streamGenerateContent`). Stream URL semantics:
+    //   - None        → default to "/chat/completions"
+    //   - Some("")    → base_url is the full endpoint; do not append
+    //   - Some(other) → append (with leading slash if needed)
+    let base_resolved = provider.base_url.replace("{model}", model);
     let url = match stream_url {
+        Some("") => base_resolved,
         Some(su) => format!(
             "{}{}",
-            provider.base_url.trim_end_matches('/'),
+            base_resolved.trim_end_matches('/'),
             if su.starts_with('/') { su.to_string() } else { format!("/{}", su) }
         ),
         None => format!(
             "{}/chat/completions",
-            provider.base_url.trim_end_matches('/')
+            base_resolved.trim_end_matches('/')
         ),
     };
 

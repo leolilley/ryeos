@@ -1,29 +1,26 @@
-# ryeos:signed:2026-05-09T08:36:14Z:646199729670c7795b417cbfad83671c7849ce4376c1187bb339283472a65f51:f0vmvXAoblSBrW8cGBX3MU5HAsg0lCpzkeFT9zB9rBb5EoOxQbIOtj2wd83PS4HJZls4khI7pKP/+aTkUf0kBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-09T10:22:05Z:ca83ae9323758e5f36aa0ad11112e3773addc957fd7207a574ae25c0c4eaf964:b+s0O6SDofaJ9PRLy9B4870FuT2BbJPn+GP/wZBPXzOrFIiyNnqN++iVqQEUJdSjR24foPTIRSyXo1GILnVwDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
-base_url: "https://openrouter.ai/api/v1"
+base_url: "https://api.openai.com/v1"
 auth:
-  env_var: OPENROUTER_API_KEY
+  env_var: OPENAI_API_KEY
   header_name: Authorization
   prefix: "Bearer "
 headers:
-  HTTP-Referer: "https://ryeos.local/"
-  X-Title: "ryeos directive runtime"
+  Content-Type: application/json
 schemas:
   messages:
-    role_map:
-      user: user
-      assistant: assistant
-      system: system
-      tool: tool
+    role_map: {user: user, assistant: assistant, system: system, tool: tool}
     content_key: content
-    system_message:
-      mode: message
-    tool_result:
-      wrap_key: content
-  streaming:
-    mode: delta_merge
+    system_message: {mode: message_role}
+    tool_result: {wrap_key: content}
+  streaming: {mode: delta_merge}
 pricing:
-  input_per_million: 0.15
-  output_per_million: 0.60
+  input_per_million: 0.0
+  output_per_million: 0.0
+  models:
+    gpt-4o:        {input_per_million: 2.50, output_per_million: 10.00}
+    gpt-4o-mini:   {input_per_million: 0.15, output_per_million: 0.60}
+    o1:            {input_per_million: 15.00, output_per_million: 60.00}
+    o3-mini:       {input_per_million: 1.10, output_per_million: 4.40}
 extra:
   stream_url: "/chat/completions"

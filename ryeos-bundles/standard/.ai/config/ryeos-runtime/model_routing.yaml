@@ -1,19 +1,17 @@
-# ryeos:signed:2026-05-09T08:36:14Z:712da66d51ca5ee9243669e7e3699f8041536a820dd51524f4eff3d3c58573bc:QAH7/t6B+AbREmpv+29Tl3TlpxbdwC13PP879LFVvgFqIXHIa4HTNKqgwRmvHJilpagjWPfmWhw+JNe5X16sCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-09T10:22:05Z:6fb7f4d31ddf05aafdb3352c7ee5d57ce35dd93b8309e906b86008b1f8074b13:kzLUMjzC6P/dzzqgBr34khTtzDIkOA0NwgyLrquVyYUw/A7VytOxdni6T6zQ9j3afbJXp+R3N0GmvVmp/ozYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 tiers:
-  general:
-    provider: zen
-    model: kimi-k2.5-free
-    context_window: 128000
-  fast:
-    provider: zen
-    model: kimi-k2.5-free
-    context_window: 128000
-  high:
-    provider: zen
-    model: claude-sonnet-4-6
-    context_window: 200000
-  orchestrator:
-    provider: zen
-    model: claude-sonnet-4-6
-    context_window: 200000
+  general:      {provider: zen, model: claude-haiku-4-5,    context_window: 200000}
+  fast:         {provider: zen, model: claude-haiku-4-5,    context_window: 200000}
+  high:         {provider: zen, model: claude-sonnet-4-6,   context_window: 200000}
+  orchestrator: {provider: zen, model: claude-sonnet-4-6,   context_window: 200000}
+  max:          {provider: zen, model: claude-opus-4-7,     context_window: 200000}
+  code:         {provider: zen, model: gpt-5.4,             context_window: 200000}
+  code_max:     {provider: zen, model: gpt-5.5-pro,         context_window: 200000}
+  cheap:        {provider: zen, model: gpt-5.4-nano,        context_window: 128000}
+  free:         {provider: zen, model: minimax-m2.5-free,   context_window: 128000}
+  vision:       {provider: zen, model: gemini-3.1-pro,      context_window: 1000000}
+  vision_fast:  {provider: zen, model: gemini-3-flash,      context_window: 1000000}
+  kimi:         {provider: zen, model: kimi-k2.6,           context_window: 128000}
+  glm:          {provider: zen, model: glm-5.1,             context_window: 128000}
+  qwen:         {provider: zen, model: qwen3.6-plus,        context_window: 128000}

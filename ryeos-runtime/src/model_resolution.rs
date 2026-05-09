@@ -101,6 +101,29 @@ pub struct ProviderConfig {
     pub pricing: Option<PricingConfig>,
     #[serde(default)]
     pub extra: HashMap<String, Value>,
+    /// Profile-by-model overlay. Profiles are tried in declaration
+    /// order; the first whose `match` glob list contains a pattern
+    /// matching the model name wins. The matched profile is
+    /// deep-merged over the base config.
+    #[serde(default)]
+    pub profiles: Vec<ProviderProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderProfile {
+    pub name: String,
+    pub r#match: Vec<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub schemas: Option<SchemasConfig>,
+    #[serde(default)]
+    pub extra: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -168,6 +191,34 @@ pub struct PricingConfig {
     pub input_per_million: Option<f64>,
     #[serde(default)]
     pub output_per_million: Option<f64>,
+    /// Per-model overrides. Looked up first; falls back to the
+    /// per-provider defaults above when absent.
+    #[serde(default)]
+    pub models: HashMap<String, ModelPricing>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPricing {
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+}
+
+impl PricingConfig {
+    /// Effective pricing for `model_name`: per-model entry if present,
+    /// else the provider-level defaults wrapped in `ModelPricing`.
+    pub fn for_model(&self, model_name: &str) -> Option<ModelPricing> {
+        if let Some(p) = self.models.get(model_name) {
+            return Some(p.clone());
+        }
+        match (self.input_per_million, self.output_per_million) {
+            (Some(i), Some(o)) => Some(ModelPricing {
+                input_per_million: i,
+                output_per_million: o,
+            }),
+            _ => None,
+        }
+    }
 }
 
 // ── Resolution result types ───────────────────────────────────────
@@ -193,6 +244,52 @@ struct ResolvedTargetInfo {
     model_name: String,
     context_window: u64,
     source: &'static str,
+}
+
+// ── Provider profile resolution ────────────────────────────────────
+
+impl ProviderConfig {
+    /// Return a config with the matching profile (if any) deep-merged
+    /// over the base. Profiles are tried in order; first hit wins.
+    pub fn resolve_for_model(&self, model_name: &str) -> ProviderConfig {
+        for profile in &self.profiles {
+            if profile.r#match.iter().any(|pat| glob_match(pat, model_name)) {
+                return self.merge_profile(profile);
+            }
+        }
+        self.clone()
+    }
+
+    fn merge_profile(&self, p: &ProviderProfile) -> ProviderConfig {
+        let mut out = self.clone();
+        if let Some(url) = &p.base_url { out.base_url = url.clone(); }
+        if let Some(auth) = &p.auth { out.auth = auth.clone(); }
+        if let Some(h) = &p.headers {
+            // Profile headers replace conflicting keys, others inherit.
+            for (k, v) in h { out.headers.insert(k.clone(), v.clone()); }
+        }
+        if let Some(s) = &p.schemas { out.schemas = Some(s.clone()); }
+        if let Some(e) = &p.extra {
+            for (k, v) in e { out.extra.insert(k.clone(), v.clone()); }
+        }
+        // profiles is intentionally *not* carried — the resolved view
+        // is flat and the runtime never recurses.
+        out.profiles = Vec::new();
+        out
+    }
+}
+
+/// Minimal glob: `*` matches anything, exact otherwise.
+/// For our needs (model-name prefix/suffix matching), this is enough.
+/// If patterns get more complex, swap in the `globset` crate.
+fn glob_match(pattern: &str, candidate: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        candidate.starts_with(prefix)
+    } else if let Some(suffix) = pattern.strip_prefix('*') {
+        candidate.ends_with(suffix)
+    } else {
+        pattern == candidate
+    }
 }
 
 // ── Resolution functions ──────────────────────────────────────────
@@ -296,7 +393,7 @@ pub fn resolve_model_target(
         })?;
 
     Ok(ResolvedModelTarget {
-        provider,
+        provider: provider.resolve_for_model(&info.model_name),
         provider_id: info.provider_id,
         model_name: info.model_name,
         context_window: info.context_window,
@@ -453,5 +550,194 @@ mod tests {
         assert_eq!(info.provider_id, "anthropic");
         assert_eq!(info.model_name, "claude-sonnet");
         assert_eq!(info.source, "routing");
+    }
+
+    // ── Profile resolution tests ────────────────────────────────────
+
+    fn base_provider() -> ProviderConfig {
+        ProviderConfig {
+            category: None,
+            base_url: "https://base.example.com/v1".to_string(),
+            auth: AuthConfig {
+                env_var: Some("BASE_KEY".to_string()),
+                header_name: Some("Authorization".to_string()),
+                prefix: Some("Bearer ".to_string()),
+            },
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("Content-Type".to_string(), "application/json".to_string());
+                h
+            },
+            schemas: None,
+            pricing: None,
+            extra: HashMap::new(),
+            profiles: vec![
+                ProviderProfile {
+                    name: "claude".to_string(),
+                    r#match: vec!["claude-*".to_string()],
+                    base_url: Some("https://anthropic.example.com/v1/messages".to_string()),
+                    auth: Some(AuthConfig {
+                        env_var: Some("ANTHROPIC_KEY".to_string()),
+                        header_name: Some("x-api-key".to_string()),
+                        prefix: Some("".to_string()),
+                    }),
+                    headers: Some({
+                        let mut h = HashMap::new();
+                        h.insert("anthropic-version".to_string(), "2023-06-01".to_string());
+                        h
+                    }),
+                    schemas: None,
+                    extra: None,
+                },
+                ProviderProfile {
+                    name: "gpt".to_string(),
+                    r#match: vec!["gpt-*".to_string()],
+                    base_url: None,
+                    auth: None,
+                    headers: Some({
+                        let mut h = HashMap::new();
+                        h.insert("X-OpenAI".to_string(), "true".to_string());
+                        h
+                    }),
+                    schemas: None,
+                    extra: None,
+                },
+                ProviderProfile {
+                    name: "gemini".to_string(),
+                    r#match: vec!["gemini-*".to_string()],
+                    base_url: Some("https://gemini.example.com/v1/models/{model}:generate".to_string()),
+                    auth: Some(AuthConfig {
+                        env_var: Some("BASE_KEY".to_string()),
+                        header_name: Some("x-goog-api-key".to_string()),
+                        prefix: Some("".to_string()),
+                    }),
+                    headers: None,
+                    schemas: None,
+                    extra: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn profile_match_glob_prefix() {
+        let provider = base_provider();
+        let resolved = provider.resolve_for_model("claude-haiku-4-5");
+        assert_eq!(
+            resolved.base_url,
+            "https://anthropic.example.com/v1/messages"
+        );
+        assert_eq!(resolved.auth.env_var.as_deref(), Some("ANTHROPIC_KEY"));
+    }
+
+    #[test]
+    fn profile_match_first_wins() {
+        let provider = base_provider();
+        // "gpt-4" matches the "gpt-*" profile (second), not claude
+        let resolved = provider.resolve_for_model("gpt-4");
+        assert_eq!(
+            resolved.base_url,
+            "https://base.example.com/v1",
+            "gpt profile doesn't override base_url"
+        );
+        assert_eq!(
+            resolved.headers.get("X-OpenAI").map(|s| s.as_str()),
+            Some("true"),
+            "gpt profile adds its header"
+        );
+        assert!(
+            resolved.headers.contains_key("Content-Type"),
+            "base headers inherited"
+        );
+    }
+
+    #[test]
+    fn profile_no_match_returns_base_clone() {
+        let provider = base_provider();
+        let resolved = provider.resolve_for_model("llama-3-70b");
+        assert_eq!(resolved.base_url, "https://base.example.com/v1");
+        assert_eq!(resolved.auth.env_var.as_deref(), Some("BASE_KEY"));
+    }
+
+    #[test]
+    fn profile_merge_overrides_url_auth_keeps_inherited_headers() {
+        let provider = base_provider();
+        let resolved = provider.resolve_for_model("claude-opus-4");
+        assert_eq!(resolved.base_url, "https://anthropic.example.com/v1/messages");
+        assert_eq!(resolved.auth.header_name.as_deref(), Some("x-api-key"));
+        assert_eq!(resolved.auth.prefix.as_deref(), Some(""));
+        // Base header preserved + profile header added
+        assert_eq!(resolved.headers.get("Content-Type").map(|s| s.as_str()), Some("application/json"));
+        assert_eq!(resolved.headers.get("anthropic-version").map(|s| s.as_str()), Some("2023-06-01"));
+    }
+
+    #[test]
+    fn profile_resolved_view_has_no_profiles() {
+        let provider = base_provider();
+        let resolved = provider.resolve_for_model("claude-haiku-4-5");
+        assert!(resolved.profiles.is_empty(), "resolved config must be flat");
+    }
+
+    // ── Pricing tests ───────────────────────────────────────────────
+
+    #[test]
+    fn pricing_per_model_overrides_provider_default() {
+        let pricing = PricingConfig {
+            input_per_million: Some(1.0),
+            output_per_million: Some(5.0),
+            models: {
+                let mut m = HashMap::new();
+                m.insert("claude-haiku-4-5".to_string(), ModelPricing {
+                    input_per_million: 0.80,
+                    output_per_million: 4.00,
+                });
+                m
+            },
+        };
+        let p = pricing.for_model("claude-haiku-4-5").unwrap();
+        assert_eq!(p.input_per_million, 0.80);
+        assert_eq!(p.output_per_million, 4.00);
+    }
+
+    #[test]
+    fn pricing_falls_back_to_provider_default_when_model_absent() {
+        let pricing = PricingConfig {
+            input_per_million: Some(1.0),
+            output_per_million: Some(5.0),
+            models: HashMap::new(),
+        };
+        let p = pricing.for_model("unknown-model").unwrap();
+        assert_eq!(p.input_per_million, 1.0);
+        assert_eq!(p.output_per_million, 5.0);
+    }
+
+    #[test]
+    fn pricing_returns_none_when_no_default_and_no_model_entry() {
+        let pricing = PricingConfig {
+            input_per_million: None,
+            output_per_million: None,
+            models: HashMap::new(),
+        };
+        assert!(pricing.for_model("anything").is_none());
+    }
+
+    // ── Glob match tests ────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_prefix_star() {
+        assert!(super::glob_match("claude-*", "claude-haiku-4-5"));
+        assert!(!super::glob_match("claude-*", "gpt-4"));
+    }
+
+    #[test]
+    fn glob_match_suffix_star() {
+        assert!(super::glob_match("*-free", "minimax-m2.5-free"));
+        assert!(!super::glob_match("*-free", "minimax-m2.5"));
+    }
+
+    #[test]
+    fn glob_match_exact() {
+        assert!(super::glob_match("big-pickle", "big-pickle"));
+        assert!(!super::glob_match("big-pickle", "small-pickle"));
     }
 }
