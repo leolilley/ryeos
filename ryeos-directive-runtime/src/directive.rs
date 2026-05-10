@@ -8,9 +8,9 @@ use serde_json::Value;
 // in the directive-runtime continue to resolve these names.
 #[allow(unused_imports)]
 pub use ryeos_runtime::model_resolution::{
-    MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig, ProviderConfig,
-    SamplingConfig, SchemasConfig, StreamPaths, SystemMessageConfig, ToolResultConfig,
-    ToolSchemaConfig,
+    AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig,
+    ProviderConfig, SamplingConfig, SchemasConfig, StreamPaths, SystemMessageConfig,
+    SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode, ToolSchemaConfig,
 };
 
 /// Typed runtime view of a directive's effective header *after* the

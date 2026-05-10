@@ -12,8 +12,14 @@ schemas:
   messages:
     role_map: {user: user, assistant: assistant, system: system, tool: user}
     content_key: content
-    system_message: {mode: body_field}
-    tool_result: {wrap_key: content}
+    system_message: {mode: body_field, field: system}
+    tool_result:
+      role: user
+      wrap_mode: content_blocks
+      block_template:
+        type: tool_result
+        tool_use_id: "{tool_call_id}"
+        content: "{content}"
   streaming: {mode: event_typed}
 pricing:
   input_per_million: 0.0

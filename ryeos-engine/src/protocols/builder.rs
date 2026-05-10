@@ -452,6 +452,7 @@ mod tests {
                 referenced_items: vec![],
             },
             inventory: HashMap::new(),
+            provider_snapshot: None,
         }
     }
 

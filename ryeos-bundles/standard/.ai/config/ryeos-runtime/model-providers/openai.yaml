@@ -12,7 +12,25 @@ schemas:
     role_map: {user: user, assistant: assistant, system: system, tool: tool}
     content_key: content
     system_message: {mode: message_role}
-    tool_result: {wrap_key: content}
+    tool_result:
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      id: "{id}"
+      type: function
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+  tools:
+    template:
+      type: function
+      function:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
   streaming: {mode: delta_merge}
 pricing:
   input_per_million: 0.0

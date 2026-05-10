@@ -81,7 +81,7 @@ impl Capability {
     }
 
     /// Render back to wire format.
-    pub fn to_string(&self) -> String {
+    pub fn to_wire(&self) -> String {
         format!("ryeos.{}.{}.{}", self.verb, self.kind, self.subject)
     }
 }
@@ -284,7 +284,7 @@ impl Authorizer {
 
     /// Access the underlying `VerbRegistry`.
     pub fn verb_registry(&self) -> &VerbRegistry {
-        &*self.verbs
+        &self.verbs
     }
 
     /// Authorize a principal's scopes against a policy.
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(cap.verb, "execute");
         assert_eq!(cap.kind, "service");
         assert_eq!(cap.subject, "bundle/install");
-        assert_eq!(cap.to_string(), "ryeos.execute.service.bundle/install");
+        assert_eq!(cap.to_wire(), "ryeos.execute.service.bundle/install");
     }
 
     #[test]

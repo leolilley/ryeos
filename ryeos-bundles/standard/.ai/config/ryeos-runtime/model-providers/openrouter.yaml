@@ -17,9 +17,13 @@ schemas:
       tool: tool
     content_key: content
     system_message:
-      mode: message
+      mode: message_role
     tool_result:
-      wrap_key: content
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
   streaming:
     mode: delta_merge
 pricing:
