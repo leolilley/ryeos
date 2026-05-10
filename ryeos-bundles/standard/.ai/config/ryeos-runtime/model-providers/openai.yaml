@@ -1,5 +1,6 @@
 # ryeos:signed:2026-05-09T23:50:18Z:ca83ae9323758e5f36aa0ad11112e3773addc957fd7207a574ae25c0c4eaf964:b+s0O6SDofaJ9PRLy9B4870FuT2BbJPn+GP/wZBPXzOrFIiyNnqN++iVqQEUJdSjR24foPTIRSyXo1GILnVwDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
+family: chat_completions
 base_url: "https://api.openai.com/v1"
 auth:
   env_var: OPENAI_API_KEY

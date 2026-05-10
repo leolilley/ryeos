@@ -945,6 +945,7 @@ mod tests {
     fn compute_cost_with_pricing() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -986,6 +987,7 @@ mod tests {
     fn finalize_extracts_string() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1025,6 +1027,7 @@ mod tests {
     fn system_prompt_prepended() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1068,6 +1071,7 @@ mod tests {
     fn directive_outputs_stored_from_config() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1110,6 +1114,7 @@ mod tests {
     fn sampling_stored_from_config() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1159,6 +1164,7 @@ mod tests {
         );
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1204,6 +1210,7 @@ mod tests {
     fn compute_cost_falls_back_to_provider_default_when_no_model_entry() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),

@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::directive::{
-    ExecutionConfig, ProviderConfig, ProviderMessage, SamplingConfig, StreamEvent,
+    ExecutionConfig, ProtocolFamily, ProviderConfig, ProviderMessage, SamplingConfig, StreamEvent,
     SystemMessageMode, ToolCall, ToolSchema,
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
@@ -482,7 +482,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
 
     // Sampling parameters — gated by provider capabilities so we
     // never send a field the upstream API will reject with a 400.
-    inject_sampling(&mut body, provider_id, sampling);
+    inject_sampling(&mut body, provider.family, sampling);
 
     let mut req = client.post(&url);
 
@@ -846,11 +846,11 @@ fn harvest_chunk_meta(
 /// capabilities. Unknown providers get no fields (fail-closed).
 fn inject_sampling(
     body: &mut Value,
-    provider_id: &str,
+    family: ProtocolFamily,
     sampling: Option<&SamplingConfig>,
 ) {
     if let Some(s) = sampling {
-        let caps = provider_capabilities(provider_id);
+        let caps = family_capabilities(family);
         if caps.supports_temperature {
             if let Some(temp) = s.temperature {
                 body["temperature"] = json!(temp);
@@ -866,7 +866,7 @@ fn inject_sampling(
 
 // ── Provider capabilities ──────────────────────────────────────
 
-/// Capability flags for a single provider. Used to gate which
+/// Capability flags for a protocol family. Used to gate which
 /// sampling fields are safe to inject into the request body.
 #[derive(Debug, Clone)]
 struct ProviderCapabilities {
@@ -876,10 +876,8 @@ struct ProviderCapabilities {
 
 impl Default for ProviderCapabilities {
     fn default() -> Self {
-        // Conservative default: temperature is widely supported,
-        // seed is not. Unknown providers get this.
-        // Fail-closed: unknown providers get no sampling fields injected
-        // until explicitly added to the match in provider_capabilities().
+        // Fail-closed: unknown families get no sampling fields injected
+        // until explicitly added to family_capabilities().
         Self {
             supports_temperature: false,
             supports_seed: false,
@@ -887,25 +885,24 @@ impl Default for ProviderCapabilities {
     }
 }
 
-/// Look up capabilities for a known provider ID. Falls back to
-/// the conservative default for unrecognised providers.
-fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
-    match provider_id {
-        "openai" => ProviderCapabilities {
+/// Look up capabilities for a known protocol family. Falls back to
+/// the conservative default for unrecognised families.
+fn family_capabilities(family: ProtocolFamily) -> ProviderCapabilities {
+    match family {
+        ProtocolFamily::ChatCompletions => ProviderCapabilities {
             supports_temperature: true,
             supports_seed: true,
         },
-        "anthropic" => ProviderCapabilities {
+        ProtocolFamily::AnthropicMessages => ProviderCapabilities {
             supports_temperature: true,
             supports_seed: false,
         },
-        "google" | "gemini" => ProviderCapabilities {
+        ProtocolFamily::GoogleGenerateContent => ProviderCapabilities {
             supports_temperature: true,
             supports_seed: false,
         },
-         _ => ProviderCapabilities::default(),
-     }
- }
+    }
+}
 
 /// Build the request body from the resolved provider config.
 ///
@@ -1207,31 +1204,24 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     }
 
     #[test]
-    fn provider_capabilities_openai_supports_seed() {
-        let caps = provider_capabilities("openai");
+    fn family_capabilities_chat_completions_supports_seed() {
+        let caps = family_capabilities(ProtocolFamily::ChatCompletions);
         assert!(caps.supports_temperature);
         assert!(caps.supports_seed);
     }
 
     #[test]
-    fn provider_capabilities_anthropic_omits_seed() {
-        let caps = provider_capabilities("anthropic");
+    fn family_capabilities_anthropic_omits_seed() {
+        let caps = family_capabilities(ProtocolFamily::AnthropicMessages);
         assert!(caps.supports_temperature);
         assert!(!caps.supports_seed);
     }
 
     #[test]
-    fn provider_capabilities_google_omits_seed() {
-        let caps = provider_capabilities("google");
+    fn family_capabilities_google_omits_seed() {
+        let caps = family_capabilities(ProtocolFamily::GoogleGenerateContent);
         assert!(caps.supports_temperature);
         assert!(!caps.supports_seed);
-    }
-
-    #[test]
-    fn provider_capabilities_unknown_is_fail_closed() {
-        let caps = provider_capabilities("some-new-provider");
-        assert!(!caps.supports_temperature, "unknown provider should not assume temperature");
-        assert!(!caps.supports_seed, "unknown provider should not assume seed");
     }
 
     // ── Body-level sampling injection tests ─────────────────────
@@ -1243,7 +1233,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             temperature: Some(0.3),
             seed: Some(42),
         };
-        inject_sampling(&mut body, "openai", Some(&sampling));
+        inject_sampling(&mut body, ProtocolFamily::ChatCompletions, Some(&sampling));
         assert_eq!(body["temperature"].as_f64(), Some(0.3));
         assert_eq!(body["seed"].as_u64(), Some(42));
     }
@@ -1255,7 +1245,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             temperature: Some(0.7),
             seed: Some(99),
         };
-        inject_sampling(&mut body, "anthropic", Some(&sampling));
+        inject_sampling(&mut body, ProtocolFamily::AnthropicMessages, Some(&sampling));
         assert_eq!(body["temperature"].as_f64(), Some(0.7));
         assert!(body.get("seed").is_none(), "anthropic body must not contain seed");
     }
@@ -1267,27 +1257,15 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             temperature: Some(0.5),
             seed: Some(1),
         };
-        inject_sampling(&mut body, "google", Some(&sampling));
+        inject_sampling(&mut body, ProtocolFamily::GoogleGenerateContent, Some(&sampling));
         assert_eq!(body["temperature"].as_f64(), Some(0.5));
         assert!(body.get("seed").is_none(), "google body must not contain seed");
     }
 
     #[test]
-    fn sampling_injection_unknown_provider_omits_everything() {
-        let mut body = json!({"model": "custom", "messages": []});
-        let sampling = SamplingConfig {
-            temperature: Some(0.9),
-            seed: Some(77),
-        };
-        inject_sampling(&mut body, "custom-provider", Some(&sampling));
-        assert!(body.get("temperature").is_none(), "unknown provider must not get temperature");
-        assert!(body.get("seed").is_none(), "unknown provider must not get seed");
-    }
-
-    #[test]
-    fn sampling_injection_none_sampling_no_fields() {
-        let mut body = json!({"model": "gpt-4", "messages": []});
-        inject_sampling(&mut body, "openai", None);
+    fn sampling_injection_with_no_sampling_config_is_noop() {
+        let mut body = json!({"model": "test", "messages": []});
+        inject_sampling(&mut body, ProtocolFamily::ChatCompletions, None);
         assert!(body.get("temperature").is_none());
         assert!(body.get("seed").is_none());
     }
@@ -1298,6 +1276,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_renders_template() {
         let provider = ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1323,6 +1302,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_deep_merges_body_extra() {
         let provider = ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1345,6 +1325,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         // because ProviderConfig::validate catches it at load-time.
         let provider = ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1365,6 +1346,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         // "tools" key at all — not even tools: [].
         let provider = ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1388,6 +1370,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
         let provider = ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1418,6 +1401,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
         let provider = ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
