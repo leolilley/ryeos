@@ -1,6 +1,5 @@
-# ryeos:signed:2026-05-10T05:28:27Z:2e8e11bcd7623bb1091882483d7f6d721743edc3f3f4d4d7d9da4377ef47d14a:cRwn68el96+hnPhLZSlXcG+fJHvZY7I3a8lRvead5kcEihxYD/s3AtJfGKsEuoTeAB1aG8ZgOgNdvs1vLSnGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-10T07:27:11Z:4ea6e2ae6f2eee60f808a0be28e24d7b5b48b67dad106df1d732ac3cb597aec1:J5VTX/1XmhaAKS35HR5HtZGOCzRhPG+wQUBmh9AlwppvBaRULw7t/h8AhuNCplU3Zl1JYZvkBa6w1UoZvgLeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
-family: anthropic_messages
 base_url: "https://api.anthropic.com/v1/messages"
 auth:
   env_var: ANTHROPIC_API_KEY
@@ -13,38 +12,9 @@ schemas:
   messages:
     role_map: {user: user, assistant: assistant, system: system, tool: user}
     content_key: content
-    text_placement: blocks_array
-    text_block_template:
-      type: text
-      text: "{text}"
-    assistant_tool_calls_placement: inline_blocks
-    system_message: {mode: body_field, field: system}
-    tool_result:
-      role: user
-      wrap_mode: content_blocks
-      block_template:
-        type: tool_result
-        tool_use_id: "{tool_call_id}"
-        content: "{content}"
-    tool_call_block_template:
-      type: tool_use
-      id: "{id}"
-      name: "{name}"
-      input: "{input}"
-  tools:
-    template:
-      name: "{name}"
-      description: "{description}"
-      input_schema: "{schema}"
+    system_message: {mode: body_field}
+    tool_result: {wrap_key: content}
   streaming: {mode: event_typed}
-body_template:
-  model: "{model}"
-  max_tokens: "{max_tokens}"
-  messages: "{messages}"
-  tools: "{tools}"
-  stream: "{stream}"
-body_extra:
-  max_tokens: 8192
 pricing:
   input_per_million: 0.0
   output_per_million: 0.0

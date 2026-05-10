@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn service_registry_count() {
         let reg = build_service_registry();
-        assert_eq!(reg.endpoints().len(), 14);
+        assert_eq!(reg.endpoints().len(), 20);
     }
 
     #[test]

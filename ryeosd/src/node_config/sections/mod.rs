@@ -3,4 +3,5 @@
 pub mod alias;
 pub mod bundle;
 pub mod route;
+pub mod schedule;
 pub mod verb;

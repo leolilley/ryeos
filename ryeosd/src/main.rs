@@ -16,7 +16,7 @@ use ryeosd::services::event_store::EventStoreService;
 use ryeosd::services::thread_lifecycle::ThreadLifecycleService;
 use ryeosd::state::AppState;
 use ryeosd::{
-    api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, service_executor,
+    api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, scheduler, service_executor,
     service_registry, services, state, state_lock, state_store, uds,
 };
 
@@ -227,6 +227,20 @@ async fn main() -> Result<()> {
         .context("StateStore initialization failed")?);
     tracing::info!("StateStore initialized successfully");
 
+    // Open scheduler DB
+    let scheduler_db_path = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("scheduler.sqlite3");
+    let scheduler_db = Arc::new(
+        scheduler::db::SchedulerDb::open(&scheduler_db_path)
+            .context("SchedulerDb initialization failed")?,
+    );
+    tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
+
+    // Note: Schedule spec projection rebuild is handled by
+    // scheduler::reconcile::reconcile() below (line ~523), which is the
+    // single source of truth for CAS→DB sync. Do NOT add a second
+    // rebuild here — that would cause duplicate work and potential
+    // inconsistencies between the two passes.
+
     // Acquire operator state lock — prevents standalone services from
     // running while the daemon is up. Released on process exit (Drop).
     let _state_lock = state_lock::StateLock::acquire(
@@ -242,6 +256,7 @@ async fn main() -> Result<()> {
         kind_profiles.clone(),
         events.clone(),
     )?);
+    threads.set_scheduler_db(scheduler_db.clone(), config.system_space_dir.clone());
     let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
     let thread_auth = Arc::new(execution::callback_token::ThreadAuthStore::new());
@@ -306,7 +321,7 @@ async fn main() -> Result<()> {
 
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone()));
 
-    let app_state = AppState {
+    let mut app_state = AppState {
         config: Arc::new(config.clone()),
         state_store,
         engine: engine.clone(),
@@ -329,6 +344,8 @@ async fn main() -> Result<()> {
         verb_registry,
         alias_registry,
         authorizer,
+        scheduler_db,
+        scheduler_reload_tx: None,
     };
 
     // Reconcile threads from the previous run BEFORE binding listeners,
@@ -337,6 +354,11 @@ async fn main() -> Result<()> {
     // bound would fail. We collect intents here and dispatch them
     // below, after the listeners are accepting connections.
     let resume_intents = reconcile::reconcile(&app_state).await?;
+
+    // Scheduler reload channel — must be created BEFORE the router is built
+    // so that HTTP handler clones of AppState carry the sender.
+    let (scheduler_reload_tx, scheduler_reload_rx) = tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
+    app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
 
     let app = build_router(app_state.clone())
         .layer(axum::middleware::from_fn_with_state(
@@ -457,6 +479,18 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // ── Scheduler reconciliation + timer start ──
+    let scheduler_intents = scheduler::reconcile::reconcile(&Arc::new(app_state.clone())).await?;
+    for intent in scheduler_intents {
+        let st = Arc::new(app_state.clone());
+        tokio::spawn(async move {
+            scheduler::timer::dispatch_recovery_fire(st, intent).await;
+        });
+    }
+
+    tokio::spawn(scheduler::timer::run(Arc::new(app_state.clone()), scheduler_reload_rx));
+    tracing::info!("scheduler: timer loop started");
 
     tokio::select! {
         result = http_task => {
@@ -622,7 +656,7 @@ async fn run_service_standalone(
         &state_lock::default_lock_path(&config.system_space_dir),
     ).context("failed to acquire state lock — is the daemon running?")?;
 
-    let state_root = config.system_space_dir.join(".ai").join("state");
+    let state_root = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     let write_barrier = ryeosd::write_barrier::WriteBarrier::new();
@@ -630,12 +664,18 @@ async fn run_service_standalone(
         state_root, runtime_db_path, signer, write_barrier.clone(),
     )?);
 
+    let scheduler_db_path = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("scheduler.sqlite3");
+    let scheduler_db = Arc::new(
+        scheduler::db::SchedulerDb::open(&scheduler_db_path)?,
+    );
+
     let events = Arc::new(services::event_store::EventStoreService::new(state_store.clone()));
     let threads = Arc::new(services::thread_lifecycle::ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
     )?);
+    threads.set_scheduler_db(scheduler_db.clone(), config.system_space_dir.clone());
     let commands = Arc::new(services::command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,
@@ -719,6 +759,8 @@ async fn run_service_standalone(
         verb_registry: standalone_vr,
         alias_registry: standalone_ar,
         authorizer: standalone_auth,
+        scheduler_db: scheduler_db.clone(),
+        scheduler_reload_tx: None,
     };
 
     let params: serde_json::Value = match params_json {
