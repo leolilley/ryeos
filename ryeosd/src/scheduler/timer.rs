@@ -311,9 +311,9 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
         if !overlap_ok {
             // Skip this fire and all subsequent fires
             record_skip(state, &pending.fire_id, spec, pending.scheduled_at, "overlap_policy_skip").await;
-            return;
+            break; // stop processing this batch, later fires reappear next tick
         }
-        dispatch_fire(state, &pending.fire_id, spec, pending.scheduled_at, pending.reason).await;
+        dispatch_fire(state, &pending.fire_id, spec, pending.scheduled_at, pending.reason, false).await;
     }
 }
 
@@ -323,6 +323,7 @@ pub async fn dispatch_fire(
     spec: &ScheduleSpecRecord,
     scheduled_at: i64,
     trigger_reason: &str,
+    skip_claim: bool,
 ) {
     let now = lillux::time::timestamp_millis();
     let thread_id = types::thread_id_from_fire(fire_id);
@@ -355,7 +356,7 @@ pub async fn dispatch_fire(
         signer_fingerprint: Some(spec.signer_fingerprint.clone()),
     };
 
-    {
+    if !skip_claim {
         let fires_path = fires_path.clone();
         let db = state.scheduler_db.clone();
         let fire_id_owned = fire_id.to_string();
@@ -387,6 +388,21 @@ pub async fn dispatch_fire(
         if !claimed {
             return;
         }
+    } else {
+        // Recovery path: fire already reclaimed, just update JSONL + DB
+        let fires_path = fires_path.clone();
+        let db = state.scheduler_db.clone();
+        let fire_id_owned = fire_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append recovery dispatch entry");
+            }
+            if let Err(e) = db.upsert_fire(&rec) {
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to upsert recovery dispatch fire");
+            }
+        }).await.unwrap_or_else(|e| {
+            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (recovery dispatch)");
+        });
     }
 
     // ── Dispatch via existing dispatch path ──────────────────
@@ -507,8 +523,28 @@ pub async fn dispatch_fire(
 }
 
 /// Dispatch a recovery fire (from reconciler).
+/// Uses reclaim path instead of claim to handle fires already persisted in DB.
 pub async fn dispatch_recovery_fire(state: Arc<AppState>, intent: super::reconcile::ResumeIntent) {
-    dispatch_fire(&state, &intent.fire_id, &intent.spec, intent.scheduled_at, intent.trigger_reason).await;
+    // Attempt to reclaim the fire for redispatch.
+    // This handles the case where fire was persisted but thread was never created.
+    let fire_id = intent.fire_id.clone();
+    let db = state.scheduler_db.clone();
+    let can_reclaim = tokio::task::spawn_blocking(move || {
+        db.reclaim_fire(&fire_id).unwrap_or(false)
+    }).await.unwrap_or_else(|e| {
+        tracing::error!(fire_id = %intent.fire_id, error = %e, "reclaim spawn_blocking failed");
+        false
+    });
+
+    if !can_reclaim {
+        tracing::warn!(
+            fire_id = %intent.fire_id,
+            "fire not reclaim-safe — skipping recovery dispatch"
+        );
+        return;
+    }
+
+    dispatch_fire(&state, &intent.fire_id, &intent.spec, intent.scheduled_at, intent.trigger_reason, true).await;
 }
 
 async fn record_skip(

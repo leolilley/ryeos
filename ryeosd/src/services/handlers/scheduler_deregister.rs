@@ -52,7 +52,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:scheduler/deregister",
     endpoint: "scheduler.deregister",
     availability: ServiceAvailability::Both,
-    required_caps: &[],
+    required_caps: &["ryeos.execute.service.scheduler/deregister"],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)?;

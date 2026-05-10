@@ -62,8 +62,25 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         bail!("at schedule timestamp is in the past");
     }
 
-    // Build YAML body
-    let registered_at = lillux::time::timestamp_millis();
+    // Check if schedule already exists (for preserving registered_at on update)
+    let existing_spec = state.scheduler_db.get_spec(&req.schedule_id)?;
+
+    // Disallow schedule_id reuse if fire history exists from a previous schedule.
+    // Prevents old JSONL from corrupting new schedule on rebuild.
+    // existing_spec.is_none() means this is a new registration, not an update.
+    let fires_dir = state.config.system_space_dir
+        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
+        .join(&req.schedule_id);
+    if fires_dir.exists() && existing_spec.is_none() {
+        bail!(
+            "schedule_id '{}' reuse not allowed: fire history exists at {} — deregister first or use a different ID",
+            req.schedule_id,
+            fires_dir.display()
+        );
+    }
+
+    // Build YAML body — preserve registered_at on updates for deterministic first-fire
+    let registered_at = existing_spec.as_ref().map(|s| s.last_modified).unwrap_or_else(|| lillux::time::timestamp_millis());
     let mut body = serde_json::json!({
         "spec_version": 1,
         "section": "schedules",
@@ -108,7 +125,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let last_modified = lillux::time::timestamp_millis();
 
     // Upsert projection
-    let was_existing = state.scheduler_db.get_spec(&req.schedule_id)?.is_some();
+    let was_existing = existing_spec.is_some();
     let misfire_policy = req.misfire_policy.unwrap_or_default();
     let overlap_policy = req.overlap_policy.unwrap_or_else(|| "skip".to_string());
     let rec = ScheduleSpecRecord {
@@ -168,7 +185,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:scheduler/register",
     endpoint: "scheduler.register",
     availability: ServiceAvailability::Both,
-    required_caps: &[],
+    required_caps: &["ryeos.execute.service.scheduler/register"],
     handler: |params, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)?;

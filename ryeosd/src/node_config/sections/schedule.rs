@@ -30,6 +30,10 @@ pub struct ScheduleRecord {
     pub enabled: bool,
     #[serde(default)]
     pub project_root: Option<String>,
+    /// Canonical registration timestamp (millis since epoch).
+    /// Set once at creation, preserved on updates. Used as anchor for first-fire calculation.
+    #[serde(default)]
+    pub registered_at: Option<i64>,
     /// Path to the YAML file. Set by loader.
     #[serde(skip)]
     pub source_file: std::path::PathBuf,

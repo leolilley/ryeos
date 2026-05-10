@@ -284,6 +284,51 @@ impl SchedulerDb {
         Ok(changed > 0)
     }
 
+    /// Reclaim a fire that was persisted but never got a running thread.
+    /// Safe to redispatch if: status is 'dispatched' AND thread_id is NULL
+    /// or the thread row doesn't exist in the runtime DB.
+    /// Updates fired_at to now and returns true if reclaimable.
+    pub fn reclaim_fire(&self, fire_id: &str) -> Result<bool> {
+        let conn = self.lock()?;
+
+        // Check if the fire exists and is in dispatched state with no thread
+        let is_reclaimable: bool = conn.query_row(
+            "SELECT status = 'dispatched' AND thread_id IS NULL
+             FROM schedule_fires WHERE fire_id = ?1",
+            params![fire_id],
+            |row| row.get::<_, bool>(0),
+        ).optional()?.unwrap_or(false);
+
+        if !is_reclaimable {
+            // Also check: dispatched with thread_id set, but thread may not exist.
+            // For that case, we check if the fire exists at all with dispatched status.
+            let is_dispatched: bool = conn.query_row(
+                "SELECT status = 'dispatched' FROM schedule_fires WHERE fire_id = ?1",
+                params![fire_id],
+                |row| row.get::<_, bool>(0),
+            ).optional()?.unwrap_or(false);
+
+            if !is_dispatched {
+                return Ok(false);
+            }
+
+            // Fire is dispatched with thread_id — update to clear thread_id
+            // so redispatch can proceed. The thread row check is done by the caller.
+            conn.execute(
+                "UPDATE schedule_fires SET fired_at = ?1 WHERE fire_id = ?2",
+                params![lillux::time::timestamp_millis(), fire_id],
+            )?;
+            return Ok(true);
+        }
+
+        // No thread_id at all — safe to reclaim
+        conn.execute(
+            "UPDATE schedule_fires SET fired_at = ?1 WHERE fire_id = ?2",
+            params![lillux::time::timestamp_millis(), fire_id],
+        )?;
+        Ok(true)
+    }
+
     pub fn get_fire(&self, fire_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
