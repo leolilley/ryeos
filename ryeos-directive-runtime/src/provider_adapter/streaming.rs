@@ -62,7 +62,7 @@ pub fn parse_sse_events_with_state(
                 parse_delta_merge(&parsed, &mut events, tool_call_state);
             }
             Some("complete_chunks") => {
-                parse_complete_chunks(&parsed, &mut events, stream_paths);
+                parse_complete_chunks(&parsed, &mut events, stream_paths, tool_call_state);
             }
             _ => {}
         }
@@ -269,6 +269,7 @@ fn parse_complete_chunks(
     parsed: &Value,
     events: &mut Vec<StreamEvent>,
     paths: Option<&crate::directive::StreamPaths>,
+    tool_call_state: &mut HashMap<String, String>,
 ) {
     use ryeos_runtime::template::resolve_path;
 
@@ -318,8 +319,16 @@ fn parse_complete_chunks(
                         );
                         continue;
                     }
-                    // Gemini does not assign tool_call ids; synthesize one.
-                    let id = format!("tc_{}", uuid_like(&name));
+                    // Gemini does not assign tool_call ids; synthesize a
+                    // stream-local sequential id. Counter lives in the
+                    // tool_call_state map keyed `gemini_tc_seq`. IDs are
+                    // stable within a stream (no clock dependency).
+                    let seq: u64 = tool_call_state
+                        .get("gemini_tc_seq")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let id = format!("gemini_tc_{}", seq);
+                    tool_call_state.insert("gemini_tc_seq".to_string(), (seq + 1).to_string());
                     let arguments = serde_json::to_string(&args)
                         .unwrap_or_else(|_| "{}".to_string());
                     events.push(StreamEvent::ToolUse { id, name, arguments });
@@ -354,21 +363,6 @@ fn parse_complete_chunks(
     }
 }
 
-/// Cheap, deterministic id derived from a tool name.
-/// Gemini doesn't return tool_call_ids; the runner needs SOME id
-/// to thread tool results back.
-fn uuid_like(name: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    name.hash(&mut h);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-        .hash(&mut h);
-    format!("{:x}", h.finish())
-}
 
 /// Streaming provider call. Issues a streaming POST (`stream: true` +
 /// `stream_options.include_usage: true` for OpenAI-compatible
@@ -418,8 +412,12 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     let (converted_messages, system_prompt) =
         crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
 
-    let tools_val =
-        crate::provider_adapter::tools::serialize_tools(tools, &schemas.cloned());
+    let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
+    let tools_val = crate::provider_adapter::tools::serialize_tools(
+        tools,
+        &tool_schema,
+        &schemas.cloned(),
+    );
 
     let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
     // Resolve {model} template in base_url (e.g. gemini profiles use
@@ -750,18 +748,20 @@ fn harvest_chunk_meta(
         if let Some(sp) = stream_paths {
             if let Some(ref usage_path) = sp.usage_path {
                 if let Some(u) = resolve_path(&parsed, usage_path) {
-                    let input = sp.input_tokens_field.as_ref()
+                    let new_input = sp.input_tokens_field.as_ref()
                         .and_then(|f| u.get(f))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let output = sp.output_tokens_field.as_ref()
+                    let new_output = sp.output_tokens_field.as_ref()
                         .and_then(|f| u.get(f))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    if input > 0 || output > 0 {
+                    if new_input > 0 || new_output > 0 {
+                        let prev_input = last_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
+                        let prev_output = last_usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
                         *last_usage = Some(TokenUsage {
-                            input_tokens: input,
-                            output_tokens: output,
+                            input_tokens: new_input.max(prev_input),
+                            output_tokens: new_output.max(prev_output),
                         });
                     }
                 }
@@ -776,20 +776,22 @@ fn harvest_chunk_meta(
         } else {
             // OpenAI / Anthropic style
             if let Some(u) = parsed.get("usage") {
-                let input = u
+                let new_input = u
                     .get("prompt_tokens")
                     .or_else(|| u.get("input_tokens"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let output = u
+                let new_output = u
                     .get("completion_tokens")
                     .or_else(|| u.get("output_tokens"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                if input > 0 || output > 0 {
+                if new_input > 0 || new_output > 0 {
+                    let prev_input = last_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
+                    let prev_output = last_usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
                     *last_usage = Some(TokenUsage {
-                        input_tokens: input,
-                        output_tokens: output,
+                        input_tokens: new_input.max(prev_input),
+                        output_tokens: new_output.max(prev_output),
                     });
                 }
             }
@@ -881,8 +883,10 @@ fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
 /// prompt per `schemas.messages.system_message` rules, and adds tools
 /// if the template didn't already place them.
 ///
-/// Panics if `body_template` is not set — every provider config must
-/// declare its body shape explicitly.
+/// # Panics
+///
+/// Panics if `body_template` is not set. This should never happen in
+/// production because `ProviderConfig::validate` catches it at load-time.
 fn build_request_body(
     provider: &ProviderConfig,
     model: &str,
@@ -894,11 +898,15 @@ fn build_request_body(
     use ryeos_runtime::template::{apply_template, deep_merge};
 
     let template = provider.body_template.as_ref().unwrap_or_else(|| {
-        panic!(
-            "provider config for model '{}' has no body_template — \
-             this is a required field. Add body_template to the provider \
-             config or matching profile.",
-            model
+        unreachable!(
+            "ProviderConfig::validate() rejects providers without body_template \
+             at config-load time (resolve_model_target → bootstrap, launch). \
+             If this fires, either:\n  \
+             1. validate() was not called on the path that produced this config, OR\n  \
+             2. a code path constructed ProviderConfig directly without validation.\n  \
+             The fix is to add a validate() call at the new construction site, \
+             not to add a runtime fallback here. The adapter does not guess \
+             body shapes — that is a config error and must surface loudly."
         )
     });
 
@@ -1275,8 +1283,10 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
     }
 
     #[test]
-    #[should_panic(expected = "no body_template")]
+    #[should_panic(expected = "entered unreachable code")]
     fn build_request_body_panics_when_no_template() {
+        // Defense-in-depth: this should never trigger in production
+        // because ProviderConfig::validate catches it at load-time.
         let provider = ProviderConfig {
             category: None,
             base_url: "http://example.com".to_string(),
@@ -1323,7 +1333,10 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
                 messages: Some(MessageSchemas {
                     role_map: None,
                     content_key: None,
-                    content_wrap: None,
+                    text_placement: None,
+                    assistant_tool_calls_placement: None,
+                    text_block_template: None,
+                    tool_call_block_template: None,
                     system_message: Some(SystemMessageConfig {
                         mode: Some("body_inject".to_string()),
                         field: None,
@@ -1336,6 +1349,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
                     tool_result: None,
                     tool_list_wrap: None,
                 }),
+                tools: None,
                 streaming: None,
             }),
             pricing: None,
@@ -1372,7 +1386,8 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             }]
         });
         let mut events = vec![];
-        super::parse_complete_chunks(&frame, &mut events, Some(&paths));
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Delta(s) => assert_eq!(s, "Hi there"),
@@ -1404,7 +1419,8 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             }]
         });
         let mut events = vec![];
-        super::parse_complete_chunks(&frame, &mut events, Some(&paths));
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Delta(s) => assert_eq!(s, "the answer is 42"),
@@ -1434,7 +1450,8 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             }]
         });
         let mut events = vec![];
-        super::parse_complete_chunks(&frame, &mut events, Some(&paths));
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
         // 1 Delta + 1 Done
         assert_eq!(events.len(), 2);
         assert!(matches!(events[1], StreamEvent::Done));
@@ -1444,7 +1461,50 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
     fn parse_complete_chunks_no_paths_emits_warning_and_zero_events() {
         let frame = json!({"candidates": []});
         let mut events = vec![];
-        super::parse_complete_chunks(&frame, &mut events, None);
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, None, &mut state);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_complete_chunks_assigns_stable_sequential_tool_call_ids() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: None,
+            tool_call_field: Some("functionCall".to_string()),
+            tool_call_name_path: Some("functionCall.name".to_string()),
+            tool_call_args_path: Some("functionCall.args".to_string()),
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        let frame = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "search", "args": {"q": "rust"}}},
+                    {"functionCall": {"name": "search", "args": {"q": "go"}}}
+                ]}
+            }]
+        });
+        let mut events = vec![];
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            StreamEvent::ToolUse { id, name, .. } => {
+                assert_eq!(id, "gemini_tc_0");
+                assert_eq!(name, "search");
+            }
+            other => panic!("expected ToolUse, got {:?}", other),
+        }
+        match &events[1] {
+            StreamEvent::ToolUse { id, .. } => assert_eq!(id, "gemini_tc_1"),
+            other => panic!("expected ToolUse, got {:?}", other),
+        }
+        // Counter persists in state.
+        assert_eq!(state.get("gemini_tc_seq").map(|s| s.as_str()), Some("2"));
     }
 }

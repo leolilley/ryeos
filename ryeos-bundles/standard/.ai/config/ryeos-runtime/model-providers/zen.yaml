@@ -1,3 +1,4 @@
+# ryeos:signed:2026-05-09T23:50:18Z:46df26ba9475ab332733d70cbff2dbb76aedc1d97df6fd086221a388c6644503:nkDbsqlQXjgPDiGNS70tQaea4BfRLj8j67bJrrH5zf+1/XoWwNwzx3qH6boM5AwPVGuhYoLJvYbOFyWNbJf4BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 base_url: "https://opencode.ai/zen/v1"
 auth:
@@ -11,7 +12,25 @@ schemas:
     role_map: {user: user, assistant: assistant, system: system, tool: tool}
     content_key: content
     system_message: {mode: message_role}
-    tool_result: {wrap_key: content}
+    tool_result:
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      id: "{id}"
+      type: function
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+  tools:
+    template:
+      type: function
+      function:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
   streaming: {mode: delta_merge}
 body_template:
   model: "{model}"
@@ -58,9 +77,7 @@ pricing:
     gemini-3.1-pro:      {input_per_million: 1.25, output_per_million: 10.00}
 
 profiles:
-  # Claude family — Anthropic Messages API via Zen's /v1/messages
-  # endpoint. Zen handles Anthropic's auth; we swap the header to
-  # x-api-key + anthropic-version, and set the body shape.
+  # ── Anthropic Messages API (Claude family routed through Zen's /v1/messages) ──
   - name: anthropic
     match: ["claude-*"]
     base_url: "https://opencode.ai/zen/v1/messages"
@@ -82,11 +99,27 @@ profiles:
       messages:
         role_map: {user: user, assistant: assistant}
         content_key: content
+        assistant_tool_calls_placement: inline_blocks
         system_message:
           mode: body_field
           field: system
         tool_result:
-          wrap_key: content
+          role: user
+          wrap_mode: content_blocks
+          block_template:
+            type: tool_result
+            tool_use_id: "{tool_call_id}"
+            content: "{content}"
+        tool_call_block_template:
+          type: tool_use
+          id: "{id}"
+          name: "{name}"
+          input: "{input}"
+      tools:
+        template:
+          name: "{name}"
+          description: "{description}"
+          input_schema: "{schema}"
       streaming:
         mode: event_typed
     extra:
@@ -106,11 +139,7 @@ profiles:
       - "nemotron-*"
       - "hy3-*"
 
-  # Gemini — Zen routes Gemini through GCP's native API which
-  # rejects OpenAI shape. Body is `{contents: [{role, parts: [{text}]}]}`,
-  # auth is `x-goog-api-key`, system prompt goes into
-  # `systemInstruction.parts[0].text`. Streaming endpoint uses
-  # `?alt=sse` and emits one complete chunk per data: frame.
+  # ── Gemini (native Google API via Zen's :streamGenerateContent endpoint) ──
   - name: gemini
     match: ["gemini-*"]
     base_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
@@ -126,30 +155,51 @@ profiles:
         maxOutputTokens: 4096
         thinkingConfig:
           includeThoughts: true
-          thinkingLevel: "low"
+          thinkingLevel: low
     schemas:
       messages:
         role_map: {user: user, assistant: model}
         content_key: parts
-        content_wrap: parts
+        text_placement: parts_array
+        assistant_tool_calls_placement: inline_blocks
+        text_block_template:
+          text: "{text}"
         system_message:
           mode: body_inject
           template:
             systemInstruction:
               parts:
                 - text: "{system}"
+        tool_result:
+          role: user
+          wrap_mode: content_blocks
+          block_template:
+            functionResponse:
+              name: "{tool_name}"
+              response:
+                content: "{content}"
+        tool_call_block_template:
+          functionCall:
+            name: "{name}"
+            args: "{input}"
+      tools:
+        template:
+          name: "{name}"
+          description: "{description}"
+          parameters: "{schema}"
+        list_wrap: functionDeclarations
       streaming:
         mode: complete_chunks
         paths:
           content_path: "candidates.0.content.parts"
-          text_field: "text"
-          thought_field: "thought"
-          tool_call_field: "functionCall"
+          text_field: text
+          thought_field: thought
+          tool_call_field: functionCall
           tool_call_name_path: "functionCall.name"
           tool_call_args_path: "functionCall.args"
-          usage_path: "usageMetadata"
-          input_tokens_field: "promptTokenCount"
-          output_tokens_field: "candidatesTokenCount"
+          usage_path: usageMetadata
+          input_tokens_field: promptTokenCount
+          output_tokens_field: candidatesTokenCount
           finish_reason_path: "candidates.0.finishReason"
     extra:
       stream_url: ""
