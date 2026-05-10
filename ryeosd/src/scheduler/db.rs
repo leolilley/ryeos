@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS schedule_specs (
     project_root         TEXT,
     signer_fingerprint   TEXT NOT NULL,
     spec_hash            TEXT NOT NULL,
-    last_modified        INTEGER NOT NULL,
+    registered_at        INTEGER NOT NULL,
     requester_fingerprint TEXT NOT NULL DEFAULT '',
     capabilities          TEXT NOT NULL DEFAULT '[]'
 );
@@ -79,7 +79,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "project_root", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "signer_fingerprint", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "spec_hash", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "last_modified", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "registered_at", col_type: "INTEGER", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "requester_fingerprint", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "capabilities", col_type: "TEXT", pk: false, not_null: true },
                 ],
@@ -144,7 +144,7 @@ impl SchedulerDb {
             "INSERT INTO schedule_specs
                 (schedule_id, item_ref, params, schedule_type, expression,
                  timezone, misfire_policy, overlap_policy, enabled,
-                 project_root, signer_fingerprint, spec_hash, last_modified,
+                 project_root, signer_fingerprint, spec_hash, registered_at,
                  requester_fingerprint, capabilities)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(schedule_id) DO UPDATE SET
@@ -153,7 +153,7 @@ impl SchedulerDb {
                 timezone=excluded.timezone, misfire_policy=excluded.misfire_policy,
                 overlap_policy=excluded.overlap_policy, enabled=excluded.enabled,
                 project_root=excluded.project_root, signer_fingerprint=excluded.signer_fingerprint,
-                spec_hash=excluded.spec_hash, last_modified=excluded.last_modified,
+                spec_hash=excluded.spec_hash, registered_at=excluded.registered_at,
                 requester_fingerprint=excluded.requester_fingerprint,
                 capabilities=excluded.capabilities",
             params![
@@ -161,7 +161,7 @@ impl SchedulerDb {
                 rec.schedule_type, rec.expression, rec.timezone,
                 rec.misfire_policy, rec.overlap_policy, rec.enabled as i32,
                 rec.project_root, rec.signer_fingerprint, rec.spec_hash,
-                rec.last_modified, rec.requester_fingerprint, capabilities_json,
+                rec.registered_at, rec.requester_fingerprint, capabilities_json,
             ],
         )
         .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
@@ -181,7 +181,7 @@ impl SchedulerDb {
         let mut stmt = conn.prepare(
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
-                    project_root, signer_fingerprint, spec_hash, last_modified,
+                    project_root, signer_fingerprint, spec_hash, registered_at,
                     requester_fingerprint, capabilities
              FROM schedule_specs WHERE schedule_id = ?1",
         )?;
@@ -195,7 +195,7 @@ impl SchedulerDb {
         let mut stmt = conn.prepare(
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
-                    project_root, signer_fingerprint, spec_hash, last_modified,
+                    project_root, signer_fingerprint, spec_hash, registered_at,
                     requester_fingerprint, capabilities
              FROM schedule_specs WHERE enabled = 1",
         )?;
@@ -210,7 +210,7 @@ impl SchedulerDb {
     pub fn list_specs(&self, enabled_only: bool, schedule_type: Option<&str>) -> Result<Vec<ScheduleSpecRecord>> {
         let sel = "SELECT schedule_id, item_ref, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
-                          project_root, signer_fingerprint, spec_hash, last_modified,
+                          project_root, signer_fingerprint, spec_hash, registered_at,
                           requester_fingerprint, capabilities";
         let sql = match (enabled_only, schedule_type) {
             (true, Some(_)) => format!("{sel} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?"),
@@ -555,7 +555,7 @@ fn row_to_spec(row: &rusqlite::Row<'_>) -> ScheduleSpecRecord {
         project_root: row.get("project_root").unwrap(),
         signer_fingerprint: row.get("signer_fingerprint").unwrap(),
         spec_hash: row.get("spec_hash").unwrap(),
-        last_modified: row.get("last_modified").unwrap(),
+        registered_at: row.get("registered_at").unwrap(),
         requester_fingerprint: row.get("requester_fingerprint").unwrap(),
         capabilities,
     }
@@ -599,7 +599,7 @@ mod tests {
             project_root: None,
             signer_fingerprint: "fp:test".to_string(),
             spec_hash: "abc123".to_string(),
-            last_modified: 1000,
+            registered_at: 1000,
             requester_fingerprint: "fp:test".to_string(),
             capabilities: vec!["ryeos.execute.*".to_string()],
         }

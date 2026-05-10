@@ -48,9 +48,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &state.identity,
     )?;
 
+    // Update projection — preserve registered_at (immutable anchor)
     let mut rec = spec;
     rec.enabled = true;
-    rec.last_modified = lillux::time::timestamp_millis();
     state.scheduler_db.upsert_spec(&rec)?;
 
     if let Some(ref tx) = state.scheduler_reload_tx {

@@ -150,7 +150,18 @@ pub fn rebuild_specs_from_dir(
                     .unwrap_or_else(lillux::time::timestamp_millis)
             });
 
-        let rec = spec_record_from_body(&body, &signer_fingerprint, &spec_hash, registered_at);
+        let rec = match spec_record_from_body(&body, &signer_fingerprint, &spec_hash, registered_at) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    schedule_id = %name,
+                    error = %e,
+                    "schedule validation failed — rejecting"
+                );
+                continue;
+            }
+        };
 
         if let Err(e) = db.upsert_spec(&rec) {
             tracing::error!(schedule_id = %schedule_id, error = %e, "failed to upsert spec projection");
@@ -273,27 +284,27 @@ fn spec_record_from_body(
     body: &serde_json::Value,
     signer_fingerprint: &str,
     spec_hash: &str,
-    last_modified: i64,
-) -> ScheduleSpecRecord {
-    // Extract execution authority from YAML body.
-    // The execution block is written at registration time by scheduler_register.
+    registered_at: i64,
+) -> anyhow::Result<ScheduleSpecRecord> {
+    // Fail-closed: execution block is required for security.
+    // Reject schedules missing it — they must be re-registered.
     let (requester_fingerprint, capabilities) = body.get("execution")
         .and_then(|exec| {
             let fp = exec.get("requester_fingerprint")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .filter(|s| !s.is_empty())?;
             let caps = exec.get("capabilities")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some((fp, caps))
+                .filter(|arr| !arr.is_empty())?;
+            let cap_strs: Vec<String> = caps.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if cap_strs.is_empty() { return None; }
+            Some((fp.to_string(), cap_strs))
         })
-        .unwrap_or_else(|| (String::new(), Vec::new()));
+        .ok_or_else(|| anyhow::anyhow!(
+            "missing or invalid execution block (requires non-empty requester_fingerprint + capabilities)"
+        ))?;
 
     // Normalize misfire default: both live and rebuild paths must use the
     // same default when the field is empty. Interval → fire_once_now, else → skip.
@@ -309,7 +320,7 @@ fn spec_record_from_body(
         raw_misfire.to_string()
     };
 
-    ScheduleSpecRecord {
+    Ok(ScheduleSpecRecord {
         schedule_id: body_str(body, "schedule_id"),
         item_ref: body_str(body, "item_ref"),
         params: body.get("params")
@@ -327,10 +338,10 @@ fn spec_record_from_body(
         project_root: body.get("project_root").and_then(|v| v.as_str()).map(String::from),
         signer_fingerprint: signer_fingerprint.to_string(),
         spec_hash: spec_hash.to_string(),
-        last_modified,
+        registered_at,
         requester_fingerprint,
         capabilities,
-    }
+    })
 }
 
 fn body_str(v: &serde_json::Value, key: &str) -> String {

@@ -107,7 +107,7 @@ mod tests {
             project_root: None,
             signer_fingerprint: "fp:test".to_string(),
             spec_hash: "abc".to_string(),
-            last_modified: 0,
+            registered_at: 0,
             requester_fingerprint: "fp:test".to_string(),
             capabilities: vec!["ryeos.execute.*".to_string()],
         }

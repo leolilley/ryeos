@@ -17,7 +17,9 @@ pub struct ScheduleSpecRecord {
     pub project_root: Option<String>,
     pub signer_fingerprint: String,
     pub spec_hash: String,
-    pub last_modified: i64,
+    /// Immutable scheduling anchor (millis since epoch).
+    /// Set once at creation, preserved on updates. Used by timer for fire-time calculation.
+    pub registered_at: i64,
     /// Fingerprint of the principal who registered this schedule.
     /// Used as the acting principal at dispatch time.
     pub requester_fingerprint: String,

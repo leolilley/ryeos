@@ -50,10 +50,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &state.identity,
     )?;
 
-    // Update projection
+    // Update projection — preserve registered_at (immutable anchor)
     let mut rec = spec;
     rec.enabled = false;
-    rec.last_modified = lillux::time::timestamp_millis();
     state.scheduler_db.upsert_spec(&rec)?;
 
     // Ping timer loop

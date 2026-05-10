@@ -153,7 +153,7 @@ fn load_specs_or_log(state: &Arc<AppState>) -> Vec<ScheduleSpecRecord> {
 
 /// Check if a spec is due by computing its scheduled_at from the DB's last
 /// fire record. For the first fire of an interval schedule (no last fire),
-/// we use the spec's `last_modified` (set at registration time) as the base.
+/// we use the spec's `registered_at` (immutable anchor) as the base.
 fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
     let last_fire_at = match state.scheduler_db.get_last_fire(&spec.schedule_id) {
         Ok(Some(f)) => Some(f.scheduled_at),
@@ -171,7 +171,7 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
     // For interval schedules with no prior fire, use registration time as base
     let effective_last = last_fire_at.or_else(|| {
         if spec.schedule_type == "interval" || spec.schedule_type == "cron" {
-            Some(spec.last_modified)
+            Some(spec.registered_at)
         } else {
             None
         }
@@ -179,7 +179,7 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
 
     let scheduled_at = match crontab::compute_scheduled_at(
         &spec.schedule_type, &spec.expression, &spec.timezone, now, effective_last,
-        Some(spec.last_modified),
+        Some(spec.registered_at),
     ) {
         Some(at) => at,
         None => {
@@ -207,7 +207,7 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
                         return false;
                     }
                 };
-                let first_fire = spec.last_modified + interval_secs * 1000;
+                let first_fire = spec.registered_at + interval_secs * 1000;
                 return first_fire <= now;
             }
             // For at schedules, parse the expression directly
@@ -226,14 +226,14 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
 fn compute_soonest_fire(specs: &[ScheduleSpecRecord], now: i64) -> Option<i64> {
     specs.iter().filter_map(|s| {
         // For interval schedules with no prior fires, the first fire is at
-        // last_modified + interval. For cron/at, compute_next_fire handles it.
+        // registered_at + interval. For cron/at, compute_next_fire handles it.
         if s.schedule_type == "interval" {
             let interval_secs = match s.expression.parse::<i64>() {
                 Ok(secs) if secs > 0 => secs,
                 _ => return None, // skip invalid interval in sleep calculation
             };
             let interval_ms = interval_secs * 1000;
-            let first_fire = s.last_modified + interval_ms;
+            let first_fire = s.registered_at + interval_ms;
             if first_fire > now {
                 return Some(first_fire);
             }
@@ -263,7 +263,7 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
 
     let scheduled_at = match crontab::compute_scheduled_at(
         &spec.schedule_type, &spec.expression, &spec.timezone, now, last_fire_at,
-        Some(spec.last_modified),
+        Some(spec.registered_at),
     ) {
         Some(at) => at,
         None => {
@@ -280,7 +280,7 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
                         return;
                     }
                 };
-                spec.last_modified + interval_ms
+                spec.registered_at + interval_ms
             } else {
                 return;
             }

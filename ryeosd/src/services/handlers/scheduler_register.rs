@@ -104,7 +104,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 let body: serde_json::Value = serde_yaml::from_str(&body_str).ok()?;
                 body.get("registered_at").and_then(|v| v.as_i64())
             })
-            .unwrap_or_else(|| existing_spec.as_ref().map(|s| s.last_modified).unwrap_or_else(lillux::time::timestamp_millis))
+            .unwrap_or_else(|| existing_spec.as_ref().map(|s| s.registered_at).unwrap_or_else(lillux::time::timestamp_millis))
     } else {
         lillux::time::timestamp_millis()
     };
@@ -130,12 +130,18 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
     // Determine execution authority from caller context.
     // The service executor injects these from ExecutionContext before
-    // dispatching the handler. If missing (e.g. standalone mode), fall back
-    // to node identity with full execute capabilities.
+    // dispatching the handler. Fail-closed: if injection didn't happen,
+    // error out rather than silently degrading to node identity.
     let requester_fingerprint = req.caller_fingerprint.clone()
-        .unwrap_or_else(|| state.identity.fingerprint().to_string());
+        .ok_or_else(|| anyhow::anyhow!(
+            "scheduler.register requires verified caller context \
+             (executor must inject _caller_fingerprint)"
+        ))?;
     let capabilities = req.caller_capabilities.clone()
-        .unwrap_or_else(|| vec!["ryeos.execute.*".to_string()]);
+        .ok_or_else(|| anyhow::anyhow!(
+            "scheduler.register requires verified caller context \
+             (executor must inject _caller_capabilities)"
+        ))?;
 
     if let Some(ref p) = req.project_root {
         body["project_root"] = Value::String(p.clone());
@@ -164,7 +170,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Compute hash
     let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
-    let last_modified = lillux::time::timestamp_millis();
+    // Use registered_at as the scheduling anchor — immutable across updates.
+    // This ensures the timer always fires at the same intervals regardless of
+    // when the schedule was last modified.
+    let registered_at_db = registered_at;
 
     // Upsert projection
     let was_existing = existing_spec.is_some();
@@ -183,7 +192,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         project_root: req.project_root.clone(),
         signer_fingerprint,
         spec_hash,
-        last_modified,
+        registered_at: registered_at_db,
         requester_fingerprint,
         capabilities,
     };
