@@ -75,7 +75,7 @@ pub fn rebuild_specs_from_dir(
         };
 
         // Strip signature lines and parse YAML body
-        let body_str = strip_signature(&content);
+        let body_str = lillux::signature::strip_signature_lines(&content);
         let body: serde_json::Value = match serde_yaml::from_str(&body_str) {
             Ok(b) => b,
             Err(e) => {
@@ -85,8 +85,13 @@ pub fn rebuild_specs_from_dir(
         };
 
         // Extract signer fingerprint from signature line
-        let signer_fingerprint = parse_signer_fingerprint(&content)
-            .unwrap_or_else(|| "unknown".to_string());
+        let signer_fingerprint = match parse_signer_fingerprint(&content) {
+            Some(fp) => fp,
+            None => {
+                tracing::warn!(path = %path.display(), "missing or invalid signature — skipping unsigned schedule");
+                continue;
+            }
+        };
 
         let schedule_id = match body.get("schedule_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
@@ -95,6 +100,12 @@ pub fn rebuild_specs_from_dir(
                 continue;
             }
         };
+
+        // Validate schedule_id format (no path traversal, no whitespace)
+        if let Err(e) = super::crontab::validate_schedule_id(&schedule_id) {
+            tracing::warn!(path = %path.display(), schedule_id = %schedule_id, error = %e, "invalid schedule_id — skipping");
+            continue;
+        }
 
         if schedule_id != name {
             tracing::warn!(
@@ -253,16 +264,6 @@ fn body_str(v: &serde_json::Value, key: &str) -> String {
     v.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
-fn strip_signature(content: &str) -> String {
-    content
-        .lines()
-        .skip_while(|l| l.trim().starts_with("# ryeos:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_start()
-        .to_string()
-}
-
 pub fn parse_signer_fingerprint_from_str(content: &str) -> Option<String> {
     parse_signer_fingerprint(content)
 }
@@ -325,13 +326,14 @@ mod tests {
         let sched_dir = dir.path().join("schedules");
         fs::create_dir_all(&sched_dir).unwrap();
 
-        let yaml_content = r#"spec_version: 1
+        let yaml_content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:c2ln:b64==:fp:abc123
+spec_version: 1
 section: schedules
 schedule_id: my-schedule
-item_ref: "directive:test/hello"
+item_ref: \"directive:test/hello\"
 schedule_type: interval
-expression: "60"
-"#;
+expression: \"60\"
+";
         fs::write(sched_dir.join("my-schedule.yaml"), yaml_content).unwrap();
 
         let db = test_db();
@@ -442,20 +444,20 @@ expression: "60"
         // No panic = success
     }
 
-    // ── strip_signature ────────────────────────────────────────
+    // ── strip_signature_lines ──────────────────────────────────
 
     #[test]
     fn strip_signature_removes_header() {
         let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:sig==:fp:abc\nspec_version: 1\nschedule_id: test";
-        let body = strip_signature(content);
-        assert!(!body.starts_with("# ryeos:signed:"));
+        let body = lillux::signature::strip_signature_lines(content);
+        assert!(!body.contains("ryeos:signed:"));
         assert!(body.contains("spec_version: 1"));
     }
 
     #[test]
     fn strip_signature_no_header() {
         let content = "spec_version: 1\nschedule_id: test";
-        let body = strip_signature(content);
+        let body = lillux::signature::strip_signature_lines(content);
         assert!(body.contains("spec_version: 1"));
     }
 

@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::node_config::writer;
 use crate::scheduler::crontab;
+use crate::scheduler::projection;
 use crate::scheduler::types::ScheduleSpecRecord;
 use crate::service_executor::ServiceAvailability;
 use crate::service_registry::ServiceDescriptor;
@@ -97,7 +98,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Extract signer fingerprint
     let content = std::fs::read_to_string(&spec_path)?;
-    let signer_fingerprint = parse_signer_fingerprint(&content)
+    let signer_fingerprint = projection::parse_signer_fingerprint_from_str(&content)
         .unwrap_or_else(|| state.identity.fingerprint().to_string());
 
     // Compute hash
@@ -148,17 +149,6 @@ fn is_valid_misfire_policy(p: &str) -> bool {
     matches!(p, "skip" | "fire_once_now")
         || p.starts_with("catch_up_bounded:")
         || p.starts_with("catch_up_within_secs:")
-}
-
-fn parse_signer_fingerprint(content: &str) -> Option<String> {
-    let first_line = content.lines().next()?;
-    let after_prefix = first_line.trim().strip_prefix("# ryeos:signed:")?;
-    let parts: Vec<&str> = after_prefix.split(':').collect();
-    if parts.len() >= 4 {
-        Some(parts[parts.len() - 1].trim().to_string())
-    } else {
-        None
-    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

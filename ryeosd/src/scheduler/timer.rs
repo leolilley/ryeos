@@ -16,8 +16,7 @@ use crate::state::AppState;
 
 /// Start the timer loop. Call after listeners are bound.
 pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>) {
-    let mut specs = state.scheduler_db.load_enabled_specs()
-        .unwrap_or_default();
+    let mut specs = load_specs_or_log(&state);
 
     tracing::info!(count = specs.len(), "scheduler: timer loop started");
 
@@ -41,8 +40,7 @@ pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>)
         }
 
         // Reload for next iteration
-        specs = state.scheduler_db.load_enabled_specs()
-            .unwrap_or_default();
+        specs = load_specs_or_log(&state);
 
         let now = lillux::time::timestamp_millis();
         let next_fire = compute_soonest_fire(&specs, now);
@@ -55,11 +53,23 @@ pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>)
         tokio::select! {
             _ = tokio::time::sleep(sleep_duration) => {}
             Some(_) = reload.recv() => {
-                specs = state.scheduler_db.load_enabled_specs()
-                    .unwrap_or_default();
+                specs = load_specs_or_log(&state);
                 tracing::debug!(count = specs.len(), "scheduler: reloaded specs");
                 continue;
             }
+        }
+    }
+}
+
+/// Load enabled specs, logging an error on DB failure instead of silently
+/// returning an empty list. On error we return the previous specs unchanged
+/// so the timer retries on the next tick rather than dropping all schedules.
+fn load_specs_or_log(state: &Arc<AppState>) -> Vec<ScheduleSpecRecord> {
+    match state.scheduler_db.load_enabled_specs() {
+        Ok(specs) => specs,
+        Err(e) => {
+            tracing::error!(error = %e, "scheduler: failed to load enabled specs — retaining previous list");
+            Vec::new()
         }
     }
 }
@@ -68,10 +78,18 @@ pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>)
 /// fire record. For the first fire of an interval schedule (no last fire),
 /// we use the spec's `last_modified` (set at registration time) as the base.
 fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
-    let last_fire_at = state.scheduler_db.get_last_fire(&spec.schedule_id)
-        .ok()
-        .flatten()
-        .map(|f| f.scheduled_at);
+    let last_fire_at = match state.scheduler_db.get_last_fire(&spec.schedule_id) {
+        Ok(Some(f)) => Some(f.scheduled_at),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(
+                schedule_id = %spec.schedule_id,
+                error = %e,
+                "spec_is_due: failed to query last fire — treating as no prior fire"
+            );
+            None
+        }
+    };
 
     // For interval schedules with no prior fire, use registration time as base
     let effective_last = last_fire_at.or_else(|| {
@@ -92,8 +110,27 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
             // fire is at registration_time + interval. compute_scheduled_at
             // returns None when last_fire_at is None, so handle it here.
             if spec.schedule_type == "interval" {
-                let interval_ms = spec.expression.parse::<i64>().unwrap_or(0) * 1000;
-                let first_fire = spec.last_modified + interval_ms;
+                let interval_secs = match spec.expression.parse::<i64>() {
+                    Ok(secs) if secs > 0 => secs,
+                    Ok(_) => {
+                        tracing::error!(
+                            schedule_id = %spec.schedule_id,
+                            expression = %spec.expression,
+                            "spec_is_due: interval expression is zero or negative — skipping"
+                        );
+                        return false;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            schedule_id = %spec.schedule_id,
+                            expression = %spec.expression,
+                            error = %e,
+                            "spec_is_due: interval expression failed to parse — skipping"
+                        );
+                        return false;
+                    }
+                };
+                let first_fire = spec.last_modified + interval_secs * 1000;
                 return first_fire <= now;
             }
             // For at schedules, parse the expression directly
@@ -114,7 +151,11 @@ fn compute_soonest_fire(specs: &[ScheduleSpecRecord], now: i64) -> Option<i64> {
         // For interval schedules with no prior fires, the first fire is at
         // last_modified + interval. For cron/at, compute_next_fire handles it.
         if s.schedule_type == "interval" {
-            let interval_ms = s.expression.parse::<i64>().ok()? * 1000;
+            let interval_secs = match s.expression.parse::<i64>() {
+                Ok(secs) if secs > 0 => secs,
+                _ => return None, // skip invalid interval in sleep calculation
+            };
+            let interval_ms = interval_secs * 1000;
             let first_fire = s.last_modified + interval_ms;
             if first_fire > now {
                 return Some(first_fire);
@@ -130,10 +171,18 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
     let now = lillux::time::timestamp_millis();
 
     // Get last fire for this schedule to compute scheduled_at
-    let last_fire_at = state.scheduler_db.get_last_fire(&spec.schedule_id)
-        .ok()
-        .flatten()
-        .map(|f| f.scheduled_at);
+    let last_fire_at = match state.scheduler_db.get_last_fire(&spec.schedule_id) {
+        Ok(Some(f)) => Some(f.scheduled_at),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(
+                schedule_id = %spec.schedule_id,
+                error = %e,
+                "process_spec: failed to query last fire — treating as no prior fire"
+            );
+            None
+        }
+    };
 
     let scheduled_at = match crontab::compute_scheduled_at(
         &spec.schedule_type, &spec.expression, &spec.timezone, now, last_fire_at,
@@ -143,7 +192,17 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
         None => {
             // Fallback for interval first-fire: registration_time + interval
             if spec.schedule_type == "interval" {
-                let interval_ms = spec.expression.parse::<i64>().unwrap_or(0) * 1000;
+                let interval_ms = match spec.expression.parse::<i64>() {
+                    Ok(secs) if secs > 0 => secs * 1000,
+                    _ => {
+                        tracing::error!(
+                            schedule_id = %spec.schedule_id,
+                            expression = %spec.expression,
+                            "process_spec: invalid interval expression — skipping fire"
+                        );
+                        return;
+                    }
+                };
                 spec.last_modified + interval_ms
             } else {
                 return;
@@ -229,7 +288,18 @@ pub async fn dispatch_fire(
     }
 
     // ── Dispatch via existing dispatch path ──────────────────
-    let params: serde_json::Value = serde_json::from_str(&spec.params).unwrap_or_default();
+    let params: serde_json::Value = match serde_json::from_str(&spec.params) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                schedule_id = %spec.schedule_id,
+                params_raw = %spec.params,
+                error = %e,
+                "failed to parse schedule params — defaulting to empty object"
+            );
+            serde_json::Value::Object(Default::default())
+        }
+    };
     let project_path = spec.project_root.as_deref().unwrap_or_else(|| {
         state.config.system_space_dir.to_str().unwrap_or(".")
     });

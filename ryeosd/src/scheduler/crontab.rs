@@ -26,20 +26,6 @@ pub fn compute_next_fire(
     }
 }
 
-/// Check if the given timestamp is "due" (at or past the scheduled time).
-pub fn is_due(
-    schedule_type: &str,
-    expression: &str,
-    timezone: &str,
-    now_ms: i64,
-    last_fire_at: Option<i64>,
-) -> bool {
-    match compute_next_fire(schedule_type, expression, timezone, now_ms, last_fire_at) {
-        Ok(Some(fire_at)) => fire_at <= now_ms,
-        _ => false,
-    }
-}
-
 /// Compute the `scheduled_at` for the current fire.
 /// For cron/interval: finds the exact boundary.
 /// For at: returns the given timestamp.
@@ -95,6 +81,9 @@ fn next_cron_fire(expression: &str, timezone: &str, after_ms: i64) -> Result<Opt
 
 /// Walk cron fire times between `start_ms` and `end_ms` and return
 /// the most recent one that is <= `end_ms`.
+///
+/// Caps iteration at 10 000 steps to prevent runaway loops on pathological
+/// cron expressions (e.g. every second over a multi-year span).
 fn find_most_recent_cron(expression: &str, timezone: &str, start_ms: i64, end_ms: i64) -> Option<i64> {
     let schedule = cron::Schedule::from_str(expression).ok()?;
     let tz: chrono_tz::Tz = timezone.parse().ok()?;
@@ -102,7 +91,15 @@ fn find_most_recent_cron(expression: &str, timezone: &str, start_ms: i64, end_ms
     let start_with_tz = start.with_timezone(&tz);
 
     let mut most_recent: Option<i64> = None;
-    for dt in schedule.after(&start_with_tz) {
+    const MAX_ITERATIONS: usize = 10_000;
+    for (i, dt) in schedule.after(&start_with_tz).enumerate() {
+        if i >= MAX_ITERATIONS {
+            tracing::warn!(
+                expression = %expression,
+                "find_most_recent_cron hit iteration cap ({MAX_ITERATIONS}) — using last found boundary"
+            );
+            break;
+        }
         let ms = dt.timestamp_millis();
         if ms > end_ms {
             break;

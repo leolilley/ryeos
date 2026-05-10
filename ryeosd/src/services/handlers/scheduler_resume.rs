@@ -36,7 +36,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let content = std::fs::read_to_string(&yaml_path)
         .with_context(|| format!("read schedule YAML {}", yaml_path.display()))?;
 
-    let body_str = strip_signature(&content);
+    let body_str = lillux::signature::strip_signature_lines(&content);
     let mut body: serde_json::Value = serde_yaml::from_str(&body_str)?;
     body["enabled"] = Value::Bool(true);
 
@@ -61,16 +61,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "schedule_id": req.schedule_id,
         "enabled": true,
     }))
-}
-
-fn strip_signature(content: &str) -> String {
-    content
-        .lines()
-        .skip_while(|l| l.trim().starts_with("# ryeos:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_start()
-        .to_string()
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

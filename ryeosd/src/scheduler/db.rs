@@ -378,6 +378,24 @@ impl SchedulerDb {
             .map_err(Into::into)
     }
 
+    /// Count fires for a schedule (optionally filtered by status).
+    pub fn count_fires(&self, schedule_id: &str, status_filter: Option<&str>) -> Result<usize> {
+        let conn = self.lock()?;
+        let total: usize = match status_filter {
+            Some(s) => conn.query_row(
+                "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1 AND status = ?2",
+                params![schedule_id, s],
+                |row| row.get::<_, i64>(0),
+            )? as usize,
+            None => conn.query_row(
+                "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
+                params![schedule_id],
+                |row| row.get::<_, i64>(0),
+            )? as usize,
+        };
+        Ok(total)
+    }
+
     pub fn delete_fires_for_schedule(&self, schedule_id: &str) -> Result<usize> {
         let n = self.lock()?.execute(
             "DELETE FROM schedule_fires WHERE schedule_id = ?1",
