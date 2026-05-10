@@ -91,6 +91,10 @@ pub struct ProviderConfig {
     /// bootstrap for parity with the other config structs.
     #[serde(default)]
     pub category: Option<String>,
+    /// REQUIRED. Selects the Rust protocol family that owns streaming
+    /// state machine, sampling capability mapping, finish-reason
+    /// normalization, and reasoning-block handling.
+    pub family: ProtocolFamily,
     pub base_url: String,
     #[serde(default)]
     pub auth: AuthConfig,
@@ -130,6 +134,10 @@ pub struct ProviderConfig {
 pub struct ProviderProfile {
     pub name: String,
     pub r#match: Vec<String>,
+    /// Override the base family for this profile. When absent, the
+    /// base config's family is inherited.
+    #[serde(default)]
+    pub family: Option<ProtocolFamily>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -160,6 +168,31 @@ pub struct AuthConfig {
     pub header_name: Option<String>,
     #[serde(default)]
     pub prefix: Option<String>,
+}
+
+// ── Protocol family enum ───────────────────────────────────────────
+
+/// Selects the Rust protocol kernel that owns streaming state machine,
+/// sampling capability mapping, finish-reason normalization, and
+/// reasoning-block handling. YAML cannot override these — they are
+/// protocol semantics.
+///
+/// REQUIRED on every `ProviderConfig`. Provider profiles may override
+/// the base family (e.g. a single provider ID routing to multiple
+/// upstream families).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProtocolFamily {
+    /// OpenAI-style ChatCompletions: messages array, tool_calls
+    /// top-level, SSE delta_merge, finish_reason in choices[0].
+    ChatCompletions,
+    /// Anthropic Messages API: content blocks, top-level system,
+    /// SSE event_typed.
+    AnthropicMessages,
+    /// Google Gemini generateContent: parts arrays,
+    /// functionCall/Response, SSE complete_chunks with cumulative
+    /// semantics.
+    GoogleGenerateContent,
 }
 
 // ── Typed enums for provider-knob validation ───────────────────────
@@ -547,6 +580,39 @@ impl ProviderConfig {
             }
         }
 
+        // Family-specific coherence checks.
+        match self.family {
+            ProtocolFamily::AnthropicMessages => {
+                if let Some(s) = &self.schemas {
+                    if let Some(m) = &s.messages {
+                        if m.assistant_tool_calls_placement
+                            != Some(AssistantToolCallsPlacement::InlineBlocks)
+                        {
+                            bail!(
+                                "provider config{}: family=anthropic_messages \
+                                 requires assistant_tool_calls_placement=inline_blocks",
+                                context
+                            );
+                        }
+                    }
+                }
+            }
+            ProtocolFamily::GoogleGenerateContent => {
+                if let Some(s) = &self.schemas {
+                    if let Some(m) = &s.messages {
+                        if m.content_key.as_deref() != Some("parts") {
+                            bail!(
+                                "provider config{}: family=google_generate_content \
+                                 requires messages.content_key=\"parts\"",
+                                context
+                            );
+                        }
+                    }
+                }
+            }
+            ProtocolFamily::ChatCompletions => {}
+        }
+
         // Auth coherence: env_var without header_name (or vice versa) is
         // incoherent — auth is unusable.
         if self.auth.env_var.is_some() != self.auth.header_name.is_some() {
@@ -562,6 +628,7 @@ impl ProviderConfig {
 
     fn merge_profile(&self, p: &ProviderProfile) -> ProviderConfig {
         let mut out = self.clone();
+        if let Some(f) = p.family { out.family = f; }
         if let Some(url) = &p.base_url { out.base_url = url.clone(); }
         if let Some(auth) = &p.auth { out.auth = auth.clone(); }
         if let Some(h) = &p.headers {
@@ -900,6 +967,7 @@ mod tests {
     fn base_provider() -> ProviderConfig {
         ProviderConfig {
             category: None,
+            family: ProtocolFamily::ChatCompletions,
             base_url: "https://base.example.com/v1".to_string(),
             auth: AuthConfig {
                 env_var: Some("BASE_KEY".to_string()),
@@ -920,6 +988,7 @@ mod tests {
                 ProviderProfile {
                     name: "claude".to_string(),
                     r#match: vec!["claude-*".to_string()],
+                    family: Some(ProtocolFamily::AnthropicMessages),
                     base_url: Some("https://anthropic.example.com/v1/messages".to_string()),
                     auth: Some(AuthConfig {
                         env_var: Some("ANTHROPIC_KEY".to_string()),
@@ -939,6 +1008,7 @@ mod tests {
                 ProviderProfile {
                     name: "gpt".to_string(),
                     r#match: vec!["gpt-*".to_string()],
+                    family: None,
                     base_url: None,
                     auth: None,
                     headers: Some({
@@ -954,6 +1024,7 @@ mod tests {
                 ProviderProfile {
                     name: "gemini".to_string(),
                     r#match: vec!["gemini-*".to_string()],
+                    family: Some(ProtocolFamily::GoogleGenerateContent),
                     base_url: Some("https://gemini.example.com/v1/models/{model}:generate".to_string()),
                     auth: Some(AuthConfig {
                         env_var: Some("BASE_KEY".to_string()),
@@ -1098,6 +1169,7 @@ mod tests {
     fn validate_rejects_missing_body_template() {
         let cfg = ProviderConfig {
             category: None,
+            family: ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1119,6 +1191,7 @@ mod tests {
     fn validate_accepts_config_with_body_template() {
         let cfg = ProviderConfig {
             category: None,
+            family: ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1183,6 +1256,7 @@ mod tests {
     fn minimal_valid_provider() -> ProviderConfig {
         ProviderConfig {
             category: None,
+            family: ProtocolFamily::ChatCompletions,
             base_url: "http://example.com".to_string(),
             auth: AuthConfig {
                 env_var: Some("API_KEY".to_string()),

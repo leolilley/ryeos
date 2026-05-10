@@ -9,8 +9,9 @@ use serde_json::Value;
 #[allow(unused_imports)]
 pub use ryeos_runtime::model_resolution::{
     AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig,
-    ProviderConfig, SamplingConfig, SchemasConfig, StreamPaths, SystemMessageConfig,
-    SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode, ToolSchemaConfig,
+    ProtocolFamily, ProviderConfig, ProviderProfile, SamplingConfig, SchemasConfig, StreamPaths,
+    SystemMessageConfig, SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode,
+    ToolSchemaConfig,
 };
 
 /// Typed runtime view of a directive's effective header *after* the

@@ -1,5 +1,6 @@
 # ryeos:signed:2026-05-09T23:50:18Z:46df26ba9475ab332733d70cbff2dbb76aedc1d97df6fd086221a388c6644503:nkDbsqlQXjgPDiGNS70tQaea4BfRLj8j67bJrrH5zf+1/XoWwNwzx3qH6boM5AwPVGuhYoLJvYbOFyWNbJf4BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
+family: chat_completions
 base_url: "https://opencode.ai/zen/v1"
 auth:
   env_var: ZEN_API_KEY
@@ -80,6 +81,7 @@ profiles:
   # ── Anthropic Messages API (Claude family routed through Zen's /v1/messages) ──
   - name: anthropic
     match: ["claude-*"]
+    family: anthropic_messages
     base_url: "https://opencode.ai/zen/v1/messages"
     auth:
       env_var: ZEN_API_KEY
@@ -146,6 +148,7 @@ profiles:
   # ── Gemini (native Google API via Zen's :streamGenerateContent endpoint) ──
   - name: gemini
     match: ["gemini-*"]
+    family: google_generate_content
     base_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
     auth:
       env_var: ZEN_API_KEY
