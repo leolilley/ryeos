@@ -238,13 +238,25 @@ pub async fn execute_service_verified(
         let _ = state.threads.mark_running(&audit_thread_id);
     }
 
-    // 6. Dispatch to handler
+    // 6. Inject caller identity into params for the scheduler.register handler.
+    //    Only scheduler_register needs caller auth — it's the only handler that
+    //    persists execution authority. All other handlers use deny_unknown_fields,
+    //    so injection must be targeted, not global.
+    let mut enriched_params = params.clone();
+    if endpoint == "scheduler.register" {
+        if let Value::Object(ref mut map) = enriched_params {
+            map.insert("_caller_fingerprint".to_string(), Value::String(ctx.principal_fingerprint.clone()));
+            map.insert("_caller_capabilities".to_string(), serde_json::json!(ctx.caller_scopes));
+        }
+    }
+
+    // 7. Dispatch to handler
     let handler = state.services.get(&endpoint)
         .ok_or_else(|| anyhow::anyhow!("service handler '{}' not registered", endpoint))?
         .clone();
 
     let state_arc = Arc::new(state.clone());
-    let dispatch_result = handler(params.clone(), state_arc).await;
+    let dispatch_result = handler(enriched_params, state_arc).await;
 
     // 7b. Finalize audit with success or failure
     if audit_ok {

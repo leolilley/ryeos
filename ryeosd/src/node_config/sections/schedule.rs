@@ -34,9 +34,21 @@ pub struct ScheduleRecord {
     /// Set once at creation, preserved on updates. Used as anchor for first-fire calculation.
     #[serde(default)]
     pub registered_at: Option<i64>,
+    /// Execution authority — who this schedule runs as and with what capabilities.
+    /// Set at registration time by scheduler_register. Read by projection on rebuild.
+    #[serde(default)]
+    pub execution: Option<ScheduleExecution>,
     /// Path to the YAML file. Set by loader.
     #[serde(skip)]
     pub source_file: std::path::PathBuf,
+}
+
+/// Execution authority persisted in schedule YAML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleExecution {
+    pub requester_fingerprint: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 fn default_utc() -> String {

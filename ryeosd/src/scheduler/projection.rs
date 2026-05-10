@@ -76,19 +76,38 @@ pub fn rebuild_specs_from_dir(
 
         // Strip signature lines and parse YAML body
         let body_str = lillux::signature::strip_signature_lines(&content);
-        let body: serde_json::Value = match serde_yaml::from_str(&body_str) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to parse schedule YAML — skipping");
-                continue;
-            }
-        };
 
-        // Extract signer fingerprint from signature line
+        // Verify signature integrity: the signature's content_hash must match
+        // the actual body hash. This catches tampering after signing.
         let signer_fingerprint = match parse_signer_fingerprint(&content) {
             Some(fp) => fp,
             None => {
                 tracing::warn!(path = %path.display(), "missing or invalid signature — skipping unsigned schedule");
+                continue;
+            }
+        };
+        let expected_hash = lillux::cas::sha256_hex(body_str.as_bytes());
+        let sig_header = content.lines().next()
+            .and_then(|line| lillux::signature::parse_signature_line(line, "#", None));
+        if let Some(ref header) = sig_header {
+            if header.content_hash != expected_hash {
+                tracing::warn!(
+                    path = %path.display(),
+                    expected = %expected_hash,
+                    got = %header.content_hash,
+                    "signature content_hash mismatch — skipping tampered schedule"
+                );
+                continue;
+            }
+        } else {
+            tracing::warn!(path = %path.display(), "could not parse signature header — skipping");
+            continue;
+        }
+
+        let body: serde_json::Value = match serde_yaml::from_str(&body_str) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "failed to parse schedule YAML — skipping");
                 continue;
             }
         };
@@ -256,6 +275,40 @@ fn spec_record_from_body(
     spec_hash: &str,
     last_modified: i64,
 ) -> ScheduleSpecRecord {
+    // Extract execution authority from YAML body.
+    // The execution block is written at registration time by scheduler_register.
+    let (requester_fingerprint, capabilities) = body.get("execution")
+        .and_then(|exec| {
+            let fp = exec.get("requester_fingerprint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let caps = exec.get("capabilities")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((fp, caps))
+        })
+        .unwrap_or_else(|| (String::new(), Vec::new()));
+
+    // Normalize misfire default: both live and rebuild paths must use the
+    // same default when the field is empty. Interval → fire_once_now, else → skip.
+    let raw_misfire = body.get("misfire_policy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let misfire_policy = if raw_misfire.is_empty() {
+        match body.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("") {
+            "interval" => "fire_once_now".to_string(),
+            _ => "skip".to_string(),
+        }
+    } else {
+        raw_misfire.to_string()
+    };
+
     ScheduleSpecRecord {
         schedule_id: body_str(body, "schedule_id"),
         item_ref: body_str(body, "item_ref"),
@@ -265,10 +318,7 @@ fn spec_record_from_body(
         schedule_type: body_str(body, "schedule_type"),
         expression: body_str(body, "expression"),
         timezone: body.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC").to_string(),
-        misfire_policy: body.get("misfire_policy")
-            .and_then(|v| v.as_str())
-            .unwrap_or("skip")
-            .to_string(),
+        misfire_policy,
         overlap_policy: body.get("overlap_policy")
             .and_then(|v| v.as_str())
             .unwrap_or("skip")
@@ -278,6 +328,8 @@ fn spec_record_from_body(
         signer_fingerprint: signer_fingerprint.to_string(),
         spec_hash: spec_hash.to_string(),
         last_modified,
+        requester_fingerprint,
+        capabilities,
     }
 }
 
@@ -339,14 +391,20 @@ mod tests {
         let sched_dir = dir.path().join("schedules");
         fs::create_dir_all(&sched_dir).unwrap();
 
-        let yaml_content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:c2ln:b64==:fp:abc123
-spec_version: 1
+        let body = r#"spec_version: 1
 section: schedules
 schedule_id: my-schedule
-item_ref: \"directive:test/hello\"
+item_ref: "directive:test/hello"
 schedule_type: interval
-expression: \"60\"
-";
+expression: "60"
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        // Sign with a real key so content_hash matches the body
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
+        let yaml_content = lillux::signature::sign_content(body, &sk, "#", None);
         fs::write(sched_dir.join("my-schedule.yaml"), yaml_content).unwrap();
 
         let db = test_db();
@@ -376,13 +434,15 @@ expression: \"60\"
         let sched_dir = dir.path().join("schedules");
         fs::create_dir_all(&sched_dir).unwrap();
 
-        let yaml = r#"spec_version: 1
+        let body = r#"spec_version: 1
 section: schedules
 schedule_id: wrong-id
 item_ref: "directive:test/hello"
 schedule_type: interval
 expression: "60"
 "#;
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
+        let yaml = lillux::signature::sign_content(body, &sk, "#", None);
         fs::write(sched_dir.join("my-schedule.yaml"), yaml).unwrap();
 
         let db = test_db();

@@ -429,7 +429,7 @@ pub async fn dispatch_fire(
         project_source_is_pushed_head: false,
         validate_only: false,
         params,
-        acting_principal: &spec.signer_fingerprint,
+        acting_principal: &spec.requester_fingerprint,
         project_path: std::path::Path::new(project_path),
         original_project_path: project_path_buf.clone(),
         snapshot_hash: None,
@@ -441,16 +441,18 @@ pub async fn dispatch_fire(
     };
 
     let exec_ctx = crate::service_executor::ExecutionContext {
-        principal_fingerprint: spec.signer_fingerprint.clone(),
-        // Narrow scope: scheduler dispatch can execute any tool/directive but
-        // cannot perform admin operations (identity, config, signing, etc.).
-        // Mutation authority is already guarded by required_caps on register/pause/resume/deregister.
-        caller_scopes: vec!["ryeos.execute.*".to_string()],
+        principal_fingerprint: spec.requester_fingerprint.clone(),
+        // Use the capabilities stored at registration time — least privilege.
+        caller_scopes: if spec.capabilities.is_empty() {
+            vec!["ryeos.execute.*".to_string()]
+        } else {
+            spec.capabilities.clone()
+        },
         engine: state.engine.clone(),
         plan_ctx: ryeos_engine::contracts::PlanContext {
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
-                    fingerprint: spec.signer_fingerprint.clone(),
+                    fingerprint: spec.requester_fingerprint.clone(),
                     scopes: vec![],
                 },
             ),

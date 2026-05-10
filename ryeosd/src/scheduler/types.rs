@@ -18,6 +18,12 @@ pub struct ScheduleSpecRecord {
     pub signer_fingerprint: String,
     pub spec_hash: String,
     pub last_modified: i64,
+    /// Fingerprint of the principal who registered this schedule.
+    /// Used as the acting principal at dispatch time.
+    pub requester_fingerprint: String,
+    /// Capabilities granted at registration time. The schedule runs with
+    /// only these capabilities — least privilege.
+    pub capabilities: Vec<String>,
 }
 
 /// Projection record for a fire event in `scheduler.sqlite3`.

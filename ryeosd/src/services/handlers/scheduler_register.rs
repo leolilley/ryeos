@@ -33,6 +33,14 @@ pub struct Request {
     pub enabled: bool,
     #[serde(default)]
     pub project_root: Option<String>,
+    /// Injected by execute_service_verified from ExecutionContext.
+    /// The caller's fingerprint — used as the schedule's acting principal.
+    #[serde(default, rename = "_caller_fingerprint")]
+    pub caller_fingerprint: Option<String>,
+    /// Injected by execute_service_verified from ExecutionContext.
+    /// The caller's capabilities — the schedule runs with only these.
+    #[serde(default, rename = "_caller_capabilities")]
+    pub caller_capabilities: Option<Vec<String>>,
 }
 
 fn default_true() -> bool { true }
@@ -120,9 +128,24 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if let Some(ref p) = req.overlap_policy {
         body["overlap_policy"] = Value::String(p.clone());
     }
+    // Determine execution authority from caller context.
+    // The service executor injects these from ExecutionContext before
+    // dispatching the handler. If missing (e.g. standalone mode), fall back
+    // to node identity with full execute capabilities.
+    let requester_fingerprint = req.caller_fingerprint.clone()
+        .unwrap_or_else(|| state.identity.fingerprint().to_string());
+    let capabilities = req.caller_capabilities.clone()
+        .unwrap_or_else(|| vec!["ryeos.execute.*".to_string()]);
+
     if let Some(ref p) = req.project_root {
         body["project_root"] = Value::String(p.clone());
     }
+
+    // Persist execution authority in YAML body — survives restart, rebuildable.
+    body["execution"] = serde_json::json!({
+        "requester_fingerprint": requester_fingerprint,
+        "capabilities": capabilities,
+    });
 
     // Write signed YAML
     let node_dir = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("node");
@@ -161,6 +184,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         signer_fingerprint,
         spec_hash,
         last_modified,
+        requester_fingerprint,
+        capabilities,
     };
     state.scheduler_db.upsert_spec(&rec)?;
 
