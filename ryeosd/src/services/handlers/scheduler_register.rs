@@ -33,12 +33,6 @@ pub struct Request {
     pub enabled: bool,
     #[serde(default)]
     pub project_root: Option<String>,
-    
-    // NEW: Execution authority (injected by dispatcher from ExecutionContext)
-    #[serde(default)]
-    pub requester_fingerprint: Option<String>,
-    #[serde(default)]
-    pub approved_scopes: Option<Vec<String>>,
 }
 
 fn default_true() -> bool { true }
@@ -140,7 +134,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &state.identity,
     )?;
 
-    // Extract signer fingerprint (YAML signature is for integrity, not execution authority)
+    // Extract signer fingerprint
     let content = std::fs::read_to_string(&spec_path)?;
     let signer_fingerprint = projection::parse_signer_fingerprint_from_str(&content)
         .unwrap_or_else(|| state.identity.fingerprint().to_string());
@@ -148,12 +142,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Compute hash
     let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
     let last_modified = lillux::time::timestamp_millis();
-    
-    // Extract execution authority from request (should be injected by dispatcher from ExecutionContext)
-    // For now: default to empty scopes if not provided (TODO: inject from dispatcher)
-    let requester_fingerprint = req.requester_fingerprint.unwrap_or_else(|| state.identity.fingerprint().to_string());
-    let approved_scopes_vec = req.approved_scopes.unwrap_or_default();
-    let approved_scopes = serde_json::to_string(&approved_scopes_vec)?;
 
     // Upsert projection
     let was_existing = existing_spec.is_some();
@@ -172,11 +160,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         project_root: req.project_root.clone(),
         signer_fingerprint,
         spec_hash,
-        registered_at,
         last_modified,
-        last_modified_by: Some(state.identity.fingerprint().to_string()),
-        requester_fingerprint,
-        approved_scopes,
     };
     state.scheduler_db.upsert_spec(&rec)?;
 

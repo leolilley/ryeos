@@ -132,9 +132,6 @@ pub fn rebuild_specs_from_dir(
             });
 
         let rec = spec_record_from_body(&body, &signer_fingerprint, &spec_hash, registered_at);
-        
-        // TODO: Phase 3: Add signature verification before accepting YAML
-        // For now, accepting unsigned/unverified YAML (current behavior)
 
         if let Err(e) = db.upsert_spec(&rec) {
             tracing::error!(schedule_id = %schedule_id, error = %e, "failed to upsert spec projection");
@@ -257,32 +254,8 @@ fn spec_record_from_body(
     body: &serde_json::Value,
     signer_fingerprint: &str,
     spec_hash: &str,
-    registered_at: i64,
+    last_modified: i64,
 ) -> ScheduleSpecRecord {
-    // Extract execution authority from YAML body (if present, else defaults)
-    let execution = body.get("execution");
-    let requester_fingerprint = execution
-        .and_then(|e| e.get("requester_fingerprint"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("") // Will be set by registration handler
-        .to_string();
-    
-    let approved_scopes_list: Vec<String> = execution
-        .and_then(|e| e.get("approved_scopes"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let approved_scopes = serde_json::to_string(&approved_scopes_list).unwrap_or_else(|_| "[]".to_string());
-    
-    let last_modified_by = execution
-        .and_then(|e| e.get("last_modified_by"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    
     ScheduleSpecRecord {
         schedule_id: body_str(body, "schedule_id"),
         item_ref: body_str(body, "item_ref"),
@@ -294,7 +267,7 @@ fn spec_record_from_body(
         timezone: body.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC").to_string(),
         misfire_policy: body.get("misfire_policy")
             .and_then(|v| v.as_str())
-            .unwrap_or("")  // Empty string → default applied at resolution time
+            .unwrap_or("skip")
             .to_string(),
         overlap_policy: body.get("overlap_policy")
             .and_then(|v| v.as_str())
@@ -304,11 +277,7 @@ fn spec_record_from_body(
         project_root: body.get("project_root").and_then(|v| v.as_str()).map(String::from),
         signer_fingerprint: signer_fingerprint.to_string(),
         spec_hash: spec_hash.to_string(),
-        registered_at,
-        last_modified: registered_at,  // Will be updated by register handler
-        last_modified_by,
-        requester_fingerprint,
-        approved_scopes,
+        last_modified,
     }
 }
 

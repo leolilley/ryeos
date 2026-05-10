@@ -17,13 +17,7 @@ pub struct ScheduleSpecRecord {
     pub project_root: Option<String>,
     pub signer_fingerprint: String,
     pub spec_hash: String,
-    pub registered_at: i64,           // Original registration time (immutable)
     pub last_modified: i64,
-    pub last_modified_by: Option<String>,  // Fingerprint of last updater
-    
-    // Execution authority (NEW: replaces hardcoded scopes + node identity)
-    pub requester_fingerprint: String, // Who registered it
-    pub approved_scopes: String,       // JSON array of scope strings
 }
 
 /// Projection record for a fire event in `scheduler.sqlite3`.

@@ -107,11 +107,7 @@ mod tests {
             project_root: None,
             signer_fingerprint: "fp:test".to_string(),
             spec_hash: "abc".to_string(),
-            registered_at: 0,
             last_modified: 0,
-            last_modified_by: Some("fp:test".to_string()),
-            requester_fingerprint: "fp:test".to_string(),
-            approved_scopes: "[]".to_string(),
         }
     }
 
