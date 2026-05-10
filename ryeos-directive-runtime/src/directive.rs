@@ -10,6 +10,7 @@ use serde_json::Value;
 pub use ryeos_runtime::model_resolution::{
     MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig, ProviderConfig,
     SamplingConfig, SchemasConfig, StreamPaths, SystemMessageConfig, ToolResultConfig,
+    ToolSchemaConfig,
 };
 
 /// Typed runtime view of a directive's effective header *after* the

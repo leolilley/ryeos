@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -167,22 +167,81 @@ pub struct SchemasConfig {
     #[serde(default)]
     pub messages: Option<MessageSchemas>,
     #[serde(default)]
+    pub tools: Option<ToolSchemaConfig>,
+    #[serde(default)]
     pub streaming: Option<StreamingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageSchemas {
+    /// Role-name remapping. e.g. Gemini wants `assistant` → `model`.
+    /// Applied AFTER tool-result/tool-call message construction.
     #[serde(default)]
     pub role_map: Option<HashMap<String, String>>,
+    /// Outer key on each converted message that holds the content.
+    /// OpenAI/Anthropic: `"content"`. Gemini: `"parts"`.
     #[serde(default)]
     pub content_key: Option<String>,
+    /// How text content is wrapped on each message.
+    /// - `"string"` (default if absent) — content is a plain string.
+    ///   `{"role":"user", "content":"hello"}`.
+    /// - `"parts_array"` — content is `[<text_block_template rendered with {text}>, ...]`.
+    ///   Used by Gemini.
+    /// - `"blocks_array"` — content is `[<text_block_template rendered with {text}>, ...]`
+    ///   with the SAME mechanism as parts_array but conventionally a different
+    ///   block shape. Used by direct-Anthropic for `[{type:"text", text:"..."}]`.
+    ///
+    /// In `parts_array` and `blocks_array` modes, `text_block_template`
+    /// MUST be set; otherwise the wrapper falls back to `[{<content_key>: text}]`.
+    ///
+    /// NOTE: This used to be called `content_wrap`. Renamed in v0.3.0-final-2
+    /// to clarify scope — it controls TEXT placement only, not tool_call
+    /// or tool_result placement (those are independent knobs below).
     #[serde(default)]
-    pub content_wrap: Option<String>,
+    pub text_placement: Option<String>,
+    /// Where assistant `tool_calls` are placed on the converted message.
+    /// - `"top_level_field"` (default if absent) — `tool_calls: [...]` is
+    ///   a top-level array field on the assistant message. Used by OpenAI.
+    /// - `"inline_blocks"` — each tool_call is appended (as a rendered
+    ///   `tool_call_block_template`) into the message's content / parts
+    ///   array. Used by Anthropic and Gemini.
+    ///
+    /// This was previously inferred from `text_placement.is_some()` which was
+    /// wrong for Anthropic (text=string but tool_calls=blocks). v0.3.0-final-2
+    /// makes it explicit so each provider declares its own truth.
+    #[serde(default)]
+    pub assistant_tool_calls_placement: Option<String>,
+    /// Template applied to each piece of text content when wrapping
+    /// into parts_array / blocks_array. Context: `{"text": <text>}`.
+    /// Gemini: `{text: "{text}"}`.
+    /// Anthropic blocks: `{type: "text", text: "{text}"}`.
+    /// If absent, falls back to `{<content_key>: <text>}` for backwards
+    /// compat with the v0.3.0 first-cut shape (which was buggy for Gemini).
+    #[serde(default)]
+    pub text_block_template: Option<Value>,
+    /// Template applied to each assistant tool-call when serializing
+    /// into the message body. Context: `{"id": <id>, "name": <name>,
+    /// "input": <args_value>, "input_json": <args_json_string>}`.
+    /// - OpenAI: tool_calls go in a top-level `tool_calls` array on the
+    ///   assistant message; this template renders one entry.
+    /// - Anthropic: tool_calls go as `{type: "tool_use", id, name, input}` blocks
+    ///   inside the assistant message's content array.
+    /// - Gemini: tool_calls go as `{functionCall: {name, args}}` parts
+    ///   inside the model message's parts array.
+    ///   When absent, the legacy implicit OpenAI shape is emitted (v0.3.0 first-cut).
+    #[serde(default)]
+    pub tool_call_block_template: Option<Value>,
+    /// System-prompt placement config.
     #[serde(default)]
     pub system_message: Option<SystemMessageConfig>,
+    /// Tool-result message construction.
     #[serde(default)]
     pub tool_result: Option<ToolResultConfig>,
+    /// Wrap key for the entire tool list. Used by Gemini whose tools
+    /// must be `[{functionDeclarations: [...]}]`. v0.3.0 first-cut had
+    /// this on MessageSchemas; the new ToolSchemaConfig.list_wrap
+    /// takes precedence when set.
     #[serde(default)]
     pub tool_list_wrap: Option<String>,
 }
@@ -217,8 +276,55 @@ pub struct SystemMessageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResultConfig {
+    /// Legacy v0.3.0-first-cut field; kept for transitional yamls
+    /// but superseded by `block_template`. If both are set,
+    /// `block_template` wins.
     #[serde(default)]
     pub wrap_key: Option<String>,
+    /// Role for the synthesized tool-result message.
+    /// - OpenAI: `"tool"`
+    /// - Anthropic: `"user"` (tool_results are content blocks in user messages)
+    /// - Gemini: `"user"`
+    #[serde(default)]
+    pub role: Option<String>,
+    /// How tool-result blocks combine into provider-specific messages.
+    /// - `"content_blocks"` — accumulate all consecutive tool-result
+    ///   messages into a single user message whose content is an
+    ///   array of rendered block_templates. Used by Anthropic, Gemini.
+    /// - `"direct"` — each tool-result message is a standalone
+    ///   `{role, ...rendered_block_template}`. Used by OpenAI.
+    /// - `"parts"` — each tool-result message is `{role, parts: [<rendered>]}`.
+    ///   Defaults to `"direct"` if absent.
+    #[serde(default)]
+    pub wrap_mode: Option<String>,
+    /// Template for one tool-result block. Context:
+    /// `{"tool_call_id": <id>, "tool_name": <name>, "content": <result_value>}`.
+    /// - OpenAI: `{tool_call_id: "{tool_call_id}", content: "{content}"}`
+    /// - Anthropic: `{type: "tool_result", tool_use_id: "{tool_call_id}", content: "{content}"}`
+    /// - Gemini: `{functionResponse: {name: "{tool_name}", response: {content: "{content}"}}}`
+    #[serde(default)]
+    pub block_template: Option<Value>,
+}
+
+/// Tool-definition serialization config. Drives how the directive's
+/// internal `ToolSchema` (name + description + input_schema) gets
+/// reshaped into the provider-specific tools-array element.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSchemaConfig {
+    /// Template for one tool definition. Context:
+    /// `{"name": <name>, "description": <desc>, "schema": <input_schema_value>}`.
+    /// - OpenAI: `{type: "function", function: {name: "{name}", description: "{description}", parameters: "{schema}"}}`
+    /// - Anthropic: `{name: "{name}", description: "{description}", input_schema: "{schema}"}`
+    /// - Gemini: `{name: "{name}", description: "{description}", parameters: "{schema}"}`
+    pub template: Value,
+    /// Optional outer key under which all rendered templates wrap
+    /// into a SINGLE tool-list element. Gemini requires
+    /// `tools: [{functionDeclarations: [<rendered>, ...]}]`; this
+    /// field's value is `"functionDeclarations"`. When absent, the
+    /// rendered templates form the tools array directly.
+    #[serde(default)]
+    pub list_wrap: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +465,21 @@ impl ProviderConfig {
             }
         }
         self.clone()
+    }
+
+    /// Validate that the resolved config is structurally sound.
+    /// Called after `resolve_for_model` so profile merges are
+    /// already applied. Returns `Err` on the first problem found.
+    pub fn validate(&self, context: &str) -> Result<()> {
+        if self.body_template.is_none() {
+            bail!(
+                "provider config{} has no body_template — \
+                 every provider must declare its request body shape \
+                 via body_template (base or profile)",
+                context
+            );
+        }
+        Ok(())
     }
 
     fn merge_profile(&self, p: &ProviderProfile) -> ProviderConfig {
@@ -506,8 +627,12 @@ pub fn resolve_model_target(
             )
         })?;
 
+    let resolved = provider.resolve_for_model(&info.model_name);
+    let ctx = format!(" for model `{}` (provider `{}`)", info.model_name, info.provider_id);
+    resolved.validate(&ctx)?;
+
     Ok(ResolvedModelTarget {
-        provider: provider.resolve_for_model(&info.model_name),
+        provider: resolved,
         provider_id: info.provider_id,
         model_name: info.model_name,
         context_window: info.context_window,
@@ -861,5 +986,45 @@ mod tests {
     fn glob_match_exact() {
         assert!(super::glob_match("big-pickle", "big-pickle"));
         assert!(!super::glob_match("big-pickle", "small-pickle"));
+    }
+
+    // ── ProviderConfig::validate tests ──────────────────────────────
+
+    #[test]
+    fn validate_rejects_missing_body_template() {
+        let cfg = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: None,
+            body_extra: None,
+            profiles: vec![],
+        };
+        let err = cfg.validate("").unwrap_err();
+        assert!(
+            err.to_string().contains("no body_template"),
+            "expected 'no body_template' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_config_with_body_template() {
+        let cfg = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: Some(serde_json::json!({"model": "{model}"})),
+            body_extra: None,
+            profiles: vec![],
+        };
+        assert!(cfg.validate("").is_ok());
     }
 }
