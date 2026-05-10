@@ -35,8 +35,9 @@ async fn main() -> Result<()> {
     //
     // This intentionally does NOT walk or sign items in `system_space_dir`.
     // System-tier bundle items are operator/publisher-managed and out of
-    // scope for daemon init. To sign bundle items, use the explicit signer
-    // tool (`cargo run --example resign_yaml -p ryeos-engine -- <path>`).
+    // scope for daemon init. To re-sign bundle items, use:
+    //   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
+    // See docs/operations/signing-bundles.md.
     if cli.init_only {
         let force = cli.force;
         bootstrap::init(&config, &bootstrap::InitOptions { force })?;

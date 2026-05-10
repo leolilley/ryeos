@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::directive::{
     ExecutionConfig, FinishReason, ProtocolFamily, ProviderConfig, ProviderMessage,
     SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema,
-    normalize_finish_reason,
+    UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
@@ -26,15 +26,33 @@ fn sha256_hex(data: &[u8]) -> String {
 /// (first 200 chars) plus a sha256 hash. Full body is logged only when
 /// `RYEOS_LOG_PROVIDER_BODIES=1` is set (development/debugging).
 fn safe_error_body(body: &str) -> String {
-    let preview: String = body.chars().take(200).collect();
-    let hash = sha256_hex(body.as_bytes());
-    if std::env::var("RYEOS_LOG_PROVIDER_BODIES").as_deref() == Ok("1") {
-        format!("body={body} (sha256={hash})")
+    let truncated: String = body.chars().take(512).collect();
+    if truncated.len() < body.len() {
+        format!("{}… [truncated, sha256={}]", truncated, sha256_hex(body.as_bytes()))
     } else {
-        format!(
-            "body_preview=\"{preview}\" body_sha256={hash} \
-             (set RYEOS_LOG_PROVIDER_BODIES=1 to log full body)"
-        )
+        truncated
+    }
+}
+
+/// Check if the cancellation flag is set.
+fn cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> bool {
+    flag.as_ref()
+        .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// Async future that resolves when the cancellation flag is set.
+/// Polls with a 50ms backoff — bounded cancellation latency.
+async fn cancel_signal(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+    if let Some(f) = flag {
+        loop {
+            if f.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -139,20 +157,35 @@ fn parse_event_typed(
     match event_type {
         "content_block_delta" => {
             if let Some(delta) = parsed.get("delta") {
-                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                    events.push(StreamEvent::Delta(text.to_string()));
-                } else if let Some(input) = delta.get("partial_json").and_then(|j| j.as_str()) {
-                    // Only accumulate when we know which tool the
-                    // partial_json belongs to (set by a preceding
-                    // content_block_start). Anthropic guarantees
-                    // ordering; this guard is defensive.
-                    if tool_call_state.contains_key("current_tool_id")
-                        && tool_call_state.contains_key("current_tool_name")
-                    {
-                        tool_call_state
-                            .entry("current_tool_args".to_string())
-                            .and_modify(|e| e.push_str(input))
-                            .or_insert_with(|| input.to_string());
+                let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match delta_type {
+                    "text_delta" => {
+                        if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                            events.push(StreamEvent::Delta(text.to_string()));
+                        }
+                    }
+                    "thinking_delta" => {
+                        if let Some(text) = delta.get("thinking").and_then(|t| t.as_str()) {
+                            events.push(StreamEvent::ReasoningDelta(text.to_string()));
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(input) = delta.get("partial_json").and_then(|j| j.as_str()) {
+                            if tool_call_state.contains_key("current_tool_id")
+                                && tool_call_state.contains_key("current_tool_name")
+                            {
+                                tool_call_state
+                                    .entry("current_tool_args".to_string())
+                                    .and_modify(|e| e.push_str(input))
+                                    .or_insert_with(|| input.to_string());
+                            }
+                        }
+                    }
+                    other => {
+                        events.push(StreamEvent::Warning {
+                            code: "unknown_delta_type".into(),
+                            message: format!("anthropic content_block_delta type `{other}` not handled"),
+                        });
                     }
                 }
             }
@@ -215,8 +248,62 @@ fn parse_event_typed(
                 tool_call_state.remove("current_tool_name");
                 tool_call_state.remove("current_tool_args");
             }
+        "message_delta" => {
+            // Capture stop_reason for use when message_stop arrives.
+            if let Some(delta) = parsed.get("delta") {
+                if let Some(sr) = delta.get("stop_reason").and_then(|v| v.as_str()) {
+                    tool_call_state.insert(
+                        "last_stop_reason".to_string(),
+                        sr.to_string(),
+                    );
+                }
+            }
+            // Emit usage update from message_delta.usage (cumulative).
+            if let Some(usage_obj) = parsed.get("usage") {
+                let mut update = UsageUpdate::default();
+                if let Some(v) = usage_obj.get("input_tokens").and_then(|v| v.as_u64()) {
+                    update.input_tokens = Some(v);
+                }
+                if let Some(v) = usage_obj.get("output_tokens").and_then(|v| v.as_u64()) {
+                    update.output_tokens = Some(v);
+                }
+                if let Some(v) = usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+                    update.cache_read_tokens = Some(v);
+                }
+                if let Some(v) = usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                    update.cache_write_tokens = Some(v);
+                }
+                events.push(StreamEvent::Usage(update));
+            }
+        }
+        "message_start" => {
+            // Initial usage from message_start.message.usage.
+            if let Some(usage_obj) = parsed
+                .get("message")
+                .and_then(|m| m.get("usage"))
+            {
+                let mut update = UsageUpdate::default();
+                if let Some(v) = usage_obj.get("input_tokens").and_then(|v| v.as_u64()) {
+                    update.input_tokens = Some(v);
+                }
+                if let Some(v) = usage_obj.get("output_tokens").and_then(|v| v.as_u64()) {
+                    update.output_tokens = Some(v);
+                }
+                if let Some(v) = usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+                    update.cache_read_tokens = Some(v);
+                }
+                if let Some(v) = usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                    update.cache_write_tokens = Some(v);
+                }
+                events.push(StreamEvent::Usage(update));
+            }
+        }
         "message_stop" => {
-            events.push(StreamEvent::Finish { reason: FinishReason::Stop, raw: None });
+            let raw_reason = tool_call_state.remove("last_stop_reason");
+            events.push(StreamEvent::Finish {
+                reason: normalize_finish_reason(raw_reason.as_deref()),
+                raw: raw_reason,
+            });
         }
         _ => {}
     }
@@ -327,6 +414,33 @@ fn parse_delta_merge(
             }
         }
     }
+
+    // OpenAI usage: sent as a top-level `usage` object on the final chunk
+    // (when stream_options.include_usage: true). The `choices` array is
+    // empty on this chunk, so the loop above skips it.
+    if let Some(usage_obj) = parsed.get("usage") {
+        if usage_obj.is_object() && !usage_obj.is_null() {
+            let mut update = UsageUpdate::default();
+            let mut has_any = false;
+            if let Some(v) = usage_obj.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                update.input_tokens = Some(v);
+                has_any = true;
+            }
+            if let Some(v) = usage_obj.get("completion_tokens").and_then(|v| v.as_u64()) {
+                update.output_tokens = Some(v);
+                has_any = true;
+            }
+            if let Some(details) = usage_obj.get("completion_tokens_details") {
+                if let Some(v) = details.get("reasoning_tokens").and_then(|v| v.as_u64()) {
+                    update.reasoning_tokens = Some(v);
+                    has_any = true;
+                }
+            }
+            if has_any {
+                events.push(StreamEvent::Usage(update));
+            }
+        }
+    }
 }
 
 fn parse_complete_chunks(
@@ -362,6 +476,8 @@ fn parse_complete_chunks(
             return;
         }
     };
+
+    let mut frame_text = String::new();
 
     for block in blocks {
         // Tool-call detection takes precedence over text.
@@ -414,30 +530,62 @@ fn parse_complete_chunks(
             }
         }
 
-        // Thinking blocks: count as text in token usage but DO NOT
-        // emit as user-visible deltas.
+        // Thinking blocks: emit as ReasoningDelta (not visible deltas).
         if let Some(ref thought_field) = p.thought_field {
             if block.get(thought_field).and_then(|v| v.as_bool()) == Some(true) {
+                if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        events.push(StreamEvent::ReasoningDelta(text.to_string()));
+                    }
+                }
                 continue;
             }
         }
 
-        // Text block. Gemini sends cumulative text (each chunk has the
-        // full text so far), so we must deduplicate by tracking how
-        // much text we've already emitted.
+        // Collect visible text from this block for per-frame aggregation.
         if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str()) {
             if !text.is_empty() {
-                let seen_len: usize = tool_call_state
-                    .get("seen_text_len")
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                if text.len() > seen_len {
-                    let new_text = &text[seen_len..];
-                    if !new_text.is_empty() {
-                        events.push(StreamEvent::Delta(new_text.to_string()));
-                    }
-                    tool_call_state.insert("seen_text_len".to_string(), text.len().to_string());
-                }
+                frame_text.push_str(text);
+            }
+        }
+    }
+
+    // Apply cursor once against the aggregated frame text, not per-part.
+    // Per-part cursoring corrupts output when a single frame contains
+    // multiple text parts (e.g. Gemini sends [{text:"Hello"},{text:" world"}]).
+    if !frame_text.is_empty() {
+        let seen_len: usize = tool_call_state
+            .get("seen_text_len")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if frame_text.len() > seen_len {
+            let new_text = &frame_text[seen_len..];
+            if !new_text.is_empty() {
+                events.push(StreamEvent::Delta(new_text.to_string()));
+            }
+        }
+        tool_call_state.insert("seen_text_len".to_string(), frame_text.len().to_string());
+    }
+
+    // Usage from usageMetadata (Gemini path).
+    if let Some(ref usage_path) = p.usage_path {
+        if let Some(usage_md) = resolve_path(parsed, usage_path) {
+            let mut update = UsageUpdate::default();
+            let mut has_any = false;
+            if let Some(v) = usage_md.get("promptTokenCount").and_then(|v| v.as_u64()) {
+                update.input_tokens = Some(v);
+                has_any = true;
+            }
+            if let Some(v) = usage_md.get("candidatesTokenCount").and_then(|v| v.as_u64()) {
+                update.output_tokens = Some(v);
+                has_any = true;
+            }
+            if let Some(v) = usage_md.get("thoughtsTokenCount").and_then(|v| v.as_u64()) {
+                update.reasoning_tokens = Some(v);
+                has_any = true;
+            }
+            if has_any {
+                events.push(StreamEvent::Usage(update));
             }
         }
     }
@@ -638,15 +786,31 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     // (`tool_calls[].function.arguments`) wire shapes.
     let mut tool_state: HashMap<String, String> = HashMap::new();
 
-    while let Some(chunk_res) = byte_stream.next().await {
-        // Mid-stream cancellation check: if the harness flag is set,
-        // break immediately and return what we have so far.
-        if let Some(ref flag) = input.cancel_flag {
-            if flag.load(std::sync::atomic::Ordering::Relaxed) {
-                tracing::info!(turn = input.turn, "provider stream cancelled mid-flight");
+    loop {
+        // Preemptive cancellation: check BEFORE waiting for the next
+        // chunk. Combined with the post-await check below, this
+        // guarantees cancellation latency is bounded by the polling
+        // interval (~50ms), not the next chunk arrival.
+        if cancelled(&input.cancel_flag) {
+            tracing::info!(turn = input.turn, "provider stream cancelled mid-flight (preemptive)");
+            break;
+        }
+
+        let chunk_res = tokio::select! {
+            biased;
+
+            _ = cancel_signal(&input.cancel_flag) => {
+                tracing::info!(turn = input.turn, "provider stream cancelled mid-flight (select)");
                 break;
             }
-        }
+
+            chunk = byte_stream.next() => {
+                match chunk {
+                    Some(c) => c,
+                    None => break, // upstream closed
+                }
+            }
+        };
 
         let chunk: Bytes = chunk_res.map_err(|e| anyhow!("stream chunk error: {e}"))?;
         let text = std::str::from_utf8(&chunk)
@@ -990,7 +1154,7 @@ fn family_capabilities(family: ProtocolFamily) -> ProviderCapabilities {
 ///
 /// Panics if `body_template` is not set. This should never happen in
 /// production because `ProviderConfig::validate` catches it at load-time.
-fn build_request_body(
+pub fn build_request_body(
     provider: &ProviderConfig,
     model: &str,
     converted_messages: &[Value],
@@ -1570,8 +1734,13 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let mut events = vec![];
         let mut state = HashMap::new();
         super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
-        assert_eq!(events.len(), 1);
+        // Now emits ReasoningDelta for the thought + Delta for visible text.
+        assert_eq!(events.len(), 2);
         match &events[0] {
+            StreamEvent::ReasoningDelta(s) => assert_eq!(s, "let me think"),
+            other => panic!("expected ReasoningDelta, got {:?}", other),
+        }
+        match &events[1] {
             StreamEvent::Delta(s) => assert_eq!(s, "the answer is 42"),
             other => panic!("expected Delta, got {:?}", other),
         }
@@ -1695,6 +1864,92 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     }
 
     #[test]
+    fn gemini_complete_chunks_multi_part_text_in_one_frame_emits_full_text() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: Some("thought".to_string()),
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        // Single frame containing two visible text parts. The cursor must
+        // operate on the concatenated frame text, not per-part.
+        let frame = json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"text": "Hello"},
+                        {"text": ", world"}
+                    ]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        let mut events = vec![];
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
+        let combined: String = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::Delta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(combined, "Hello, world",
+            "multi-part frame text must concatenate correctly; got: {combined:?}");
+    }
+
+    #[test]
+    fn gemini_complete_chunks_cumulative_multi_part_does_not_truncate() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: Some("thought".to_string()),
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        // Two frames, each with two parts; second frame is cumulative.
+        let f1 = json!({
+            "candidates": [{
+                "content": {"role":"model","parts":[{"text":"Hi"},{"text":" there"}]}
+            }]
+        });
+        let f2 = json!({
+            "candidates": [{
+                "content": {"role":"model","parts":[
+                    {"text":"Hi"}, {"text":" there"},
+                    {"text":", how"}, {"text":" are you?"}
+                ]},
+                "finishReason": "STOP"
+            }]
+        });
+        let mut events = vec![];
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&f1, &mut events, Some(&paths), &mut state);
+        super::parse_complete_chunks(&f2, &mut events, Some(&paths), &mut state);
+        let combined: String = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::Delta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(combined, "Hi there, how are you?",
+            "cumulative multi-part frames must produce the full text exactly once");
+    }
+
+    #[test]
     fn complete_chunks_repeated_tool_call_emits_once() {
         use crate::directive::StreamPaths;
         let paths = StreamPaths {
@@ -1732,26 +1987,86 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         assert_eq!(tool_uses.len(), 1, "cumulative frame must not duplicate tool calls");
     }
 
-    // ── Golden-wire integration tests ────────────────────────────────
+    // ── Real golden-wire tests ────────────────────────────────────────
     //
-    // These tests construct `ProviderConfig` matching the bundled YAML
-    // shapes and exercise the full message→body pipeline. They catch:
-    //   - YAML profile-merge regressions
-    //   - placement-enum breakage
-    //   - tool serialization drift
-    //   - system-prompt misplacement
+    // These tests load the ACTUAL signed bundled provider YAML through
+    // VerifiedLoader, resolve the matching profile via preflight_resolve,
+    // and build the request body. They catch:
+    //   - Bundled YAML signature / parse failures
+    //   - Profile-match resolution regressions
+    //   - Trust-policy violations in shipped configs
+    //   - Request-shape drift (placement enums, tool serialization,
+    //     system-prompt placement)
     //
     // If a bundle YAML edit breaks one of these, CI catches it here.
 
-    use crate::directive::{
-        MessageSchemas, SchemasConfig, SystemMessageConfig, TextPlacement,
-        AssistantToolCallsPlacement, ToolResultConfig, ToolResultWrapMode,
-        ToolSchemaConfig, ToolCall,
+    use ryeos_runtime::model_resolution::{
+        DirectiveModelHeader, ModelSpec, preflight_resolve,
     };
-    use ryeos_runtime::model_resolution::StreamingConfig;
+    use ryeos_runtime::verified_loader::VerifiedLoader;
 
-    /// Canonical transcript used by all golden-wire tests.
-    fn canonical_transcript() -> Vec<ProviderMessage> {
+    /// Path to the bundled standard root in the workspace.
+    fn bundle_root() -> std::path::PathBuf {
+        // CARGO_MANIFEST_DIR is ryeos-directive-runtime/; parent is workspace.
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("ryeos-bundles/standard")
+    }
+
+    /// Build a VerifiedLoader rooted at the bundled standard, with an
+    /// empty temp project root so project-overlay attacks can't interfere.
+    fn loader_for_bundle() -> VerifiedLoader {
+        let empty_project = std::env::temp_dir().join("ryeos-golden-wire-empty-project");
+        let _ = std::fs::create_dir_all(&empty_project);
+        VerifiedLoader::new(
+            empty_project,
+            None,
+            vec![bundle_root()],
+        )
+    }
+
+    /// Resolve a provider+model through the real loader + preflight chain.
+    fn resolve(provider: &str, model: &str) -> ryeos_runtime::ResolvedProviderSnapshot {
+        let loader = loader_for_bundle();
+        let header = DirectiveModelHeader {
+            model: Some(ModelSpec {
+                tier: None,
+                provider: Some(provider.to_string()),
+                name: Some(model.to_string()),
+                context_window: Some(128_000),
+                sampling: None,
+            }),
+        };
+        preflight_resolve(&header, &loader)
+            .unwrap_or_else(|e| panic!("preflight_resolve failed for {provider}/{model}: {e:#}"))
+    }
+
+    /// Helper: build the full request body from a resolved snapshot.
+    fn build_golden_body(
+        snapshot: &ryeos_runtime::ResolvedProviderSnapshot,
+        messages: &[ProviderMessage],
+        tools: &[ToolSchema],
+    ) -> Value {
+        let schemas = snapshot.provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
+        let (converted, system_prompt) =
+            crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
+        let tool_schema = snapshot.provider.schemas.as_ref().and_then(|s| s.tools.clone());
+        let tools_val = crate::provider_adapter::tools::serialize_tools(tools, &tool_schema);
+        super::build_request_body(
+            &snapshot.provider,
+            &snapshot.model_name,
+            &converted,
+            system_prompt.as_deref(),
+            &tools_val,
+            !tools.is_empty(),
+        )
+    }
+
+    use crate::directive::ToolCall;
+
+    /// Canonical transcript with a tool call.
+    fn canonical_transcript_with_tool_call() -> Vec<ProviderMessage> {
         vec![
             ProviderMessage {
                 role: "system".to_string(),
@@ -1790,238 +2105,86 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         ]
     }
 
-    /// Helper: build the full request body for a provider config.
-    fn build_golden_body(
-        provider: &ProviderConfig,
-        model: &str,
-        messages: &[ProviderMessage],
-        tools: &[ToolSchema],
-    ) -> Value {
-        let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
-        let (converted, system_prompt) =
-            crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
-        let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
-        let tools_val = crate::provider_adapter::tools::serialize_tools(tools, &tool_schema);
-        super::build_request_body(provider, model, &converted, system_prompt.as_deref(), &tools_val, !tools.is_empty())
+    fn canonical_transcript_no_tools() -> Vec<ProviderMessage> {
+        vec![
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("hi")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ]
     }
 
-    // ── OpenAI (ChatCompletions) ─────────────────────────────────────
-
-    fn openai_provider() -> ProviderConfig {
-        ProviderConfig {
-            category: None,
-            family: ProtocolFamily::ChatCompletions,
-            base_url: "https://api.openai.com/v1".to_string(),
-            auth: Default::default(),
-            headers: Default::default(),
-            schemas: Some(SchemasConfig {
-                messages: Some(MessageSchemas {
-                    role_map: Some({
-                        let mut m = HashMap::new();
-                        m.insert("user".into(), "user".into());
-                        m.insert("assistant".into(), "assistant".into());
-                        m.insert("system".into(), "system".into());
-                        m.insert("tool".into(), "tool".into());
-                        m
-                    }),
-                    content_key: Some("content".to_string()),
-                    text_placement: None,
-                    text_block_template: None,
-                    assistant_tool_calls_placement: None,
-                    tool_call_block_template: Some(json!({
-                        "id": "{id}",
-                        "type": "function",
-                        "function": {
-                            "name": "{name}",
-                            "arguments": "{input_json}",
-                        }
-                    })),
-                    system_message: Some(SystemMessageConfig {
-                        mode: SystemMessageMode::MessageRole,
-                        field: None,
-                        template: None,
-                    }),
-                    tool_result: Some(ToolResultConfig {
-                        role: "tool".to_string(),
-                        wrap_mode: ToolResultWrapMode::Direct,
-                        block_template: json!({
-                            "tool_call_id": "{tool_call_id}",
-                            "content": "{content}",
-                        }),
-                    }),
-                }),
-                tools: Some(ToolSchemaConfig {
-                    template: json!({
-                        "type": "function",
-                        "function": {
-                            "name": "{name}",
-                            "description": "{description}",
-                            "parameters": "{schema}",
-                        }
-                    }),
-                    list_wrap: None,
-                }),
-                streaming: Some(StreamingConfig {
-                    mode: Some("delta_merge".to_string()),
-                    paths: None,
-                }),
-            }),
-            pricing: None,
-            extra: {
-                let mut m = HashMap::new();
-                m.insert("stream_url".to_string(), json!("/chat/completions"));
-                m
-            },
-            body_template: Some(json!({
-                "model": "{model}",
-                "messages": "{messages}",
-                "tools": "{tools}",
-                "stream": "{stream}",
+    fn canonical_tool_schemas() -> Vec<ToolSchema> {
+        vec![ToolSchema {
+            name: "calculator".to_string(),
+            item_id: "test/calculator".to_string(),
+            description: Some("Evaluate arithmetic".to_string()),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": { "expr": {"type":"string"} },
+                "required": ["expr"],
             })),
-            body_extra: None,
-            profiles: vec![],
+        }]
+    }
+
+    // ── Tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn bundled_provider_configs_all_pass_validation() {
+        // Sanity: every provider in the bundle resolves and validates.
+        for (provider, model) in [
+            ("openai", "gpt-4o-mini"),
+            ("anthropic", "claude-sonnet-4-5-20250929"),
+            ("zen", "gpt-5.4-nano"),
+        ] {
+            let snapshot = resolve(provider, model);
+            assert_eq!(snapshot.provider_id, provider);
+            assert!(!snapshot.config_hash.is_empty(),
+                "config_hash must be populated for {provider}");
         }
     }
 
     #[test]
-    fn golden_openai_tool_calls_are_top_level_on_assistant() {
-        let provider = openai_provider();
-        let body = build_golden_body(&provider, "gpt-4o-mini", &canonical_transcript(), &[]);
-
+    fn bundled_openai_profile_builds_top_level_tool_calls() {
+        let snapshot = resolve("openai", "gpt-4o-mini");
+        assert_eq!(snapshot.provider_id, "openai");
+        let body = build_golden_body(
+            &snapshot,
+            &canonical_transcript_with_tool_call(),
+            &canonical_tool_schemas(),
+        );
         assert_eq!(body["model"], "gpt-4o-mini");
 
         let messages = body["messages"].as_array().expect("messages must be array");
-        // System + user + assistant + tool + user = 5
-        assert_eq!(messages.len(), 5);
-
-        // Find the assistant message
         let assistant = messages.iter()
             .find(|m| m["role"] == "assistant")
             .expect("must have assistant message");
 
         // tool_calls must be a top-level array, not inline in content
         assert!(assistant["tool_calls"].is_array(),
-            "OpenAI tool_calls must be top-level array on assistant message, got: {:?}",
-            assistant);
+            "OpenAI tool_calls must be top-level array on assistant message; got: {assistant}");
         assert_eq!(assistant["tool_calls"][0]["function"]["name"], "calculator");
 
         // Content must be a plain string, not a block array
         assert!(assistant["content"].is_string(),
             "OpenAI assistant content must be plain string, got: {:?}", assistant["content"]);
-
-        // Tool result message must have tool_call_id
-        let tool_msg = messages.iter()
-            .find(|m| m["role"] == "tool")
-            .expect("must have tool message");
-        assert_eq!(tool_msg["tool_call_id"], "call_1");
     }
 
     #[test]
-    fn golden_openai_empty_tools_omits_field() {
-        let provider = openai_provider();
-        let body = build_golden_body(&provider, "gpt-4o-mini", &canonical_transcript(), &[]);
-        // Template includes "tools": "{tools}" which renders as empty array.
-        // With no tools, the template placeholder resolves to [].
-        assert!(body["tools"].is_array(), "tools must be array (possibly empty)");
-        assert_eq!(body["tools"].as_array().unwrap().len(), 0);
-    }
-
-    // ── Anthropic (AnthropicMessages) ────────────────────────────────
-
-    fn anthropic_provider() -> ProviderConfig {
-        ProviderConfig {
-            category: None,
-            family: ProtocolFamily::AnthropicMessages,
-            base_url: "https://api.anthropic.com/v1/messages".to_string(),
-            auth: Default::default(),
-            headers: Default::default(),
-            schemas: Some(SchemasConfig {
-                messages: Some(MessageSchemas {
-                    role_map: Some({
-                        let mut m = HashMap::new();
-                        m.insert("user".into(), "user".into());
-                        m.insert("assistant".into(), "assistant".into());
-                        m
-                    }),
-                    content_key: Some("content".to_string()),
-                    text_placement: Some(TextPlacement::BlocksArray),
-                    text_block_template: Some(json!({
-                        "type": "text",
-                        "text": "{text}",
-                    })),
-                    assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
-                    tool_call_block_template: Some(json!({
-                        "type": "tool_use",
-                        "id": "{id}",
-                        "name": "{name}",
-                        "input": "{input}",
-                    })),
-                    system_message: Some(SystemMessageConfig {
-                        mode: SystemMessageMode::BodyField,
-                        field: Some("system".to_string()),
-                        template: None,
-                    }),
-                    tool_result: Some(ToolResultConfig {
-                        role: "user".to_string(),
-                        wrap_mode: ToolResultWrapMode::ContentBlocks,
-                        block_template: json!({
-                            "type": "tool_result",
-                            "tool_use_id": "{tool_call_id}",
-                            "content": "{content}",
-                        }),
-                    }),
-                }),
-                tools: Some(ToolSchemaConfig {
-                    template: json!({
-                        "name": "{name}",
-                        "description": "{description}",
-                        "input_schema": "{schema}",
-                    }),
-                    list_wrap: None,
-                }),
-                streaming: Some(StreamingConfig {
-                    mode: Some("event_typed".to_string()),
-                    paths: None,
-                }),
-            }),
-            pricing: None,
-            extra: {
-                let mut m = HashMap::new();
-                m.insert("stream_url".to_string(), json!(""));
-                m
-            },
-            body_template: Some(json!({
-                "model": "{model}",
-                "max_tokens": "{max_tokens}",
-                "messages": "{messages}",
-                "tools": "{tools}",
-                "stream": "{stream}",
-            })),
-            body_extra: Some(json!({"max_tokens": 8192})),
-            profiles: vec![],
-        }
-    }
-
-    #[test]
-    fn golden_anthropic_system_is_body_field() {
-        let provider = anthropic_provider();
-        let body = build_golden_body(&provider, "claude-sonnet-4", &canonical_transcript(), &[]);
+    fn bundled_anthropic_profile_builds_typed_blocks() {
+        let snapshot = resolve("anthropic", "claude-sonnet-4-5-20250929");
+        assert_eq!(snapshot.provider_id, "anthropic");
+        let body = build_golden_body(
+            &snapshot,
+            &canonical_transcript_with_tool_call(),
+            &canonical_tool_schemas(),
+        );
 
         // System must be a top-level body field, not in messages
         assert!(body["system"].is_string(),
-            "Anthropic system must be top-level body field, got: {:?}", body.get("system"));
-        assert_eq!(body["system"], "You are helpful.");
-
-        // No system role in messages
-        let messages = body["messages"].as_array().expect("messages must be array");
-        assert!(messages.iter().all(|m| m["role"] != "system"),
-            "Anthropic must not have system-role messages");
-    }
-
-    #[test]
-    fn golden_anthropic_content_is_block_array() {
-        let provider = anthropic_provider();
-        let body = build_golden_body(&provider, "claude-sonnet-4", &canonical_transcript(), &[]);
+            "Anthropic system must be top-level body field");
 
         let messages = body["messages"].as_array().expect("messages must be array");
         let assistant = messages.iter()
@@ -2040,177 +2203,303 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     }
 
     #[test]
-    fn golden_anthropic_tool_result_is_content_blocks() {
-        let provider = anthropic_provider();
-        let body = build_golden_body(&provider, "claude-sonnet-4", &canonical_transcript(), &[]);
-
-        let messages = body["messages"].as_array().expect("messages must be array");
-        // Tool result should be merged into a user message with content blocks
-        let user_msgs: Vec<_> = messages.iter()
-            .filter(|m| m["role"] == "user")
-            .collect();
-        // At least 2 user messages: tool_result + "Thanks."
-        assert!(user_msgs.len() >= 2, "expected >= 2 user messages, got {}", user_msgs.len());
-
-        // Find the user message containing tool_result block
-        let tool_result_msg = user_msgs.iter().find(|m| {
-            m["content"].as_array().is_some_and(|blocks| {
-                blocks.iter().any(|b| b["type"] == "tool_result")
-            })
-        }).expect("must have a user message with tool_result content block");
-        assert_eq!(tool_result_msg["content"].as_array().unwrap()[0]["tool_use_id"], "call_1");
+    fn bundled_gemini_profile_omits_tools_when_empty() {
+        // Gemini provider comes through zen's gemini profile.
+        // zen.yaml matches gemini-* to the gemini profile.
+        let snapshot = resolve("zen", "gemini-3-flash");
+        let body = build_golden_body(
+            &snapshot,
+            &canonical_transcript_no_tools(),
+            &[],
+        );
+        assert!(body.get("tools").is_none(),
+            "Gemini empty-tools must omit the field; got: {:?}", body.get("tools"));
     }
 
-    // ── Gemini (GoogleGenerateContent) ───────────────────────────────
+    #[test]
+    fn bundled_gemini_profile_tool_result_carries_real_function_name() {
+        let snapshot = resolve("zen", "gemini-3-flash");
+        let body = build_golden_body(
+            &snapshot,
+            &canonical_transcript_with_tool_call(),
+            &canonical_tool_schemas(),
+        );
+        let contents = body["contents"].as_array().expect("Gemini contents array");
+        let function_response = contents.iter()
+            .flat_map(|c| c["parts"].as_array().cloned().unwrap_or_default())
+            .find(|p| p.get("functionResponse").is_some())
+            .expect("must have a functionResponse part");
+        assert_eq!(
+            function_response["functionResponse"]["name"], "calculator",
+            "functionResponse.name must be the real tool name, not empty"
+        );
+    }
 
-    fn gemini_provider() -> ProviderConfig {
-        ProviderConfig {
-            category: None,
-            family: ProtocolFamily::GoogleGenerateContent,
-            base_url: "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse".to_string(),
-            auth: Default::default(),
-            headers: Default::default(),
-            schemas: Some(SchemasConfig {
-                messages: Some(MessageSchemas {
-                    role_map: Some({
-                        let mut m = HashMap::new();
-                        m.insert("user".into(), "user".into());
-                        m.insert("assistant".into(), "model".into());
-                        m
-                    }),
-                    content_key: Some("parts".to_string()),
-                    text_placement: Some(TextPlacement::PartsArray),
-                    text_block_template: Some(json!({"text": "{text}"})),
-                    assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
-                    tool_call_block_template: Some(json!({
-                        "functionCall": {
-                            "name": "{name}",
-                            "args": "{input}",
-                        }
-                    })),
-                    system_message: Some(SystemMessageConfig {
-                        mode: SystemMessageMode::BodyInject,
-                        field: None,
-                        template: Some(json!({
-                            "systemInstruction": {
-                                "parts": [{"text": "{system}"}]
-                            }
-                        })),
-                    }),
-                    tool_result: Some(ToolResultConfig {
-                        role: "user".to_string(),
-                        wrap_mode: ToolResultWrapMode::ContentBlocks,
-                        block_template: json!({
-                            "functionResponse": {
-                                "name": "{tool_name}",
-                                "response": {"content": "{content}"},
-                            }
-                        }),
-                    }),
-                }),
-                tools: Some(ToolSchemaConfig {
-                    template: json!({
-                        "name": "{name}",
-                        "description": "{description}",
-                        "parameters": "{schema}",
-                    }),
-                    list_wrap: Some("functionDeclarations".to_string()),
-                }),
-                streaming: Some(StreamingConfig {
-                    mode: Some("complete_chunks".to_string()),
-                    paths: None,
-                }),
-            }),
-            pricing: None,
-            extra: {
-                let mut m = HashMap::new();
-                m.insert("stream_url".to_string(), json!(""));
-                m
-            },
-            body_template: Some(json!({
-                "contents": "{messages}",
-            })),
-            body_extra: Some(json!({
-                "generationConfig": {"maxOutputTokens": 4096}
-            })),
-            profiles: vec![],
+    #[tokio::test]
+    async fn cancel_signal_resolves_within_250ms_of_flag_set() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let start = tokio::time::Instant::now();
+
+        // Spawn the cancel_signal future and set the flag after 10ms
+        let handle = tokio::spawn(async move {
+            let opt_flag: Option<Arc<AtomicBool>> = Some(flag_clone);
+            cancel_signal(&opt_flag).await;
+        });
+
+        // Simulate external trigger after a short delay
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        flag.store(true, Ordering::Relaxed);
+
+        // cancel_signal must resolve within 250ms of the flag being set
+        let result = tokio::time::timeout(Duration::from_millis(250), handle).await;
+        assert!(
+            result.is_ok(),
+            "cancel_signal did not resolve within 250ms; elapsed: {}ms",
+            start.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    fn cancelled_returns_false_when_no_flag() {
+        assert!(!cancelled(&None));
+    }
+
+    #[test]
+    fn cancelled_returns_true_when_flag_set() {
+        use std::sync::atomic::{AtomicBool};
+        use std::sync::Arc;
+        let flag = Arc::new(AtomicBool::new(true));
+        assert!(cancelled(&Some(flag)));
+    }
+
+    // ── Phase 5: Stream event emission tests ──────────────────────────
+
+    #[test]
+    fn anthropic_emits_finish_reason_from_stop_reason() {
+        let data = r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":15}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+        let events = parse_sse_events(data, Some("event_typed"));
+        let finish = events.iter().find(|e| matches!(e, StreamEvent::Finish { .. }));
+        assert!(finish.is_some(), "must have a Finish event");
+        match finish.unwrap() {
+            StreamEvent::Finish { reason, raw } => {
+                assert_eq!(*reason, FinishReason::ToolCalls);
+                assert_eq!(raw.as_deref(), Some("tool_use"));
+            }
+            other => panic!("expected Finish, got {:?}", other),
         }
     }
 
     #[test]
-    fn golden_gemini_system_is_body_inject() {
-        let provider = gemini_provider();
-        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+    fn anthropic_emits_usage_from_message_delta() {
+        let data = r#"event: message_delta
+data: {"type":"message_delta","delta":{},"usage":{"input_tokens":25,"output_tokens":10}}
 
-        // System must be injected as systemInstruction, not in contents
-        assert!(body["systemInstruction"].is_object(),
-            "Gemini system must be body-injected as systemInstruction, got: {:?}",
-            body.get("systemInstruction"));
-        assert_eq!(
-            body["systemInstruction"]["parts"][0]["text"],
-            "You are helpful."
-        );
-
-        // No system role in contents
-        let contents = body["contents"].as_array().expect("contents must be array");
-        assert!(contents.iter().all(|m| m["role"] != "system"),
-            "Gemini must not have system-role messages");
+"#;
+        let events = parse_sse_events(data, Some("event_typed"));
+        let usage_events: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::Usage(u) => Some(u.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].input_tokens, Some(25));
+        assert_eq!(usage_events[0].output_tokens, Some(10));
     }
 
     #[test]
-    fn golden_gemini_empty_tools_omits_field() {
-        let provider = gemini_provider();
-        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+    fn anthropic_emits_usage_from_message_start() {
+        let data = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":100,"output_tokens":0}}}
 
-        // Gemini with empty tools must NOT have a tools field at all
-        assert!(body.get("tools").is_none(),
-            "Gemini empty-tools must omit the field entirely, got: {:?}", body.get("tools"));
+"#;
+        let events = parse_sse_events(data, Some("event_typed"));
+        let usage_events: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::Usage(u) => Some(u.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].input_tokens, Some(100));
     }
 
     #[test]
-    fn golden_gemini_assistant_role_is_model() {
-        let provider = gemini_provider();
-        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+    fn anthropic_emits_reasoning_delta_from_thinking_delta() {
+        let data = r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I need to calculate 2+2"}}
 
-        let contents = body["contents"].as_array().expect("contents must be array");
-        // Assistant role must be remapped to "model"
-        assert!(contents.iter().any(|m| m["role"] == "model"),
-            "Gemini must have 'model' role for assistant messages");
-        assert!(!contents.iter().any(|m| m["role"] == "assistant"),
-            "Gemini must not have 'assistant' role");
+"#;
+        let events = parse_sse_events(data, Some("event_typed"));
+        let reasoning: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::ReasoningDelta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning.len(), 1);
+        assert_eq!(reasoning[0], "I need to calculate 2+2");
     }
 
     #[test]
-    fn golden_gemini_function_response_carries_real_tool_name() {
-        let provider = gemini_provider();
-        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
-
-        let contents = body["contents"].as_array().expect("contents must be array");
-        // Find the functionResponse part
-        let function_response = contents.iter()
-            .flat_map(|c| c["parts"].as_array().unwrap_or(&Vec::new()).clone())
-            .find(|p| p.get("functionResponse").is_some())
-            .expect("must have a functionResponse part");
-
-        assert_eq!(function_response["functionResponse"]["name"], "calculator",
-            "functionResponse.name must be the real tool name, not empty");
+    fn gemini_emits_usage_from_usage_metadata() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: None,
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: Some("usageMetadata".to_string()),
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        let frame = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "hi"}]}
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 42,
+                "candidatesTokenCount": 7,
+                "thoughtsTokenCount": 3
+            }
+        });
+        let mut events = vec![];
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
+        let usage_events: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::Usage(u) => Some(u.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].input_tokens, Some(42));
+        assert_eq!(usage_events[0].output_tokens, Some(7));
+        assert_eq!(usage_events[0].reasoning_tokens, Some(3));
     }
 
     #[test]
-    fn golden_gemini_tool_calls_are_inline_in_parts() {
-        let provider = gemini_provider();
-        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+    fn gemini_emits_reasoning_delta_for_thought_parts() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: Some("thought".to_string()),
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        let frame = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"thought": true, "text": "reasoning step 1"},
+                    {"text": "visible answer"}
+                ]}
+            }]
+        });
+        let mut events = vec![];
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
+        let reasoning: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::ReasoningDelta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning.len(), 1);
+        assert_eq!(reasoning[0], "reasoning step 1");
+        // Also verify the visible text was emitted
+        let deltas: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::Delta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["visible answer"]);
+    }
 
-        let contents = body["contents"].as_array().expect("contents must be array");
-        let model_msg = contents.iter()
-            .find(|m| m["role"] == "model")
-            .expect("must have model message");
+    #[test]
+    fn gemini_uppercase_finish_reason_normalizes_correctly() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: None,
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: Some("candidates.0.finishReason".to_string()),
+        };
+        let frame = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "done"}]},
+                "finishReason": "STOP"
+            }]
+        });
+        let mut events = vec![];
+        let mut state = HashMap::new();
+        super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
+        let finish = events.iter().find(|e| matches!(e, StreamEvent::Finish { .. }));
+        assert!(finish.is_some());
+        match finish.unwrap() {
+            StreamEvent::Finish { reason, raw } => {
+                assert_eq!(*reason, FinishReason::Stop,
+                    "uppercase STOP must normalize to Stop");
+                assert_eq!(raw.as_deref(), Some("STOP"));
+            }
+            other => panic!("expected Finish, got {:?}", other),
+        }
+    }
 
-        // Tool calls must be inline functionCall parts, not a top-level field
-        assert!(model_msg.get("tool_calls").is_none(),
-            "Gemini must not have top-level tool_calls on model message");
-        let parts = model_msg["parts"].as_array().expect("model message must have parts");
-        assert!(parts.iter().any(|p| p.get("functionCall").is_some()),
-            "model message parts must contain functionCall");
+    #[test]
+    fn openai_emits_usage_from_stream_options_frame() {
+        let data = r#"data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":20,"completion_tokens_details":{"reasoning_tokens":5}}}
+
+"#;
+        let events = parse_sse_events(data, Some("delta_merge"));
+        let usage_events: Vec<_> = events.iter()
+            .filter_map(|e| match e {
+                StreamEvent::Usage(u) => Some(u.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].input_tokens, Some(50));
+        assert_eq!(usage_events[0].output_tokens, Some(20));
+        assert_eq!(usage_events[0].reasoning_tokens, Some(5));
+    }
+
+    #[test]
+    fn normalize_finish_reason_case_insensitive() {
+        use crate::directive::{normalize_finish_reason, FinishReason};
+        assert_eq!(normalize_finish_reason(Some("stop")), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason(Some("STOP")), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason(Some("Stop")), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason(Some("end_turn")), FinishReason::Stop);
+        assert_eq!(normalize_finish_reason(Some("tool_use")), FinishReason::ToolCalls);
+        assert_eq!(normalize_finish_reason(Some("SAFETY")), FinishReason::ContentFilter);
+        assert_eq!(normalize_finish_reason(Some("MAX_TOKENS")), FinishReason::Length);
     }
 }

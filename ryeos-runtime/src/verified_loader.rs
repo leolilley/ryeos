@@ -48,6 +48,21 @@ impl ConfigLoadError {
     }
 }
 
+/// Strictness policy for config/item verification.
+///
+/// `Permissive` is the historical default — accepts unsigned files
+/// and unknown-signer files with a warning. Suitable for development
+/// where bundle-signing may lag.
+///
+/// `Required` rejects unsigned and unknown-signer files outright.
+/// Used for security-sensitive configs where a wrong source means
+/// vault secrets get redirected (provider configs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadStrictness {
+    Permissive,
+    Required,
+}
+
 #[derive(Debug, Clone)]
 pub struct TrustedKey {
     pub fingerprint: String,
@@ -330,7 +345,18 @@ impl VerifiedLoader {
         bail!("item not found: {kind}:{bare_id}");
     }
 
+    /// Load and verify a file. Permissive mode — warns on unsigned/unknown-signer.
     pub fn load_verified(&self, kind: &str, path: &Path) -> Result<VerifiedContent> {
+        self.load_verified_with_strictness(kind, path, LoadStrictness::Permissive)
+    }
+
+    /// Load and verify a file with configurable strictness.
+    pub fn load_verified_with_strictness(
+        &self,
+        kind: &str,
+        path: &Path,
+        strictness: LoadStrictness,
+    ) -> Result<VerifiedContent> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
 
@@ -368,22 +394,46 @@ impl VerifiedLoader {
                     path: path.to_path_buf(),
                 }
             } else {
-                tracing::warn!(
-                    "signed by unknown signer {} — not in trust store: {}",
-                    sig_header.signer_fingerprint,
-                    path.display()
-                );
-                VerifiedContent {
-                    content,
-                    hash,
-                    path: path.to_path_buf(),
+                match strictness {
+                    LoadStrictness::Permissive => {
+                        tracing::warn!(
+                            "signed by unknown signer {} — not in trust store: {}",
+                            sig_header.signer_fingerprint,
+                            path.display()
+                        );
+                        VerifiedContent {
+                            content,
+                            hash,
+                            path: path.to_path_buf(),
+                        }
+                    }
+                    LoadStrictness::Required => {
+                        bail!(
+                            "REJECTED: {} is signed by unknown signer {} \
+                             (not in trust store). Strict mode requires a \
+                             trusted publisher signature for this config kind.",
+                            path.display(),
+                            sig_header.signer_fingerprint
+                        );
+                    }
                 }
             }
         } else {
-            VerifiedContent {
-                content,
-                hash,
-                path: path.to_path_buf(),
+            match strictness {
+                LoadStrictness::Permissive => VerifiedContent {
+                    content,
+                    hash,
+                    path: path.to_path_buf(),
+                },
+                LoadStrictness::Required => {
+                    bail!(
+                        "REJECTED: {} is unsigned. Strict mode requires a \
+                         valid publisher signature for this config kind. \
+                         Re-sign with: ./scripts/populate-bundles.sh \
+                         --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev",
+                        path.display()
+                    );
+                }
             }
         };
 
@@ -521,17 +571,39 @@ impl VerifiedLoader {
         Ok(Some(value))
     }
 
-    /// Same as `load_config_strict` but also returns the source root
-    /// label (`"system"` | `"user"` | `"project"`) for trust decisions.
+    /// Same as `load_config_strict` but also returns the set of source root
+    /// labels (`"system"` / `"user"` / `"project"`) that contributed a file
+    /// to the result, in resolution order (system → user → project).
+    /// Used for trust decisions where ANY contribution from an untrusted
+    /// root must be detectable.
     ///
-    /// When a single candidate is found, its root label is returned.
-    /// When multiple candidates are merged, the label of the *first*
-    /// contributing root is returned (highest-precedence root that
-    /// supplied a file).
+    /// Returns `Ok(None)` if no root contributed a file.
+    /// Load a config requiring a valid signature from a trusted publisher.
+    /// Returns only the parsed value (no contributor labels).
+    /// Rejects unsigned and unknown-signer files outright.
+    pub fn load_config_strict_signed<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+    ) -> std::result::Result<Option<T>, ConfigLoadError> {
+        self.load_config_with_strictness(config_id, LoadStrictness::Required)
+            .map(|opt| opt.map(|(v, _contribs)| v))
+    }
+
+    /// Permissive provenance loader — backward-compatible.
     pub fn load_config_with_provenance<T: DeserializeOwned>(
         &self,
         config_id: &str,
-    ) -> std::result::Result<Option<(T, String)>, ConfigLoadError> {
+    ) -> std::result::Result<Option<(T, Vec<String>)>, ConfigLoadError> {
+        self.load_config_with_strictness(config_id, LoadStrictness::Permissive)
+    }
+
+    /// Core loader with configurable strictness. Returns the parsed value
+    /// and the list of contributing root labels.
+    pub fn load_config_with_strictness<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+        strictness: LoadStrictness,
+    ) -> std::result::Result<Option<(T, Vec<String>)>, ConfigLoadError> {
         let subdir = Self::kind_subdir("config");
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
@@ -563,14 +635,15 @@ impl VerifiedLoader {
             return Ok(None);
         }
 
-        // The source root is the first root that contributed a file
-        // (system > user > project precedence).
-        let source_root = candidate_paths[0].1.to_string();
+        let contributors: Vec<String> = candidate_paths
+            .iter()
+            .map(|(_, label)| label.to_string())
+            .collect();
 
         if candidate_paths.len() == 1 {
             let (path, _) = &candidate_paths[0];
             let verified = self
-                .load_verified("config", path)
+                .load_verified_with_strictness("config", path, strictness)
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -588,13 +661,15 @@ impl VerifiedLoader {
                     source: e,
                 }
             })?;
-            return Ok(Some((value, source_root)));
+            return Ok(Some((value, contributors)));
         }
 
+        // Multi-root merge path — preserve existing merge logic but return
+        // all contributors so callers can apply trust policy.
         let mut merged = serde_yaml::Value::Null;
         for (path, _) in &candidate_paths {
             let verified = self
-                .load_verified("config", path)
+                .load_verified_with_strictness("config", path, strictness)
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -618,7 +693,7 @@ impl VerifiedLoader {
                 source: e,
             }
         })?;
-        Ok(Some((value, source_root)))
+        Ok(Some((value, contributors)))
     }
 
     pub fn scan_kind(&self, kind: &str) -> Result<Vec<ScannedItem>> {
@@ -1101,5 +1176,113 @@ pem = """
         let items = loader.scan_kind("directive").unwrap();
 
         assert!(items.is_empty());
+    }
+
+    // ── Strict mode tests ──────────────────────────────────────────────
+
+    /// Helper: sign YAML with a test key and pin it into the root's trust
+    /// store so strict mode accepts it.
+    fn sign_and_pin(yaml_body: &str, root: &Path) -> String {
+        use base64::Engine;
+        use ed25519_dalek::SigningKey;
+        use lillux::signature::{compute_fingerprint, sign_content_at};
+
+        let sk = SigningKey::from_bytes(&[99u8; 32]);
+        let vk = sk.verifying_key();
+        let fp = compute_fingerprint(&vk);
+        let signed = sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
+
+        let trust_dir = root.join(".ai/config/keys/trusted");
+        std::fs::create_dir_all(&trust_dir).unwrap();
+        let vk_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        let toml = format!(
+            "fingerprint = \"{fp}\"\npem = \"ed25519:{vk_b64}\"\nowner = \"test\"\n"
+        );
+        std::fs::write(trust_dir.join("test.toml"), toml).unwrap();
+        signed
+    }
+
+    #[test]
+    fn strict_load_rejects_unsigned_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("system");
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
+        std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
+        // NO signature header.
+        std::fs::write(
+            system.join(cfg_subpath),
+            "base_url: https://example.com/v1\n",
+        )
+        .unwrap();
+
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            None,
+            vec![system],
+        );
+        let res = loader.load_config_strict_signed::<serde_yaml::Value>(
+            "model-providers/test",
+        );
+        assert!(res.is_err(), "strict mode must reject unsigned config");
+        let msg = format!("{:#}", res.unwrap_err());
+        assert!(
+            msg.contains("unsigned") || msg.contains("REJECTED"),
+            "error must explain unsigned rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn strict_load_rejects_unknown_signer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("system");
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
+        std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
+
+        // Sign with a throwaway key that is NOT in the trust store.
+        let yaml_body = "base_url: https://example.com/v1\n";
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[77u8; 32]);
+        let signed = lillux::signature::sign_content_at(
+            yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z",
+        );
+        std::fs::write(system.join(cfg_subpath), signed).unwrap();
+
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            None,
+            vec![system],
+        );
+        let res = loader.load_config_strict_signed::<serde_yaml::Value>(
+            "model-providers/test",
+        );
+        assert!(res.is_err(), "strict mode must reject unknown signer");
+        let msg = format!("{:#}", res.unwrap_err());
+        assert!(
+            msg.contains("unknown signer") || msg.contains("REJECTED"),
+            "error must explain unknown-signer rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn strict_load_accepts_trusted_signed_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("system");
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
+        std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
+
+        let yaml_body = "base_url: https://example.com/v1\n";
+        let signed = sign_and_pin(yaml_body, &system);
+        std::fs::write(system.join(cfg_subpath), signed).unwrap();
+
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            None,
+            vec![system],
+        );
+        let res = loader.load_config_strict_signed::<serde_yaml::Value>(
+            "model-providers/test",
+        );
+        assert!(res.is_ok(), "strict mode must accept trusted-signed config");
+        let val = res.unwrap().expect("should have a value");
+        assert_eq!(val["base_url"].as_str(), Some("https://example.com/v1"));
     }
 }

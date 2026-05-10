@@ -1970,6 +1970,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "ed25519-dalek",
  "libc",
  "lillux",
  "regex",
