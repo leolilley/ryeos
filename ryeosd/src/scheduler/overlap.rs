@@ -86,7 +86,7 @@ pub async fn check_overlap(spec: &ScheduleSpecRecord, state: &crate::state::AppS
 }
 
 fn thread_is_terminal(status: &str) -> bool {
-    matches!(status, "completed" | "failed")
+    matches!(status, "completed" | "failed" | "cancelled")
 }
 
 #[cfg(test)]
@@ -144,6 +144,11 @@ mod tests {
     #[test]
     fn thread_is_terminal_failed() {
         assert!(thread_is_terminal("failed"));
+    }
+
+    #[test]
+    fn thread_is_terminal_cancelled() {
+        assert!(thread_is_terminal("cancelled"));
     }
 
     #[test]

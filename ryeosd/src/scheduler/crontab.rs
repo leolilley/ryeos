@@ -43,17 +43,23 @@ pub fn is_due(
 /// Compute the `scheduled_at` for the current fire.
 /// For cron/interval: finds the exact boundary.
 /// For at: returns the given timestamp.
+///
+/// `registration_time` is used as the fallback start bound for cron schedules
+/// that have never fired, preventing an epoch-to-now walk that would iterate
+/// millions of times for fine-grained cron expressions.
 pub fn compute_scheduled_at(
     schedule_type: &str,
     expression: &str,
     timezone: &str,
     now_ms: i64,
     last_fire_at: Option<i64>,
+    registration_time: Option<i64>,
 ) -> Option<i64> {
     match schedule_type {
         "cron" => {
-            // Find the most recent fire boundary at or before now
-            let after = last_fire_at.unwrap_or(0);
+            // Find the most recent fire boundary at or before now.
+            // Use registration_time (not 0) as fallback to avoid walking from epoch.
+            let after = last_fire_at.or(registration_time).unwrap_or(0);
             find_most_recent_cron(expression, timezone, after, now_ms)
         }
         "interval" => {

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T01:54:15Z:0f79b40fe686afaf3d49ccd192ff5644c3df5aec4bbe75505bcf7bf6865e4566:AA9yOakfQp/O/P+/nmFTR1dtBgPGc60ifYnjigNLf0qny1BhlaHRyaJvLrOGfnEoDHc8GoR6L30z8CXnilNeBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-10T03:17:43Z:0f79b40fe686afaf3d49ccd192ff5644c3df5aec4bbe75505bcf7bf6865e4566:AA9yOakfQp/O/P+/nmFTR1dtBgPGc60ifYnjigNLf0qny1BhlaHRyaJvLrOGfnEoDHc8GoR6L30z8CXnilNeBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """YAML parser for RYE."""
 
 __version__ = "1.0.0"

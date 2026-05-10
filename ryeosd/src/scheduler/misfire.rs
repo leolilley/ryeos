@@ -60,6 +60,10 @@ pub fn detect_misfires(
     let mut missed = Vec::new();
     let mut cursor = last_fire_at;
 
+    // Batch-load all existing fire IDs for this schedule upfront to avoid
+    // N+1 individual get_fire() queries inside the loop.
+    let existing_ids = db.get_existing_fire_ids(&spec.schedule_id)?;
+
     loop {
         let next = compute_next_fire(
             &spec.schedule_type, &spec.expression, &spec.timezone,
@@ -69,7 +73,7 @@ pub fn detect_misfires(
         match next {
             Some(scheduled_at) if scheduled_at <= now => {
                 let fid = super::types::fire_id(&spec.schedule_id, scheduled_at);
-                if db.get_fire(&fid)?.is_none() {
+                if !existing_ids.contains(&fid) {
                     missed.push(scheduled_at);
                 }
                 cursor = scheduled_at + 1;

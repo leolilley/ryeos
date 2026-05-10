@@ -274,6 +274,54 @@ impl SchedulerDb {
             .map_err(Into::into)
     }
 
+    /// Get the set of existing fire_ids for a schedule. Used by misfire
+    /// detection to batch-check which candidate fires already exist,
+    /// avoiding N+1 individual get_fire() calls.
+    pub fn get_existing_fire_ids(&self, schedule_id: &str) -> Result<std::collections::HashSet<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT fire_id FROM schedule_fires WHERE schedule_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![schedule_id], |row| row.get::<_, String>(0))?;
+        let mut ids = std::collections::HashSet::new();
+        for row in rows {
+            let id = row?;
+            ids.insert(id);
+        }
+        Ok(ids)
+    }
+
+    /// Batch-get last fire for multiple schedules. Returns a map from
+    /// schedule_id → FireRecord. Used by scheduler_list to avoid N+1 queries.
+    pub fn get_last_fires_batch(&self, schedule_ids: &[String]) -> Result<std::collections::HashMap<String, FireRecord>> {
+        if schedule_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = schedule_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+                    status, trigger_reason, outcome, signer_fingerprint
+             FROM schedule_fires
+             WHERE (schedule_id, scheduled_at) IN (
+                 SELECT schedule_id, MAX(scheduled_at)
+                 FROM schedule_fires
+                 WHERE schedule_id IN ({})
+                 GROUP BY schedule_id
+             )",
+            placeholders.join(","),
+        );
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = schedule_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| Ok(row_to_fire(row)))?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let rec = row?;
+            map.insert(rec.schedule_id.clone(), rec);
+        }
+        Ok(map)
+    }
+
     pub fn get_last_fire(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(

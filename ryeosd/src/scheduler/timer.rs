@@ -75,7 +75,7 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
 
     // For interval schedules with no prior fire, use registration time as base
     let effective_last = last_fire_at.or_else(|| {
-        if spec.schedule_type == "interval" {
+        if spec.schedule_type == "interval" || spec.schedule_type == "cron" {
             Some(spec.last_modified)
         } else {
             None
@@ -84,6 +84,7 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
 
     let scheduled_at = match crontab::compute_scheduled_at(
         &spec.schedule_type, &spec.expression, &spec.timezone, now, effective_last,
+        Some(spec.last_modified),
     ) {
         Some(at) => at,
         None => {
@@ -136,6 +137,7 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
 
     let scheduled_at = match crontab::compute_scheduled_at(
         &spec.schedule_type, &spec.expression, &spec.timezone, now, last_fire_at,
+        Some(spec.last_modified),
     ) {
         Some(at) => at,
         None => {
@@ -186,7 +188,7 @@ pub async fn dispatch_fire(
     let now = lillux::time::timestamp_millis();
     let thread_id = types::thread_id_from_fire(fire_id);
 
-    // ── Record dispatched to JSONL ───────────────────────────
+    // ── Record dispatched to JSONL + DB (blocking I/O) ───────
     let entry = serde_json::json!({
         "entry_type": "dispatched",
         "fire_id": fire_id,
@@ -200,11 +202,6 @@ pub async fn dispatch_fire(
     let fires_path = state.config.system_space_dir
         .join(ryeos_engine::AI_DIR).join("state").join("schedules")
         .join(&spec.schedule_id).join("fires.jsonl");
-    if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-        tracing::error!(fire_id = %fire_id, error = %e, "failed to append dispatched entry");
-    }
-
-    // ── Update projection DB ─────────────────────────────────
     let rec = FireRecord {
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),
@@ -216,8 +213,19 @@ pub async fn dispatch_fire(
         outcome: None,
         signer_fingerprint: Some(spec.signer_fingerprint.clone()),
     };
-    if let Err(e) = state.scheduler_db.upsert_fire(&rec) {
-        tracing::error!(fire_id = %fire_id, error = %e, "failed to upsert dispatched fire");
+
+    {
+        let fires_path = fires_path.clone();
+        let db = state.scheduler_db.clone();
+        let fire_id = fire_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
+                tracing::error!(fire_id = %fire_id, error = %e, "failed to append dispatched entry");
+            }
+            if let Err(e) = db.upsert_fire(&rec) {
+                tracing::error!(fire_id = %fire_id, error = %e, "failed to upsert dispatched fire");
+            }
+        }).await.ok();
     }
 
     // ── Dispatch via existing dispatch path ──────────────────
@@ -291,10 +299,6 @@ pub async fn dispatch_fire(
                 "error": err.to_string(),
                 "signer_fingerprint": spec.signer_fingerprint,
             });
-            if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
-                tracing::error!(fire_id = %fire_id, error = %e, "failed to append failure entry");
-            }
-
             let fail_rec = FireRecord {
                 fire_id: fire_id.to_string(),
                 schedule_id: spec.schedule_id.clone(),
@@ -306,7 +310,15 @@ pub async fn dispatch_fire(
                 outcome: Some("dispatch_failed".to_string()),
                 signer_fingerprint: Some(spec.signer_fingerprint.clone()),
             };
-            let _ = state.scheduler_db.upsert_fire(&fail_rec);
+            {
+                let db = state.scheduler_db.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
+                        tracing::error!(fire_id = %fail_rec.fire_id, error = %e, "failed to append failure entry");
+                    }
+                    let _ = db.upsert_fire(&fail_rec);
+                }).await.ok();
+            }
 
             tracing::error!(
                 fire_id = %fire_id,
@@ -345,10 +357,6 @@ async fn record_skip(
     let fires_path = state.config.system_space_dir
         .join(ryeos_engine::AI_DIR).join("state").join("schedules")
         .join(&spec.schedule_id).join("fires.jsonl");
-    if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-        tracing::error!(fire_id = %fire_id, error = %e, "failed to append skip entry");
-    }
-
     let rec = FireRecord {
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),
@@ -360,7 +368,16 @@ async fn record_skip(
         outcome: None,
         signer_fingerprint: Some(spec.signer_fingerprint.clone()),
     };
-    if let Err(e) = state.scheduler_db.upsert_fire(&rec) {
-        tracing::error!(fire_id = %fire_id, error = %e, "failed to upsert skipped fire");
+    {
+        let db = state.scheduler_db.clone();
+        let fire_id = fire_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
+                tracing::error!(fire_id = %fire_id, error = %e, "failed to append skip entry");
+            }
+            if let Err(e) = db.upsert_fire(&rec) {
+                tracing::error!(fire_id = %fire_id, error = %e, "failed to upsert skipped fire");
+            }
+        }).await.ok();
     }
 }

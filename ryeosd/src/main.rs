@@ -234,51 +234,11 @@ async fn main() -> Result<()> {
     );
     tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
 
-    // Sync schedule specs from node-config snapshot to scheduler DB
-    {
-        let schedules_dir = config.system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("schedules");
-        let live_ids = scheduler::projection::rebuild_specs_from_dir(&schedules_dir, &scheduler_db)?;
-        let live_refs: Vec<&str> = live_ids.iter().map(|s| s.as_str()).collect();
-        let removed = scheduler_db.delete_stale_specs(&live_refs)?;
-        if removed > 0 {
-            tracing::info!(removed, "removed stale schedule spec projections");
-        }
-        for sched in &node_config_snapshot.schedules {
-            let yaml_path = schedules_dir.join(format!("{}.yaml", sched.schedule_id));
-            let content = match std::fs::read_to_string(&yaml_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
-            let mtime = std::fs::metadata(&yaml_path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or_else(lillux::time::timestamp_millis);
-            let signer_fp = scheduler::projection::parse_signer_fingerprint_from_str(&content)
-                .unwrap_or_else(|| identity.fingerprint().to_string());
-            let rec = scheduler::types::ScheduleSpecRecord {
-                schedule_id: sched.schedule_id.clone(),
-                item_ref: sched.item_ref.clone(),
-                params: serde_json::to_string(&sched.params).unwrap_or_default(),
-                schedule_type: sched.schedule_type.clone(),
-                expression: sched.expression.clone(),
-                timezone: sched.timezone.clone(),
-                misfire_policy: sched.misfire_policy.clone().unwrap_or_default(),
-                overlap_policy: sched.overlap_policy.clone().unwrap_or_else(|| "skip".to_string()),
-                enabled: sched.enabled,
-                project_root: sched.project_root.clone(),
-                signer_fingerprint: signer_fp,
-                spec_hash,
-                last_modified: mtime,
-            };
-            if let Err(e) = scheduler_db.upsert_spec(&rec) {
-                tracing::warn!(schedule_id = %sched.schedule_id, error = %e, "failed to upsert schedule spec");
-            }
-        }
-        tracing::info!(count = node_config_snapshot.schedules.len(), "schedule specs synced to DB");
-    }
+    // Note: Schedule spec projection rebuild is handled by
+    // scheduler::reconcile::reconcile() below (line ~523), which is the
+    // single source of truth for CAS→DB sync. Do NOT add a second
+    // rebuild here — that would cause duplicate work and potential
+    // inconsistencies between the two passes.
 
     // Acquire operator state lock — prevents standalone services from
     // running while the daemon is up. Released on process exit (Drop).

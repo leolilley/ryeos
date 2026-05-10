@@ -25,11 +25,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         req.schedule_type.as_deref(),
     )?;
 
-    let mut schedules = Vec::new();
-    for spec in &specs {
-        let last_fire = state.scheduler_db.get_last_fire(&spec.schedule_id)?;
+    // Batch-load last fires to avoid N+1 queries
+    let schedule_ids: Vec<String> = specs.iter().map(|s| s.schedule_id.clone()).collect();
+    let last_fires = state.scheduler_db.get_last_fires_batch(&schedule_ids)?;
 
-        schedules.push(serde_json::json!({
+    let schedules: Vec<Value> = specs.iter().map(|spec| {
+        let last_fire = last_fires.get(&spec.schedule_id);
+        serde_json::json!({
             "schedule_id": spec.schedule_id,
             "item_ref": spec.item_ref,
             "schedule_type": spec.schedule_type,
@@ -37,11 +39,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             "timezone": spec.timezone,
             "enabled": spec.enabled,
             "signer_fingerprint": spec.signer_fingerprint,
-            "last_fire_at": last_fire.as_ref().and_then(|f| f.fired_at),
-            "last_fire_status": last_fire.as_ref().map(|f| f.status.clone()),
+            "last_fire_at": last_fire.and_then(|f| f.fired_at),
+            "last_fire_status": last_fire.map(|f| f.status.clone()),
             "total_fires": 0, // TODO: count query
-        }));
-    }
+        })
+    }).collect();
 
     Ok(serde_json::json!({ "schedules": schedules }))
 }
