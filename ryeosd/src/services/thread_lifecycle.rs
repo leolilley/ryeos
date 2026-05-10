@@ -463,7 +463,7 @@ impl ThreadLifecycleService {
                                 "signer_fingerprint": jsonl_signer_fp,
                             });
                             let fires_path = sys_dir
-                                .join(".ai").join("state").join("schedules")
+                                .join(ryeos_engine::AI_DIR).join("state").join("schedules")
                                 .join(&jsonl_schedule_id).join("fires.jsonl");
                             if let Err(e) = crate::scheduler::projection::append_jsonl_entry(&fires_path, &entry) {
                                 tracing::warn!(

@@ -24,7 +24,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Delete YAML file
     let yaml_path = state.config.system_space_dir
-        .join(".ai").join("node").join("schedules")
+        .join(ryeos_engine::AI_DIR).join("node").join("schedules")
         .join(format!("{}.yaml", req.schedule_id));
     if yaml_path.exists() {
         std::fs::remove_file(&yaml_path)?;

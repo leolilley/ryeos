@@ -29,9 +29,9 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
 
     // Step 1: Rebuild projection from CAS
     let schedules_dir = state.config.system_space_dir
-        .join(".ai").join("node").join("schedules");
+        .join(ryeos_engine::AI_DIR).join("node").join("schedules");
     let fires_dir = state.config.system_space_dir
-        .join(".ai").join("state").join("schedules");
+        .join(ryeos_engine::AI_DIR).join("state").join("schedules");
 
     let live_ids = projection::rebuild_specs_from_dir(&schedules_dir, &state.scheduler_db)?;
 
@@ -205,7 +205,7 @@ fn update_fire_completed(
         "signer_fingerprint": fire.signer_fingerprint,
     });
     let fires_path = state.config.system_space_dir
-        .join(".ai").join("state").join("schedules")
+        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
         .join(&fire.schedule_id).join("fires.jsonl");
     projection::append_jsonl_entry(&fires_path, &entry)?;
 

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-09T23:48:48Z:5bd7fc1342eac18862c099dada9d94703ac1d67f714609d8b29d7799c23bc36e:FnjboeUPUUxI7MMQAo8F7a7dq1O8Y00T1DaNi8LgJOydVoWlRExXIVPLmE592n2eKvR0iQpj1CXNidqTJN//AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "scheduler"
+name: "show_fires"
+kind: service
+endpoint: scheduler.show_fires
+required_caps: []
+description: "Show fire history for a schedule"

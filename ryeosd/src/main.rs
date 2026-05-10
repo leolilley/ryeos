@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
     tracing::info!("StateStore initialized successfully");
 
     // Open scheduler DB
-    let scheduler_db_path = config.system_space_dir.join(".ai").join("state").join("scheduler.sqlite3");
+    let scheduler_db_path = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("scheduler.sqlite3");
     let scheduler_db = Arc::new(
         scheduler::db::SchedulerDb::open(&scheduler_db_path)
             .context("SchedulerDb initialization failed")?,
@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
 
     // Sync schedule specs from node-config snapshot to scheduler DB
     {
-        let schedules_dir = config.system_space_dir.join(".ai").join("node").join("schedules");
+        let schedules_dir = config.system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("schedules");
         let live_ids = scheduler::projection::rebuild_specs_from_dir(&schedules_dir, &scheduler_db)?;
         let live_refs: Vec<&str> = live_ids.iter().map(|s| s.as_str()).collect();
         let removed = scheduler_db.delete_stale_specs(&live_refs)?;
@@ -693,7 +693,7 @@ async fn run_service_standalone(
         &state_lock::default_lock_path(&config.system_space_dir),
     ).context("failed to acquire state lock — is the daemon running?")?;
 
-    let state_root = config.system_space_dir.join(".ai").join("state");
+    let state_root = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     let write_barrier = ryeosd::write_barrier::WriteBarrier::new();
@@ -701,7 +701,7 @@ async fn run_service_standalone(
         state_root, runtime_db_path, signer, write_barrier.clone(),
     )?);
 
-    let scheduler_db_path = config.system_space_dir.join(".ai").join("state").join("scheduler.sqlite3");
+    let scheduler_db_path = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("scheduler.sqlite3");
     let scheduler_db = Arc::new(
         scheduler::db::SchedulerDb::open(&scheduler_db_path)?,
     );

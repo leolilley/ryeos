@@ -253,7 +253,7 @@ async fn record_skip(
 }
 
 fn append_fire_entry(state_root: &std::path::Path, schedule_id: &str, entry: &serde_json::Value) {
-    let fires_dir = state_root.join(".ai").join("state").join("schedules").join(schedule_id);
+    let fires_dir = state_root.join(ryeos_engine::AI_DIR).join("state").join("schedules").join(schedule_id);
     let fires_path = fires_dir.join("fires.jsonl");
     if let Err(e) = super::projection::append_jsonl_entry(&fires_path, entry) {
         tracing::error!(schedule_id = %schedule_id, error = %e, "failed to append fire entry");

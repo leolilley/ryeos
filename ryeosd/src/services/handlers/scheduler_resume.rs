@@ -28,8 +28,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }));
     }
 
-    let yaml_path = state.config.system_space_dir
-        .join(".ai").join("node").join("schedules")
+    let node_dir = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("node");
+    let yaml_path = node_dir
+        .join("schedules")
         .join(format!("{}.yaml", req.schedule_id));
 
     let content = std::fs::read_to_string(&yaml_path)
@@ -40,7 +41,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     body["enabled"] = Value::Bool(true);
 
     writer::write_signed_node_item(
-        &state.config.system_space_dir,
+        &node_dir,
         "schedules",
         &req.schedule_id,
         &body,

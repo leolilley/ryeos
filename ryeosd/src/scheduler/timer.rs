@@ -139,7 +139,7 @@ pub async fn dispatch_fire(
         "signer_fingerprint": spec.signer_fingerprint,
     });
     let fires_path = state.config.system_space_dir
-        .join(".ai").join("state").join("schedules")
+        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
         .join(&spec.schedule_id).join("fires.jsonl");
     if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
         tracing::error!(fire_id = %fire_id, error = %e, "failed to append dispatched entry");
@@ -284,7 +284,7 @@ async fn record_skip(
         "signer_fingerprint": spec.signer_fingerprint,
     });
     let fires_path = state.config.system_space_dir
-        .join(".ai").join("state").join("schedules")
+        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
         .join(&spec.schedule_id).join("fires.jsonl");
     if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
         tracing::error!(fire_id = %fire_id, error = %e, "failed to append skip entry");

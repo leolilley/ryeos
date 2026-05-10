@@ -86,8 +86,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     // Write signed YAML
+    let node_dir = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("node");
     let spec_path = writer::write_signed_node_item(
-        &state.config.system_space_dir,
+        &node_dir,
         "schedules",
         &req.schedule_id,
         &body,
