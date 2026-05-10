@@ -250,15 +250,17 @@ async fn record_skip(
 
     {
         let db = state.scheduler_db.clone();
-        let fire_id = fire_id.to_string();
+        let fire_id_owned = fire_id.to_string();
         tokio::task::spawn_blocking(move || {
             if let Err(e) = db.upsert_fire(&rec) {
-                tracing::error!(fire_id = %fire_id, error = %e, "failed to record skipped fire");
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to record skipped fire");
             }
             if let Err(e) = super::projection::append_jsonl_entry(&fires_path, &entry) {
-                tracing::error!(fire_id = %fire_id, error = %e, "failed to append fire entry");
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append fire entry");
             }
-        }).await.ok();
+        }).await.unwrap_or_else(|e| {
+            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (misfire skip persist)");
+        });
     }
 }
 

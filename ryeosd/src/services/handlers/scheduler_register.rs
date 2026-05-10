@@ -146,9 +146,20 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 }
 
 fn is_valid_misfire_policy(p: &str) -> bool {
-    matches!(p, "skip" | "fire_once_now")
-        || p.starts_with("catch_up_bounded:")
-        || p.starts_with("catch_up_within_secs:")
+    match p {
+        "skip" | "fire_once_now" => true,
+        s if s.starts_with("catch_up_bounded:") => {
+            s.strip_prefix("catch_up_bounded:")
+                .and_then(|n| n.parse::<usize>().ok())
+                .is_some()
+        }
+        s if s.starts_with("catch_up_within_secs:") => {
+            s.strip_prefix("catch_up_within_secs:")
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some()
+        }
+        _ => false,
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

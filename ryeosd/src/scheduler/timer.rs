@@ -275,15 +275,17 @@ pub async fn dispatch_fire(
     {
         let fires_path = fires_path.clone();
         let db = state.scheduler_db.clone();
-        let fire_id = fire_id.to_string();
+        let fire_id_owned = fire_id.to_string();
         tokio::task::spawn_blocking(move || {
             if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                tracing::error!(fire_id = %fire_id, error = %e, "failed to append dispatched entry");
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append dispatched entry");
             }
             if let Err(e) = db.upsert_fire(&rec) {
-                tracing::error!(fire_id = %fire_id, error = %e, "failed to upsert dispatched fire");
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to upsert dispatched fire");
             }
-        }).await.ok();
+        }).await.unwrap_or_else(|e| {
+            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (dispatch persist)");
+        });
     }
 
     // ── Dispatch via existing dispatch path ──────────────────
@@ -386,7 +388,9 @@ pub async fn dispatch_fire(
                         tracing::error!(fire_id = %fail_rec.fire_id, error = %e, "failed to append failure entry");
                     }
                     let _ = db.upsert_fire(&fail_rec);
-                }).await.ok();
+                }).await.unwrap_or_else(|e| {
+                    tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (failure persist)");
+                });
             }
 
             tracing::error!(
@@ -439,14 +443,16 @@ async fn record_skip(
     };
     {
         let db = state.scheduler_db.clone();
-        let fire_id = fire_id.to_string();
+        let fire_id_owned = fire_id.to_string();
         tokio::task::spawn_blocking(move || {
             if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                tracing::error!(fire_id = %fire_id, error = %e, "failed to append skip entry");
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append skip entry");
             }
             if let Err(e) = db.upsert_fire(&rec) {
-                tracing::error!(fire_id = %fire_id, error = %e, "failed to upsert skipped fire");
+                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to upsert skipped fire");
             }
-        }).await.ok();
+        }).await.unwrap_or_else(|e| {
+            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (skip persist)");
+        });
     }
 }
