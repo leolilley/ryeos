@@ -380,7 +380,10 @@ impl Runner {
                         match ev {
                             StreamEvent::Delta(_) => delta_count += 1,
                             StreamEvent::ToolUse { .. } => tool_use_count += 1,
-                            StreamEvent::Done => done_seen = true,
+                            StreamEvent::Finish { .. } => done_seen = true,
+                            StreamEvent::ReasoningDelta(_) => {}
+                            StreamEvent::Usage(_) => {}
+                            StreamEvent::Warning { .. } => {}
                         }
                     }
                     tracing::debug!(

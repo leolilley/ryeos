@@ -199,7 +199,56 @@ pub struct ProviderMessage {
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    /// Incremental assistant text.
     Delta(String),
-    ToolUse { id: String, name: String, arguments: String },
-    Done,
+    /// Incremental reasoning/thinking text. Some providers stream these
+    /// separately (Anthropic extended thinking, Gemini thoughts, OpenAI o-series).
+    /// Runners may choose to surface, log, or discard.
+    ReasoningDelta(String),
+    /// Complete tool call ready to dispatch.
+    ToolUse { id: Option<String>, name: String, arguments: Value },
+    /// Cumulative usage update from the provider.
+    Usage(UsageUpdate),
+    /// Provider warning (safety, truncation, partial failure) that doesn't
+    /// terminate the stream.
+    Warning { code: String, message: String },
+    /// Stream is finished. Terminal event — runner stops consuming.
+    /// Carries the normalized finish reason and the raw provider string.
+    Finish { reason: FinishReason, raw: Option<String> },
+}
+
+/// Normalized finish reason across all provider families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    /// Model produced end-of-turn.
+    Stop,
+    /// Model wants tools dispatched.
+    ToolCalls,
+    /// Hit max_tokens / output length limit.
+    Length,
+    /// Content filtered by provider safety.
+    ContentFilter,
+    /// Unmappable; check raw string.
+    Other,
+}
+
+/// Cumulative token usage from the provider.
+#[derive(Debug, Clone, Default)]
+pub struct UsageUpdate {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+}
+
+/// Normalize a provider-specific finish reason string to a canonical enum.
+pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
+    match raw {
+        Some("stop") | Some("end_turn") => FinishReason::Stop,
+        Some("tool_calls") | Some("function_call") | Some("tool_use") => FinishReason::ToolCalls,
+        Some("length") | Some("max_tokens") => FinishReason::Length,
+        Some("content_filter") | Some("safety") => FinishReason::ContentFilter,
+        _ => FinishReason::Other,
+    }
 }
