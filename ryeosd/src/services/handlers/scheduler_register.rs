@@ -122,9 +122,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if !req.params.is_null() {
         body["params"] = req.params.clone();
     }
-    if let Some(ref p) = req.misfire_policy {
-        body["misfire_policy"] = Value::String(p.clone());
-    }
+    // Normalize misfire_policy: resolve default so YAML and DB always have
+    // the same resolved value (no empty strings that behave differently
+    // in projection vs live paths).
+    let normalized_misfire = match req.misfire_policy.as_deref() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => match req.schedule_type.as_str() {
+            "interval" => "fire_once_now".to_string(),
+            _ => "skip".to_string(),
+        },
+    };
+    body["misfire_policy"] = Value::String(normalized_misfire.clone());
     if let Some(ref p) = req.overlap_policy {
         body["overlap_policy"] = Value::String(p.clone());
     }
@@ -138,9 +146,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
              (executor must inject _caller_fingerprint)"
         ))?;
     let capabilities = req.caller_capabilities.clone()
+        .filter(|caps| !caps.is_empty())
         .ok_or_else(|| anyhow::anyhow!(
             "scheduler.register requires verified caller context \
-             (executor must inject _caller_capabilities)"
+             with non-empty _caller_capabilities"
         ))?;
 
     if let Some(ref p) = req.project_root {
@@ -177,7 +186,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Upsert projection
     let was_existing = existing_spec.is_some();
-    let misfire_policy = req.misfire_policy.unwrap_or_default();
     let overlap_policy = req.overlap_policy.unwrap_or_else(|| "skip".to_string());
     let rec = ScheduleSpecRecord {
         schedule_id: req.schedule_id.clone(),
@@ -186,7 +194,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         schedule_type: req.schedule_type.clone(),
         expression: req.expression.clone(),
         timezone: timezone.to_string(),
-        misfire_policy: misfire_policy.clone(),
+        misfire_policy: normalized_misfire.clone(),
         overlap_policy: overlap_policy.clone(),
         enabled: req.enabled,
         project_root: req.project_root.clone(),
@@ -209,7 +217,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "schedule_type": req.schedule_type,
         "expression": req.expression,
         "timezone": timezone,
-        "misfire_policy": misfire_policy,
+        "misfire_policy": normalized_misfire,
         "overlap_policy": overlap_policy,
         "enabled": req.enabled,
         "spec_path": spec_path.display().to_string(),

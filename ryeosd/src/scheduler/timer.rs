@@ -325,6 +325,55 @@ pub async fn dispatch_fire(
     trigger_reason: &str,
     skip_claim: bool,
 ) {
+    // Fail-closed: never dispatch with empty capabilities.
+    // If capabilities are empty, the schedule is corrupted or misconfigured.
+    if spec.capabilities.is_empty() {
+        tracing::error!(
+            schedule_id = %spec.schedule_id,
+            fire_id = %fire_id,
+            "refusing to dispatch schedule with empty capabilities — \
+             corrupted or misconfigured schedule. Deregister and re-register."
+        );
+        let now = lillux::time::timestamp_millis();
+        let thread_id = types::thread_id_from_fire(fire_id);
+        let fail_entry = serde_json::json!({
+            "entry_type": "failed",
+            "status": "failed",
+            "fire_id": fire_id,
+            "schedule_id": spec.schedule_id,
+            "scheduled_at": scheduled_at,
+            "fired_at": now,
+            "thread_id": thread_id,
+            "completed_at": now,
+            "outcome": "dispatch_skipped",
+            "error": "empty capabilities",
+            "signer_fingerprint": spec.signer_fingerprint,
+        });
+        let fail_rec = types::FireRecord {
+            fire_id: fire_id.to_string(),
+            schedule_id: spec.schedule_id.clone(),
+            scheduled_at,
+            fired_at: Some(now),
+            completed_at: Some(now),
+            thread_id: Some(thread_id),
+            status: "failed".to_string(),
+            trigger_reason: trigger_reason.to_string(),
+            outcome: Some("dispatch_skipped".to_string()),
+            signer_fingerprint: Some(spec.signer_fingerprint.clone()),
+        };
+        let db = state.scheduler_db.clone();
+        let fires_path = state.config.system_space_dir
+            .join(ryeos_engine::AI_DIR).join("state").join("schedules")
+            .join(&spec.schedule_id).join("fires.jsonl");
+        tokio::task::spawn_blocking(move || {
+            let _ = projection::append_jsonl_entry(&fires_path, &fail_entry);
+            let _ = db.upsert_fire(&fail_rec);
+        }).await.unwrap_or_else(|e| {
+            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking failed for empty-caps failure record");
+        });
+        return;
+    }
+
     let now = lillux::time::timestamp_millis();
     let thread_id = types::thread_id_from_fire(fire_id);
 
@@ -442,12 +491,8 @@ pub async fn dispatch_fire(
 
     let exec_ctx = crate::service_executor::ExecutionContext {
         principal_fingerprint: spec.requester_fingerprint.clone(),
-        // Use the capabilities stored at registration time — least privilege.
-        caller_scopes: if spec.capabilities.is_empty() {
-            vec!["ryeos.execute.*".to_string()]
-        } else {
-            spec.capabilities.clone()
-        },
+        // Capabilities guaranteed non-empty by guard at top of dispatch_fire.
+        caller_scopes: spec.capabilities.clone(),
         engine: state.engine.clone(),
         plan_ctx: ryeos_engine::contracts::PlanContext {
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
