@@ -877,4 +877,88 @@ mod tests {
         assert_eq!(total, 0);
         assert!(fires.is_empty());
     }
+
+    // ── claim_fire / reclaim_fire ──────────────────────────────────
+
+    #[test]
+    fn claim_fire_inserts_new() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "dispatched");
+        let claimed = db.claim_fire(&fire).unwrap();
+        assert!(claimed, "first claim should succeed");
+    }
+
+    #[test]
+    fn claim_fire_rejects_duplicate() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "dispatched");
+        db.claim_fire(&fire).unwrap();
+        let claimed = db.claim_fire(&fire).unwrap();
+        assert!(!claimed, "second claim of same fire_id should return false");
+    }
+
+    #[test]
+    fn reclaim_fire_succeeds_for_dispatched_no_thread() {
+        let db = test_db();
+        // Insert a fire with dispatched status and no thread_id
+        let mut fire = make_fire("sched", 1000, "dispatched");
+        fire.thread_id = None;
+        db.upsert_fire(&fire).unwrap();
+
+        let reclaimed = db.reclaim_fire("sched@1000").unwrap();
+        assert!(reclaimed, "dispatched fire with no thread should be reclaimable");
+    }
+
+    #[test]
+    fn reclaim_fire_succeeds_for_dispatched_with_thread() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "dispatched");
+        db.upsert_fire(&fire).unwrap();
+
+        // Thread existence is checked by the caller (reconciler), not by reclaim_fire.
+        // reclaim_fire just checks the fire's own DB state.
+        let reclaimed = db.reclaim_fire("sched@1000").unwrap();
+        assert!(reclaimed, "dispatched fire should be reclaimable even with thread_id set");
+    }
+
+    #[test]
+    fn reclaim_fire_rejects_completed() {
+        let db = test_db();
+        let fire = make_fire("sched", 1000, "completed");
+        db.upsert_fire(&fire).unwrap();
+
+        let reclaimed = db.reclaim_fire("sched@1000").unwrap();
+        assert!(!reclaimed, "completed fire should not be reclaimable");
+    }
+
+    #[test]
+    fn reclaim_fire_rejects_nonexistent() {
+        let db = test_db();
+        let reclaimed = db.reclaim_fire("nope@9999").unwrap();
+        assert!(!reclaimed, "nonexistent fire should not be reclaimable");
+    }
+
+    #[test]
+    fn find_stale_dispatched_fires() {
+        let db = test_db();
+
+        // Create a dispatched fire with fired_at in the past
+        let mut old = make_fire("sched", 1000, "dispatched");
+        old.fired_at = Some(lillux::time::timestamp_millis() - 60_000); // 60s ago
+        db.upsert_fire(&old).unwrap();
+
+        // Create a recent dispatched fire (should not be stale)
+        let mut recent = make_fire("sched", 2000, "dispatched");
+        recent.fired_at = Some(lillux::time::timestamp_millis());
+        db.upsert_fire(&recent).unwrap();
+
+        // Create a completed fire (should not show up even if old)
+        let mut done = make_fire("sched", 3000, "completed");
+        done.fired_at = Some(lillux::time::timestamp_millis() - 120_000);
+        db.upsert_fire(&done).unwrap();
+
+        let stale = db.find_stale_dispatched_fires(30).unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].fire_id, "sched@1000");
+    }
 }

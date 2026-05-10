@@ -442,7 +442,10 @@ pub async fn dispatch_fire(
 
     let exec_ctx = crate::service_executor::ExecutionContext {
         principal_fingerprint: spec.signer_fingerprint.clone(),
-        caller_scopes: vec!["*".to_string()],
+        // Narrow scope: scheduler dispatch can execute any tool/directive but
+        // cannot perform admin operations (identity, config, signing, etc.).
+        // Mutation authority is already guarded by required_caps on register/pause/resume/deregister.
+        caller_scopes: vec!["ryeos.execute.*".to_string()],
         engine: state.engine.clone(),
         plan_ctx: ryeos_engine::contracts::PlanContext {
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(

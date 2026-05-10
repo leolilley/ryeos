@@ -94,14 +94,14 @@ impl NodeConfigSection for ScheduleSection {
         // Validate timezone
         crate::scheduler::crontab::validate_timezone(&record.timezone)?;
 
-        // Validate overlap_policy
+        // Validate overlap_policy (all policies ship day 1: allow, skip, cancel_previous)
         if let Some(ref p) = record.overlap_policy {
             if !matches!(p.as_str(), "allow" | "skip" | "cancel_previous") {
                 bail!("invalid overlap_policy '{}': must be allow, skip, or cancel_previous", p);
             }
         }
 
-        // Validate misfire_policy
+        // Validate misfire_policy (all policies ship day 1: skip, fire_once_now, catch_up_bounded:N, catch_up_within_secs:S)
         if let Some(ref p) = record.misfire_policy {
             if !is_valid_misfire_policy(p) {
                 bail!(

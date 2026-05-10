@@ -47,11 +47,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let timezone = req.timezone.as_deref().unwrap_or("UTC");
     crontab::validate_timezone(timezone)?;
 
+    // All overlap policies ship day 1: allow, skip, cancel_previous.
     if let Some(ref p) = req.overlap_policy {
         if !matches!(p.as_str(), "allow" | "skip" | "cancel_previous") {
             bail!("invalid overlap_policy: {}", p);
         }
     }
+    // All misfire policies ship day 1: skip, fire_once_now, catch_up_bounded:N, catch_up_within_secs:S.
     if let Some(ref p) = req.misfire_policy {
         if !is_valid_misfire_policy(p) {
             bail!("invalid misfire_policy: {}", p);
@@ -79,8 +81,25 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    // Build YAML body — preserve registered_at on updates for deterministic first-fire
-    let registered_at = existing_spec.as_ref().map(|s| s.last_modified).unwrap_or_else(|| lillux::time::timestamp_millis());
+    // Build YAML body — preserve registered_at on updates for deterministic first-fire.
+    // The YAML body is the canonical source of truth for registered_at.
+    // We read it from the existing file (not DB) so repeated updates don't drift the anchor.
+    let registered_at = if existing_spec.is_some() {
+        let existing_yaml_path = state.config.system_space_dir
+            .join(ryeos_engine::AI_DIR).join("node").join("schedules")
+            .join(&req.schedule_id)
+            .with_extension("yaml");
+        std::fs::read_to_string(&existing_yaml_path)
+            .ok()
+            .and_then(|content| {
+                let body_str = lillux::signature::strip_signature_lines(&content);
+                let body: serde_json::Value = serde_yaml::from_str(&body_str).ok()?;
+                body.get("registered_at").and_then(|v| v.as_i64())
+            })
+            .unwrap_or_else(|| existing_spec.as_ref().map(|s| s.last_modified).unwrap_or_else(lillux::time::timestamp_millis))
+    } else {
+        lillux::time::timestamp_millis()
+    };
     let mut body = serde_json::json!({
         "spec_version": 1,
         "section": "schedules",
