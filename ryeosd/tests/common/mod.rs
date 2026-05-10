@@ -13,8 +13,10 @@ pub mod mock_provider;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
+use lillux::crypto::{Signer as _, SigningKey};
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
@@ -307,6 +309,13 @@ pub struct DaemonHarness {
     pub child: Child,
     /// Captured stderr (joined async) — populated on drop for diagnostics.
     pub stderr_buf: Option<String>,
+    /// User signing key from the fast fixture. Used by `post_execute` to
+    /// sign requests. `None` when the daemon was started via `start()`
+    /// instead of `start_fast()`.
+    pub user_key: Option<SigningKey>,
+    /// Node identity key from the fast fixture. Used to compute the
+    /// daemon's principal_id for audience binding.
+    pub node_key: Option<SigningKey>,
 }
 
 impl DaemonHarness {
@@ -437,6 +446,8 @@ impl DaemonHarness {
             uds_path,
             child,
             stderr_buf: None,
+            user_key: None,
+            node_key: None,
         })
     }
 
@@ -477,6 +488,11 @@ impl DaemonHarness {
 
         let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
         plant(&state_path, user_space.path(), &fixture)?;
+
+        // Always authorize the user key so `post_execute` can sign requests.
+        fast_fixture::write_authorized_key_signed_by(
+            &state_path, &fixture.user, &fixture.node,
+        )?;
 
         let port = pick_free_port();
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -556,11 +572,17 @@ impl DaemonHarness {
             uds_path,
             child,
             stderr_buf: None,
+            user_key: Some(fixture.user.clone()),
+            node_key: Some(fixture.node.clone()),
         };
         Ok((harness, fixture))
     }
 
     /// POST `/execute` to the daemon and return (status, json body).
+    ///
+    /// When the harness was created via `start_fast`, the request is
+    /// signed with the user key. Otherwise the request is sent unsigned
+    /// (for legacy test paths that don't require auth).
     pub async fn post_execute(
         &self,
         item_ref: &str,
@@ -572,11 +594,21 @@ impl DaemonHarness {
             "project_path": project_path,
             "parameters": params,
         });
-        let resp = reqwest::Client::new()
+        let body_bytes = serde_json::to_vec(&body)?;
+
+        let mut req = reqwest::Client::new()
             .post(format!("http://{}/execute", self.bind))
-            .json(&body)
-            .send()
-            .await?;
+            .header("content-type", "application/json")
+            .body(body_bytes.clone());
+
+        if let (Some(user_key), Some(node_key)) = (&self.user_key, &self.node_key) {
+            let headers = build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute", &body_bytes);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+
+        let resp = req.send().await?;
         let status = resp.status();
         let value: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
         Ok((status, value))
@@ -919,4 +951,51 @@ pub async fn run_service_standalone_fresh(
     let state_dir = tempfile::tempdir()?;
     let user_space = tempfile::tempdir()?;
     run_service_standalone(state_dir, user_space, service_ref, params_json).await
+}
+
+/// Build ryeos-signed auth headers for a test request.
+///
+/// Signs with `user_key` using the daemon's principal_id (from `node_key`)
+/// as the audience. Returns a vec of (header_name, header_value) pairs.
+fn build_signed_headers_for_bytes(
+    user_key: &SigningKey,
+    node_key: &SigningKey,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Vec<(String, String)> {
+    let fp = lillux::signature::compute_fingerprint(&user_key.verifying_key());
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let nonce = format!("{:016x}", rand::random::<u64>());
+
+    // Audience = daemon's principal_id (from node key).
+    let audience = format!(
+        "fp:{}",
+        lillux::signature::compute_fingerprint(&node_key.verifying_key())
+    );
+
+    let body_hash = lillux::cas::sha256_hex(body);
+    let string_to_sign = format!(
+        "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        method.to_uppercase(),
+        path,
+        body_hash,
+        timestamp,
+        nonce,
+        audience,
+    );
+    let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
+    let sig: lillux::crypto::Signature = user_key.sign(content_hash.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+
+    vec![
+        ("x-ryeos-key-id".into(), format!("fp:{fp}")),
+        ("x-ryeos-timestamp".into(), timestamp),
+        ("x-ryeos-nonce".into(), nonce),
+        ("x-ryeos-signature".into(), sig_b64),
+    ]
 }

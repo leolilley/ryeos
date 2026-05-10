@@ -16,7 +16,7 @@
 //!   prevent the daemon from starting (build_from_bundles errors
 //!   propagate from `engine_init.rs`).
 //! - **Grep gate**: `rg '"directive"|"service"|"runtime"|"tool"|"knowledge"'
-//!   ryeosd/src/api/execute.rs ryeosd/src/dispatch.rs` returns ZERO
+//!   ryeosd/src/routes/response_modes/execute_mode.rs ryeosd/src/dispatch.rs` returns ZERO
 //!   branching/string-prefix hits — the schema is the only route
 //!   decision-maker.
 
@@ -820,7 +820,7 @@ config:
 #[test]
 fn grep_gate_no_kind_name_branching_in_dispatch_code() {
     let workspace = common::workspace_root();
-    let api_execute = workspace.join("ryeosd/src/api/execute.rs");
+    let execute_mode = workspace.join("ryeosd/src/routes/response_modes/execute_mode.rs");
     let dispatch_rs = workspace.join("ryeosd/src/dispatch.rs");
 
     // Walk the file directly so we can:
@@ -840,7 +840,7 @@ fn grep_gate_no_kind_name_branching_in_dispatch_code() {
         "\"knowledge\"",
     ];
     let mut violations = Vec::new();
-    for path in [&api_execute, &dispatch_rs] {
+    for path in [&execute_mode, &dispatch_rs] {
         let content = std::fs::read_to_string(path)
             .unwrap_or_else(|_| panic!("read {}", path.display()));
         let lines: Vec<&str> = content.lines().collect();

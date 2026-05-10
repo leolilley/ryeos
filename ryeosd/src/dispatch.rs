@@ -28,7 +28,7 @@
 //!   `DispatchRequest.current_resolved` to avoid double-resolution in
 //!   `dispatch_native_runtime`.
 //! - **A1** Errors are typed as `DispatchError` end-to-end; the HTTP
-//!   layer in `api/execute.rs` maps them via `http_status()` once per
+//!   layer in the execute response mode maps them via `http_status()` once per
 //!   request — no substring matching survives.
 //! - **A3** Thread-profile names (`tool_run`, `service_run`,
 //!   `runtime_run`, …) are read from `schema.execution.thread_profile`

@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::state::AppState;
 
 /// Typed error for `resolve_project_context`. Replaces the prior
-/// anyhow-only return so `api/execute.rs` can pattern-match the
+/// anyhow-only return so the execute response mode can pattern-match the
 /// failure mode instead of substring-matching `Display`. The variants
 /// map 1:1 to the typed `DispatchError` variants the HTTP layer
 /// returns (`ProjectSourcePushFirst` → 409, `CheckoutFailed` →

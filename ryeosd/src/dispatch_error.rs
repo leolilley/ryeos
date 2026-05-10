@@ -1,11 +1,11 @@
 //! Typed dispatch errors with explicit HTTP status mapping.
 //!
 //! Replaces the V5.2/V5.3-pre substring HTTP mapping that used to live
-//! in `api/execute.rs` (`msg.contains("insufficient capabilities")`,
+//! in the execute handler (`msg.contains("insufficient capabilities")`,
 //! `msg.contains("push first")`, `msg.contains("is not root-executable")`).
 //! Each enumerated variant carries the structured fields callers need
 //! to reason about the failure, plus a `http_status()` method that
-//! `api/execute.rs` consults exactly once per request.
+//! the execute response mode consults exactly once per request.
 //!
 //! The variant names — and the `http_status()` arms — are the source
 //! of truth for `/execute` non-200 surfaces. The pin tests in
@@ -235,7 +235,7 @@ impl axum::response::IntoResponse for RouteDispatchError {
 
 impl DispatchError {
     /// Map the typed variant to the HTTP status `/execute` returns.
-    /// `api/execute.rs` calls this once per error path; there is no
+    /// The execute response mode calls this once per error path; there is no
     /// substring fallback anywhere else.
     pub fn http_status(&self) -> StatusCode {
         match self {

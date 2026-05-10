@@ -29,7 +29,7 @@ use common::{
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_execute_service_system_status_over_tcp() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
         .post_execute("service:system/status", ".", serde_json::json!({}))
         .await
@@ -128,7 +128,7 @@ async fn cli_daemon_down_fails_fast_with_exit_75() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn offline_only_service_errors_when_daemon_up() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
         .post_execute("service:rebuild", ".", serde_json::json!({}))
         .await
@@ -439,7 +439,7 @@ async fn symlinked_node_config_rejected_at_startup() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_startup_proves_bundle_yamls_parse() {
-    let h = DaemonHarness::start().await.expect("daemon should start — bundle YAMLs must all parse");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("daemon should start — bundle YAMLs must all parse");
     // If we got here, the daemon completed Phase 1 + Phase 2 node_config
     // bootstrap and the self-check. Every bundle YAML in the system bundle
     // was loaded and verified. Verify the daemon is actually healthy.

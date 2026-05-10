@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use axum::routing::{get, post};
 use axum::{serve, Router};
 use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
@@ -16,7 +15,7 @@ use ryeosd::services::event_store::EventStoreService;
 use ryeosd::services::thread_lifecycle::ThreadLifecycleService;
 use ryeosd::state::AppState;
 use ryeosd::{
-    api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, scheduler, service_executor,
+    bootstrap, execution, kind_profiles, process, reconcile, routes, scheduler, service_executor,
     service_registry, services, state, state_lock, state_store, uds,
 };
 
@@ -360,11 +359,11 @@ async fn main() -> Result<()> {
     let (scheduler_reload_tx, scheduler_reload_rx) = tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
     app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
 
-    let app = build_router(app_state.clone())
-        .layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            auth::auth_middleware,
-        ));
+    // Auth is per-route via the dispatcher's auth_invoker chain.
+    // No global middleware layer — each route declares its own auth
+    // policy (auth: "none" for public, auth: "ryeos_signed" for
+    // authenticated). The fallback dispatcher handles everything.
+    let app = build_router(app_state.clone());
     let tcp_listener = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.bind))?;
@@ -599,9 +598,7 @@ fn drain_running_threads(state: &AppState) {
 
 fn build_router(state: AppState) -> Router {
     Router::new()
-        .route("/health", get(api::health::health))
-        .route("/execute", post(api::execute::execute))
-        .fallback(routes::dispatcher::custom_route_dispatcher)
+        .fallback(routes::dispatcher::route_dispatcher)
         .with_state(state)
 }
 

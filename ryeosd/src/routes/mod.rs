@@ -97,17 +97,10 @@ pub fn build_route_table(
             continue;
         }
 
-        const RESERVED_EXACT: &[&str] = &["/health", "/execute"];
-
-        let path = &raw.path;
-        if let Some(r) = RESERVED_EXACT.iter().find(|r| path == *r) {
-            errors.push(RouteConfigError::ReservedPathPrefix {
-                id: raw.id.clone(),
-                path: path.clone(),
-                reserved: (*r).into(),
-            });
-            continue;
-        }
+        // Note: /health and /execute were previously reserved as explicit
+        // axum Router.route() registrations. In v0.4.0 they are ordinary
+        // data-driven routes served through the route table, so no path
+        // reservation is needed.
 
         // Compile auth invoker (no registry lookup).
         let auth_invoker = match invokers::compile_auth_invoker(
@@ -270,14 +263,6 @@ mod tests {
         assert_eq!(err.len(), 1);
         let msg = format!("{}", err[0]);
         assert!(msg.contains("duplicate route id"), "got: {msg}");
-    }
-
-    #[test]
-    fn reserved_path_prefix_rejected() {
-        let raw = make_raw("r1", "/health", &["GET"], "none", "static");
-        let err = build_table(&[raw]).unwrap_err();
-        let msg = format!("{}", err[0]);
-        assert!(msg.contains("reserved path"), "got: {msg}");
     }
 
     #[test]

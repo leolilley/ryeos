@@ -18,6 +18,8 @@ pub mod bundle_remove;
 pub mod commands_submit;
 pub mod events_chain_replay;
 pub mod events_replay;
+pub mod health_status;
+pub mod identity_public_key;
 pub mod maintenance_gc;
 pub mod rebuild;
 pub mod node_sign;
@@ -37,6 +39,8 @@ pub(crate) fn default_list_limit() -> usize { 50 }
 pub(crate) fn default_replay_limit() -> usize { 200 }
 
 pub const ALL: &[ServiceDescriptor] = &[
+    health_status::DESCRIPTOR,
+    identity_public_key::DESCRIPTOR,
     system_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
