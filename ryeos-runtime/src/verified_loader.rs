@@ -521,6 +521,106 @@ impl VerifiedLoader {
         Ok(Some(value))
     }
 
+    /// Same as `load_config_strict` but also returns the source root
+    /// label (`"system"` | `"user"` | `"project"`) for trust decisions.
+    ///
+    /// When a single candidate is found, its root label is returned.
+    /// When multiple candidates are merged, the label of the *first*
+    /// contributing root is returned (highest-precedence root that
+    /// supplied a file).
+    pub fn load_config_with_provenance<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+    ) -> std::result::Result<Option<(T, String)>, ConfigLoadError> {
+        let subdir = Self::kind_subdir("config");
+        let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
+
+        // Collect (path, root_label) pairs in system → user → project order.
+        let mut candidate_paths: Vec<(PathBuf, &'static str)> = Vec::new();
+
+        for system_root in &self.system_roots {
+            let p = system_root.join(&item_path);
+            if p.exists() {
+                candidate_paths.push((p, "system"));
+            }
+        }
+
+        if let Some(ref user_root) = self.user_root {
+            let p = user_root.join(&item_path);
+            if p.exists() {
+                candidate_paths.push((p, "user"));
+            }
+        }
+
+        {
+            let p = self.project_root.join(&item_path);
+            if p.exists() {
+                candidate_paths.push((p, "project"));
+            }
+        }
+
+        if candidate_paths.is_empty() {
+            return Ok(None);
+        }
+
+        // The source root is the first root that contributed a file
+        // (system > user > project precedence).
+        let source_root = candidate_paths[0].1.to_string();
+
+        if candidate_paths.len() == 1 {
+            let (path, _) = &candidate_paths[0];
+            let verified = self
+                .load_verified("config", path)
+                .map_err(|e| ConfigLoadError::VerifyFailed {
+                    path: path.clone(),
+                    source: e,
+                })?;
+            let raw_value: serde_yaml::Value =
+                serde_yaml::from_str(&verified.content).map_err(|e| {
+                    ConfigLoadError::RawYamlParseFailed {
+                        path: path.clone(),
+                        source: e,
+                    }
+                })?;
+            let value = serde_yaml::from_value(raw_value).map_err(|e| {
+                ConfigLoadError::TypedParseFailed {
+                    path: path.clone(),
+                    source: e,
+                }
+            })?;
+            return Ok(Some((value, source_root)));
+        }
+
+        let mut merged = serde_yaml::Value::Null;
+        for (path, _) in &candidate_paths {
+            let verified = self
+                .load_verified("config", path)
+                .map_err(|e| ConfigLoadError::VerifyFailed {
+                    path: path.clone(),
+                    source: e,
+                })?;
+            let value = serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(
+                |e| ConfigLoadError::RawYamlParseFailed {
+                    path: path.clone(),
+                    source: e,
+                },
+            )?;
+            merged = deep_merge_yaml(merged, value);
+        }
+
+        let last_path = candidate_paths
+            .last()
+            .map(|(p, _)| p.clone())
+            .unwrap_or_else(|| item_path.clone());
+        let value = serde_yaml::from_value::<T>(merged).map_err(|e| {
+            ConfigLoadError::TypedParseFailed {
+                path: last_path,
+                source: e,
+            }
+        })?;
+        Ok(Some((value, source_root)))
+    }
+
     pub fn scan_kind(&self, kind: &str) -> Result<Vec<ScannedItem>> {
         let subdir = Self::kind_subdir(kind);
         let mut seen_names: HashSet<String> = HashSet::new();

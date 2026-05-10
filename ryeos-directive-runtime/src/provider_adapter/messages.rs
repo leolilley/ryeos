@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
-use crate::directive::{MessageSchemas, ProviderMessage};
+use crate::directive::{
+    MessageSchemas, ProviderMessage,
+    AssistantToolCallsPlacement, SystemMessageMode, TextPlacement, ToolResultWrapMode,
+};
 
 #[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas), fields(count = messages.len()))]
 pub fn convert_messages(
@@ -51,20 +54,17 @@ fn convert_with_schemas(
 
     let role_map = schemas.role_map.as_ref();
     let content_key = schemas.content_key.as_deref().unwrap_or("content");
-    let text_placement = schemas.text_placement.as_deref();
     let tc_placement = schemas
         .assistant_tool_calls_placement
-        .as_deref()
-        .unwrap_or("top_level_field");
+        .unwrap_or_default();
+    // When system_message is configured, use its declared mode.
+    // When absent, system prompts stay inline as regular messages
+    // (OpenAI behavior — no extraction, no injection).
     let system_mode = schemas
         .system_message
         .as_ref()
-        .and_then(|s| s.mode.as_deref())
-        .unwrap_or("body_field");
-    let tool_result_wrap = schemas
-        .tool_result
-        .as_ref()
-        .and_then(|t| t.wrap_key.as_deref());
+        .map(|s| s.mode)
+        .unwrap_or(SystemMessageMode::MessageRole);
 
     // Tool-result buffering for `wrap_mode: content_blocks` mode.
     // Accumulates rendered blocks across consecutive tool messages;
@@ -72,17 +72,17 @@ fn convert_with_schemas(
     let tr_role = schemas
         .tool_result
         .as_ref()
-        .and_then(|t| t.role.as_deref())
+        .map(|t| t.role.as_str())
         .unwrap_or("tool");
     let tr_wrap_mode = schemas
         .tool_result
         .as_ref()
-        .and_then(|t| t.wrap_mode.as_deref())
-        .unwrap_or("direct");
+        .map(|t| t.wrap_mode)
+        .unwrap_or_default();
     let tr_block_template = schemas
         .tool_result
         .as_ref()
-        .and_then(|t| t.block_template.as_ref());
+        .map(|t| &t.block_template);
     let tc_block_template = schemas.tool_call_block_template.as_ref();
 
     // Build tool_call_id → tool_name lookup so tool-result messages
@@ -110,7 +110,7 @@ fn convert_with_schemas(
         // and `body_inject` (Gemini) need extraction so the adapter can
         // route the text to the right place. Only `message_role`
         // (OpenAI) keeps the system message inline.
-        if msg.role == "system" && system_mode != "message_role" {
+        if msg.role == "system" && system_mode != SystemMessageMode::MessageRole {
             if let Some(ref content) = msg.content {
                 let text = match content {
                     Value::String(s) => s.clone(),
@@ -138,7 +138,7 @@ fn convert_with_schemas(
 
         let mut obj = json!({ "role": mapped_role });
 
-        if msg.role == "system" && system_mode == "message_role" {
+        if msg.role == "system" && system_mode == SystemMessageMode::MessageRole {
             match &msg.content {
                 Some(content) => obj[content_key] = content.clone(),
                 None => obj[content_key] = Value::Null,
@@ -165,7 +165,7 @@ fn convert_with_schemas(
                     .unwrap_or_else(|| {
                         tracing::warn!(
                             tool_call_id = tc_id,
-                            "tool-result message has no preceding assistant tool_call \
+                            "tool-result message has no preceding assistant tool-call \
                              with this id; tool_name in template will be empty"
                         );
                         String::new()
@@ -175,26 +175,23 @@ fn convert_with_schemas(
                 ctx.insert("tool_name".to_string(), json!(tool_name));
                 ctx.insert("content".to_string(), json!(result_content_str));
                 apply_template(tmpl, &ctx)
-            } else if let Some(wk) = tool_result_wrap {
-                // Legacy fallback (v0.3.0-first-cut shape).
-                json!({ wk: result_content_value, "tool_call_id": tc_id })
             } else {
                 json!({"tool_call_id": tc_id, "content": result_content_value})
             };
 
             match tr_wrap_mode {
-                "content_blocks" => {
+                ToolResultWrapMode::ContentBlocks => {
                     pending_tool_results.push(rendered_block);
                     continue; // Don't push obj this iteration.
                 }
-                "parts" => {
+                ToolResultWrapMode::Parts => {
                     let mut tr_msg = json!({"role": tr_role});
                     tr_msg[content_key] = json!([rendered_block]);
                     converted.push(tr_msg);
                     continue;
                 }
-                _ => {
-                    // "direct" — flatten block keys into the message itself.
+                ToolResultWrapMode::Direct => {
+                    // flatten block keys into the message itself.
                     let mut tr_msg = json!({"role": tr_role});
                     if let Value::Object(obj_map) = rendered_block {
                         for (k, v) in obj_map {
@@ -210,14 +207,14 @@ fn convert_with_schemas(
                 Some(content) => content.clone(),
                 None => Value::Null,
             };
-            match text_placement {
-                Some("parts_array") | Some("blocks_array") => {
+            match schemas.text_placement {
+                Some(TextPlacement::PartsArray) | Some(TextPlacement::BlocksArray) => {
                     let template = schemas.text_block_template.as_ref();
                     let wrapped = wrap_content(nested_content, content_key, template);
                     obj[content_key] = wrapped;
                 }
                 _ => {
-                    // "string" (default) — content is the raw value.
+                    // String (default) — content is the raw value.
                     obj[content_key] = nested_content;
                 }
             }
@@ -241,7 +238,7 @@ fn convert_with_schemas(
                         ctx.insert("input_json".to_string(), json!(input_json));
                         apply_template(tmpl, &ctx)
                     } else {
-                        // Legacy fallback (v0.3.0-first-cut OpenAI shape).
+                        // Default OpenAI tool-call shape (no template).
                         json!({
                             "id": tc.id,
                             "type": "function",
@@ -255,7 +252,7 @@ fn convert_with_schemas(
                 .collect();
 
             match tc_placement {
-                "inline_blocks" => {
+                AssistantToolCallsPlacement::InlineBlocks => {
                     // Append rendered tool_call blocks into the message's
                     // existing content/parts array.
                     let existing = obj.get(content_key).cloned().unwrap_or(json!([]));
@@ -267,9 +264,8 @@ fn convert_with_schemas(
                     merged.extend(rendered);
                     obj[content_key] = json!(merged);
                 }
-                _ => {
-                    // "top_level_field" (default) — OpenAI-style: tool_calls
-                    // is a top-level array field on the assistant message.
+                AssistantToolCallsPlacement::TopLevelField => {
+                    // OpenAI-style: tool_calls is a top-level array field.
                     obj["tool_calls"] = json!(rendered);
                 }
             }
@@ -292,30 +288,25 @@ fn convert_with_schemas(
 /// template. The template's `{text}` placeholder is replaced with
 /// each text fragment.
 ///
-/// - If `template` is `Some`, each string fragment is rendered as
-///   `apply_template(template, {"text": fragment})`.
-///   Gemini template `{text: "{text}"}` → `{text: "fragment"}`.
-///   Anthropic-blocks template `{type: "text", text: "{text}"}` →
-///   `{type: "text", text: "fragment"}`.
-/// - If `template` is `None`, falls back to `[{<content_key>: <fragment>}]`
-///   for backwards compat (this is the buggy v0.3.0-first-cut shape;
-///   only kept so any pre-template profile still parses).
+/// `template` MUST be `Some` — callers are responsible for checking
+/// via `ProviderConfig::validate()` before reaching this function.
+/// If `template` is `None`, this is a programmer error (not a valid
+/// config state) and the function panics with a diagnostic.
 ///
 /// Non-string content (already-array, already-object) is passed
 /// through wholesale (assumed already in provider-native shape).
-fn wrap_content(content: Value, content_key: &str, template: Option<&Value>) -> Value {
+fn wrap_content(content: Value, _content_key: &str, template: Option<&Value>) -> Value {
     use ryeos_runtime::template::apply_template;
     use std::collections::HashMap;
 
     let render_text = |text: &str| -> Value {
-        match template {
-            Some(t) => {
-                let mut ctx: HashMap<String, Value> = HashMap::new();
-                ctx.insert("text".to_string(), Value::String(text.to_string()));
-                apply_template(t, &ctx)
-            }
-            None => json!({ content_key: text }),
-        }
+        let t = template.expect(
+            "wrap_content requires text_block_template — \
+             ProviderConfig::validate() should have caught this"
+        );
+        let mut ctx: HashMap<String, Value> = HashMap::new();
+        ctx.insert("text".to_string(), Value::String(text.to_string()));
+        apply_template(t, &ctx)
     };
 
     match &content {
@@ -418,7 +409,6 @@ mod tests {
             tool_call_block_template: None,
             system_message: None,
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted[1]["role"], "model");
@@ -435,12 +425,11 @@ mod tests {
             text_block_template: None,
             tool_call_block_template: None,
             system_message: Some(SystemMessageConfig {
-                mode: Some("body_inject".to_string()),
+                mode: SystemMessageMode::BodyInject,
                 field: None,
                 template: None,
             }),
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, system) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(system, Some("You are helpful.".to_string()));
@@ -463,48 +452,16 @@ mod tests {
             text_block_template: None,
             tool_call_block_template: None,
             system_message: Some(SystemMessageConfig {
-                mode: Some("message_role".to_string()),
+                mode: SystemMessageMode::MessageRole,
                 field: None,
                 template: None,
             }),
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, system) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(system, None);
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0]["role"], "my_system");
-    }
-
-    #[test]
-    fn tool_result_with_wrap_key() {
-        let msgs = vec![ProviderMessage {
-            role: "tool".to_string(),
-            content: Some(json!("result data")),
-            tool_calls: None,
-            tool_call_id: Some("call_123".to_string()),
-        }];
-        let schemas = MessageSchemas {
-            role_map: None,
-            content_key: None,
-            text_placement: None,
-            assistant_tool_calls_placement: None,
-            text_block_template: None,
-            tool_call_block_template: None,
-            system_message: None,
-            tool_result: Some(ToolResultConfig {
-                wrap_key: Some("result".to_string()),
-                role: None,
-                wrap_mode: None,
-                block_template: None,
-            }),
-            tool_list_wrap: None,
-        };
-        let (converted, _) = convert_messages(&msgs, &Some(schemas));
-        // Legacy wrap_key path: block rendered as {wrap_key: content, tool_call_id: id},
-        // flattened into the message in "direct" wrap_mode.
-        assert_eq!(converted[0]["result"], "result data");
-        assert_eq!(converted[0]["tool_call_id"], "call_123");
     }
 
     #[test]
@@ -525,7 +482,6 @@ mod tests {
             tool_call_block_template: None,
             system_message: None,
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas.clone()));
         assert_eq!(converted[0]["content"], "Hello world");
@@ -534,7 +490,7 @@ mod tests {
         // content_key = "parts", wrap produces [{text: "..."}].
         let schemas_wrap = MessageSchemas {
             content_key: Some("parts".to_string()),
-            text_placement: Some("parts_array".to_string()),
+            text_placement: Some(TextPlacement::PartsArray),
             text_block_template: Some(json!({"text": "{text}"})),
             ..schemas.clone()
         };
@@ -560,7 +516,6 @@ mod tests {
             tool_call_block_template: None,
             system_message: None,
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted[0]["text"], "test");
@@ -610,12 +565,11 @@ mod tests {
             text_block_template: None,
             tool_call_block_template: None,
             system_message: Some(SystemMessageConfig {
-                mode: Some("body_field".to_string()),
+                mode: SystemMessageMode::BodyField,
                 field: Some("system".to_string()),
                 template: None,
             }),
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, system) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(
@@ -654,16 +608,6 @@ mod tests {
     }
 
     #[test]
-    fn wrap_content_no_template_falls_back_to_content_key() {
-        let result = super::wrap_content(
-            Value::String("hi".to_string()),
-            "content",
-            None,
-        );
-        assert_eq!(result, json!([{"content": "hi"}]));
-    }
-
-    #[test]
     fn wrap_content_preserves_structured_array_parts() {
         let template = json!({"text": "{text}"});
         let result = super::wrap_content(
@@ -690,13 +634,12 @@ mod tests {
                 m
             }),
             content_key: Some("parts".to_string()),
-            text_placement: Some("parts_array".to_string()),
+            text_placement: Some(TextPlacement::PartsArray),
             assistant_tool_calls_placement: None,
             text_block_template: Some(json!({"text": "{text}"})),
             tool_call_block_template: None,
             system_message: None,
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted.len(), 1);
@@ -733,16 +676,14 @@ mod tests {
             tool_call_block_template: None,
             system_message: None,
             tool_result: Some(ToolResultConfig {
-                wrap_key: None,
-                role: Some("user".to_string()),
-                wrap_mode: Some("content_blocks".to_string()),
-                block_template: Some(json!({
+                role: "user".to_string(),
+                wrap_mode: ToolResultWrapMode::ContentBlocks,
+                block_template: json!({
                     "type": "tool_result",
                     "tool_use_id": "{tool_call_id}",
                     "content": "{content}",
-                })),
+                }),
             }),
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         // Two consecutive tool messages → ONE user message with two blocks.
@@ -773,15 +714,13 @@ mod tests {
             tool_call_block_template: None,
             system_message: None,
             tool_result: Some(ToolResultConfig {
-                wrap_key: None,
-                role: Some("tool".to_string()),
-                wrap_mode: Some("direct".to_string()),
-                block_template: Some(json!({
+                role: "tool".to_string(),
+                wrap_mode: ToolResultWrapMode::Direct,
+                block_template: json!({
                     "tool_call_id": "{tool_call_id}",
                     "content": "{content}",
-                })),
+                }),
             }),
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted.len(), 1);
@@ -808,7 +747,7 @@ mod tests {
             role_map: None,
             content_key: Some("content".to_string()),
             text_placement: None, // default = string
-            assistant_tool_calls_placement: Some("inline_blocks".to_string()),
+            assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
             text_block_template: None,
             tool_call_block_template: Some(json!({
                 "type": "tool_use",
@@ -818,7 +757,6 @@ mod tests {
             })),
             system_message: None,
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted.len(), 1);
@@ -859,7 +797,6 @@ mod tests {
             })),
             system_message: None,
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted.len(), 1);
@@ -908,25 +845,23 @@ mod tests {
                 m
             }),
             content_key: Some("parts".to_string()),
-            text_placement: Some("parts_array".to_string()),
-            assistant_tool_calls_placement: Some("inline_blocks".to_string()),
+            text_placement: Some(TextPlacement::PartsArray),
+            assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
             text_block_template: Some(json!({"text": "{text}"})),
             tool_call_block_template: Some(json!({
                 "functionCall": {"name": "{name}", "args": "{input}"},
             })),
             system_message: None,
             tool_result: Some(ToolResultConfig {
-                wrap_key: None,
-                role: Some("user".to_string()),
-                wrap_mode: Some("content_blocks".to_string()),
-                block_template: Some(json!({
+                role: "user".to_string(),
+                wrap_mode: ToolResultWrapMode::ContentBlocks,
+                block_template: json!({
                     "functionResponse": {
                         "name": "{tool_name}",
                         "response": {"content": "{content}"},
                     },
-                })),
+                }),
             }),
-            tool_list_wrap: None,
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         // Three messages → three converted messages (user, assistant, user-tool-result).
@@ -963,16 +898,15 @@ mod tests {
             role_map: None,
             content_key: Some("content".to_string()),
             text_placement: None, // string (default)
-            assistant_tool_calls_placement: Some("inline_blocks".to_string()),
+            assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
             text_block_template: None,
             tool_call_block_template: None,
             system_message: Some(crate::directive::SystemMessageConfig {
-                mode: Some("body_field".to_string()),
+                mode: SystemMessageMode::BodyField,
                 field: Some("system".to_string()),
                 template: None,
             }),
             tool_result: None,
-            tool_list_wrap: None,
         };
         let (converted, system) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(system, Some("be brief".to_string()),
@@ -981,5 +915,49 @@ mod tests {
         assert_eq!(converted[0]["role"], "user");
         assert_eq!(converted[0]["content"], "hello",
             "Anthropic content stays as plain string when text_placement is unset");
+    }
+
+    #[test]
+    fn anthropic_assistant_text_plus_tool_use_produces_typed_blocks() {
+        // When text_placement=blocks_array, assistant text MUST be wrapped
+        // in {type: "text", text: "..."} blocks so the content array
+        // contains only well-formed Anthropic blocks — no raw strings.
+        let msgs = vec![ProviderMessage {
+            role: "assistant".to_string(),
+            content: Some(Value::String("Let me check.".to_string())),
+            tool_calls: Some(vec![crate::directive::ToolCall {
+                id: Some("toolu_01".to_string()),
+                name: "search".to_string(),
+                arguments: json!({"q":"rust"}),
+            }]),
+            tool_call_id: None,
+        }];
+        let schemas = MessageSchemas {
+            role_map: None,
+            content_key: Some("content".to_string()),
+            text_placement: Some(TextPlacement::BlocksArray),
+            assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
+            text_block_template: Some(json!({"type":"text","text":"{text}"})),
+            tool_call_block_template: Some(json!({
+                "type":"tool_use","id":"{id}","name":"{name}","input":"{input}"
+            })),
+            system_message: None,
+            tool_result: None,
+        };
+        let (converted, _) = convert_messages(&msgs, &Some(schemas));
+        assert_eq!(converted.len(), 1);
+        let content = converted[0]["content"].as_array()
+            .expect("content must be array");
+        // First block must be the typed text block, not a raw string.
+        assert_eq!(content[0]["type"], "text",
+            "Anthropic text must be wrapped in {{type:text,text:...}}, got: {}", content[0]);
+        assert_eq!(content[0]["text"], "Let me check.");
+        // Second block must be the tool_use.
+        let has_tool_use = content.iter()
+            .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_use"));
+        assert!(has_tool_use, "tool_use block missing: {content:?}");
+        // No raw strings allowed.
+        assert!(content.iter().all(|v| !v.is_string()),
+            "no element may be a raw string in Anthropic block array");
     }
 }

@@ -99,6 +99,10 @@ profiles:
       messages:
         role_map: {user: user, assistant: assistant}
         content_key: content
+        text_placement: blocks_array
+        text_block_template:
+          type: text
+          text: "{text}"
         assistant_tool_calls_placement: inline_blocks
         system_message:
           mode: body_field
@@ -149,7 +153,6 @@ profiles:
       prefix: ""
     body_template:
       contents: "{messages}"
-      tools: "{tools}"
     body_extra:
       generationConfig:
         maxOutputTokens: 4096

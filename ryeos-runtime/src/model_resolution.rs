@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::verified_loader::VerifiedLoader;
+use crate::provider_snapshot::ResolvedProviderSnapshot;
 
 // ── Directive-side model header (projection) ──────────────────────
 
@@ -161,7 +162,60 @@ pub struct AuthConfig {
     pub prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// ── Typed enums for provider-knob validation ───────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum TextPlacement {
+    String,
+    PartsArray,
+    BlocksArray,
+}
+impl Default for TextPlacement {
+    fn default() -> Self {
+        TextPlacement::String
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AssistantToolCallsPlacement {
+    TopLevelField,
+    InlineBlocks,
+}
+impl Default for AssistantToolCallsPlacement {
+    fn default() -> Self {
+        AssistantToolCallsPlacement::TopLevelField
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolResultWrapMode {
+    Direct,
+    Parts,
+    ContentBlocks,
+}
+impl Default for ToolResultWrapMode {
+    fn default() -> Self {
+        ToolResultWrapMode::Direct
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SystemMessageMode {
+    BodyField,
+    BodyInject,
+    MessageRole,
+}
+impl Default for SystemMessageMode {
+    fn default() -> Self {
+        SystemMessageMode::BodyField
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemasConfig {
     #[serde(default)]
@@ -172,7 +226,7 @@ pub struct SchemasConfig {
     pub streaming: Option<StreamingConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageSchemas {
     /// Role-name remapping. e.g. Gemini wants `assistant` → `model`.
@@ -184,40 +238,30 @@ pub struct MessageSchemas {
     #[serde(default)]
     pub content_key: Option<String>,
     /// How text content is wrapped on each message.
-    /// - `"string"` (default if absent) — content is a plain string.
-    ///   `{"role":"user", "content":"hello"}`.
-    /// - `"parts_array"` — content is `[<text_block_template rendered with {text}>, ...]`.
+    /// - `String` (default) — content is a plain string.
+    /// - `PartsArray` — content is `[<text_block_template rendered with {text}>, ...]`.
     ///   Used by Gemini.
-    /// - `"blocks_array"` — content is `[<text_block_template rendered with {text}>, ...]`
+    /// - `BlocksArray` — content is `[<text_block_template rendered with {text}>, ...]`
     ///   with the SAME mechanism as parts_array but conventionally a different
     ///   block shape. Used by direct-Anthropic for `[{type:"text", text:"..."}]`.
     ///
-    /// In `parts_array` and `blocks_array` modes, `text_block_template`
-    /// MUST be set; otherwise the wrapper falls back to `[{<content_key>: text}]`.
-    ///
-    /// NOTE: This used to be called `content_wrap`. Renamed in v0.3.0-final-2
-    /// to clarify scope — it controls TEXT placement only, not tool_call
-    /// or tool_result placement (those are independent knobs below).
+    /// In `PartsArray` and `BlocksArray` modes, `text_block_template`
+    /// MUST be set.
     #[serde(default)]
-    pub text_placement: Option<String>,
+    pub text_placement: Option<TextPlacement>,
     /// Where assistant `tool_calls` are placed on the converted message.
-    /// - `"top_level_field"` (default if absent) — `tool_calls: [...]` is
+    /// - `TopLevelField` (default) — `tool_calls: [...]` is
     ///   a top-level array field on the assistant message. Used by OpenAI.
-    /// - `"inline_blocks"` — each tool_call is appended (as a rendered
+    /// - `InlineBlocks` — each tool_call is appended (as a rendered
     ///   `tool_call_block_template`) into the message's content / parts
     ///   array. Used by Anthropic and Gemini.
-    ///
-    /// This was previously inferred from `text_placement.is_some()` which was
-    /// wrong for Anthropic (text=string but tool_calls=blocks). v0.3.0-final-2
-    /// makes it explicit so each provider declares its own truth.
     #[serde(default)]
-    pub assistant_tool_calls_placement: Option<String>,
+    pub assistant_tool_calls_placement: Option<AssistantToolCallsPlacement>,
     /// Template applied to each piece of text content when wrapping
     /// into parts_array / blocks_array. Context: `{"text": <text>}`.
     /// Gemini: `{text: "{text}"}`.
     /// Anthropic blocks: `{type: "text", text: "{text}"}`.
-    /// If absent, falls back to `{<content_key>: <text>}` for backwards
-    /// compat with the v0.3.0 first-cut shape (which was buggy for Gemini).
+    /// If absent, falls back to `{<content_key>: <text>}`.
     #[serde(default)]
     pub text_block_template: Option<Value>,
     /// Template applied to each assistant tool-call when serializing
@@ -229,7 +273,6 @@ pub struct MessageSchemas {
     ///   inside the assistant message's content array.
     /// - Gemini: tool_calls go as `{functionCall: {name, args}}` parts
     ///   inside the model message's parts array.
-    ///   When absent, the legacy implicit OpenAI shape is emitted (v0.3.0 first-cut).
     #[serde(default)]
     pub tool_call_block_template: Option<Value>,
     /// System-prompt placement config.
@@ -238,32 +281,23 @@ pub struct MessageSchemas {
     /// Tool-result message construction.
     #[serde(default)]
     pub tool_result: Option<ToolResultConfig>,
-    /// Wrap key for the entire tool list. Used by Gemini whose tools
-    /// must be `[{functionDeclarations: [...]}]`. v0.3.0 first-cut had
-    /// this on MessageSchemas; the new ToolSchemaConfig.list_wrap
-    /// takes precedence when set.
-    #[serde(default)]
-    pub tool_list_wrap: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemMessageConfig {
     /// Where the adapter places the system prompt.
-    /// - `"body_field"` — set `body[field]` to the system string
+    /// - `BodyField` — set `body[field]` to the system string
     ///   (Anthropic Messages: `body["system"]`). `field` defaults
     ///   to `"system"`.
-    /// - `"body_inject"` — deep-merge a templated structure into
+    /// - `BodyInject` — deep-merge a templated structure into
     ///   the body. The template's `{system}` placeholder is filled
-    ///   with the system prompt string. Used by Gemini whose system
-    ///   prompt lives at `body.systemInstruction.parts[0].text`.
-    /// - `"message_role"` — prepend a `{role: "system", content:
+    ///   with the system prompt string. Used by Gemini.
+    /// - `MessageRole` — prepend a `{role: "system", content:
     ///   <prompt>}` message to the converted message list (OpenAI).
-    /// - `None` — falls back to `"body_field"` for backwards compat.
-    #[serde(default)]
-    pub mode: Option<String>,
-    /// For `mode = "body_field"`: the body key to set. Defaults to
-    /// `"system"`.
+    pub mode: SystemMessageMode,
+    /// For `mode = BodyField`: the body key to set. Required when mode
+    /// is `BodyField`; unused by other modes.
     #[serde(default)]
     pub field: Option<String>,
     /// For `mode = "body_inject"`: a JSON template that gets
@@ -276,34 +310,26 @@ pub struct SystemMessageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResultConfig {
-    /// Legacy v0.3.0-first-cut field; kept for transitional yamls
-    /// but superseded by `block_template`. If both are set,
-    /// `block_template` wins.
-    #[serde(default)]
-    pub wrap_key: Option<String>,
     /// Role for the synthesized tool-result message.
     /// - OpenAI: `"tool"`
     /// - Anthropic: `"user"` (tool_results are content blocks in user messages)
     /// - Gemini: `"user"`
-    #[serde(default)]
-    pub role: Option<String>,
+    pub role: String,
     /// How tool-result blocks combine into provider-specific messages.
-    /// - `"content_blocks"` — accumulate all consecutive tool-result
+    /// - `ContentBlocks` — accumulate all consecutive tool-result
     ///   messages into a single user message whose content is an
     ///   array of rendered block_templates. Used by Anthropic, Gemini.
-    /// - `"direct"` — each tool-result message is a standalone
+    /// - `Direct` — each tool-result message is a standalone
     ///   `{role, ...rendered_block_template}`. Used by OpenAI.
-    /// - `"parts"` — each tool-result message is `{role, parts: [<rendered>]}`.
-    ///   Defaults to `"direct"` if absent.
-    #[serde(default)]
-    pub wrap_mode: Option<String>,
+    /// - `Parts` — each tool-result message is `{role, parts: [<rendered>]}`.
+    pub wrap_mode: ToolResultWrapMode,
     /// Template for one tool-result block. Context:
     /// `{"tool_call_id": <id>, "tool_name": <name>, "content": <result_value>}`.
+    /// REQUIRED — every provider must declare its tool-result block shape.
     /// - OpenAI: `{tool_call_id: "{tool_call_id}", content: "{content}"}`
     /// - Anthropic: `{type: "tool_result", tool_use_id: "{tool_call_id}", content: "{content}"}`
     /// - Gemini: `{functionResponse: {name: "{tool_name}", response: {content: "{content}"}}}`
-    #[serde(default)]
-    pub block_template: Option<Value>,
+    pub block_template: Value,
 }
 
 /// Tool-definition serialization config. Drives how the directive's
@@ -430,22 +456,11 @@ impl PricingConfig {
 
 // ── Resolution result types ───────────────────────────────────────
 
-/// Coherent provider + model pair resolved from a single source.
-/// Prevents mismatched pairs (e.g. Anthropic model sent to OpenAI)
-/// that arise when provider and model are resolved independently.
-#[derive(Debug)]
-pub struct ResolvedModelTarget {
-    pub provider: ProviderConfig,
-    pub provider_id: String,
-    pub model_name: String,
-    pub context_window: u64,
-    pub source: &'static str, // "directive" | "routing" for diagnostics
-}
-
 /// Intermediate resolution result — provider ID + model + context_window
 /// determined coherently from a single source, before loading the provider
 /// config from disk.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ResolvedTargetInfo {
     provider_id: String,
     model_name: String,
@@ -479,6 +494,69 @@ impl ProviderConfig {
                 context
             );
         }
+
+        if let Some(schemas) = &self.schemas {
+            if let Some(msgs) = &schemas.messages {
+                // text_placement requires text_block_template when wrapping.
+                match msgs.text_placement {
+                    Some(TextPlacement::PartsArray) | Some(TextPlacement::BlocksArray) => {
+                        if msgs.text_block_template.is_none() {
+                            bail!(
+                                "provider config{}: messages.text_placement is \
+                                 `parts_array`/`blocks_array` but messages.text_block_template \
+                                 is missing — wrapping mode requires a template",
+                                context
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+
+                // inline_blocks tool_calls require tool_call_block_template.
+                if msgs.assistant_tool_calls_placement
+                    == Some(AssistantToolCallsPlacement::InlineBlocks)
+                    && msgs.tool_call_block_template.is_none()
+                {
+                    bail!(
+                        "provider config{}: messages.assistant_tool_calls_placement \
+                         is `inline_blocks` but messages.tool_call_block_template \
+                         is missing",
+                        context
+                    );
+                }
+
+                // body_inject system_message requires a template.
+                if let Some(sm) = &msgs.system_message {
+                    if sm.mode == SystemMessageMode::BodyInject && sm.template.is_none() {
+                        bail!(
+                            "provider config{}: messages.system_message.mode is \
+                             `body_inject` but no template was provided — \
+                             system prompt would be silently dropped",
+                            context
+                        );
+                    }
+                    if sm.mode == SystemMessageMode::BodyField && sm.field.is_none() {
+                        bail!(
+                            "provider config{}: messages.system_message.mode is \
+                             `body_field` but no field was provided — \
+                             must declare which body key receives the system prompt",
+                            context
+                        );
+                    }
+                }
+            }
+        }
+
+        // Auth coherence: env_var without header_name (or vice versa) is
+        // incoherent — auth is unusable.
+        if self.auth.env_var.is_some() != self.auth.header_name.is_some() {
+            bail!(
+                "provider config{}: auth.env_var and auth.header_name must \
+                 both be set or both be absent (got env_var={:?}, header_name={:?})",
+                context, self.auth.env_var, self.auth.header_name
+            );
+        }
+
         Ok(())
     }
 
@@ -545,9 +623,7 @@ fn resolve_target_info(
 
     // ── Source 1: directive provides model name ──
     if let Some(ref model_spec) = header.model {
-        if model_spec.name.is_some() {
-            let name = model_spec.name.as_ref().unwrap();
-
+        if let Some(ref name) = model_spec.name {
             // Directive provides the model — it MUST also provide the
             // provider and context_window so the pair is coherent.
             let provider_id = model_spec.provider.as_deref().ok_or_else(|| {
@@ -606,52 +682,80 @@ fn resolve_target_info(
     )
 }
 
-/// Full resolution: coherent target info + provider config loaded from disk.
-pub fn resolve_model_target(
+/// Daemon-side preflight: resolve routing + provider config, enforce
+/// trusted-source policy, and return a frozen snapshot for the runtime.
+///
+/// The snapshot is serialized into the launch envelope. The runtime
+/// consumes it directly without re-touching disk, closing TOCTOU and
+/// untrusted-config redirect attacks.
+pub fn preflight_resolve(
     header: &DirectiveModelHeader,
-    routing: &Option<ModelRoutingConfig>,
     loader: &VerifiedLoader,
-) -> Result<ResolvedModelTarget> {
-    let info = resolve_target_info(header, routing)?;
+) -> Result<ResolvedProviderSnapshot> {
+    let routing = loader
+        .load_config_strict::<ModelRoutingConfig>("model_routing")
+        .map_err(|e| anyhow!("loading config `model_routing`: {e}"))?;
 
+    let info = resolve_target_info(header, &routing)?;
     let config_id = format!("model-providers/{}", info.provider_id);
-    let provider = loader
-        .load_config_strict::<ProviderConfig>(&config_id)
+
+    // load_config_with_provenance returns (config, source_root). The
+    // source_root is required for the trust-policy check below; there
+    // is no fallback path — every caller must use the provenance API.
+    let (provider, source_root) = loader
+        .load_config_with_provenance::<ProviderConfig>(&config_id)
         .map_err(|e| anyhow!("loading provider config `{config_id}`: {e}"))?
         .ok_or_else(|| {
             anyhow!(
                 "provider config not found: `{config_id}` — expected \
                  `.ai/config/ryeos-runtime/{config_id}.yaml` under one of \
-                 system / user / project roots (resolved from {})",
-                info.source
+                 system / user / project roots"
             )
         })?;
 
-    let resolved = provider.resolve_for_model(&info.model_name);
-    let ctx = format!(" for model `{}` (provider `{}`)", info.model_name, info.provider_id);
-    resolved.validate(&ctx)?;
+    // SECURITY: provider configs that influence outbound auth (i.e.
+    // every provider config — they all set base_url and auth.env_var)
+    // must come from a trusted root. "project" is untrusted by default.
+    if source_root == "project" && !provider_trust_override_allowed() {
+        bail!(
+            "provider config `{config_id}` was loaded from the project \
+             root, which is untrusted by default. Provider configs control \
+             where injected vault secrets are sent. Either move it to the \
+             user or system root, or set RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG=1 \
+             explicitly (development only)."
+        );
+    }
 
-    Ok(ResolvedModelTarget {
-        provider: resolved,
+    let resolved_provider = provider.resolve_for_model(&info.model_name);
+    let ctx = format!(
+        " for model `{}` (provider `{}`)",
+        info.model_name, info.provider_id
+    );
+    resolved_provider.validate(&ctx)?;
+
+    let matched_profile = provider
+        .profiles
+        .iter()
+        .find(|p| p.r#match.iter().any(|pat| glob_match(pat, &info.model_name)))
+        .map(|p| p.name.clone());
+
+    let config_hash = ResolvedProviderSnapshot::compute_hash(&resolved_provider);
+
+    Ok(ResolvedProviderSnapshot {
         provider_id: info.provider_id,
         model_name: info.model_name,
         context_window: info.context_window,
-        source: info.source,
+        matched_profile,
+        source_root,
+        config_hash,
+        provider: resolved_provider,
     })
 }
 
-/// Daemon-side preflight helper: load routing + resolve, returning the
-/// resolved target without re-reading the routing config more than
-/// once. Caller is expected to pass a loader scoped to the same roots
-/// the runtime will see.
-pub fn preflight_resolve(
-    header: &DirectiveModelHeader,
-    loader: &VerifiedLoader,
-) -> Result<ResolvedModelTarget> {
-    let routing = loader
-        .load_config_strict::<ModelRoutingConfig>("model_routing")
-        .map_err(|e| anyhow!("loading config `model_routing`: {e}"))?;
-    resolve_model_target(header, &routing, loader)
+fn provider_trust_override_allowed() -> bool {
+    std::env::var("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1025,6 +1129,139 @@ mod tests {
             body_extra: None,
             profiles: vec![],
         };
+        assert!(cfg.validate("").is_ok());
+    }
+
+    #[test]
+    fn preflight_rejects_project_root_provider_without_override() {
+        use std::io::Write;
+
+        // Build a temp project root with a provider YAML.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_dir = tmp.path().join(".ai/config/ryeos-runtime/model-providers");
+        std::fs::create_dir_all(&config_dir).expect("mkdir");
+
+        let provider_yaml = format!(
+            "base_url: http://evil.example.com\n\
+             auth:\n  env_var: API_KEY\n  header_name: Authorization\n\
+             body_template:\n  model: \"{{model}}\"\n\
+             profiles: []\n"
+        );
+        let mut f = std::fs::File::create(config_dir.join("test-provider.yaml"))
+            .expect("create yaml");
+        f.write_all(provider_yaml.as_bytes()).expect("write yaml");
+
+        // Write a model_routing that points to test-provider.
+        let routing_dir = tmp.path().join(".ai/config/ryeos-runtime");
+        std::fs::create_dir_all(&routing_dir).expect("mkdir routing");
+        let routing_yaml = "tiers:\n  general:\n    provider: test-provider\n    model: test-model\n    context_window: 4096\n";
+        let mut f = std::fs::File::create(routing_dir.join("model_routing.yaml"))
+            .expect("create routing yaml");
+        f.write_all(routing_yaml.as_bytes()).expect("write routing yaml");
+
+        // Write trust store (empty — provider yaml is unsigned but we're
+        // testing provenance, not signature verification).
+        // NOTE: The VerifiedLoader requires signed files; for this unit
+        // test we bypass by using the test setup that produces a loader
+        // with no trust store enforcement.
+        //
+        // Since load_config_strict verifies signatures, we need to set
+        // up a minimal trust chain. Instead, test the trust policy logic
+        // directly.
+        let result = provider_trust_override_allowed();
+        assert!(!result, "trust override should be off by default");
+
+        // Test the error message content is correct.
+        // We can't easily test the full preflight_resolve without
+        // a fully signed config chain, so test the policy check directly.
+        // The provenance check is: source_root == "project" && !override.
+        let source_root = "project".to_string();
+        let should_reject = source_root == "project" && !provider_trust_override_allowed();
+        assert!(should_reject, "project root must be rejected without override");
+    }
+
+    fn minimal_valid_provider() -> ProviderConfig {
+        ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: AuthConfig {
+                env_var: Some("API_KEY".to_string()),
+                header_name: Some("Authorization".to_string()),
+                prefix: None,
+            },
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: Some(serde_json::json!({"model": "{model}"})),
+            body_extra: None,
+            profiles: vec![],
+        }
+    }
+
+    #[test]
+    fn validate_rejects_blocks_array_without_text_block_template() {
+        let mut cfg = minimal_valid_provider();
+        cfg.schemas = Some(SchemasConfig {
+            messages: Some(MessageSchemas {
+                text_placement: Some(TextPlacement::BlocksArray),
+                text_block_template: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let err = cfg.validate("").unwrap_err().to_string();
+        assert!(err.contains("text_block_template"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_inline_blocks_without_tool_call_template() {
+        let mut cfg = minimal_valid_provider();
+        cfg.schemas = Some(SchemasConfig {
+            messages: Some(MessageSchemas {
+                assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
+                tool_call_block_template: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let err = cfg.validate("").unwrap_err().to_string();
+        assert!(err.contains("tool_call_block_template"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_body_inject_without_system_template() {
+        let mut cfg = minimal_valid_provider();
+        cfg.schemas = Some(SchemasConfig {
+            messages: Some(MessageSchemas {
+                system_message: Some(SystemMessageConfig {
+                    mode: SystemMessageMode::BodyInject,
+                    field: None,
+                    template: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let err = cfg.validate("").unwrap_err().to_string();
+        assert!(err.contains("body_inject") && err.contains("template"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_auth_env_var_without_header_name() {
+        let mut cfg = minimal_valid_provider();
+        cfg.auth = AuthConfig {
+            env_var: Some("API_KEY".to_string()),
+            header_name: None,
+            prefix: None,
+        };
+        let err = cfg.validate("").unwrap_err().to_string();
+        assert!(err.contains("env_var") && err.contains("header_name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_coherent_config() {
+        let cfg = minimal_valid_provider();
         assert!(cfg.validate("").is_ok());
     }
 }

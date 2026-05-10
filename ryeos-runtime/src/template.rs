@@ -36,8 +36,19 @@ pub fn apply_template(template: &Value, data: &HashMap<String, Value>) -> Value 
                 .strip_prefix('{')
                 .and_then(|rest| rest.strip_suffix('}'))
             {
-                // Whole-string placeholder: substitute the value.
-                data.get(key).cloned().unwrap_or(Value::Null)
+            // Whole-string placeholder: substitute the value.
+            match data.get(key) {
+                Some(v) => v.clone(),
+                None => {
+                    tracing::warn!(
+                        missing_placeholder = key,
+                        available_keys = ?data.keys().collect::<Vec<_>>(),
+                        "template placeholder not found in context — emitting null; \
+                         this is almost certainly a YAML typo"
+                    );
+                    Value::Null
+                }
+            }
             } else {
                 // Plain string: return as-is.
                 Value::String(s.clone())

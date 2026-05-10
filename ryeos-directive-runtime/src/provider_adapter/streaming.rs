@@ -7,7 +7,8 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::directive::{
-    ExecutionConfig, ProviderConfig, ProviderMessage, SamplingConfig, StreamEvent, ToolCall, ToolSchema,
+    ExecutionConfig, ProviderConfig, ProviderMessage, SamplingConfig, StreamEvent,
+    SystemMessageMode, ToolCall, ToolSchema,
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
@@ -228,7 +229,18 @@ fn parse_delta_merge(
                 }
             }
 
-            if let Some("stop") = choice.get("finish_reason").and_then(|f| f.as_str()) {
+            let finish_reason = choice
+                .get("finish_reason")
+                .and_then(|f| f.as_str());
+            let is_terminal = finish_reason
+                .map(|r| !r.is_empty())
+                .unwrap_or(false);
+
+            if is_terminal {
+                // Flush accumulated tool calls BEFORE emitting Done.
+                // OpenAI sends finish_reason="tool_calls" when the model
+                // wants tools dispatched; the old code only flushed on
+                // "stop", which meant streamed tool calls never fired.
                 let mut indices: Vec<u64> = Vec::new();
                 for (key, _) in tool_call_state.iter() {
                     if let Some(idx) = key.strip_prefix("tool_id_") {
@@ -319,6 +331,17 @@ fn parse_complete_chunks(
                         );
                         continue;
                     }
+                    // Deduplicate: Gemini sends cumulative frames, so the
+                    // same tool call may appear in multiple chunks. Use
+                    // (name + arguments) as a dedupe key.
+                    let arguments = serde_json::to_string(&args)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let dedupe_key = format!("seen_tc_{}:{}", name, arguments);
+                    if tool_call_state.contains_key(&dedupe_key) {
+                        continue; // already emitted this tool call
+                    }
+                    tool_call_state.insert(dedupe_key, "1".to_string());
+
                     // Gemini does not assign tool_call ids; synthesize a
                     // stream-local sequential id. Counter lives in the
                     // tool_call_state map keyed `gemini_tc_seq`. IDs are
@@ -329,8 +352,6 @@ fn parse_complete_chunks(
                         .unwrap_or(0);
                     let id = format!("gemini_tc_{}", seq);
                     tool_call_state.insert("gemini_tc_seq".to_string(), (seq + 1).to_string());
-                    let arguments = serde_json::to_string(&args)
-                        .unwrap_or_else(|_| "{}".to_string());
                     events.push(StreamEvent::ToolUse { id, name, arguments });
                     continue;
                 }
@@ -345,10 +366,22 @@ fn parse_complete_chunks(
             }
         }
 
-        // Text block.
+        // Text block. Gemini sends cumulative text (each chunk has the
+        // full text so far), so we must deduplicate by tracking how
+        // much text we've already emitted.
         if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str()) {
             if !text.is_empty() {
-                events.push(StreamEvent::Delta(text.to_string()));
+                let seen_len: usize = tool_call_state
+                    .get("seen_text_len")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                if text.len() > seen_len {
+                    let new_text = &text[seen_len..];
+                    if !new_text.is_empty() {
+                        events.push(StreamEvent::Delta(new_text.to_string()));
+                    }
+                    tool_call_state.insert("seen_text_len".to_string(), text.len().to_string());
+                }
             }
         }
     }
@@ -416,7 +449,6 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     let tools_val = crate::provider_adapter::tools::serialize_tools(
         tools,
         &tool_schema,
-        &schemas.cloned(),
     );
 
     let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
@@ -899,8 +931,8 @@ fn build_request_body(
 
     let template = provider.body_template.as_ref().unwrap_or_else(|| {
         unreachable!(
-            "ProviderConfig::validate() rejects providers without body_template \
-             at config-load time (resolve_model_target → bootstrap, launch). \
+             "ProviderConfig::validate() rejects providers without body_template \
+              at config-load time (preflight_resolve → bootstrap, launch). \
              If this fires, either:\n  \
              1. validate() was not called on the path that produced this config, OR\n  \
              2. a code path constructed ProviderConfig directly without validation.\n  \
@@ -953,18 +985,20 @@ fn inject_system_prompt(body: &mut Value, system: &str, provider: &ProviderConfi
         .and_then(|s| s.messages.as_ref())
         .and_then(|m| m.system_message.as_ref());
 
+    // When system_message is configured, use its declared mode.
+    // When absent, nothing to inject — system stays inline.
     let mode = sys_config
-        .and_then(|s| s.mode.as_deref())
-        .unwrap_or("body_field");
+        .map(|s| s.mode)
+        .unwrap_or(SystemMessageMode::MessageRole);
 
     match mode {
-        "body_field" => {
+        SystemMessageMode::BodyField => {
             let field = sys_config
                 .and_then(|s| s.field.as_deref())
                 .unwrap_or("system");
             body[field] = json!(system);
         }
-        "body_inject" => {
+        SystemMessageMode::BodyInject => {
             if let Some(template) = sys_config.and_then(|s| s.template.as_ref()) {
                 let mut ctx: HashMap<String, Value> = HashMap::new();
                 ctx.insert("system".to_string(), Value::String(system.to_string()));
@@ -977,17 +1011,10 @@ fn inject_system_prompt(body: &mut Value, system: &str, provider: &ProviderConfi
                 );
             }
         }
-        "message_role" => {
+        SystemMessageMode::MessageRole => {
             // Already handled in messages::convert_messages, which
             // prepends a system-role message. Nothing to inject in
             // the body itself.
-        }
-        other => {
-            tracing::warn!(
-                mode = other,
-                "unknown system_message.mode; defaulting to body_field"
-            );
-            body["system"] = json!(system);
         }
     }
 }
@@ -1086,6 +1113,35 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             assert_eq!(arguments, r#"{"cmd":"ls"}"#);
         }
      }
+
+    #[test]
+    fn openai_streamed_tool_calls_flush_on_tool_calls_finish_reason() {
+        // Regression test: OpenAI sends finish_reason="tool_calls" (not
+        // "stop") when the model wants tools dispatched. The old code
+        // only checked for "stop", so streamed tool calls never fired.
+        let data = r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"search","arguments":""}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\""}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"rust\"}"}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+"#;
+        let events = parse_sse_events(data, Some("delta_merge"));
+        let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
+        assert_eq!(tool_uses.len(), 1, "must emit exactly one ToolUse");
+        if let StreamEvent::ToolUse { id, name, arguments } = &tool_uses[0] {
+            assert_eq!(id, "call_abc");
+            assert_eq!(name, "search");
+            assert_eq!(arguments, r#"{"q":"rust"}"#);
+        }
+        let dones: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Done)).collect();
+        assert_eq!(dones.len(), 1, "must emit Done after tool calls");
+        // ToolUse must come before Done.
+        let tu_idx = events.iter().position(|e| matches!(e, StreamEvent::ToolUse { .. })).unwrap();
+        let done_idx = events.iter().position(|e| matches!(e, StreamEvent::Done)).unwrap();
+        assert!(tu_idx < done_idx, "ToolUse must precede Done");
+    }
 
     #[test]
     fn done_sentinel() {
@@ -1303,13 +1359,49 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
     }
 
     #[test]
-    fn inject_system_prompt_body_field_default() {
+    fn gemini_no_tools_request_omits_tools_field_entirely() {
+        // When the Gemini body_template has no "tools" key and the tools
+        // list is empty, the resulting request body must NOT contain a
+        // "tools" key at all — not even tools: [].
         let provider = ProviderConfig {
             category: None,
             base_url: "http://example.com".to_string(),
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: Some(json!({
+                "contents": "{messages}",
+            })),
+            body_extra: None,
+            profiles: vec![],
+        };
+        let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
+        let body = super::build_request_body(&provider, "gemini-3-flash", &msgs, None, &json!([]), false);
+        assert!(body.get("tools").is_none(),
+            "Gemini empty-tools must omit the field entirely, got: {:?}", body.get("tools"));
+    }
+
+    #[test]
+    fn inject_system_prompt_body_field_with_explicit_field() {
+        use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
+        let provider = ProviderConfig {
+            category: None,
+            base_url: "http://example.com".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: Some(SchemasConfig {
+                messages: Some(MessageSchemas {
+                    system_message: Some(SystemMessageConfig {
+                        mode: SystemMessageMode::BodyField,
+                        field: Some("system".to_string()),
+                        template: None,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             pricing: None,
             extra: Default::default(),
             body_template: None,
@@ -1338,7 +1430,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
                     text_block_template: None,
                     tool_call_block_template: None,
                     system_message: Some(SystemMessageConfig {
-                        mode: Some("body_inject".to_string()),
+                        mode: SystemMessageMode::BodyInject,
                         field: None,
                         template: Some(json!({
                             "systemInstruction": {
@@ -1347,7 +1439,6 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
                         })),
                     }),
                     tool_result: None,
-                    tool_list_wrap: None,
                 }),
                 tools: None,
                 streaming: None,
@@ -1506,5 +1597,80 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
         }
         // Counter persists in state.
         assert_eq!(state.get("gemini_tc_seq").map(|s| s.as_str()), Some("2"));
+    }
+
+    #[test]
+    fn complete_chunks_cumulative_text_does_not_duplicate() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: None,
+            tool_call_field: None,
+            tool_call_name_path: None,
+            tool_call_args_path: None,
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        let mut events = vec![];
+        let mut state = HashMap::new();
+
+        // Frame 1: "Hello"
+        let frame1 = json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "Hello"}]}}]
+        });
+        super::parse_complete_chunks(&frame1, &mut events, Some(&paths), &mut state);
+        // Frame 2: "Hello, world" (cumulative — full text so far)
+        let frame2 = json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "Hello, world"}]}}]
+        });
+        super::parse_complete_chunks(&frame2, &mut events, Some(&paths), &mut state);
+
+        let deltas: Vec<&str> = events.iter().filter_map(|e| match e {
+            StreamEvent::Delta(s) => Some(s.as_str()),
+            _ => None,
+        }).collect();
+        // Must be ["Hello", ", world"], NOT ["Hello", "Hello, world"]
+        assert_eq!(deltas, vec!["Hello", ", world"]);
+    }
+
+    #[test]
+    fn complete_chunks_repeated_tool_call_emits_once() {
+        use crate::directive::StreamPaths;
+        let paths = StreamPaths {
+            content_path: "candidates.0.content.parts".to_string(),
+            text_field: "text".to_string(),
+            thought_field: None,
+            tool_call_field: Some("functionCall".to_string()),
+            tool_call_name_path: Some("functionCall.name".to_string()),
+            tool_call_args_path: Some("functionCall.args".to_string()),
+            usage_path: None,
+            input_tokens_field: None,
+            output_tokens_field: None,
+            finish_reason_path: None,
+        };
+        let mut events = vec![];
+        let mut state = HashMap::new();
+
+        // Frame 1: one tool call
+        let frame1 = json!({
+            "candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "search", "args": {"q": "rust"}}}
+            ]}}]
+        });
+        super::parse_complete_chunks(&frame1, &mut events, Some(&paths), &mut state);
+
+        // Frame 2: same tool call again (cumulative frame)
+        let frame2 = json!({
+            "candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "search", "args": {"q": "rust"}}}
+            ]}}]
+        });
+        super::parse_complete_chunks(&frame2, &mut events, Some(&paths), &mut state);
+
+        let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
+        assert_eq!(tool_uses.len(), 1, "cumulative frame must not duplicate tool calls");
     }
 }

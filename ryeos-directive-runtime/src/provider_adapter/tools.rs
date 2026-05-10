@@ -1,24 +1,14 @@
 use serde_json::{json, Value};
 
-use crate::directive::{MessageSchemas, ToolSchema, ToolSchemaConfig};
+use crate::directive::{ToolSchema, ToolSchemaConfig};
 
 pub fn serialize_tools(
     tools: &[ToolSchema],
     tool_schema: &Option<ToolSchemaConfig>,
-    message_schemas: &Option<MessageSchemas>,
 ) -> Value {
-    // New path: tool_schema is set (v0.3.0-final and beyond) —
-    // template-driven serialization handles every provider correctly.
-    if let Some(ts) = tool_schema {
-        return serialize_with_template(tools, ts);
-    }
-
-    // Legacy path: no tool_schema provided. Fall back to message_schemas
-    // (the v0.3.0-first-cut shape) so any operator profile that pre-dates
-    // this rewrite continues to function.
-    match message_schemas {
-        None => serialize_openai_tools(tools),
-        Some(s) => serialize_with_schemas(tools, s),
+    match tool_schema {
+        Some(ts) => serialize_with_template(tools, ts),
+        None => serialize_openai_default(tools),
     }
 }
 
@@ -88,7 +78,10 @@ fn empty_object_schema() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
-fn serialize_openai_tools(tools: &[ToolSchema]) -> Value {
+/// Default OpenAI tool serialization — used when no ToolSchemaConfig
+/// is provided (e.g. test code, legacy profiles). Produces the standard
+/// `{type: "function", function: {name, description, parameters}}` shape.
+fn serialize_openai_default(tools: &[ToolSchema]) -> Value {
     json!(tools
         .iter()
         .map(|t| {
@@ -104,46 +97,10 @@ fn serialize_openai_tools(tools: &[ToolSchema]) -> Value {
         .collect::<Vec<_>>())
 }
 
-fn serialize_with_schemas(tools: &[ToolSchema], schemas: &MessageSchemas) -> Value {
-    let param_key = schemas
-        .content_key
-        .as_deref()
-        .unwrap_or("parameters");
-    let tool_list_wrap = schemas.tool_list_wrap.as_deref();
-
-    let list: Vec<Value> = tools
-        .iter()
-        .map(|t| {
-            let mut func_obj = json!({
-                "name": t.name,
-                "description": t.description,
-            });
-            func_obj[param_key] = t.input_schema.clone().unwrap_or_else(empty_object_schema);
-            func_obj
-        })
-        .collect();
-
-    if let Some(wrap) = tool_list_wrap {
-        let mut wrapped = json!({});
-        wrapped[wrap] = json!(list);
-        wrapped
-    } else {
-        json!(list
-            .iter()
-            .map(|func| {
-                json!({
-                    "type": "function",
-                    "function": func,
-                })
-            })
-            .collect::<Vec<_>>())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::{MessageSchemas, ToolSchema};
+    use crate::directive::ToolSchema;
 
     fn sample_tools() -> Vec<ToolSchema> {
         vec![
@@ -171,7 +128,7 @@ mod tests {
     #[test]
     fn default_openai_tool_format() {
         let tools = sample_tools();
-        let result = serialize_tools(&tools, &None, &None);
+        let result = serialize_tools(&tools, &None);
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["type"], "function");
@@ -192,70 +149,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_list_wrap_gemini_style() {
-        let tools = sample_tools();
-        let schemas = MessageSchemas {
-            role_map: None,
-            content_key: None,
-            text_placement: None,
-            assistant_tool_calls_placement: None,
-            text_block_template: None,
-            tool_call_block_template: None,
-            system_message: None,
-            tool_result: None,
-            tool_list_wrap: Some("function_declarations".to_string()),
-        };
-        let result = serialize_tools(&tools, &None, &Some(schemas));
-        let decls = result.get("function_declarations").unwrap().as_array().unwrap();
-        assert_eq!(decls.len(), 2);
-        assert_eq!(decls[0]["name"], "bash");
-        assert_eq!(decls[0]["parameters"]["type"], "object");
-    }
-
-    #[test]
-    fn custom_content_key_renames_parameters() {
-        let tools = sample_tools();
-        let schemas = MessageSchemas {
-            role_map: None,
-            content_key: Some("inputSchema".to_string()),
-            text_placement: None,
-            assistant_tool_calls_placement: None,
-            text_block_template: None,
-            tool_call_block_template: None,
-            system_message: None,
-            tool_result: None,
-            tool_list_wrap: None,
-        };
-        let result = serialize_tools(&tools, &None, &Some(schemas));
-        let arr = result.as_array().unwrap();
-        assert_eq!(arr[0]["function"]["inputSchema"]["type"], "object");
-        assert!(arr[0]["function"].get("parameters").is_none());
-    }
-
-    #[test]
     fn empty_tools() {
-        let result = serialize_tools(&[], &None, &None);
+        let result = serialize_tools(&[], &None);
         assert_eq!(result.as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn wrap_with_custom_content_key() {
-        let tools = sample_tools();
-        let schemas = MessageSchemas {
-            role_map: None,
-            content_key: Some("inputSchema".to_string()),
-            text_placement: None,
-            assistant_tool_calls_placement: None,
-            text_block_template: None,
-            tool_call_block_template: None,
-            system_message: None,
-            tool_result: None,
-            tool_list_wrap: Some("tools".to_string()),
-        };
-        let result = serialize_tools(&tools, &None, &Some(schemas));
-        let tools_list = result.get("tools").unwrap().as_array().unwrap();
-        assert_eq!(tools_list[0]["inputSchema"]["type"], "object");
-        assert!(tools_list[0].get("parameters").is_none());
     }
 
     #[test]
@@ -266,35 +162,10 @@ mod tests {
             description: Some("A tool with no schema".to_string()),
             input_schema: None,
         }];
-        let result = serialize_tools(&tools, &None, &None);
+        let result = serialize_tools(&tools, &None);
         let arr = result.as_array().unwrap();
         assert_eq!(arr[0]["function"]["parameters"]["type"], "object");
         assert!(arr[0]["function"]["parameters"]["properties"].is_object());
-    }
-
-    #[test]
-    fn schemas_path_tool_with_no_schema_gets_empty_object_default() {
-        let tools = vec![ToolSchema {
-            name: "no_schema_tool".to_string(),
-            item_id: "test/no-schema".to_string(),
-            description: Some("A tool with no schema".to_string()),
-            input_schema: None,
-        }];
-        let schemas = MessageSchemas {
-            role_map: None,
-            content_key: Some("inputSchema".to_string()),
-            text_placement: None,
-            assistant_tool_calls_placement: None,
-            text_block_template: None,
-            tool_call_block_template: None,
-            system_message: None,
-            tool_result: None,
-            tool_list_wrap: None,
-        };
-        let result = serialize_tools(&tools, &None, &Some(schemas));
-        let arr = result.as_array().unwrap();
-        assert_eq!(arr[0]["function"]["inputSchema"]["type"], "object");
-        assert!(arr[0]["function"]["inputSchema"]["properties"].is_object());
     }
 
     #[test]
@@ -365,7 +236,7 @@ mod tests {
             }),
             list_wrap: Some("functionDeclarations".to_string()),
         };
-        let result = serialize_tools(&tools, &Some(cfg), &None);
+        let result = serialize_tools(&tools, &Some(cfg));
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 1, "list_wrap collapses tools into one element");
         let decls = arr[0].get("functionDeclarations").unwrap().as_array().unwrap();
@@ -389,7 +260,7 @@ mod tests {
             }),
             list_wrap: None,
         };
-        let result = serialize_tools(&tools, &Some(cfg), &None);
+        let result = serialize_tools(&tools, &Some(cfg));
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"], "bash");
@@ -412,7 +283,7 @@ mod tests {
             }),
             list_wrap: None,
         };
-        let result = serialize_tools(&tools, &Some(cfg), &None);
+        let result = serialize_tools(&tools, &Some(cfg));
         let arr = result.as_array().unwrap();
         assert_eq!(arr[0]["type"], "function");
         assert_eq!(arr[0]["function"]["name"], "bash");
@@ -431,7 +302,7 @@ mod tests {
             }),
             list_wrap: Some("functionDeclarations".to_string()),
         };
-        let result = serialize_tools(&[], &Some(cfg), &None);
+        let result = serialize_tools(&[], &Some(cfg));
         assert_eq!(result, json!([]),
             "empty tools must serialize as `[]` regardless of list_wrap; \
              got: {}", result);

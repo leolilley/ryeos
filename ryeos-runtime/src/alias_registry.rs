@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn validate_all_verbs_known_rejects_unknown() {
-        use crate::verb_registry::{VerbDef, VerbRegistry};
+        use crate::verb_registry::VerbRegistry;
         let reg = test_registry();
         let verbs = VerbRegistry::from_records(&[]).unwrap();
         let result = reg.validate_all_verbs_known(&verbs);

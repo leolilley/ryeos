@@ -59,6 +59,15 @@ pub struct LaunchEnvelope {
     /// `ToolSchema`).
     #[serde(default)]
     pub inventory: HashMap<String, Vec<ItemDescriptor>>,
+    /// Daemon-resolved, frozen provider snapshot. The daemon resolves
+    /// the provider config once at preflight, validates it, and embeds
+    /// the result here. Runtimes deserialize into their own typed
+    /// `ResolvedProviderSnapshot` — the engine cannot depend on
+    /// `ryeos-runtime` so this is an opaque JSON value here.
+    ///
+    /// Absent for non-directive runtimes that don't need provider config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_snapshot: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +214,7 @@ mod tests {
                 token: "cbt-test".to_string(),
             },
             inventory: HashMap::new(),
+            provider_snapshot: None,
             resolution: ResolutionOutput {
                 root: crate::resolution::ResolvedAncestor {
                     requested_id: "directive:my/agent".to_string(),

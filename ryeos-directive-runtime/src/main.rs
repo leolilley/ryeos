@@ -17,6 +17,7 @@ mod resume;
 mod runner;
 
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
+use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 
 fn main() {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_directive_runtime());
@@ -103,6 +104,18 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &thread_auth_token,
     );
 
+    let provider_snapshot: ResolvedProviderSnapshot = serde_json::from_value(
+        envelope
+            .provider_snapshot
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!(
+                "launch envelope missing provider_snapshot — the daemon must \
+                 embed the resolved provider config in the envelope"
+            ))?
+    ).map_err(|e| anyhow::anyhow!(
+        "failed to deserialize provider_snapshot from envelope: {e}"
+    ))?;
+
     let bootstrap_output = bootstrap::bootstrap(
         &project_root,
         user_root.as_deref(),
@@ -111,6 +124,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &envelope.policy.hard_limits,
         &verified_loader,
         &envelope.inventory,
+        &provider_snapshot,
     )?;
 
     let provider = bootstrap_output.provider.clone();
