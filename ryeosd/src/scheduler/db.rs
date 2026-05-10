@@ -29,7 +29,11 @@ CREATE TABLE IF NOT EXISTS schedule_specs (
     project_root       TEXT,
     signer_fingerprint TEXT NOT NULL,
     spec_hash          TEXT NOT NULL,
-    last_modified      INTEGER NOT NULL
+    registered_at      INTEGER NOT NULL,
+    last_modified      INTEGER NOT NULL,
+    last_modified_by   TEXT,
+    requester_fingerprint TEXT NOT NULL,
+    approved_scopes    TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS schedule_fires (
@@ -77,7 +81,11 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "project_root", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "signer_fingerprint", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "spec_hash", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "registered_at", col_type: "INTEGER", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "last_modified", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "last_modified_by", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "requester_fingerprint", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "approved_scopes", col_type: "TEXT", pk: false, not_null: true },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -139,21 +147,24 @@ impl SchedulerDb {
             "INSERT INTO schedule_specs
                 (schedule_id, item_ref, params, schedule_type, expression,
                  timezone, misfire_policy, overlap_policy, enabled,
-                 project_root, signer_fingerprint, spec_hash, last_modified)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
-             ON CONFLICT(schedule_id) DO UPDATE SET
-                item_ref=excluded.item_ref, params=excluded.params,
-                schedule_type=excluded.schedule_type, expression=excluded.expression,
-                timezone=excluded.timezone, misfire_policy=excluded.misfire_policy,
-                overlap_policy=excluded.overlap_policy, enabled=excluded.enabled,
-                project_root=excluded.project_root, signer_fingerprint=excluded.signer_fingerprint,
-                spec_hash=excluded.spec_hash, last_modified=excluded.last_modified",
+                 project_root, signer_fingerprint, spec_hash, registered_at,
+                 last_modified, last_modified_by, requester_fingerprint, approved_scopes)
+              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+              ON CONFLICT(schedule_id) DO UPDATE SET
+                 item_ref=excluded.item_ref, params=excluded.params,
+                 schedule_type=excluded.schedule_type, expression=excluded.expression,
+                 timezone=excluded.timezone, misfire_policy=excluded.misfire_policy,
+                 overlap_policy=excluded.overlap_policy, enabled=excluded.enabled,
+                 project_root=excluded.project_root, signer_fingerprint=excluded.signer_fingerprint,
+                 spec_hash=excluded.spec_hash, last_modified=excluded.last_modified,
+                 last_modified_by=excluded.last_modified_by, approved_scopes=excluded.approved_scopes",
             params![
                 rec.schedule_id, rec.item_ref, rec.params,
                 rec.schedule_type, rec.expression, rec.timezone,
                 rec.misfire_policy, rec.overlap_policy, rec.enabled as i32,
                 rec.project_root, rec.signer_fingerprint, rec.spec_hash,
-                rec.last_modified,
+                rec.registered_at, rec.last_modified, rec.last_modified_by,
+                rec.requester_fingerprint, rec.approved_scopes,
             ],
         )
         .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
@@ -173,7 +184,8 @@ impl SchedulerDb {
         let mut stmt = conn.prepare(
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
-                    project_root, signer_fingerprint, spec_hash, last_modified
+                    project_root, signer_fingerprint, spec_hash, registered_at,
+                    last_modified, last_modified_by, requester_fingerprint, approved_scopes
              FROM schedule_specs WHERE schedule_id = ?1",
         )?;
         stmt.query_row(params![schedule_id], |row| Ok(row_to_spec(row)))
@@ -186,7 +198,8 @@ impl SchedulerDb {
         let mut stmt = conn.prepare(
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
-                    project_root, signer_fingerprint, spec_hash, last_modified
+                    project_root, signer_fingerprint, spec_hash, registered_at,
+                    last_modified, last_modified_by, requester_fingerprint, approved_scopes
              FROM schedule_specs WHERE enabled = 1",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_spec(row)))?;
@@ -198,26 +211,18 @@ impl SchedulerDb {
     }
 
     pub fn list_specs(&self, enabled_only: bool, schedule_type: Option<&str>) -> Result<Vec<ScheduleSpecRecord>> {
+        let cols = "schedule_id, item_ref, params, schedule_type, expression,
+                    timezone, misfire_policy, overlap_policy, enabled,
+                    project_root, signer_fingerprint, spec_hash, registered_at,
+                    last_modified, last_modified_by, requester_fingerprint, approved_scopes";
         let sql = match (enabled_only, schedule_type) {
-            (true, Some(_)) => "SELECT schedule_id, item_ref, params, schedule_type, expression,
-                                       timezone, misfire_policy, overlap_policy, enabled,
-                                       project_root, signer_fingerprint, spec_hash, last_modified
-                                FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?",
-            (true, None) => "SELECT schedule_id, item_ref, params, schedule_type, expression,
-                                    timezone, misfire_policy, overlap_policy, enabled,
-                                    project_root, signer_fingerprint, spec_hash, last_modified
-                             FROM schedule_specs WHERE enabled = 1",
-            (false, Some(_)) => "SELECT schedule_id, item_ref, params, schedule_type, expression,
-                                        timezone, misfire_policy, overlap_policy, enabled,
-                                        project_root, signer_fingerprint, spec_hash, last_modified
-                                 FROM schedule_specs WHERE schedule_type = ?",
-            (false, None) => "SELECT schedule_id, item_ref, params, schedule_type, expression,
-                                    timezone, misfire_policy, overlap_policy, enabled,
-                                    project_root, signer_fingerprint, spec_hash, last_modified
-                             FROM schedule_specs",
+            (true, Some(_)) => format!("SELECT {} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?", cols),
+            (true, None) => format!("SELECT {} FROM schedule_specs WHERE enabled = 1", cols),
+            (false, Some(_)) => format!("SELECT {} FROM schedule_specs WHERE schedule_type = ?", cols),
+            (false, None) => format!("SELECT {} FROM schedule_specs", cols),
         };
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         let rows: Vec<ScheduleSpecRecord> = if let Some(st) = schedule_type {
             stmt.query_map(params![st], |row| Ok(row_to_spec(row)))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -551,7 +556,11 @@ fn row_to_spec(row: &rusqlite::Row<'_>) -> ScheduleSpecRecord {
         project_root: row.get("project_root").unwrap(),
         signer_fingerprint: row.get("signer_fingerprint").unwrap(),
         spec_hash: row.get("spec_hash").unwrap(),
+        registered_at: row.get("registered_at").unwrap(),
         last_modified: row.get("last_modified").unwrap(),
+        last_modified_by: row.get("last_modified_by").unwrap(),
+        requester_fingerprint: row.get("requester_fingerprint").unwrap(),
+        approved_scopes: row.get("approved_scopes").unwrap(),
     }
 }
 
@@ -593,7 +602,11 @@ mod tests {
             project_root: None,
             signer_fingerprint: "fp:test".to_string(),
             spec_hash: "abc123".to_string(),
+            registered_at: 1000,
             last_modified: 1000,
+            last_modified_by: Some("fp:test".to_string()),
+            requester_fingerprint: "fp:test".to_string(),
+            approved_scopes: "[]".to_string(),
         }
     }
 

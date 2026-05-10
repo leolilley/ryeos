@@ -153,7 +153,7 @@ fn load_specs_or_log(state: &Arc<AppState>) -> Vec<ScheduleSpecRecord> {
 
 /// Check if a spec is due by computing its scheduled_at from the DB's last
 /// fire record. For the first fire of an interval schedule (no last fire),
-/// we use the spec's `last_modified` (set at registration time) as the base.
+/// we use the spec's `registered_at` (immutable registration time) as the base.
 fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
     let last_fire_at = match state.scheduler_db.get_last_fire(&spec.schedule_id) {
         Ok(Some(f)) => Some(f.scheduled_at),
@@ -168,10 +168,10 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
         }
     };
 
-    // For interval schedules with no prior fire, use registration time as base
+    // For interval schedules with no prior fire, use registered_at as base (immutable anchor)
     let effective_last = last_fire_at.or_else(|| {
         if spec.schedule_type == "interval" || spec.schedule_type == "cron" {
-            Some(spec.last_modified)
+            Some(spec.registered_at)
         } else {
             None
         }
@@ -179,12 +179,12 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
 
     let scheduled_at = match crontab::compute_scheduled_at(
         &spec.schedule_type, &spec.expression, &spec.timezone, now, effective_last,
-        Some(spec.last_modified),
+        Some(spec.registered_at),
     ) {
         Some(at) => at,
         None => {
             // For interval with no last fire and no effective_last, the first
-            // fire is at registration_time + interval. compute_scheduled_at
+            // fire is at registered_at + interval. compute_scheduled_at
             // returns None when last_fire_at is None, so handle it here.
             if spec.schedule_type == "interval" {
                 let interval_secs = match spec.expression.parse::<i64>() {
@@ -207,7 +207,7 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
                         return false;
                     }
                 };
-                let first_fire = spec.last_modified + interval_secs * 1000;
+                let first_fire = spec.registered_at + interval_secs * 1000;
                 return first_fire <= now;
             }
             // For at schedules, parse the expression directly
@@ -226,14 +226,14 @@ fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
 fn compute_soonest_fire(specs: &[ScheduleSpecRecord], now: i64) -> Option<i64> {
     specs.iter().filter_map(|s| {
         // For interval schedules with no prior fires, the first fire is at
-        // last_modified + interval. For cron/at, compute_next_fire handles it.
+        // registered_at + interval. For cron/at, compute_next_fire handles it.
         if s.schedule_type == "interval" {
             let interval_secs = match s.expression.parse::<i64>() {
                 Ok(secs) if secs > 0 => secs,
                 _ => return None, // skip invalid interval in sleep calculation
             };
             let interval_ms = interval_secs * 1000;
-            let first_fire = s.last_modified + interval_ms;
+            let first_fire = s.registered_at + interval_ms;
             if first_fire > now {
                 return Some(first_fire);
             }
@@ -423,13 +423,17 @@ pub async fn dispatch_fire(
     });
     let project_path_buf = std::path::PathBuf::from(project_path);
 
+    // Parse approved scopes from DB (stored as JSON array)
+    let approved_scopes: Vec<String> = serde_json::from_str(&spec.approved_scopes)
+        .unwrap_or_else(|_| vec![]);
+
     let dispatch_req = crate::dispatch::DispatchRequest {
         launch_mode: "detached",
         target_site_id: None,
         project_source_is_pushed_head: false,
         validate_only: false,
         params,
-        acting_principal: &spec.signer_fingerprint,
+        acting_principal: &spec.requester_fingerprint,
         project_path: std::path::Path::new(project_path),
         original_project_path: project_path_buf.clone(),
         snapshot_hash: None,
@@ -441,11 +445,11 @@ pub async fn dispatch_fire(
     };
 
     let exec_ctx = crate::service_executor::ExecutionContext {
-        principal_fingerprint: spec.signer_fingerprint.clone(),
-        // Narrow scope: scheduler dispatch can execute any tool/directive but
-        // cannot perform admin operations (identity, config, signing, etc.).
-        // Mutation authority is already guarded by required_caps on register/pause/resume/deregister.
-        caller_scopes: vec!["ryeos.execute.*".to_string()],
+        principal_fingerprint: spec.requester_fingerprint.clone(),
+        // Use scopes from registration (approved_scopes), not hardcoded or parsed signature.
+        // This enforces principle of least privilege: schedule runs with only the scopes
+        // the registrant had at registration time.
+        caller_scopes: approved_scopes,
         engine: state.engine.clone(),
         plan_ctx: ryeos_engine::contracts::PlanContext {
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
