@@ -155,6 +155,20 @@ pub fn rebuild_fires_from_dir(
             continue;
         }
 
+        // Validate directory name as a schedule_id to prevent path traversal
+        let dir_name = match schedule_dir.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if let Err(e) = super::crontab::validate_schedule_id(dir_name) {
+            tracing::warn!(
+                path = %schedule_dir.display(),
+                error = %e,
+                "skipping fires dir with invalid schedule_id name"
+            );
+            continue;
+        }
+
         let jsonl_path = schedule_dir.join("fires.jsonl");
         if !jsonl_path.is_file() {
             continue;

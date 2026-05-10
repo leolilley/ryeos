@@ -1,47 +1,6 @@
 //! Shared types for the scheduler module.
 
-use serde::{Deserialize, Serialize};
-
-/// A parsed schedule spec loaded from `.ai/node/schedules/<name>.yaml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScheduleSpec {
-    pub spec_version: u32,
-    pub section: String,
-    pub schedule_id: String,
-    pub item_ref: String,
-    pub schedule_type: ScheduleType,
-    pub expression: String,
-    #[serde(default)]
-    pub params: serde_json::Value,
-    #[serde(default = "default_utc")]
-    pub timezone: String,
-    #[serde(default)]
-    pub misfire_policy: Option<String>,
-    #[serde(default)]
-    pub overlap_policy: Option<String>,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub project_root: Option<String>,
-}
-
-fn default_utc() -> String {
-    "UTC".to_string()
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// Schedule type discriminator.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ScheduleType {
-    Cron,
-    Interval,
-    At,
-}
+use serde::Serialize;
 
 /// Projection record for a schedule spec in `scheduler.sqlite3`.
 #[derive(Debug, Clone, Serialize)]

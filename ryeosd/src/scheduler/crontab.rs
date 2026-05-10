@@ -49,7 +49,11 @@ pub fn compute_scheduled_at(
             find_most_recent_cron(expression, timezone, after, now_ms)
         }
         "interval" => {
-            let interval_ms = expression.parse::<i64>().ok()? * 1000;
+            let interval_secs = expression.parse::<i64>().ok()?;
+            if interval_secs <= 0 {
+                return None;
+            }
+            let interval_ms = interval_secs * 1000;
             last_fire_at.map(|last| last + interval_ms)
         }
         "at" => {

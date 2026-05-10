@@ -46,7 +46,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     tracing::info!(specs = live_ids.len(), "scheduler: projection rebuilt from CAS");
 
     // Step 2: Recover in-flight fires
-    let mut intents = recover_inflight_fires(state)?;
+    let mut intents = recover_inflight_fires(state).await?;
     tracing::info!(inflight = intents.len(), "scheduler: recovered in-flight fires");
 
     // Step 3: Evaluate misfire gaps
@@ -54,10 +54,18 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     let now = lillux::time::timestamp_millis();
 
     for spec in &specs {
-        let last_fire_at = state.scheduler_db.get_last_fire(&spec.schedule_id)
-            .ok()
-            .flatten()
-            .map(|f| f.scheduled_at);
+        let last_fire_at = match state.scheduler_db.get_last_fire(&spec.schedule_id) {
+            Ok(Some(f)) => Some(f.scheduled_at),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!(
+                    schedule_id = %spec.schedule_id,
+                    error = %e,
+                    "reconcile: failed to query last fire — skipping misfire evaluation"
+                );
+                continue;
+            }
+        };
 
         // evaluate_misfires internally calls detect_misfires and handles
         // the gap detection + policy evaluation. Only call it if we have
@@ -79,7 +87,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     Ok(intents)
 }
 
-fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
+async fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
     let inflight = state.scheduler_db.get_inflight_fires()?;
     let mut intents = Vec::new();
 
@@ -90,7 +98,7 @@ fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     Ok(Some(thread)) => {
                         match thread.status.as_str() {
                             "completed" => {
-                                update_fire_completed(state, fire, thread_id, "completed", "success")?;
+                                update_fire_completed(state, fire, thread_id, "completed", "success").await?;
                                 tracing::info!(
                                     fire_id = %fire.fire_id,
                                     thread_id = %thread_id,
@@ -98,7 +106,7 @@ fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
                                 );
                             }
                             "failed" => {
-                                update_fire_completed(state, fire, thread_id, "failed", "thread_failed")?;
+                                update_fire_completed(state, fire, thread_id, "failed", "thread_failed").await?;
                                 tracing::info!(
                                     fire_id = %fire.fire_id,
                                     thread_id = %thread_id,
@@ -174,7 +182,7 @@ fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
     Ok(intents)
 }
 
-fn update_fire_completed(
+async fn update_fire_completed(
     state: &AppState,
     fire: &FireRecord,
     thread_id: &str,
@@ -183,16 +191,13 @@ fn update_fire_completed(
 ) -> Result<()> {
     let now = lillux::time::timestamp_millis();
 
-    // Update projection
     let rec = FireRecord {
         status: status.to_string(),
         outcome: Some(outcome.to_string()),
         fired_at: Some(now),
         ..fire.clone()
     };
-    state.scheduler_db.upsert_fire(&rec)?;
 
-    // Append to JSONL
     let entry = serde_json::json!({
         "entry_type": status,
         "fire_id": fire.fire_id,
@@ -207,7 +212,16 @@ fn update_fire_completed(
     let fires_path = state.config.system_space_dir
         .join(ryeos_engine::AI_DIR).join("state").join("schedules")
         .join(&fire.schedule_id).join("fires.jsonl");
-    projection::append_jsonl_entry(&fires_path, &entry)?;
+
+    let db = state.scheduler_db.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = db.upsert_fire(&rec) {
+            tracing::error!(fire_id = %rec.fire_id, error = %e, "failed to update reconciled fire status");
+        }
+        if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
+            tracing::error!(fire_id = %rec.fire_id, error = %e, "failed to append reconciled fire entry");
+        }
+    }).await.map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))?;
 
     Ok(())
 }

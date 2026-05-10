@@ -62,8 +62,7 @@ pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>)
 }
 
 /// Load enabled specs, logging an error on DB failure instead of silently
-/// returning an empty list. On error we return the previous specs unchanged
-/// so the timer retries on the next tick rather than dropping all schedules.
+/// returning an empty list. On error the timer will retry on the next tick.
 fn load_specs_or_log(state: &Arc<AppState>) -> Vec<ScheduleSpecRecord> {
     match state.scheduler_db.load_enabled_specs() {
         Ok(specs) => specs,
