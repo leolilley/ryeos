@@ -209,6 +209,27 @@ pub enum StreamEvent {
     ReasoningDelta(String),
     /// Complete tool call ready to dispatch.
     ToolUse { id: Option<String>, name: String, arguments: Value },
+    /// Partial tool call argument JSON streamed mid-flight.
+    ///
+    /// Anthropic delivers tool arguments as `input_json_delta` chunks
+    /// before the final `content_block_stop`. Surfacing the running
+    /// accumulation here lets the runner emit progressive
+    /// `cognition_out` events so the daemon (and ultimately the
+    /// browser) can stream large structured outputs (e.g.
+    /// `directive_return.response`) instead of waiting for the whole
+    /// tool call to land at once.
+    ToolUsePartial {
+        id: Option<String>,
+        name: String,
+        /// The new JSON fragment that just arrived (NOT the cumulative
+        /// buffer — consumers get the delta and reconstruct the full
+        /// state if they need it).
+        delta: String,
+        /// Total bytes of partial JSON accumulated so far for this
+        /// tool call. Lets consumers know whether they're at the start
+        /// (and may need to skip past `{"response":"`) or in the middle.
+        total_len: usize,
+    },
     /// Cumulative usage update from the provider. Emitted mid-stream
     /// by providers that send incremental token counts.
     #[allow(dead_code)] // Emitted by parser once usage extraction is wired

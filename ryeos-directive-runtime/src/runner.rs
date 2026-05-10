@@ -109,6 +109,49 @@ impl Drop for RunGuard {
     }
 }
 
+/// Synthesize a `directive_return` ToolSchema from declared outputs.
+///
+/// `directive_return` is a lifecycle signal recognized by name in the
+/// runner — it's never dispatched to a real tool. Advertising it as a
+/// provider tool gives the LLM a first-class way to emit structured
+/// outputs instead of relying on prose conventions. All declared
+/// outputs are marked `required` because the runner's
+/// `ProcessingDirectiveReturn` validator rejects calls missing any of
+/// them (see runner.rs:644-654).
+fn build_directive_return_tool(outputs: &[OutputSpec]) -> ToolSchema {
+    use serde_json::Map;
+    let mut props = Map::new();
+    let mut required: Vec<Value> = Vec::with_capacity(outputs.len());
+    for o in outputs {
+        let mut prop = Map::new();
+        prop.insert(
+            "type".to_string(),
+            json!(o.r#type.clone().unwrap_or_else(|| "string".to_string())),
+        );
+        if let Some(desc) = &o.description {
+            prop.insert("description".to_string(), json!(desc));
+        }
+        props.insert(o.name.clone(), Value::Object(prop));
+        required.push(json!(o.name));
+    }
+    let mut schema = Map::new();
+    schema.insert("type".to_string(), json!("object"));
+    schema.insert("properties".to_string(), Value::Object(props));
+    schema.insert("required".to_string(), Value::Array(required));
+    ToolSchema {
+        name: "directive_return".to_string(),
+        // Synthetic item_id; the dispatcher rejects this name before
+        // any cap/permission lookup so the value is never resolved.
+        item_id: "lifecycle:directive_return".to_string(),
+        description: Some(
+            "Return final structured outputs and finish the directive. \
+             Call this exactly once when you have a complete answer."
+                .to_string(),
+        ),
+        input_schema: Some(Value::Object(schema)),
+    }
+}
+
 /// Record a callback failure as a non-fatal warning. Replaces the
 /// `let _ = self.callback.append_event(...)` pattern that silently
 /// dropped event-store rejection (V5.4 P2.2 review finding).
@@ -296,7 +339,22 @@ impl Runner {
                         self.harness.effective_caps(),
                     );
                     // Map borrowed refs back to owned slice for the adapter.
-                    let visible_tools_owned: Vec<_> = visible_tools.into_iter().cloned().collect();
+                    let mut visible_tools_owned: Vec<_> = visible_tools.into_iter().cloned().collect();
+                    // If the directive declared `outputs:`, synthesize a
+                    // `directive_return` tool from them so the LLM has a
+                    // first-class function to call when it has the answer.
+                    // Without this, the model can only mention "directive_return"
+                    // in plain text — which leaves `result.outputs` empty and
+                    // the directive never finalizes via the lifecycle path.
+                    // The runner intercepts calls to `directive_return` by
+                    // name in `DispatchingTools`; the dispatcher rejects it
+                    // as a real tool, so this synthetic schema is purely a
+                    // provider-API hint.
+                    if let Some(ref outputs) = self.directive_outputs {
+                        if !outputs.is_empty() {
+                            visible_tools_owned.push(build_directive_return_tool(outputs));
+                        }
+                    }
                     match crate::provider_adapter::call_provider_streaming(
                         crate::provider_adapter::StreamingCallInput {
                             client: &self.http_client,
@@ -390,6 +448,11 @@ impl Runner {
                         match ev {
                             StreamEvent::Delta(_) => delta_count += 1,
                             StreamEvent::ToolUse { .. } => tool_use_count += 1,
+                            StreamEvent::ToolUsePartial { .. } => {
+                                // Diagnostic-only count; the cognition_out
+                                // event was already appended by the
+                                // streaming layer for the daemon to fan out.
+                            }
                             StreamEvent::Finish { reason, raw } => {
                                 finish_reason = Some(*reason);
                                 if let Some(raw_str) = raw {
