@@ -33,6 +33,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let fire_entries: Vec<Value> = fires.iter().map(|f| {
         serde_json::json!({
             "fire_id": f.fire_id,
+            "schedule_id": f.schedule_id,
             "scheduled_at": f.scheduled_at,
             "fired_at": f.fired_at,
             "thread_id": f.thread_id,

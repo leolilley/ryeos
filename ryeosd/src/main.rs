@@ -394,6 +394,11 @@ async fn main() -> Result<()> {
     // below, after the listeners are accepting connections.
     let resume_intents = reconcile::reconcile(&app_state).await?;
 
+    // Scheduler reload channel — must be created BEFORE the router is built
+    // so that HTTP handler clones of AppState carry the sender.
+    let (scheduler_reload_tx, scheduler_reload_rx) = tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
+    app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
+
     let app = build_router(app_state.clone())
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
@@ -515,9 +520,6 @@ async fn main() -> Result<()> {
     }
 
     // ── Scheduler reconciliation + timer start ──
-    let (scheduler_reload_tx, scheduler_reload_rx) = tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
-    app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
-
     let scheduler_intents = scheduler::reconcile::reconcile(&Arc::new(app_state.clone())).await?;
     for intent in scheduler_intents {
         let st = Arc::new(app_state.clone());

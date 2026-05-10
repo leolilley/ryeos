@@ -23,6 +23,28 @@ pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>)
 
     loop {
         let now = lillux::time::timestamp_millis();
+
+        // Collect all specs that are due right now (fire time <= now).
+        // We check by computing next fire relative to (now - 1ms) so that
+        // a fire exactly at `now` is included. This avoids the bug where
+        // compute_next_fire(interval, None) always returns now+interval,
+        // making is_due always false. Instead we compute each spec's
+        // scheduled_at from the DB last fire and check if it's in the past.
+        let due_specs: Vec<ScheduleSpecRecord> = specs.iter()
+            .filter(|s| spec_is_due(s, &state, now))
+            .cloned()
+            .collect();
+
+        // Process each due spec sequentially (ordering matters for overlap)
+        for spec in &due_specs {
+            process_spec(spec, &state).await;
+        }
+
+        // Reload for next iteration
+        specs = state.scheduler_db.load_enabled_specs()
+            .unwrap_or_default();
+
+        let now = lillux::time::timestamp_millis();
         let next_fire = compute_soonest_fire(&specs, now);
 
         let sleep_duration = match next_fire {
@@ -39,39 +61,68 @@ pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>)
                 continue;
             }
         }
-
-        let now = lillux::time::timestamp_millis();
-        let due_specs: Vec<&ScheduleSpecRecord> = specs.iter()
-            .filter(|s| is_due(s, now))
-            .collect();
-
-        // Process each due spec sequentially (ordering matters for overlap)
-        for spec in &due_specs {
-            process_spec(spec, &state).await;
-        }
-
-        // Reload for next iteration
-        specs = state.scheduler_db.load_enabled_specs()
-            .unwrap_or_default();
     }
+}
+
+/// Check if a spec is due by computing its scheduled_at from the DB's last
+/// fire record. For the first fire of an interval schedule (no last fire),
+/// we use the spec's `last_modified` (set at registration time) as the base.
+fn spec_is_due(spec: &ScheduleSpecRecord, state: &AppState, now: i64) -> bool {
+    let last_fire_at = state.scheduler_db.get_last_fire(&spec.schedule_id)
+        .ok()
+        .flatten()
+        .map(|f| f.scheduled_at);
+
+    // For interval schedules with no prior fire, use registration time as base
+    let effective_last = last_fire_at.or_else(|| {
+        if spec.schedule_type == "interval" {
+            Some(spec.last_modified)
+        } else {
+            None
+        }
+    });
+
+    let scheduled_at = match crontab::compute_scheduled_at(
+        &spec.schedule_type, &spec.expression, &spec.timezone, now, effective_last,
+    ) {
+        Some(at) => at,
+        None => {
+            // For interval with no last fire and no effective_last, the first
+            // fire is at registration_time + interval. compute_scheduled_at
+            // returns None when last_fire_at is None, so handle it here.
+            if spec.schedule_type == "interval" {
+                let interval_ms = spec.expression.parse::<i64>().unwrap_or(0) * 1000;
+                let first_fire = spec.last_modified + interval_ms;
+                return first_fire <= now;
+            }
+            // For at schedules, parse the expression directly
+            if spec.schedule_type == "at" {
+                return crontab::parse_iso_ts(&spec.expression)
+                    .is_some_and(|ts| ts <= now);
+            }
+            return false;
+        }
+    };
+
+    // Due if the scheduled time has passed
+    scheduled_at <= now
 }
 
 fn compute_soonest_fire(specs: &[ScheduleSpecRecord], now: i64) -> Option<i64> {
     specs.iter().filter_map(|s| {
-        let last = stateless_last_fire_at(s);
-        crontab::compute_next_fire(&s.schedule_type, &s.expression, &s.timezone, now, last).ok().flatten()
+        // For interval schedules with no prior fires, the first fire is at
+        // last_modified + interval. For cron/at, compute_next_fire handles it.
+        if s.schedule_type == "interval" {
+            let interval_ms = s.expression.parse::<i64>().ok()? * 1000;
+            let first_fire = s.last_modified + interval_ms;
+            if first_fire > now {
+                return Some(first_fire);
+            }
+            // Already due — return now so the timer wakes immediately
+            return Some(now);
+        }
+        crontab::compute_next_fire(&s.schedule_type, &s.expression, &s.timezone, now, None).ok().flatten()
     }).min()
-}
-
-fn is_due(spec: &ScheduleSpecRecord, now: i64) -> bool {
-    let last = stateless_last_fire_at(spec);
-    crontab::is_due(&spec.schedule_type, &spec.expression, &spec.timezone, now, last)
-}
-
-fn stateless_last_fire_at(_spec: &ScheduleSpecRecord) -> Option<i64> {
-    // We don't query DB here (called in a filter). The timer loop will
-    // do the DB dedup check inside process_spec.
-    None
 }
 
 async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
@@ -87,7 +138,15 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
         &spec.schedule_type, &spec.expression, &spec.timezone, now, last_fire_at,
     ) {
         Some(at) => at,
-        None => return,
+        None => {
+            // Fallback for interval first-fire: registration_time + interval
+            if spec.schedule_type == "interval" {
+                let interval_ms = spec.expression.parse::<i64>().unwrap_or(0) * 1000;
+                spec.last_modified + interval_ms
+            } else {
+                return;
+            }
+        }
     };
 
     let fid = types::fire_id(&spec.schedule_id, scheduled_at);

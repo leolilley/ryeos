@@ -142,7 +142,7 @@ fn next_at_fire(expression: &str, now_ms: i64) -> Result<Option<i64>> {
     }
 }
 
-fn parse_iso_ts(expression: &str) -> Option<i64> {
+pub fn parse_iso_ts(expression: &str) -> Option<i64> {
     // Try chrono's ISO 8601 parsing
     chrono::DateTime::parse_from_rfc3339(expression)
         .ok()
