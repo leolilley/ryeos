@@ -7,8 +7,9 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::directive::{
-    ExecutionConfig, ProtocolFamily, ProviderConfig, ProviderMessage, SamplingConfig, StreamEvent,
-    SystemMessageMode, ToolCall, ToolSchema,
+    ExecutionConfig, FinishReason, ProtocolFamily, ProviderConfig, ProviderMessage,
+    SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema,
+    normalize_finish_reason,
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
@@ -40,7 +41,7 @@ pub fn parse_sse_events_with_state(
 
     for (event_type, payload) in raw_events {
         if payload == "[DONE]" {
-            events.push(StreamEvent::Done);
+            events.push(StreamEvent::Finish { reason: FinishReason::Stop, raw: None });
             continue;
         }
 
@@ -173,13 +174,16 @@ fn parse_event_typed(
                     .get("current_tool_args")
                     .cloned()
                     .unwrap_or_else(|| "{}".to_string());
-                events.push(StreamEvent::ToolUse { id, name, arguments });
+                let arguments_value: Value = serde_json::from_str(&arguments)
+                    .unwrap_or_else(|_| json!({}));
+                let id_opt = if id.is_empty() { None } else { Some(id) };
+                events.push(StreamEvent::ToolUse { id: id_opt, name, arguments: arguments_value });
                 tool_call_state.remove("current_tool_id");
                 tool_call_state.remove("current_tool_name");
                 tool_call_state.remove("current_tool_args");
             }
         "message_stop" => {
-            events.push(StreamEvent::Done);
+            events.push(StreamEvent::Finish { reason: FinishReason::Stop, raw: None });
         }
         _ => {}
     }
@@ -263,7 +267,10 @@ fn parse_delta_merge(
                         .get(&format!("tool_args_{}", idx))
                         .cloned()
                         .unwrap_or_else(|| "{}".to_string());
-                    events.push(StreamEvent::ToolUse { id, name, arguments });
+                    let args_value: Value = serde_json::from_str(&arguments)
+                        .unwrap_or_else(|_| json!({}));
+                    let id_opt = if id.is_empty() { None } else { Some(id) };
+                    events.push(StreamEvent::ToolUse { id: id_opt, name, arguments: args_value });
                 }
                 for idx in indices.iter() {
                     let idx_s = idx.to_string();
@@ -271,7 +278,10 @@ fn parse_delta_merge(
                     tool_call_state.remove(&format!("tool_name_{}", idx_s));
                     tool_call_state.remove(&format!("tool_args_{}", idx_s));
                 }
-                events.push(StreamEvent::Done);
+                events.push(StreamEvent::Finish {
+                    reason: normalize_finish_reason(finish_reason.as_deref()),
+                    raw: finish_reason.map(|s| s.to_string()),
+                });
             }
         }
     }
@@ -352,7 +362,11 @@ fn parse_complete_chunks(
                         .unwrap_or(0);
                     let id = format!("gemini_tc_{}", seq);
                     tool_call_state.insert("gemini_tc_seq".to_string(), (seq + 1).to_string());
-                    events.push(StreamEvent::ToolUse { id, name, arguments });
+                    events.push(StreamEvent::ToolUse {
+                        id: Some(id),
+                        name,
+                        arguments: args,
+                    });
                     continue;
                 }
             }
@@ -386,11 +400,14 @@ fn parse_complete_chunks(
         }
     }
 
-    // Finish reason → emit Done.
+    // Finish reason → emit Finish.
     if let Some(ref fr_path) = p.finish_reason_path {
         if let Some(reason) = resolve_path(parsed, fr_path).and_then(|v| v.as_str()) {
             if !reason.is_empty() {
-                events.push(StreamEvent::Done);
+                events.push(StreamEvent::Finish {
+                    reason: normalize_finish_reason(Some(reason)),
+                    raw: Some(reason.to_string()),
+                });
             }
         }
     }
@@ -431,7 +448,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     let StreamingCallInput {
         client,
         provider,
-        provider_id,
+        provider_id: _,
         execution,
         model,
         messages,
@@ -610,17 +627,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                         name,
                         arguments,
                     } => {
-                        let args_value: Value = serde_json::from_str(arguments).map_err(|e| {
-                            anyhow!(
-                                "malformed streaming tool_use arguments for {name} \
-                                 (id={id}): {e}; raw={}",
-                                arguments
-                            )
-                        })?;
                         accumulated_tools.push(ToolCall {
-                            id: Some(id.clone()),
+                            id: id.clone(),
                             name: name.clone(),
-                            arguments: args_value,
+                            arguments: arguments.clone(),
                         });
                         callback
                             .append_event(
@@ -642,7 +652,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                                 )
                             })?;
                     }
-                    StreamEvent::Done => {}
+                    StreamEvent::Finish { .. } => {}
+                    StreamEvent::Usage(_) => {}
+                    StreamEvent::Warning { .. } => {}
+                    StreamEvent::ReasoningDelta(_) => {}
                 }
                 all_events.push(ev);
             }
@@ -678,17 +691,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                         })?;
                 }
                 StreamEvent::ToolUse { id, name, arguments } => {
-                    let args_value: Value = serde_json::from_str(arguments).map_err(|e| {
-                        anyhow!(
-                            "malformed streaming tool_use arguments for {name} \
-                             (id={id}): {e}; raw={}",
-                            arguments
-                        )
-                    })?;
                     accumulated_tools.push(ToolCall {
-                        id: Some(id.clone()),
+                        id: id.clone(),
                         name: name.clone(),
-                        arguments: args_value,
+                        arguments: arguments.clone(),
                     });
                     callback
                         .append_event(
@@ -710,7 +716,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                             )
                         })?;
                 }
-                StreamEvent::Done => {}
+                StreamEvent::Finish { .. } => {}
+                StreamEvent::Usage(_) => {}
+                StreamEvent::Warning { .. } => {}
+                StreamEvent::ReasoningDelta(_) => {}
             }
             all_events.push(ev);
         }
@@ -1045,7 +1054,7 @@ data: {"type":"message_stop"}
         assert_eq!(events.len(), 3);
         assert!(matches!(&events[0], StreamEvent::Delta(s) if s == "Hello"));
         assert!(matches!(&events[1], StreamEvent::Delta(s) if s == " world"));
-        assert!(matches!(&events[2], StreamEvent::Done));
+        assert!(matches!(&events[2], StreamEvent::Finish { .. }));
     }
 
     #[test]
@@ -1066,9 +1075,9 @@ data: {"type":"message_stop"}
         let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
         assert_eq!(tool_uses.len(), 1);
         if let StreamEvent::ToolUse { id, name, arguments } = &tool_uses[0] {
-            assert_eq!(id, "toolu_1");
+            assert_eq!(id, &Some("toolu_1".to_string()));
             assert_eq!(name, "bash");
-            assert_eq!(arguments, r#"{"cmd":"ls"}"#);
+            assert_eq!(arguments, &json!({"cmd": "ls"}));
         }
     }
 
@@ -1084,7 +1093,7 @@ data: [DONE]
 "#;
         let events = parse_sse_events(data, Some("delta_merge"));
         let deltas: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Delta(_))).collect();
-        let dones: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Done)).collect();
+        let dones: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Finish { .. })).collect();
         assert_eq!(deltas.len(), 2);
         assert!(matches!(&deltas[0], StreamEvent::Delta(s) if s == "Hello"));
         assert!(matches!(&deltas[1], StreamEvent::Delta(s) if s == " world"));
@@ -1105,9 +1114,9 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
         let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
         assert_eq!(tool_uses.len(), 1);
         if let StreamEvent::ToolUse { id, name, arguments } = &tool_uses[0] {
-            assert_eq!(id, "call_1");
+            assert_eq!(id, &Some("call_1".to_string()));
             assert_eq!(name, "bash");
-            assert_eq!(arguments, r#"{"cmd":"ls"}"#);
+            assert_eq!(arguments, &json!({"cmd": "ls"}));
         }
      }
 
@@ -1128,16 +1137,16 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
         assert_eq!(tool_uses.len(), 1, "must emit exactly one ToolUse");
         if let StreamEvent::ToolUse { id, name, arguments } = &tool_uses[0] {
-            assert_eq!(id, "call_abc");
+            assert_eq!(id, &Some("call_abc".to_string()));
             assert_eq!(name, "search");
-            assert_eq!(arguments, r#"{"q":"rust"}"#);
+            assert_eq!(arguments, &json!({"q": "rust"}));
         }
-        let dones: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Done)).collect();
-        assert_eq!(dones.len(), 1, "must emit Done after tool calls");
-        // ToolUse must come before Done.
+        let dones: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Finish { .. })).collect();
+        assert_eq!(dones.len(), 1, "must emit Finish after tool calls");
+        // ToolUse must come before Finish.
         let tu_idx = events.iter().position(|e| matches!(e, StreamEvent::ToolUse { .. })).unwrap();
-        let done_idx = events.iter().position(|e| matches!(e, StreamEvent::Done)).unwrap();
-        assert!(tu_idx < done_idx, "ToolUse must precede Done");
+        let done_idx = events.iter().position(|e| matches!(e, StreamEvent::Finish { .. })).unwrap();
+        assert!(tu_idx < done_idx, "ToolUse must precede Finish");
     }
 
     #[test]
@@ -1145,8 +1154,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let data = "data: [DONE]\n\ndata: [DONE]\n\n";
         let events = parse_sse_events(data, Some("delta_merge"));
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], StreamEvent::Done));
-        assert!(matches!(&events[1], StreamEvent::Done));
+        assert!(matches!(&events[0], StreamEvent::Finish { .. }));
+        assert!(matches!(&events[1], StreamEvent::Finish { .. }));
     }
 
     #[test]
@@ -1529,7 +1538,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
         // 1 Delta + 1 Done
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[1], StreamEvent::Done));
+        assert!(matches!(events[1], StreamEvent::Finish { .. }));
     }
 
     #[test]
@@ -1570,13 +1579,13 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         assert_eq!(events.len(), 2);
         match &events[0] {
             StreamEvent::ToolUse { id, name, .. } => {
-                assert_eq!(id, "gemini_tc_0");
+                assert_eq!(id, &Some("gemini_tc_0".to_string()));
                 assert_eq!(name, "search");
             }
             other => panic!("expected ToolUse, got {:?}", other),
         }
         match &events[1] {
-            StreamEvent::ToolUse { id, .. } => assert_eq!(id, "gemini_tc_1"),
+            StreamEvent::ToolUse { id, .. } => assert_eq!(id, &Some("gemini_tc_1".to_string())),
             other => panic!("expected ToolUse, got {:?}", other),
         }
         // Counter persists in state.
