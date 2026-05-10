@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T10:48:10Z:6fb7f4d31ddf05aafdb3352c7ee5d57ce35dd93b8309e906b86008b1f8074b13:kzLUMjzC6P/dzzqgBr34khTtzDIkOA0NwgyLrquVyYUw/A7VytOxdni6T6zQ9j3afbJXp+R3N0GmvVmp/ozYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-10T11:30:01Z:6fb7f4d31ddf05aafdb3352c7ee5d57ce35dd93b8309e906b86008b1f8074b13:kzLUMjzC6P/dzzqgBr34khTtzDIkOA0NwgyLrquVyYUw/A7VytOxdni6T6zQ9j3afbJXp+R3N0GmvVmp/ozYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 tiers:
   general:      {provider: zen, model: claude-haiku-4-5,    context_window: 200000}

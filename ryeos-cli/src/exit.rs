@@ -36,6 +36,7 @@ impl CliTransportError {
             CliTransportError::BodyDecode { .. } => EX_SOFTWARE,
             CliTransportError::SigningKeyMissing { .. } => EX_TEMPFAIL,
             CliTransportError::SigningKeyUnloadable { .. } => EX_CONFIG,
+            CliTransportError::AudienceDiscoveryFailed { .. } => EX_TEMPFAIL,
         }
     }
 }

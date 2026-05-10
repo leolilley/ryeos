@@ -40,6 +40,9 @@ pub enum CliTransportError {
 
     #[error("signing key unloadable at {path}: {detail}")]
     SigningKeyUnloadable { path: PathBuf, detail: String },
+
+    #[error("audience discovery failed for {url}: {detail}")]
+    AudienceDiscoveryFailed { url: String, detail: String },
 }
 
 // ---------------------------------------------------------------------------

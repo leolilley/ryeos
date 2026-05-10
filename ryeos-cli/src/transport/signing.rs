@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use lillux::crypto::{load_signing_key, SigningKey, fingerprint as compute_fp};
+use ryeos_engine::AI_DIR;
 
 use crate::error::CliTransportError;
 
@@ -14,22 +15,30 @@ pub struct Signer {
 
 impl Signer {
     /// Resolve the signing key:
-    ///   1. RYEOS_CLI_KEY_PATH env var
-    ///   2. <system_space_dir>/.ai/node/identity/private_key.pem
-    ///      (matches `Config::node_signing_key_path` defaults in
-    ///      `ryeosd/src/config.rs` and `ryeosd/src/bootstrap.rs`)
+    ///   1. RYEOS_CLI_KEY_PATH env var (explicit override)
+    ///   2. ~/<AI_DIR>/config/keys/signing/private_key.pem
+    ///      (the operator's persistent identity, created by daemon bootstrap)
     ///   3. Fail
-    pub fn resolve(system_space_dir: &Path) -> Result<Self, CliTransportError> {
+    ///
+    /// This is the USER key — the operator's identity for authenticating to
+    /// daemons. The node key is the daemon's own identity; the CLI must NOT
+    /// silently fall back to it.
+    pub fn resolve(_system_space_dir: &Path) -> Result<Self, CliTransportError> {
         if let Ok(p) = std::env::var("RYEOS_CLI_KEY_PATH") {
             let pb = PathBuf::from(&p);
             return Self::load_from(&pb);
         }
-        let default = system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("identity")
+        let display_path = format!("~/{AI_DIR}/config/keys/signing/private_key.pem");
+        let user_key = dirs::home_dir()
+            .ok_or_else(|| CliTransportError::SigningKeyMissing {
+                path: PathBuf::from(&display_path),
+            })?
+            .join(AI_DIR)
+            .join("config")
+            .join("keys")
+            .join("signing")
             .join("private_key.pem");
-        Self::load_from(&default)
+        Self::load_from(&user_key)
     }
 
     fn load_from(path: &Path) -> Result<Self, CliTransportError> {
@@ -56,11 +65,15 @@ impl Signer {
     ///   "ryeos-request-v1\n{METHOD}\n{canonical_path}\n{sha256(body)}\n{timestamp}\n{nonce}\n{audience}"
     ///
     /// Signature = Ed25519(sk, sha256(canonical_string).as_bytes())
+    ///
+    /// `audience` MUST be the target daemon's `principal_id` (discovered via
+    /// GET /public-key), NOT the caller's own fingerprint.
     pub fn sign(
         &self,
         method: &str,
         path_and_query: &str,
         body: &[u8],
+        audience: &str,
     ) -> Result<SignHeaders, CliTransportError> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -73,11 +86,6 @@ impl Signer {
         let body_hash = lillux::cas::sha256_hex(body);
 
         let canon_path = canonicalize_path(path_and_query);
-
-        // Audience: currently auth is disabled so this value is unused by the daemon.
-        // When require_auth flips on (auth-capability-gap item 3), the CLI must
-        // provide the daemon's principal_id. For now, use the node fingerprint.
-        let audience = self.fingerprint.clone();
 
         let string_to_sign = format!(
             "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",

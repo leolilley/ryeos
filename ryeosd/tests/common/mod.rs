@@ -35,16 +35,21 @@ pub fn ryos_binary() -> PathBuf {
         .parent()
         .expect("ryeosd binary has parent dir")
         .join("ryeos");
-    if !candidate.exists() {
-        // Build it. This blocks the test until cargo finishes; it should
-        // be a no-op once the binary is up-to-date.
+
+    // Always ask Cargo to build once per test process. Cargo no-ops
+    // when fresh; this guarantees the subprocess CLI matches the
+    // current source rather than a stale pre-v0.4.0 artifact left
+    // over from an earlier build. (See PLAN-V0.4.0-CLI-INTEGRATION-401-FIX.md.)
+    static BUILD_RYEOS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BUILD_RYEOS.get_or_init(|| {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = std::process::Command::new(&cargo)
             .args(["build", "-p", "ryeos-cli", "--bin", "ryeos"])
             .status()
             .expect("failed to invoke `cargo build -p ryeos-cli`");
         assert!(status.success(), "cargo build -p ryeos-cli failed");
-    }
+    });
+
     assert!(
         candidate.exists(),
         "ryos binary not found at {} after cargo build",

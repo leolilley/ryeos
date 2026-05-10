@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T10:48:09Z:70d1c35340f73c948265baa0aeee7418f9c4e09592101c705fa532e436d52101:lAfL0cd48LpXdsdI48Pk96+cJnfZXi9TLHpTgUoYEYk2qPZRnRCxLQtpCCKPDuRDiCQjykH2EntnPIeh/8lkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-10T11:30:00Z:70d1c35340f73c948265baa0aeee7418f9c4e09592101c705fa532e436d52101:lAfL0cd48LpXdsdI48Pk96+cJnfZXi9TLHpTgUoYEYk2qPZRnRCxLQtpCCKPDuRDiCQjykH2EntnPIeh/8lkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Verb list tool — reads verb and alias YAMLs from installed bundles."""
 
 __version__ = "1.0.0"
