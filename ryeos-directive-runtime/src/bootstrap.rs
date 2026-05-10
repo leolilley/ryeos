@@ -29,10 +29,16 @@ pub struct BootstrapOutput {
     pub sampling: Option<SamplingConfig>,
 }
 
+/// Filesystem roots needed for bootstrap resolution.
+#[allow(dead_code)] // Used by future bootstrap features (context loading, etc.)
+pub struct BootstrapRoots<'a> {
+    pub project_root: &'a Path,
+    pub user_root: Option<&'a Path>,
+    pub system_roots: &'a [PathBuf],
+}
+
 pub fn bootstrap(
-    _project_root: &Path,
-    _user_root: Option<&Path>,
-    _system_roots: &[PathBuf],
+    _roots: &BootstrapRoots<'_>,
     composed_view: &KindComposedView,
     _envelope_limits: &ryeos_runtime::envelope::HardLimits,
     loader: &VerifiedLoader,
@@ -378,7 +384,7 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
         // Read required fields with typed errors, not silent defaults.
         // Policy rules are safety-critical; silent defaults are risky.
         let pattern = entry_mapping
-            .get(&serde_yaml::Value::String("pattern".into()))
+            .get(serde_yaml::Value::String("pattern".into()))
             .ok_or_else(|| {
                 anyhow!(
                     "capability_risk config: policies[{idx}].pattern is required"
@@ -393,7 +399,7 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
             .to_string();
 
         let level_str = entry_mapping
-            .get(&serde_yaml::Value::String("level".into()))
+            .get(serde_yaml::Value::String("level".into()))
             .ok_or_else(|| {
                 anyhow!(
                     "capability_risk config: policies[{idx}].level is required"
@@ -408,7 +414,7 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
             })?;
 
         let requires_ack = entry_mapping
-            .get(&serde_yaml::Value::String("requires_ack".into()))
+            .get(serde_yaml::Value::String("requires_ack".into()))
             .ok_or_else(|| {
                 anyhow!(
                     "capability_risk config: policies[{idx}].requires_ack is required"

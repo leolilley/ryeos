@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::directive::{
     ExecutionConfig, FinishReason, ProtocolFamily, ProviderConfig, ProviderMessage,
@@ -13,6 +14,29 @@ use crate::directive::{
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
+
+/// Compute a sha256 hex digest of the input bytes.
+fn sha256_hex(data: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(data);
+    format!("{:x}", h.finalize())
+}
+
+/// Redact provider error bodies by default. Returns a safe preview
+/// (first 200 chars) plus a sha256 hash. Full body is logged only when
+/// `RYEOS_LOG_PROVIDER_BODIES=1` is set (development/debugging).
+fn safe_error_body(body: &str) -> String {
+    let preview: String = body.chars().take(200).collect();
+    let hash = sha256_hex(body.as_bytes());
+    if std::env::var("RYEOS_LOG_PROVIDER_BODIES").as_deref() == Ok("1") {
+        format!("body={body} (sha256={hash})")
+    } else {
+        format!(
+            "body_preview=\"{preview}\" body_sha256={hash} \
+             (set RYEOS_LOG_PROVIDER_BODIES=1 to log full body)"
+        )
+    }
+}
 
 /// Parse a complete SSE buffer (no streaming state continuation).
 /// Test-only helper retained because the existing parser unit tests
@@ -175,7 +199,16 @@ fn parse_event_typed(
                     .cloned()
                     .unwrap_or_else(|| "{}".to_string());
                 let arguments_value: Value = serde_json::from_str(&arguments)
-                    .unwrap_or_else(|_| json!({}));
+                    .unwrap_or_else(|_| {
+                        tracing::warn!(
+                            tool_name = %name,
+                            args_len = arguments.len(),
+                            args_sha256 = %sha256_hex(arguments.as_bytes()),
+                            "malformed tool arguments — defaulting to empty object \
+                             (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
+                        );
+                        json!({})
+                    });
                 let id_opt = if id.is_empty() { None } else { Some(id) };
                 events.push(StreamEvent::ToolUse { id: id_opt, name, arguments: arguments_value });
                 tool_call_state.remove("current_tool_id");
@@ -268,7 +301,16 @@ fn parse_delta_merge(
                         .cloned()
                         .unwrap_or_else(|| "{}".to_string());
                     let args_value: Value = serde_json::from_str(&arguments)
-                        .unwrap_or_else(|_| json!({}));
+                        .unwrap_or_else(|_| {
+                            tracing::warn!(
+                                tool_name = %name,
+                                args_len = arguments.len(),
+                                args_sha256 = %sha256_hex(arguments.as_bytes()),
+                                "malformed tool arguments — defaulting to empty object \
+                                 (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
+                            );
+                            json!({})
+                        });
                     let id_opt = if id.is_empty() { None } else { Some(id) };
                     events.push(StreamEvent::ToolUse { id: id_opt, name, arguments: args_value });
                 }
@@ -279,7 +321,7 @@ fn parse_delta_merge(
                     tool_call_state.remove(&format!("tool_args_{}", idx_s));
                 }
                 events.push(StreamEvent::Finish {
-                    reason: normalize_finish_reason(finish_reason.as_deref()),
+                    reason: normalize_finish_reason(finish_reason),
                     raw: finish_reason.map(|s| s.to_string()),
                 });
             }
@@ -430,6 +472,12 @@ pub struct StreamingCallInput<'a> {
     pub client: &'a reqwest::Client,
     pub provider: &'a ProviderConfig,
     pub provider_id: &'a str,
+    /// Profile name that matched during daemon preflight (e.g. `"claude-3.5-sonnet"`).
+    /// Used for diagnostic error messages — never influences wire shape.
+    pub matched_profile: Option<&'a str>,
+    /// SHA-256 of the canonical-JSON provider config, computed by the daemon
+    /// at snapshot time. Logged on errors so operators can correlate.
+    pub config_hash: &'a str,
     pub execution: &'a ExecutionConfig,
     pub model: &'a str,
     pub messages: &'a [ProviderMessage],
@@ -452,7 +500,9 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     let StreamingCallInput {
         client,
         provider,
-        provider_id: _,
+        provider_id,
+        matched_profile,
+        config_hash,
         execution,
         model,
         messages,
@@ -506,6 +556,11 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     // never send a field the upstream API will reject with a 400.
     inject_sampling(&mut body, provider.family, sampling);
 
+    // Pre-compute the request body hash for diagnostic error messages.
+    // This runs before `body` is moved into the request builder.
+    let request_body_str = serde_json::to_string(&body).unwrap_or_default();
+    let request_body_sha256 = sha256_hex(request_body_str.as_bytes());
+
     let mut req = client.post(&url);
 
     let auth_header = provider
@@ -543,9 +598,16 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
             String::new()
         });
         bail!(
-            "provider returned {} (streaming): {}",
-            status,
-            text.chars().take(500).collect::<String>()
+            "provider returned {status} (streaming) \
+             [provider={provider_id} profile={matched_profile:?} \
+             config_hash={config_hash} request_body_sha256={request_body_sha256}]: \
+             {safe_body}",
+            status = status,
+            provider_id = provider_id,
+            matched_profile = matched_profile,
+            config_hash = config_hash,
+            request_body_sha256 = request_body_sha256,
+            safe_body = safe_error_body(&text),
         );
     }
 
@@ -891,21 +953,10 @@ fn inject_sampling(
 
 /// Capability flags for a protocol family. Used to gate which
 /// sampling fields are safe to inject into the request body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ProviderCapabilities {
     supports_temperature: bool,
     supports_seed: bool,
-}
-
-impl Default for ProviderCapabilities {
-    fn default() -> Self {
-        // Fail-closed: unknown families get no sampling fields injected
-        // until explicitly added to family_capabilities().
-        Self {
-            supports_temperature: false,
-            supports_seed: false,
-        }
-    }
 }
 
 /// Look up capabilities for a known protocol family. Falls back to
@@ -1679,5 +1730,487 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
         let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
         assert_eq!(tool_uses.len(), 1, "cumulative frame must not duplicate tool calls");
+    }
+
+    // ── Golden-wire integration tests ────────────────────────────────
+    //
+    // These tests construct `ProviderConfig` matching the bundled YAML
+    // shapes and exercise the full message→body pipeline. They catch:
+    //   - YAML profile-merge regressions
+    //   - placement-enum breakage
+    //   - tool serialization drift
+    //   - system-prompt misplacement
+    //
+    // If a bundle YAML edit breaks one of these, CI catches it here.
+
+    use crate::directive::{
+        MessageSchemas, SchemasConfig, SystemMessageConfig, TextPlacement,
+        AssistantToolCallsPlacement, ToolResultConfig, ToolResultWrapMode,
+        ToolSchemaConfig, ToolCall,
+    };
+    use ryeos_runtime::model_resolution::StreamingConfig;
+
+    /// Canonical transcript used by all golden-wire tests.
+    fn canonical_transcript() -> Vec<ProviderMessage> {
+        vec![
+            ProviderMessage {
+                role: "system".to_string(),
+                content: Some(json!("You are helpful.")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("What is 2+2?")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("Let me calculate.")),
+                tool_calls: Some(vec![ToolCall {
+                    id: Some("call_1".to_string()),
+                    name: "calculator".to_string(),
+                    arguments: json!({"expr": "2+2"}),
+                }]),
+                tool_call_id: None,
+            },
+            ProviderMessage {
+                role: "tool".to_string(),
+                content: Some(json!("4")),
+                tool_calls: None,
+                tool_call_id: Some("call_1".to_string()),
+            },
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("Thanks.")),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ]
+    }
+
+    /// Helper: build the full request body for a provider config.
+    fn build_golden_body(
+        provider: &ProviderConfig,
+        model: &str,
+        messages: &[ProviderMessage],
+        tools: &[ToolSchema],
+    ) -> Value {
+        let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
+        let (converted, system_prompt) =
+            crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
+        let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
+        let tools_val = crate::provider_adapter::tools::serialize_tools(tools, &tool_schema);
+        super::build_request_body(provider, model, &converted, system_prompt.as_deref(), &tools_val, !tools.is_empty())
+    }
+
+    // ── OpenAI (ChatCompletions) ─────────────────────────────────────
+
+    fn openai_provider() -> ProviderConfig {
+        ProviderConfig {
+            category: None,
+            family: ProtocolFamily::ChatCompletions,
+            base_url: "https://api.openai.com/v1".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: Some(SchemasConfig {
+                messages: Some(MessageSchemas {
+                    role_map: Some({
+                        let mut m = HashMap::new();
+                        m.insert("user".into(), "user".into());
+                        m.insert("assistant".into(), "assistant".into());
+                        m.insert("system".into(), "system".into());
+                        m.insert("tool".into(), "tool".into());
+                        m
+                    }),
+                    content_key: Some("content".to_string()),
+                    text_placement: None,
+                    text_block_template: None,
+                    assistant_tool_calls_placement: None,
+                    tool_call_block_template: Some(json!({
+                        "id": "{id}",
+                        "type": "function",
+                        "function": {
+                            "name": "{name}",
+                            "arguments": "{input_json}",
+                        }
+                    })),
+                    system_message: Some(SystemMessageConfig {
+                        mode: SystemMessageMode::MessageRole,
+                        field: None,
+                        template: None,
+                    }),
+                    tool_result: Some(ToolResultConfig {
+                        role: "tool".to_string(),
+                        wrap_mode: ToolResultWrapMode::Direct,
+                        block_template: json!({
+                            "tool_call_id": "{tool_call_id}",
+                            "content": "{content}",
+                        }),
+                    }),
+                }),
+                tools: Some(ToolSchemaConfig {
+                    template: json!({
+                        "type": "function",
+                        "function": {
+                            "name": "{name}",
+                            "description": "{description}",
+                            "parameters": "{schema}",
+                        }
+                    }),
+                    list_wrap: None,
+                }),
+                streaming: Some(StreamingConfig {
+                    mode: Some("delta_merge".to_string()),
+                    paths: None,
+                }),
+            }),
+            pricing: None,
+            extra: {
+                let mut m = HashMap::new();
+                m.insert("stream_url".to_string(), json!("/chat/completions"));
+                m
+            },
+            body_template: Some(json!({
+                "model": "{model}",
+                "messages": "{messages}",
+                "tools": "{tools}",
+                "stream": "{stream}",
+            })),
+            body_extra: None,
+            profiles: vec![],
+        }
+    }
+
+    #[test]
+    fn golden_openai_tool_calls_are_top_level_on_assistant() {
+        let provider = openai_provider();
+        let body = build_golden_body(&provider, "gpt-4o-mini", &canonical_transcript(), &[]);
+
+        assert_eq!(body["model"], "gpt-4o-mini");
+
+        let messages = body["messages"].as_array().expect("messages must be array");
+        // System + user + assistant + tool + user = 5
+        assert_eq!(messages.len(), 5);
+
+        // Find the assistant message
+        let assistant = messages.iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("must have assistant message");
+
+        // tool_calls must be a top-level array, not inline in content
+        assert!(assistant["tool_calls"].is_array(),
+            "OpenAI tool_calls must be top-level array on assistant message, got: {:?}",
+            assistant);
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "calculator");
+
+        // Content must be a plain string, not a block array
+        assert!(assistant["content"].is_string(),
+            "OpenAI assistant content must be plain string, got: {:?}", assistant["content"]);
+
+        // Tool result message must have tool_call_id
+        let tool_msg = messages.iter()
+            .find(|m| m["role"] == "tool")
+            .expect("must have tool message");
+        assert_eq!(tool_msg["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn golden_openai_empty_tools_omits_field() {
+        let provider = openai_provider();
+        let body = build_golden_body(&provider, "gpt-4o-mini", &canonical_transcript(), &[]);
+        // Template includes "tools": "{tools}" which renders as empty array.
+        // With no tools, the template placeholder resolves to [].
+        assert!(body["tools"].is_array(), "tools must be array (possibly empty)");
+        assert_eq!(body["tools"].as_array().unwrap().len(), 0);
+    }
+
+    // ── Anthropic (AnthropicMessages) ────────────────────────────────
+
+    fn anthropic_provider() -> ProviderConfig {
+        ProviderConfig {
+            category: None,
+            family: ProtocolFamily::AnthropicMessages,
+            base_url: "https://api.anthropic.com/v1/messages".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: Some(SchemasConfig {
+                messages: Some(MessageSchemas {
+                    role_map: Some({
+                        let mut m = HashMap::new();
+                        m.insert("user".into(), "user".into());
+                        m.insert("assistant".into(), "assistant".into());
+                        m
+                    }),
+                    content_key: Some("content".to_string()),
+                    text_placement: Some(TextPlacement::BlocksArray),
+                    text_block_template: Some(json!({
+                        "type": "text",
+                        "text": "{text}",
+                    })),
+                    assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
+                    tool_call_block_template: Some(json!({
+                        "type": "tool_use",
+                        "id": "{id}",
+                        "name": "{name}",
+                        "input": "{input}",
+                    })),
+                    system_message: Some(SystemMessageConfig {
+                        mode: SystemMessageMode::BodyField,
+                        field: Some("system".to_string()),
+                        template: None,
+                    }),
+                    tool_result: Some(ToolResultConfig {
+                        role: "user".to_string(),
+                        wrap_mode: ToolResultWrapMode::ContentBlocks,
+                        block_template: json!({
+                            "type": "tool_result",
+                            "tool_use_id": "{tool_call_id}",
+                            "content": "{content}",
+                        }),
+                    }),
+                }),
+                tools: Some(ToolSchemaConfig {
+                    template: json!({
+                        "name": "{name}",
+                        "description": "{description}",
+                        "input_schema": "{schema}",
+                    }),
+                    list_wrap: None,
+                }),
+                streaming: Some(StreamingConfig {
+                    mode: Some("event_typed".to_string()),
+                    paths: None,
+                }),
+            }),
+            pricing: None,
+            extra: {
+                let mut m = HashMap::new();
+                m.insert("stream_url".to_string(), json!(""));
+                m
+            },
+            body_template: Some(json!({
+                "model": "{model}",
+                "max_tokens": "{max_tokens}",
+                "messages": "{messages}",
+                "tools": "{tools}",
+                "stream": "{stream}",
+            })),
+            body_extra: Some(json!({"max_tokens": 8192})),
+            profiles: vec![],
+        }
+    }
+
+    #[test]
+    fn golden_anthropic_system_is_body_field() {
+        let provider = anthropic_provider();
+        let body = build_golden_body(&provider, "claude-sonnet-4", &canonical_transcript(), &[]);
+
+        // System must be a top-level body field, not in messages
+        assert!(body["system"].is_string(),
+            "Anthropic system must be top-level body field, got: {:?}", body.get("system"));
+        assert_eq!(body["system"], "You are helpful.");
+
+        // No system role in messages
+        let messages = body["messages"].as_array().expect("messages must be array");
+        assert!(messages.iter().all(|m| m["role"] != "system"),
+            "Anthropic must not have system-role messages");
+    }
+
+    #[test]
+    fn golden_anthropic_content_is_block_array() {
+        let provider = anthropic_provider();
+        let body = build_golden_body(&provider, "claude-sonnet-4", &canonical_transcript(), &[]);
+
+        let messages = body["messages"].as_array().expect("messages must be array");
+        let assistant = messages.iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("must have assistant message");
+
+        // Content MUST be an array of typed blocks — no raw strings
+        let content = assistant["content"].as_array()
+            .expect("Anthropic assistant content must be array, not raw string");
+        assert!(content.iter().all(|b| b.is_object()),
+            "Anthropic content blocks must all be objects, not raw strings");
+        assert!(content.iter().any(|b| b["type"] == "text"),
+            "must contain at least one text block");
+        assert!(content.iter().any(|b| b["type"] == "tool_use"),
+            "must contain at least one tool_use block");
+    }
+
+    #[test]
+    fn golden_anthropic_tool_result_is_content_blocks() {
+        let provider = anthropic_provider();
+        let body = build_golden_body(&provider, "claude-sonnet-4", &canonical_transcript(), &[]);
+
+        let messages = body["messages"].as_array().expect("messages must be array");
+        // Tool result should be merged into a user message with content blocks
+        let user_msgs: Vec<_> = messages.iter()
+            .filter(|m| m["role"] == "user")
+            .collect();
+        // At least 2 user messages: tool_result + "Thanks."
+        assert!(user_msgs.len() >= 2, "expected >= 2 user messages, got {}", user_msgs.len());
+
+        // Find the user message containing tool_result block
+        let tool_result_msg = user_msgs.iter().find(|m| {
+            m["content"].as_array().is_some_and(|blocks| {
+                blocks.iter().any(|b| b["type"] == "tool_result")
+            })
+        }).expect("must have a user message with tool_result content block");
+        assert_eq!(tool_result_msg["content"].as_array().unwrap()[0]["tool_use_id"], "call_1");
+    }
+
+    // ── Gemini (GoogleGenerateContent) ───────────────────────────────
+
+    fn gemini_provider() -> ProviderConfig {
+        ProviderConfig {
+            category: None,
+            family: ProtocolFamily::GoogleGenerateContent,
+            base_url: "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: Some(SchemasConfig {
+                messages: Some(MessageSchemas {
+                    role_map: Some({
+                        let mut m = HashMap::new();
+                        m.insert("user".into(), "user".into());
+                        m.insert("assistant".into(), "model".into());
+                        m
+                    }),
+                    content_key: Some("parts".to_string()),
+                    text_placement: Some(TextPlacement::PartsArray),
+                    text_block_template: Some(json!({"text": "{text}"})),
+                    assistant_tool_calls_placement: Some(AssistantToolCallsPlacement::InlineBlocks),
+                    tool_call_block_template: Some(json!({
+                        "functionCall": {
+                            "name": "{name}",
+                            "args": "{input}",
+                        }
+                    })),
+                    system_message: Some(SystemMessageConfig {
+                        mode: SystemMessageMode::BodyInject,
+                        field: None,
+                        template: Some(json!({
+                            "systemInstruction": {
+                                "parts": [{"text": "{system}"}]
+                            }
+                        })),
+                    }),
+                    tool_result: Some(ToolResultConfig {
+                        role: "user".to_string(),
+                        wrap_mode: ToolResultWrapMode::ContentBlocks,
+                        block_template: json!({
+                            "functionResponse": {
+                                "name": "{tool_name}",
+                                "response": {"content": "{content}"},
+                            }
+                        }),
+                    }),
+                }),
+                tools: Some(ToolSchemaConfig {
+                    template: json!({
+                        "name": "{name}",
+                        "description": "{description}",
+                        "parameters": "{schema}",
+                    }),
+                    list_wrap: Some("functionDeclarations".to_string()),
+                }),
+                streaming: Some(StreamingConfig {
+                    mode: Some("complete_chunks".to_string()),
+                    paths: None,
+                }),
+            }),
+            pricing: None,
+            extra: {
+                let mut m = HashMap::new();
+                m.insert("stream_url".to_string(), json!(""));
+                m
+            },
+            body_template: Some(json!({
+                "contents": "{messages}",
+            })),
+            body_extra: Some(json!({
+                "generationConfig": {"maxOutputTokens": 4096}
+            })),
+            profiles: vec![],
+        }
+    }
+
+    #[test]
+    fn golden_gemini_system_is_body_inject() {
+        let provider = gemini_provider();
+        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+
+        // System must be injected as systemInstruction, not in contents
+        assert!(body["systemInstruction"].is_object(),
+            "Gemini system must be body-injected as systemInstruction, got: {:?}",
+            body.get("systemInstruction"));
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "You are helpful."
+        );
+
+        // No system role in contents
+        let contents = body["contents"].as_array().expect("contents must be array");
+        assert!(contents.iter().all(|m| m["role"] != "system"),
+            "Gemini must not have system-role messages");
+    }
+
+    #[test]
+    fn golden_gemini_empty_tools_omits_field() {
+        let provider = gemini_provider();
+        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+
+        // Gemini with empty tools must NOT have a tools field at all
+        assert!(body.get("tools").is_none(),
+            "Gemini empty-tools must omit the field entirely, got: {:?}", body.get("tools"));
+    }
+
+    #[test]
+    fn golden_gemini_assistant_role_is_model() {
+        let provider = gemini_provider();
+        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+
+        let contents = body["contents"].as_array().expect("contents must be array");
+        // Assistant role must be remapped to "model"
+        assert!(contents.iter().any(|m| m["role"] == "model"),
+            "Gemini must have 'model' role for assistant messages");
+        assert!(!contents.iter().any(|m| m["role"] == "assistant"),
+            "Gemini must not have 'assistant' role");
+    }
+
+    #[test]
+    fn golden_gemini_function_response_carries_real_tool_name() {
+        let provider = gemini_provider();
+        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+
+        let contents = body["contents"].as_array().expect("contents must be array");
+        // Find the functionResponse part
+        let function_response = contents.iter()
+            .flat_map(|c| c["parts"].as_array().unwrap_or(&Vec::new()).clone())
+            .find(|p| p.get("functionResponse").is_some())
+            .expect("must have a functionResponse part");
+
+        assert_eq!(function_response["functionResponse"]["name"], "calculator",
+            "functionResponse.name must be the real tool name, not empty");
+    }
+
+    #[test]
+    fn golden_gemini_tool_calls_are_inline_in_parts() {
+        let provider = gemini_provider();
+        let body = build_golden_body(&provider, "gemini-3-flash", &canonical_transcript(), &[]);
+
+        let contents = body["contents"].as_array().expect("contents must be array");
+        let model_msg = contents.iter()
+            .find(|m| m["role"] == "model")
+            .expect("must have model message");
+
+        // Tool calls must be inline functionCall parts, not a top-level field
+        assert!(model_msg.get("tool_calls").is_none(),
+            "Gemini must not have top-level tool_calls on model message");
+        let parts = model_msg["parts"].as_array().expect("model message must have parts");
+        assert!(parts.iter().any(|p| p.get("functionCall").is_some()),
+            "model message parts must contain functionCall");
     }
 }

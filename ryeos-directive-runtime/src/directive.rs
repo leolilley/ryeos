@@ -198,19 +198,24 @@ pub struct ProviderMessage {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::upper_case_acronyms)] // Usage is a domain term, not an acronym leak
 pub enum StreamEvent {
     /// Incremental assistant text.
     Delta(String),
-    /// Incremental reasoning/thinking text. Some providers stream these
-    /// separately (Anthropic extended thinking, Gemini thoughts, OpenAI o-series).
-    /// Runners may choose to surface, log, or discard.
+    /// Incremental reasoning/thinking text. Emitted when the provider
+    /// streams thinking separately (Anthropic extended thinking, Gemini
+    /// thoughts, OpenAI o-series). Not all providers produce these.
+    #[allow(dead_code)] // Emitted by parser once reasoning extraction is wired
     ReasoningDelta(String),
     /// Complete tool call ready to dispatch.
     ToolUse { id: Option<String>, name: String, arguments: Value },
-    /// Cumulative usage update from the provider.
+    /// Cumulative usage update from the provider. Emitted mid-stream
+    /// by providers that send incremental token counts.
+    #[allow(dead_code)] // Emitted by parser once usage extraction is wired
     Usage(UsageUpdate),
-    /// Provider warning (safety, truncation, partial failure) that doesn't
-    /// terminate the stream.
+    /// Provider warning (safety, truncation, partial failure) that
+    /// doesn't terminate the stream.
+    #[allow(dead_code)] // Emitted by parser once warning extraction is wired
     Warning { code: String, message: String },
     /// Stream is finished. Terminal event — runner stops consuming.
     /// Carries the normalized finish reason and the raw provider string.

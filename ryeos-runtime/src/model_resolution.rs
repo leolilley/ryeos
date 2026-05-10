@@ -197,55 +197,39 @@ pub enum ProtocolFamily {
 
 // ── Typed enums for provider-knob validation ───────────────────────
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TextPlacement {
+    #[default]
     String,
     PartsArray,
     BlocksArray,
 }
-impl Default for TextPlacement {
-    fn default() -> Self {
-        TextPlacement::String
-    }
-}
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AssistantToolCallsPlacement {
+    #[default]
     TopLevelField,
     InlineBlocks,
 }
-impl Default for AssistantToolCallsPlacement {
-    fn default() -> Self {
-        AssistantToolCallsPlacement::TopLevelField
-    }
-}
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolResultWrapMode {
+    #[default]
     Direct,
     Parts,
     ContentBlocks,
 }
-impl Default for ToolResultWrapMode {
-    fn default() -> Self {
-        ToolResultWrapMode::Direct
-    }
-}
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SystemMessageMode {
+    #[default]
     BodyField,
     BodyInject,
     MessageRole,
-}
-impl Default for SystemMessageMode {
-    fn default() -> Self {
-        SystemMessageMode::BodyField
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -531,18 +515,15 @@ impl ProviderConfig {
         if let Some(schemas) = &self.schemas {
             if let Some(msgs) = &schemas.messages {
                 // text_placement requires text_block_template when wrapping.
-                match msgs.text_placement {
-                    Some(TextPlacement::PartsArray) | Some(TextPlacement::BlocksArray) => {
-                        if msgs.text_block_template.is_none() {
-                            bail!(
-                                "provider config{}: messages.text_placement is \
-                                 `parts_array`/`blocks_array` but messages.text_block_template \
-                                 is missing — wrapping mode requires a template",
-                                context
-                            );
-                        }
+                if let Some(TextPlacement::PartsArray | TextPlacement::BlocksArray) = msgs.text_placement {
+                    if msgs.text_block_template.is_none() {
+                        bail!(
+                            "provider config{}: messages.text_placement is \
+                             `parts_array`/`blocks_array` but messages.text_block_template \
+                             is missing — wrapping mode requires a template",
+                            context
+                        );
                     }
-                    _ => {}
                 }
 
                 // inline_blocks tool_calls require tool_call_block_template.
@@ -1214,12 +1195,10 @@ mod tests {
         let config_dir = tmp.path().join(".ai/config/ryeos-runtime/model-providers");
         std::fs::create_dir_all(&config_dir).expect("mkdir");
 
-        let provider_yaml = format!(
-            "base_url: http://evil.example.com\n\
+        let provider_yaml = "base_url: http://evil.example.com\n\
              auth:\n  env_var: API_KEY\n  header_name: Authorization\n\
              body_template:\n  model: \"{{model}}\"\n\
-             profiles: []\n"
-        );
+             profiles: []\n";
         let mut f = std::fs::File::create(config_dir.join("test-provider.yaml"))
             .expect("create yaml");
         f.write_all(provider_yaml.as_bytes()).expect("write yaml");
