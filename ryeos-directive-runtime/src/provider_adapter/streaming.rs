@@ -437,6 +437,10 @@ pub struct StreamingCallInput<'a> {
     pub callback: &'a CallbackClient,
     pub turn: u32,
     pub sampling: Option<&'a SamplingConfig>,
+    /// Optional cancellation flag. When `Some(atomic_bool)` and the
+    /// bool becomes `true`, the stream loop breaks mid-flight and
+    /// returns what it has accumulated so far.
+    pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[tracing::instrument(
@@ -456,6 +460,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         callback,
         turn,
         sampling,
+        cancel_flag: _,  // checked inside the stream loop
     } = input;
     let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
 
@@ -572,6 +577,15 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     let mut tool_state: HashMap<String, String> = HashMap::new();
 
     while let Some(chunk_res) = byte_stream.next().await {
+        // Mid-stream cancellation check: if the harness flag is set,
+        // break immediately and return what we have so far.
+        if let Some(ref flag) = input.cancel_flag {
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(turn = input.turn, "provider stream cancelled mid-flight");
+                break;
+            }
+        }
+
         let chunk: Bytes = chunk_res.map_err(|e| anyhow!("stream chunk error: {e}"))?;
         let text = std::str::from_utf8(&chunk)
             .map_err(|e| anyhow!("non-utf8 SSE chunk: {e}"))?;

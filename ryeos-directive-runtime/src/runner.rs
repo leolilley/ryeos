@@ -88,6 +88,9 @@ pub struct Runner {
     /// Passed to the provider adapter for inclusion in request body.
     /// `None` = use provider defaults.
     sampling: Option<SamplingConfig>,
+    /// Shared HTTP client — created once and reused across all turns.
+    /// Connection pooling keeps TCP/TLS handshakes to a minimum.
+    http_client: reqwest::Client,
 }
 
 struct RunGuard {
@@ -186,6 +189,11 @@ impl Runner {
             hooks,
             directive_outputs: outputs,
             sampling,
+            http_client: reqwest::Client::builder()
+                .pool_max_idle_per_host(8)
+                .timeout(std::time::Duration::from_secs(600))
+                .build()
+                .expect("reqwest client builder"),
         }
     }
 
@@ -267,15 +275,7 @@ impl Runner {
                         continue;
                     }
 
-                    let client = reqwest::Client::new();
-                    // Persistence-first streaming: each provider delta
-                    // and tool_use is appended as a `cognition_out`
-                    // event INSIDE call_provider_streaming before the
-                    // next chunk is pulled. The runner here only sees
-                    // the accumulated AdapterResponse + the full event
-                    // sequence after the stream finishes. Live SSE
-                    // broadcast on the daemon side then re-publishes
-                    // these durable events.
+                    let cancel_flag = self.harness.cancelled_flag();
                     // Filter tools by effective_caps so the LLM only sees
                     // tools it can actually call (saves context, avoids the
                     // "model names a tool the dispatcher would reject" path).
@@ -287,7 +287,7 @@ impl Runner {
                     let visible_tools_owned: Vec<_> = visible_tools.into_iter().cloned().collect();
                     match crate::provider_adapter::call_provider_streaming(
                         crate::provider_adapter::StreamingCallInput {
-                            client: &client,
+                            client: &self.http_client,
                             provider: &self.provider_config,
                             provider_id: &self.provider_id,
                             execution: &self.execution,
@@ -297,6 +297,7 @@ impl Runner {
                             callback: &self.callback,
                             turn,
                             sampling: self.sampling.as_ref(),
+                            cancel_flag: Some(cancel_flag),
                         },
                     )
                     .await
