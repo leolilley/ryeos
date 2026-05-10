@@ -288,8 +288,10 @@ pem = "ed25519:{key_b64}"
 // V5.2-CLOSEOUT: sign_unsigned_items + walk helpers deleted.
 // Daemon bootstrap is bootstrap-only — must NEVER mutate
 // system_space_dir or any operator/publisher-managed bundle.
-// To sign bundle items use: cargo run --example resign_yaml -p ryeos-engine -- <path>
-
+// To re-sign bundled items, use:
+//   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
+// or `ryeos publish <bundle-dir> --key ... --owner ...` for one bundle.
+// See docs/operations/signing-bundles.md.
 
 fn create_directory_layout(config: &Config) -> Result<()> {
     // Node root layout: config, auth, vault, and CAS state live under .ai/.

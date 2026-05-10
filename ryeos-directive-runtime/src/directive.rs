@@ -248,12 +248,17 @@ pub struct UsageUpdate {
 }
 
 /// Normalize a provider-specific finish reason string to a canonical enum.
+/// Case-insensitive: Gemini sends uppercase `"STOP"`, Anthropic sends
+/// lowercase `"end_turn"`, OpenAI sends lowercase `"stop"`.
 pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
-    match raw {
-        Some("stop") | Some("end_turn") => FinishReason::Stop,
+    let lower = raw.map(|s| s.to_ascii_lowercase());
+    match lower.as_deref() {
+        Some("stop") | Some("end_turn") | Some("end_of_turn") => FinishReason::Stop,
         Some("tool_calls") | Some("function_call") | Some("tool_use") => FinishReason::ToolCalls,
-        Some("length") | Some("max_tokens") => FinishReason::Length,
-        Some("content_filter") | Some("safety") => FinishReason::ContentFilter,
+        Some("length") | Some("max_tokens") | Some("model_length") => FinishReason::Length,
+        Some("content_filter") | Some("safety") | Some("recitation") | Some("blocklist") => {
+            FinishReason::ContentFilter
+        }
         _ => FinishReason::Other,
     }
 }
