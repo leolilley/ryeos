@@ -9,7 +9,7 @@ use super::arch_check;
 use super::callback_token::compute_ttl;
 use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, LaunchEnvelope,
-    RuntimeResult,
+    LaunchEnvelopeBuilder, RuntimeResult,
 };
 use super::limits::{compute_effective_limits, load_limits_config};
 use super::thread_meta::ThreadMeta;
@@ -790,36 +790,36 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     )?;
 
     // 8. Build envelope
-    //    EnvelopeTarget is gone. The runtime reads the root path / digest /
-    //    kind / id from `resolution.root` directly. There is now exactly one
-    //    root snapshot in the envelope, eliminating the split-brain where
-    //    `envelope.target` and `envelope.resolution.root` could disagree.
-    let envelope = LaunchEnvelope {
-        invocation_id: cap.invocation_id.clone(),
-        thread_id: thread_id.clone(),
-        roots: EnvelopeRoots {
+    //    Using LaunchEnvelopeBuilder to centralize construction and
+    //    prevent future field drift. New fields on LaunchEnvelope
+    //    only need updating in the builder, not at every call site.
+    let envelope = LaunchEnvelopeBuilder::new(
+        cap.invocation_id.clone(),
+        thread_id.clone(),
+        EnvelopeRoots {
             project_root: project_path.to_path_buf(),
             user_root,
             system_roots,
         },
-        request: EnvelopeRequest {
+        EnvelopeRequest {
             inputs: parameters.clone(),
             previous_thread_id: None,
             parent_thread_id: None,
             parent_capabilities: None,
             depth: 0,
         },
-        policy: EnvelopePolicy {
+        EnvelopePolicy {
             effective_caps,
             hard_limits: hard_limits.clone(),
         },
-        callback: EnvelopeCallback {
+        EnvelopeCallback {
             socket_path: state.config.uds_path.clone(),
             token: cap.token.clone(),
         },
         resolution,
-        inventory,
-    };
+    )
+    .inventory(inventory)
+    .build();
 
     // 8. Write thread.json (status = created, pre-execution audit).
     //    `executor_trust_class` is recorded so the on-disk audit trail

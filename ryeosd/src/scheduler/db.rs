@@ -185,7 +185,7 @@ impl SchedulerDb {
                     requester_fingerprint, capabilities
              FROM schedule_specs WHERE schedule_id = ?1",
         )?;
-        stmt.query_row(params![schedule_id], |row| Ok(row_to_spec(row)))
+        stmt.query_row(params![schedule_id], |row| row_to_spec(row))
             .optional()
             .map_err(Into::into)
     }
@@ -199,7 +199,7 @@ impl SchedulerDb {
                     requester_fingerprint, capabilities
              FROM schedule_specs WHERE enabled = 1",
         )?;
-        let rows = stmt.query_map([], |row| Ok(row_to_spec(row)))?;
+        let rows = stmt.query_map([], |row| row_to_spec(row))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -221,10 +221,10 @@ impl SchedulerDb {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&sql)?;
         let rows: Vec<ScheduleSpecRecord> = if let Some(st) = schedule_type {
-            stmt.query_map(params![st], |row| Ok(row_to_spec(row)))?
+            stmt.query_map(params![st], |row| row_to_spec(row))?
                 .collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map([], |row| Ok(row_to_spec(row)))?
+            stmt.query_map([], |row| row_to_spec(row))?
                 .collect::<Result<Vec<_>, _>>()?
         };
         Ok(rows)
@@ -338,7 +338,7 @@ impl SchedulerDb {
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE fire_id = ?1",
         )?;
-        stmt.query_row(params![fire_id], |row| Ok(row_to_fire(row)))
+        stmt.query_row(params![fire_id], |row| row_to_fire(row))
             .optional()
             .map_err(Into::into)
     }
@@ -382,7 +382,7 @@ impl SchedulerDb {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&sql)?;
         let params: Vec<&dyn rusqlite::ToSql> = schedule_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(params.as_slice(), |row| Ok(row_to_fire(row)))?;
+        let rows = stmt.query_map(params.as_slice(), |row| row_to_fire(row))?;
         let mut map = std::collections::HashMap::new();
         for row in rows {
             let rec = row?;
@@ -400,7 +400,7 @@ impl SchedulerDb {
              WHERE schedule_id = ?1
              ORDER BY scheduled_at DESC LIMIT 1",
         )?;
-        stmt.query_row(params![schedule_id], |row| Ok(row_to_fire(row)))
+        stmt.query_row(params![schedule_id], |row| row_to_fire(row))
             .optional()
             .map_err(Into::into)
     }
@@ -412,7 +412,7 @@ impl SchedulerDb {
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE status = 'dispatched'",
         )?;
-        let rows = stmt.query_map([], |row| Ok(row_to_fire(row)))?;
+        let rows = stmt.query_map([], |row| row_to_fire(row))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -429,7 +429,7 @@ impl SchedulerDb {
              WHERE schedule_id = ?1 AND status = 'dispatched'
              ORDER BY scheduled_at DESC LIMIT 1",
         )?;
-        stmt.query_row(params![schedule_id], |row| Ok(row_to_fire(row)))
+        stmt.query_row(params![schedule_id], |row| row_to_fire(row))
             .optional()
             .map_err(Into::into)
     }
@@ -442,7 +442,7 @@ impl SchedulerDb {
              FROM schedule_fires
              WHERE thread_id = ?1 AND status = 'dispatched'",
         )?;
-        stmt.query_row(params![thread_id], |row| Ok(row_to_fire(row)))
+        stmt.query_row(params![thread_id], |row| row_to_fire(row))
             .optional()
             .map_err(Into::into)
     }
@@ -458,7 +458,7 @@ impl SchedulerDb {
              FROM schedule_fires
              WHERE status = 'dispatched' AND fired_at IS NOT NULL AND fired_at < ?1",
         )?;
-        let rows = stmt.query_map(params![cutoff], |row| Ok(row_to_fire(row)))?;
+        let rows = stmt.query_map(params![cutoff], |row| row_to_fire(row))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -527,10 +527,10 @@ impl SchedulerDb {
         };
         let mut stmt = conn.prepare(sql)?;
         let fires: Vec<FireRecord> = if let Some(sf) = status_filter {
-            stmt.query_map(params![schedule_id, sf, limit as i64], |row| Ok(row_to_fire(row)))?
+            stmt.query_map(params![schedule_id, sf, limit as i64], |row| row_to_fire(row))?
                 .collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(params![schedule_id, limit as i64], |row| Ok(row_to_fire(row)))?
+            stmt.query_map(params![schedule_id, limit as i64], |row| row_to_fire(row))?
                 .collect::<Result<Vec<_>, _>>()?
         };
         Ok((fires, total))
@@ -539,41 +539,42 @@ impl SchedulerDb {
 
 // ── Row mappers ─────────────────────────────────────────────────────
 
-fn row_to_spec(row: &rusqlite::Row<'_>) -> ScheduleSpecRecord {
-    let capabilities_json: String = row.get("capabilities").unwrap();
-    let capabilities: Vec<String> = serde_json::from_str(&capabilities_json).unwrap_or_default();
-    ScheduleSpecRecord {
-        schedule_id: row.get("schedule_id").unwrap(),
-        item_ref: row.get("item_ref").unwrap(),
-        params: row.get("params").unwrap(),
-        schedule_type: row.get("schedule_type").unwrap(),
-        expression: row.get("expression").unwrap(),
-        timezone: row.get("timezone").unwrap(),
-        misfire_policy: row.get("misfire_policy").unwrap(),
-        overlap_policy: row.get("overlap_policy").unwrap(),
-        enabled: row.get::<_, i32>("enabled").unwrap() != 0,
-        project_root: row.get("project_root").unwrap(),
-        signer_fingerprint: row.get("signer_fingerprint").unwrap(),
-        spec_hash: row.get("spec_hash").unwrap(),
-        registered_at: row.get("registered_at").unwrap(),
-        requester_fingerprint: row.get("requester_fingerprint").unwrap(),
+fn row_to_spec(row: &rusqlite::Row<'_>) -> Result<ScheduleSpecRecord, rusqlite::Error> {
+    let capabilities_json: String = row.get("capabilities")?;
+    let capabilities: Vec<String> = serde_json::from_str(&capabilities_json)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+    Ok(ScheduleSpecRecord {
+        schedule_id: row.get("schedule_id")?,
+        item_ref: row.get("item_ref")?,
+        params: row.get("params")?,
+        schedule_type: row.get("schedule_type")?,
+        expression: row.get("expression")?,
+        timezone: row.get("timezone")?,
+        misfire_policy: row.get("misfire_policy")?,
+        overlap_policy: row.get("overlap_policy")?,
+        enabled: row.get::<_, i32>("enabled")? != 0,
+        project_root: row.get("project_root")?,
+        signer_fingerprint: row.get("signer_fingerprint")?,
+        spec_hash: row.get("spec_hash")?,
+        registered_at: row.get("registered_at")?,
+        requester_fingerprint: row.get("requester_fingerprint")?,
         capabilities,
-    }
+    })
 }
 
-fn row_to_fire(row: &rusqlite::Row<'_>) -> FireRecord {
-    FireRecord {
-        fire_id: row.get("fire_id").unwrap(),
-        schedule_id: row.get("schedule_id").unwrap(),
-        scheduled_at: row.get("scheduled_at").unwrap(),
-        fired_at: row.get("fired_at").unwrap(),
-        completed_at: row.get("completed_at").unwrap(),
-        thread_id: row.get("thread_id").unwrap(),
-        status: row.get("status").unwrap(),
-        trigger_reason: row.get("trigger_reason").unwrap(),
-        outcome: row.get("outcome").unwrap(),
-        signer_fingerprint: row.get("signer_fingerprint").unwrap(),
-    }
+fn row_to_fire(row: &rusqlite::Row<'_>) -> Result<FireRecord, rusqlite::Error> {
+    Ok(FireRecord {
+        fire_id: row.get("fire_id")?,
+        schedule_id: row.get("schedule_id")?,
+        scheduled_at: row.get("scheduled_at")?,
+        fired_at: row.get("fired_at")?,
+        completed_at: row.get("completed_at")?,
+        thread_id: row.get("thread_id")?,
+        status: row.get("status")?,
+        trigger_reason: row.get("trigger_reason")?,
+        outcome: row.get("outcome")?,
+        signer_fingerprint: row.get("signer_fingerprint")?,
+    })
 }
 
 #[cfg(test)]

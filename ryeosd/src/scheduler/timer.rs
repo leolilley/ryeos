@@ -101,13 +101,38 @@ async fn repair_stale_fires(state: &AppState) {
                             completed_at: Some(now),
                             ..fire.clone()
                         };
-                        if let Err(e) = state.scheduler_db.upsert_fire(&rec) {
-                            tracing::warn!(
-                                fire_id = %fire.fire_id,
-                                error = %e,
-                                "scheduler: repair sweep failed to finalize fire"
-                            );
-                        }
+                        let entry = serde_json::json!({
+                            "entry_type": "repaired",
+                            "status": fire_status,
+                            "fire_id": fire.fire_id,
+                            "schedule_id": fire.schedule_id,
+                            "scheduled_at": fire.scheduled_at,
+                            "fired_at": fire.fired_at.unwrap_or(now),
+                            "thread_id": thread_id,
+                            "completed_at": now,
+                            "outcome": outcome,
+                            "trigger_reason": fire.trigger_reason,
+                            "signer_fingerprint": fire.signer_fingerprint,
+                        });
+                        let fires_path = state.config.system_space_dir
+                            .join(ryeos_engine::AI_DIR).join("state").join("schedules")
+                            .join(&fire.schedule_id).join("fires.jsonl");
+                        let db = state.scheduler_db.clone();
+                        let fire_id_owned = fire.fire_id.clone();
+                        let fire_id_log = fire.fire_id.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
+                                tracing::error!(fire_id = %fire_id_owned, error = %e,
+                                    "repair sweep: failed to append JSONL entry");
+                            }
+                            if let Err(e) = db.upsert_fire(&rec) {
+                                tracing::error!(fire_id = %fire_id_owned, error = %e,
+                                    "scheduler: repair sweep failed to finalize fire");
+                            }
+                        }).await.unwrap_or_else(|e| {
+                            tracing::error!(fire_id = %fire_id_log, error = %e,
+                                "repair sweep: spawn_blocking failed");
+                        });
                         tracing::info!(
                             fire_id = %fire.fire_id,
                             thread_id = %thread_id,
@@ -125,7 +150,38 @@ async fn repair_stale_fires(state: &AppState) {
                         completed_at: Some(now),
                         ..fire.clone()
                     };
-                    let _ = state.scheduler_db.upsert_fire(&rec);
+                    let entry = serde_json::json!({
+                        "entry_type": "repaired",
+                        "status": "failed",
+                        "fire_id": fire.fire_id,
+                        "schedule_id": fire.schedule_id,
+                        "scheduled_at": fire.scheduled_at,
+                        "fired_at": fire.fired_at.unwrap_or(now),
+                        "thread_id": thread_id,
+                        "completed_at": now,
+                        "outcome": "thread_lost",
+                        "trigger_reason": fire.trigger_reason,
+                        "signer_fingerprint": fire.signer_fingerprint,
+                    });
+                    let fires_path = state.config.system_space_dir
+                        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
+                        .join(&fire.schedule_id).join("fires.jsonl");
+                    let db = state.scheduler_db.clone();
+                    let fire_id_owned = fire.fire_id.clone();
+                    let fire_id_log = fire.fire_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
+                            tracing::error!(fire_id = %fire_id_owned, error = %e,
+                                "repair sweep: failed to append thread_lost JSONL entry");
+                        }
+                        if let Err(e) = db.upsert_fire(&rec) {
+                            tracing::error!(fire_id = %fire_id_owned, error = %e,
+                                "repair sweep: failed to upsert thread_lost fire record");
+                        }
+                    }).await.unwrap_or_else(|e| {
+                        tracing::error!(fire_id = %fire_id_log, error = %e,
+                            "repair sweep: spawn_blocking failed for thread_lost");
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -139,13 +195,20 @@ async fn repair_stale_fires(state: &AppState) {
     }
 }
 
-/// Load enabled specs, logging an error on DB failure instead of silently
-/// returning an empty list. On error the timer will retry on the next tick.
+/// Load enabled specs from DB. On failure, return empty vec and log error.
+///
+/// Empty vec causes the timer to temporarily pause — no schedules appear due,
+/// so no fires are dispatched. On the next successful load cycle (1s sleep),
+/// real schedules reappear. This prevents cascading failures when the DB is
+/// temporarily unavailable.
 fn load_specs_or_log(state: &Arc<AppState>) -> Vec<ScheduleSpecRecord> {
     match state.scheduler_db.load_enabled_specs() {
         Ok(specs) => specs,
         Err(e) => {
-            tracing::error!(error = %e, "scheduler: failed to load enabled specs — retaining previous list");
+            tracing::error!(
+                error = %e,
+                "scheduler: failed to load enabled specs — timer paused until next load cycle"
+            );
             Vec::new()
         }
     }
@@ -240,7 +303,19 @@ fn compute_soonest_fire(specs: &[ScheduleSpecRecord], now: i64) -> Option<i64> {
             // Already due — return now so the timer wakes immediately
             return Some(now);
         }
-        crontab::compute_next_fire(&s.schedule_type, &s.expression, &s.timezone, now, None).ok().flatten()
+        match crontab::compute_next_fire(&s.schedule_type, &s.expression, &s.timezone, now, None) {
+            Ok(Some(at)) => Some(at),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    schedule_id = %s.schedule_id,
+                    expression = %s.expression,
+                    error = %e,
+                    "compute_soonest_fire: invalid expression — using 1s fallback"
+                );
+                None
+            }
+        }
     }).min()
 }
 
@@ -365,9 +440,16 @@ pub async fn dispatch_fire(
         let fires_path = state.config.system_space_dir
             .join(ryeos_engine::AI_DIR).join("state").join("schedules")
             .join(&spec.schedule_id).join("fires.jsonl");
+        let fire_id_owned = fire_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let _ = projection::append_jsonl_entry(&fires_path, &fail_entry);
-            let _ = db.upsert_fire(&fail_rec);
+            if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
+                tracing::error!(fire_id = %fire_id_owned, path = %fires_path.display(), error = %e,
+                    "empty-caps failure: failed to append JSONL entry");
+            }
+            if let Err(e) = db.upsert_fire(&fail_rec) {
+                tracing::error!(fire_id = %fire_id_owned, error = %e,
+                    "empty-caps failure: failed to upsert fire record");
+            }
         }).await.unwrap_or_else(|e| {
             tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking failed for empty-caps failure record");
         });
@@ -425,8 +507,8 @@ pub async fn dispatch_fire(
                     false
                 }
                 Err(e) => {
-                    tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to claim fire — proceeding anyway");
-                    true
+                    tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to claim fire — aborting dispatch");
+                    false
                 }
             }
         }).await.unwrap_or_else(|e| {
@@ -458,17 +540,65 @@ pub async fn dispatch_fire(
     let params: serde_json::Value = match serde_json::from_str(&spec.params) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(
+            // Fail-closed: malformed params indicate a corrupted schedule.
+            // Dispatching with empty params would silently change behavior.
+            tracing::error!(
                 schedule_id = %spec.schedule_id,
                 params_raw = %spec.params,
                 error = %e,
-                "failed to parse schedule params — defaulting to empty object"
+                "failed to parse schedule params — aborting dispatch"
             );
-            serde_json::Value::Object(Default::default())
+            // Record failure and return — do not dispatch with wrong params.
+            let now = lillux::time::timestamp_millis();
+            let fail_entry = serde_json::json!({
+                "entry_type": "failed",
+                "status": "failed",
+                "fire_id": fire_id,
+                "schedule_id": spec.schedule_id,
+                "scheduled_at": scheduled_at,
+                "fired_at": now,
+                "thread_id": thread_id,
+                "completed_at": now,
+                "outcome": "dispatch_skipped",
+                "error": format!("malformed params: {e}"),
+                "signer_fingerprint": spec.signer_fingerprint,
+            });
+            let fail_rec = FireRecord {
+                fire_id: fire_id.to_string(),
+                schedule_id: spec.schedule_id.clone(),
+                scheduled_at,
+                fired_at: Some(now),
+                completed_at: Some(now),
+                thread_id: Some(thread_id),
+                status: "failed".to_string(),
+                trigger_reason: trigger_reason.to_string(),
+                outcome: Some("dispatch_skipped".to_string()),
+                signer_fingerprint: Some(spec.signer_fingerprint.clone()),
+            };
+            let db = state.scheduler_db.clone();
+            let fires_path = state.config.system_space_dir
+                .join(ryeos_engine::AI_DIR).join("state").join("schedules")
+                .join(&spec.schedule_id).join("fires.jsonl");
+            let fire_id_owned = fire_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
+                    tracing::error!(fire_id = %fire_id_owned, path = %fires_path.display(), error = %e,
+                        "params-parse failure: failed to append JSONL entry");
+                }
+                if let Err(e) = db.upsert_fire(&fail_rec) {
+                    tracing::error!(fire_id = %fire_id_owned, error = %e,
+                        "params-parse failure: failed to upsert fire record");
+                }
+            }).await.unwrap_or_else(|e| {
+                tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking failed for params-parse failure record");
+            });
+            return;
         }
     };
     let project_path = spec.project_root.as_deref().unwrap_or_else(|| {
-        state.config.system_space_dir.to_str().unwrap_or(".")
+        state.config.system_space_dir.to_str().expect(
+            "system_space_dir must be valid UTF-8 — it is configured from a known directory"
+        )
     });
     let project_path_buf = std::path::PathBuf::from(project_path);
 
@@ -554,9 +684,13 @@ pub async fn dispatch_fire(
                 let db = state.scheduler_db.clone();
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
-                        tracing::error!(fire_id = %fail_rec.fire_id, error = %e, "failed to append failure entry");
+                        tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
+                            "dispatch failure: failed to append JSONL entry");
                     }
-                    let _ = db.upsert_fire(&fail_rec);
+                    if let Err(e) = db.upsert_fire(&fail_rec) {
+                        tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
+                            "dispatch failure: failed to upsert fire record");
+                    }
                 }).await.unwrap_or_else(|e| {
                     tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (failure persist)");
                 });

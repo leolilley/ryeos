@@ -33,7 +33,11 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     let fires_dir = state.config.system_space_dir
         .join(ryeos_engine::AI_DIR).join("state").join("schedules");
 
-    let live_ids = projection::rebuild_specs_from_dir(&schedules_dir, &state.scheduler_db)?;
+    let live_ids = projection::rebuild_specs_from_dir(
+        &schedules_dir,
+        &state.scheduler_db,
+        Some(&state.engine.trust_store),
+    )?;
 
     // Delete projections for removed YAML files
     let live_refs: Vec<&str> = live_ids.iter().map(|s| s.as_str()).collect();

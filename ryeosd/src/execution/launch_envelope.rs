@@ -8,5 +8,5 @@
 
 pub use ryeos_runtime::envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits,
-    LaunchEnvelope, RuntimeResult,
+    LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeResult,
 };

@@ -17,6 +17,7 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    crate::scheduler::crontab::validate_schedule_id(&req.schedule_id)?;
     // Check spec exists
     if state.scheduler_db.get_spec(&req.schedule_id)?.is_none() {
         bail!("schedule not found: {}", req.schedule_id);

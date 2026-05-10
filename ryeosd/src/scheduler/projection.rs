@@ -36,9 +36,16 @@ pub fn append_jsonl_entry(path: &Path, entry: &serde_json::Value) -> Result<()> 
 /// Rebuild `schedule_specs` from `.ai/node/schedules/*.yaml`.
 /// After calling this, call `delete_stale_specs` to remove projections
 /// for YAML files that no longer exist.
+///
+/// When a [`ryeos_engine::trust::TrustStore`] is provided, full Ed25519
+/// signature verification is performed: the signer fingerprint is looked
+/// up in the trust store and the cryptographic signature is verified
+/// against the content hash. Schedules signed by untrusted keys are
+/// rejected. When `None`, only content_hash integrity is checked.
 pub fn rebuild_specs_from_dir(
     schedules_dir: &Path,
     db: &SchedulerDb,
+    trust_store: Option<&ryeos_engine::trust::TrustStore>,
 ) -> Result<Vec<String>> {
     let mut live_ids: Vec<String> = Vec::new();
 
@@ -99,6 +106,36 @@ pub fn rebuild_specs_from_dir(
                 );
                 continue;
             }
+
+            // Full Ed25519 signature verification when trust store is available.
+            // Rejects schedules signed by untrusted keys — prevents forgery
+            // even if someone creates a valid-looking YAML with a fake sig line.
+            if let Some(ts) = trust_store {
+                match ts.get(&header.signer_fingerprint) {
+                    Some(trusted_signer) => {
+                        if !lillux::signature::verify_signature(
+                            &header.content_hash,
+                            &header.signature_b64,
+                            &trusted_signer.verifying_key,
+                        ) {
+                            tracing::warn!(
+                                path = %path.display(),
+                                signer = %header.signer_fingerprint,
+                                "Ed25519 signature verification failed — skipping forged schedule"
+                            );
+                            continue;
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            signer = %header.signer_fingerprint,
+                            "signer not in trust store — skipping untrusted schedule"
+                        );
+                        continue;
+                    }
+                }
+            }
         } else {
             tracing::warn!(path = %path.display(), "could not parse signature header — skipping");
             continue;
@@ -137,18 +174,20 @@ pub fn rebuild_specs_from_dir(
         }
 
         let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
-        // Use registered_at from YAML body if present, otherwise fall back to file mtime.
-        // registered_at is the canonical anchor for first-fire calculation.
-        let registered_at = body.get("registered_at")
-            .and_then(|v| v.as_i64())
-            .unwrap_or_else(|| {
-                fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or_else(lillux::time::timestamp_millis)
-            });
+        // registered_at is a required field — the immutable scheduling anchor.
+        // Set once at registration, never omitted. If missing, the YAML is
+        // invalid — reject it.
+        let registered_at = match body.get("registered_at").and_then(|v| v.as_i64()) {
+            Some(ts) => ts,
+            None => {
+                tracing::warn!(
+                    path = %path.display(),
+                    schedule_id = %name,
+                    "schedule missing required field 'registered_at' — rejecting invalid schedule"
+                );
+                continue;
+            }
+        };
 
         let rec = match spec_record_from_body(&body, &signer_fingerprint, &spec_hash, registered_at) {
             Ok(r) => r,
@@ -408,6 +447,7 @@ schedule_id: my-schedule
 item_ref: "directive:test/hello"
 schedule_type: interval
 expression: "60"
+registered_at: 1700000000000
 execution:
   requester_fingerprint: "fp:test"
   capabilities:
@@ -419,7 +459,7 @@ execution:
         fs::write(sched_dir.join("my-schedule.yaml"), yaml_content).unwrap();
 
         let db = test_db();
-        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
         assert_eq!(live_ids, vec!["my-schedule"]);
         let spec = db.get_spec("my-schedule").unwrap().unwrap();
@@ -435,7 +475,7 @@ execution:
         fs::write(sched_dir.join("readme.txt"), "not a schedule").unwrap();
 
         let db = test_db();
-        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
         assert!(live_ids.is_empty());
     }
 
@@ -457,7 +497,7 @@ expression: "60"
         fs::write(sched_dir.join("my-schedule.yaml"), yaml).unwrap();
 
         let db = test_db();
-        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
         assert!(live_ids.is_empty());
     }
 
@@ -468,14 +508,14 @@ expression: "60"
         fs::create_dir_all(&sched_dir).unwrap();
 
         let db = test_db();
-        let live_ids = rebuild_specs_from_dir(&sched_dir, &db).unwrap();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
         assert!(live_ids.is_empty());
     }
 
     #[test]
     fn rebuild_from_nonexistent_dir() {
         let db = test_db();
-        let live_ids = rebuild_specs_from_dir(Path::new("/nonexistent/path"), &db).unwrap();
+        let live_ids = rebuild_specs_from_dir(Path::new("/nonexistent/path"), &db, None).unwrap();
         assert!(live_ids.is_empty());
     }
 
@@ -567,5 +607,515 @@ expression: "60"
     fn public_wrapper_works() {
         let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc:Sig==:fp:test:hello\nrest";
         assert_eq!(parse_signer_fingerprint_from_str(content), Some("hello".to_string()));
+    }
+
+    // ── Authority model acceptance tests (Phase 4) ──────────────
+
+    /// Helper: sign a YAML body and write it to a temp schedules dir.
+    fn sign_and_write(sched_dir: &Path, filename: &str, body: &str) {
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
+        let yaml_content = lillux::signature::sign_content(body, &sk, "#", None);
+        fs::write(sched_dir.join(filename), yaml_content).unwrap();
+    }
+
+    #[test]
+    fn authority_rejects_missing_execution_block() {
+        // A schedule YAML without an `execution` block must be rejected
+        // during projection rebuild — fail-closed, no silent fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: no-exec
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+"#;
+        sign_and_write(&sched_dir, "no-exec.yaml", body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        // Must be rejected — no execution block
+        assert!(live_ids.is_empty(), "schedule without execution block should be rejected");
+        assert!(db.get_spec("no-exec").unwrap().is_none());
+    }
+
+    #[test]
+    fn authority_rejects_empty_capabilities() {
+        // A schedule with an execution block but empty capabilities list
+        // must be rejected — would create a schedule that can never dispatch.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: empty-caps
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities: []
+"#;
+        sign_and_write(&sched_dir, "empty-caps.yaml", body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert!(live_ids.is_empty(), "schedule with empty capabilities should be rejected");
+        assert!(db.get_spec("empty-caps").unwrap().is_none());
+    }
+
+    #[test]
+    fn authority_rejects_empty_requester_fingerprint() {
+        // A schedule with empty requester_fingerprint must be rejected —
+        // dispatch requires a valid principal identity.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: empty-fp
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: ""
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        sign_and_write(&sched_dir, "empty-fp.yaml", body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert!(live_ids.is_empty(), "schedule with empty requester_fingerprint should be rejected");
+        assert!(db.get_spec("empty-fp").unwrap().is_none());
+    }
+
+    #[test]
+    fn authority_accepts_valid_execution_block() {
+        // Happy path: valid execution block with both fields present and non-empty.
+        // Verifies that the projected spec records the authority fields correctly.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: valid-auth
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:principal-abc"
+  capabilities:
+    - "ryeos.execute.tool.*"
+    - "ryeos.execute.directive.*"
+"#;
+        sign_and_write(&sched_dir, "valid-auth.yaml", body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert_eq!(live_ids, vec!["valid-auth"]);
+        let spec = db.get_spec("valid-auth").unwrap().unwrap();
+        assert_eq!(spec.requester_fingerprint, "fp:principal-abc");
+        assert_eq!(spec.capabilities, vec!["ryeos.execute.tool.*", "ryeos.execute.directive.*"]);
+    }
+
+    #[test]
+    fn authority_tampered_content_hash_rejected() {
+        // If someone modifies the YAML body after signing, the content_hash
+        // in the signature line won't match the actual body hash.
+        // Projection must reject this — prevents tampering.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: tamper-test
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
+        let mut signed = lillux::signature::sign_content(body, &sk, "#", None);
+
+        // Tamper with the body (after the signature line)
+        signed = signed.replace("expression: \"60\"", "expression: \"1\"");
+
+        fs::write(sched_dir.join("tamper-test.yaml"), signed).unwrap();
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert!(live_ids.is_empty(), "tampered schedule should be rejected");
+        assert!(db.get_spec("tamper-test").unwrap().is_none());
+    }
+
+    #[test]
+    fn authority_registered_at_preserved_from_yaml() {
+        // The registered_at timestamp in the YAML body must be used exactly
+        // as-is — the scheduling anchor is never synthesized or overridden.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let fixed_ts: i64 = 1700000000000; // a known timestamp
+        let body = format!(r#"spec_version: 1
+section: schedules
+schedule_id: anchor-test
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: {fixed_ts}
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#);
+        sign_and_write(&sched_dir, "anchor-test.yaml", &body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert_eq!(live_ids, vec!["anchor-test"]);
+        let spec = db.get_spec("anchor-test").unwrap().unwrap();
+        assert_eq!(spec.registered_at, fixed_ts, "registered_at should come from YAML body exactly");
+    }
+
+    #[test]
+    fn authority_missing_registered_at_rejected() {
+        // registered_at is a required field — no fallback to file mtime.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: no-anchor
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        sign_and_write(&sched_dir, "no-anchor.yaml", body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert!(live_ids.is_empty(), "schedule missing registered_at should be rejected");
+        assert!(db.get_spec("no-anchor").unwrap().is_none());
+    }
+
+    #[test]
+    fn authority_unsigned_schedule_rejected() {
+        // A schedule YAML without any signature line must be rejected.
+        // All schedules must be signed by the node.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: unsigned
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        // Write WITHOUT signing
+        fs::write(sched_dir.join("unsigned.yaml"), body).unwrap();
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert!(live_ids.is_empty(), "unsigned schedule should be rejected");
+        assert!(db.get_spec("unsigned").unwrap().is_none());
+    }
+
+    #[test]
+    fn authority_misfire_default_interval_normalizes_to_fire_once_now() {
+        // Interval schedules without an explicit misfire_policy should
+        // normalize to "fire_once_now" at projection time.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: misfire-default
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        sign_and_write(&sched_dir, "misfire-default.yaml", body);
+
+        let db = test_db();
+        rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        let spec = db.get_spec("misfire-default").unwrap().unwrap();
+        assert_eq!(spec.misfire_policy, "fire_once_now",
+            "interval schedule without explicit misfire_policy should default to fire_once_now");
+    }
+
+    #[test]
+    fn authority_misfire_default_cron_normalizes_to_skip() {
+        // Cron schedules without an explicit misfire_policy should
+        // normalize to "skip" at projection time.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: cron-misfire
+item_ref: "directive:test/hello"
+schedule_type: cron
+expression: "0 0 * * * *"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        sign_and_write(&sched_dir, "cron-misfire.yaml", body);
+
+        let db = test_db();
+        rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        let spec = db.get_spec("cron-misfire").unwrap().unwrap();
+        assert_eq!(spec.misfire_policy, "skip",
+            "cron schedule without explicit misfire_policy should default to skip");
+    }
+
+    #[test]
+    fn authority_missing_capabilities_key_rejected() {
+        // Execution block with requester_fingerprint but no capabilities key at all.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: no-caps-key
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+"#;
+        sign_and_write(&sched_dir, "no-caps-key.yaml", body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert!(live_ids.is_empty(), "schedule missing capabilities key should be rejected");
+    }
+
+    // ── Full Ed25519 signature verification (Phase 6) ──────────
+
+    fn test_trust_store() -> ryeos_engine::trust::TrustStore {
+        // Build a trust store that trusts the test key ([42u8; 32])
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
+        let vk = lillux::crypto::VerifyingKey::from(&sk);
+        let fp = lillux::cas::sha256_hex(vk.to_bytes().as_ref());
+        let signer = ryeos_engine::trust::TrustedSigner {
+            fingerprint: fp,
+            verifying_key: vk,
+            label: Some("test-signer".to_string()),
+        };
+        ryeos_engine::trust::TrustStore::from_signers(vec![signer])
+    }
+
+    #[test]
+    fn ed2559_trusted_signer_accepted() {
+        // A schedule signed by a key in the trust store should pass
+        // full Ed25519 verification.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: trusted-sig
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        sign_and_write(&sched_dir, "trusted-sig.yaml", body);
+
+        let db = test_db();
+        let ts = test_trust_store();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, Some(&ts)).unwrap();
+
+        assert_eq!(live_ids, vec!["trusted-sig"]);
+        let spec = db.get_spec("trusted-sig").unwrap().unwrap();
+        assert_eq!(spec.schedule_id, "trusted-sig");
+    }
+
+    #[test]
+    fn ed25519_untrusted_signer_rejected() {
+        // A schedule signed by a key NOT in the trust store should be
+        // rejected during full Ed25519 verification.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: untrusted-sig
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        // Sign with the test key ([42u8; 32])
+        sign_and_write(&sched_dir, "untrusted-sig.yaml", body);
+
+        // Build a trust store with a DIFFERENT key
+        let sk_other = lillux::crypto::SigningKey::from_bytes(&[99u8; 32]);
+        let vk_other = lillux::crypto::VerifyingKey::from(&sk_other);
+        let fp_other = lillux::cas::sha256_hex(vk_other.to_bytes().as_ref());
+        let ts = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fp_other,
+                verifying_key: vk_other,
+                label: Some("other-signer".to_string()),
+            },
+        ]);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, Some(&ts)).unwrap();
+
+        assert!(live_ids.is_empty(), "schedule signed by untrusted key should be rejected");
+        assert!(db.get_spec("untrusted-sig").unwrap().is_none());
+    }
+
+    #[test]
+    fn ed25519_forged_signature_rejected() {
+        // A schedule where the signature b64 is tampered with (but the
+        // content_hash still matches) should be rejected by Ed25519
+        // verification, even if the signer fingerprint is in the trust store.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: forged-sig
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
+        let signed = lillux::signature::sign_content(body, &sk, "#", None);
+
+        // The sig line format is: # ryeos:signed:<ts>:<hash>:<sig_b64>:<fp>
+        // Parse using rsplitn(4, ':') to match the parser, then forge sig_b64.
+        let line_end = signed.find('\n').expect("sig line ends with newline");
+        let sig_line = &signed[..line_end];
+        let rest = &signed[line_end + 1..];
+
+        // Strip the "# " prefix, then "ryeos:signed:" prefix
+        let after_marker = sig_line
+            .strip_prefix("# ")
+            .and_then(|s| s.strip_prefix(lillux::signature::SIGNATURE_PREFIX))
+            .expect("valid sig line format");
+
+        // rsplitn(4, ':') => [fp, sig_b64, hash, timestamp]
+        let parts: Vec<&str> = after_marker.rsplitn(4, ':').collect();
+        assert_eq!(parts.len(), 4, "sig line should have 4 rsplit parts");
+
+        let forged_line = format!(
+            "# {}{}:{}:{}:{}",
+            lillux::signature::SIGNATURE_PREFIX,
+            parts[3],  // timestamp
+            parts[2],  // content_hash (untouched)
+            "FORGEDSIGNATUREBASE64==", // bogus sig_b64
+            parts[0],  // fingerprint (untouched)
+        );
+        let forged_content = format!("{}\n{}", forged_line, rest);
+
+        fs::write(sched_dir.join("forged-sig.yaml"), forged_content).unwrap();
+
+        let db = test_db();
+        let ts = test_trust_store();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, Some(&ts)).unwrap();
+
+        assert!(live_ids.is_empty(), "forged signature should be rejected by Ed25519 verification");
+        assert!(db.get_spec("forged-sig").unwrap().is_none());
+    }
+
+    #[test]
+    fn ed25519_none_trust_store_falls_back_to_hash_only() {
+        // Without a trust store (None), schedules are accepted if the
+        // content_hash matches — the existing behavior. This ensures
+        // backward compatibility for code paths that don't have a
+        // trust store available.
+        let dir = tempfile::tempdir().unwrap();
+        let sched_dir = dir.path().join("schedules");
+        fs::create_dir_all(&sched_dir).unwrap();
+
+        let body = r#"spec_version: 1
+section: schedules
+schedule_id: hash-only
+item_ref: "directive:test/hello"
+schedule_type: interval
+expression: "60"
+registered_at: 1700000000000
+execution:
+  requester_fingerprint: "fp:test"
+  capabilities:
+    - "ryeos.execute.*"
+"#;
+        sign_and_write(&sched_dir, "hash-only.yaml", body);
+
+        let db = test_db();
+        let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
+
+        assert_eq!(live_ids, vec!["hash-only"]);
     }
 }

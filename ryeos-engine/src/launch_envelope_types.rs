@@ -61,6 +61,113 @@ pub struct LaunchEnvelope {
     pub inventory: HashMap<String, Vec<ItemDescriptor>>,
 }
 
+/// Builder for [`LaunchEnvelope`].
+///
+/// Centralizes envelope construction so that new fields added to
+/// `LaunchEnvelope` only need to be updated in one place. The builder
+/// requires all mandatory fields; optional fields default sensibly.
+///
+/// # Example
+///
+/// ```ignore
+/// let envelope = LaunchEnvelopeBuilder::new(
+///     "inv-123".to_string(),
+///     "T-456".to_string(),
+///     roots,
+///     EnvelopeRequest::simple(inputs),
+///     EnvelopePolicy::new(caps, limits),
+///     EnvelopeCallback::new(socket, token),
+///     resolution,
+/// )
+/// .inventory(inv)
+/// .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct LaunchEnvelopeBuilder {
+    invocation_id: String,
+    thread_id: String,
+    roots: EnvelopeRoots,
+    request: EnvelopeRequest,
+    policy: EnvelopePolicy,
+    callback: EnvelopeCallback,
+    resolution: ResolutionOutput,
+    inventory: HashMap<String, Vec<ItemDescriptor>>,
+}
+
+impl LaunchEnvelopeBuilder {
+    /// Create a new builder with all mandatory fields.
+    pub fn new(
+        invocation_id: String,
+        thread_id: String,
+        roots: EnvelopeRoots,
+        request: EnvelopeRequest,
+        policy: EnvelopePolicy,
+        callback: EnvelopeCallback,
+        resolution: ResolutionOutput,
+    ) -> Self {
+        Self {
+            invocation_id,
+            thread_id,
+            roots,
+            request,
+            policy,
+            callback,
+            resolution,
+            inventory: HashMap::new(),
+        }
+    }
+
+    /// Set the pre-baked inventory map.
+    pub fn inventory(mut self, inventory: HashMap<String, Vec<ItemDescriptor>>) -> Self {
+        self.inventory = inventory;
+        self
+    }
+
+    /// Build the final `LaunchEnvelope`.
+    pub fn build(self) -> LaunchEnvelope {
+        LaunchEnvelope {
+            invocation_id: self.invocation_id,
+            thread_id: self.thread_id,
+            roots: self.roots,
+            request: self.request,
+            policy: self.policy,
+            callback: self.callback,
+            resolution: self.resolution,
+            inventory: self.inventory,
+        }
+    }
+}
+
+impl EnvelopeRequest {
+    /// Construct a simple request with just inputs and no parent context.
+    pub fn simple(inputs: Value) -> Self {
+        Self {
+            inputs,
+            previous_thread_id: None,
+            parent_thread_id: None,
+            parent_capabilities: None,
+            depth: 0,
+        }
+    }
+}
+
+impl EnvelopePolicy {
+    /// Construct a policy from effective capabilities and hard limits.
+    pub fn new(effective_caps: Vec<String>, hard_limits: HardLimits) -> Self {
+        Self {
+            effective_caps,
+            hard_limits,
+        }
+    }
+}
+
+impl EnvelopeCallback {
+    /// Construct a callback from socket path and token.
+    pub fn new(socket_path: PathBuf, token: String) -> Self {
+        Self { socket_path, token }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvelopeRoots {
@@ -267,5 +374,65 @@ mod tests {
         assert_eq!(limits.turns, 25);
         assert_eq!(limits.tokens, 200_000);
         assert_eq!(limits.spawns, 10);
+    }
+
+    #[test]
+    fn builder_produces_same_envelope() {
+        let resolution = ResolutionOutput {
+            root: crate::resolution::ResolvedAncestor {
+                requested_id: "directive:test".to_string(),
+                resolved_ref: "directive:test".to_string(),
+                source_path: PathBuf::from("/project/.ai/directives/test.directive.md"),
+                trust_class: crate::resolution::TrustClass::Unsigned,
+                alias_resolution: None,
+                added_by: crate::resolution::ResolutionStepName::PipelineInit,
+                raw_content: String::new(),
+                raw_content_digest:
+                    "0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_string(),
+            },
+            ancestors: vec![],
+            references_edges: vec![],
+            step_outputs: std::collections::HashMap::new(),
+            executor_trust_class: crate::resolution::TrustClass::Unsigned,
+            composed: crate::resolution::KindComposedView::identity(
+                serde_json::json!({}),
+            ),
+            referenced_items: vec![],
+        };
+
+        let envelope = LaunchEnvelopeBuilder::new(
+            "inv-builder".to_string(),
+            "T-builder".to_string(),
+            EnvelopeRoots {
+                project_root: PathBuf::from("/project"),
+                user_root: None,
+                system_roots: vec![],
+            },
+            EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
+            EnvelopePolicy::new(
+                vec!["ryeos.execute.*".to_string()],
+                HardLimits::default(),
+            ),
+            EnvelopeCallback::new(
+                PathBuf::from("/tmp/ryeosd.sock"),
+                "token-abc".to_string(),
+            ),
+            resolution,
+        )
+        .build();
+
+        assert_eq!(envelope.invocation_id, "inv-builder");
+        assert_eq!(envelope.thread_id, "T-builder");
+        assert_eq!(envelope.request.depth, 0);
+        assert!(envelope.request.previous_thread_id.is_none());
+        assert_eq!(envelope.policy.effective_caps, vec!["ryeos.execute.*"]);
+        assert_eq!(envelope.callback.socket_path, PathBuf::from("/tmp/ryeosd.sock"));
+        assert!(envelope.inventory.is_empty());
+
+        // Round-trip through JSON
+        let json = serde_json::to_string(&envelope).unwrap();
+        let parsed: LaunchEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.thread_id, "T-builder");
     }
 }
