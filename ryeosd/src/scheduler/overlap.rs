@@ -85,7 +85,7 @@ pub async fn check_overlap(spec: &ScheduleSpecRecord, state: &crate::state::AppS
     }
 }
 
-fn thread_is_terminal(status: &str) -> bool {
+pub fn thread_is_terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled")
 }
 

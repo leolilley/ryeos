@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS schedule_fires (
     schedule_id        TEXT NOT NULL,
     scheduled_at       INTEGER NOT NULL,
     fired_at           INTEGER,
+    completed_at       INTEGER,
     thread_id          TEXT,
     status             TEXT NOT NULL,
     trigger_reason     TEXT NOT NULL DEFAULT 'normal',
@@ -86,6 +87,7 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "schedule_id", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "scheduled_at", col_type: "INTEGER", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "fired_at", col_type: "INTEGER", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "completed_at", col_type: "INTEGER", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "status", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "trigger_reason", col_type: "TEXT", pk: false, not_null: true },
@@ -243,18 +245,20 @@ impl SchedulerDb {
     pub fn upsert_fire(&self, rec: &FireRecord) -> Result<()> {
         self.lock()?.execute(
             "INSERT INTO schedule_fires
-                (fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+                (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                  status, trigger_reason, outcome, signer_fingerprint)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(fire_id) DO UPDATE SET
-                status=excluded.status, fired_at=COALESCE(excluded.fired_at, fired_at),
+                status=excluded.status,
+                fired_at=CASE WHEN fired_at IS NULL THEN excluded.fired_at ELSE fired_at END,
+                completed_at=COALESCE(excluded.completed_at, completed_at),
                 thread_id=COALESCE(excluded.thread_id, thread_id),
                 outcome=COALESCE(excluded.outcome, outcome),
                 trigger_reason=excluded.trigger_reason,
                 signer_fingerprint=COALESCE(excluded.signer_fingerprint, signer_fingerprint)",
             params![
                 rec.fire_id, rec.schedule_id, rec.scheduled_at,
-                rec.fired_at, rec.thread_id, rec.status,
+                rec.fired_at, rec.completed_at, rec.thread_id, rec.status,
                 rec.trigger_reason, rec.outcome, rec.signer_fingerprint,
             ],
         )
@@ -262,10 +266,28 @@ impl SchedulerDb {
         Ok(())
     }
 
+    /// Atomic claim: INSERT if absent. Returns true if the insert succeeded
+    /// (fire was claimed), false if it already existed.
+    pub fn claim_fire(&self, rec: &FireRecord) -> Result<bool> {
+        let changed = self.lock()?.execute(
+            "INSERT OR IGNORE INTO schedule_fires
+                (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
+                 status, trigger_reason, outcome, signer_fingerprint)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                rec.fire_id, rec.schedule_id, rec.scheduled_at,
+                rec.fired_at, rec.completed_at, rec.thread_id, rec.status,
+                rec.trigger_reason, rec.outcome, rec.signer_fingerprint,
+            ],
+        )
+        .with_context(|| format!("claim_fire failed for {}", rec.fire_id))?;
+        Ok(changed > 0)
+    }
+
     pub fn get_fire(&self, fire_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE fire_id = ?1",
         )?;
@@ -299,7 +321,7 @@ impl SchedulerDb {
         }
         let placeholders: Vec<String> = schedule_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
         let sql = format!(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
              WHERE (schedule_id, scheduled_at) IN (
@@ -325,7 +347,7 @@ impl SchedulerDb {
     pub fn get_last_fire(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
              WHERE schedule_id = ?1
@@ -339,7 +361,7 @@ impl SchedulerDb {
     pub fn get_inflight_fires(&self) -> Result<Vec<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE status = 'dispatched'",
         )?;
@@ -354,7 +376,7 @@ impl SchedulerDb {
     pub fn get_inflight_for_schedule(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
              WHERE schedule_id = ?1 AND status = 'dispatched'
@@ -368,7 +390,7 @@ impl SchedulerDb {
     pub fn find_fire_by_thread(&self, thread_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
              WHERE thread_id = ?1 AND status = 'dispatched'",
@@ -376,6 +398,25 @@ impl SchedulerDb {
         stmt.query_row(params![thread_id], |row| Ok(row_to_fire(row)))
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Find dispatched fires older than `threshold_secs` that may need repair.
+    /// Used by the periodic repair sweep to finalize stale fires.
+    pub fn find_stale_dispatched_fires(&self, threshold_secs: i64) -> Result<Vec<FireRecord>> {
+        let cutoff = lillux::time::timestamp_millis() - (threshold_secs * 1000);
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
+                    status, trigger_reason, outcome, signer_fingerprint
+             FROM schedule_fires
+             WHERE status = 'dispatched' AND fired_at IS NOT NULL AND fired_at < ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| Ok(row_to_fire(row)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// Count fires for a schedule (optionally filtered by status).
@@ -426,12 +467,12 @@ impl SchedulerDb {
         };
 
         let sql = match status_filter {
-            Some(_) => "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            Some(_) => "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                                status, trigger_reason, outcome, signer_fingerprint
                         FROM schedule_fires
                         WHERE schedule_id = ?1 AND status = ?2
                         ORDER BY scheduled_at DESC LIMIT ?3",
-            None => "SELECT fire_id, schedule_id, scheduled_at, fired_at, thread_id,
+            None => "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                             status, trigger_reason, outcome, signer_fingerprint
                      FROM schedule_fires
                      WHERE schedule_id = ?1
@@ -475,6 +516,7 @@ fn row_to_fire(row: &rusqlite::Row<'_>) -> FireRecord {
         schedule_id: row.get("schedule_id").unwrap(),
         scheduled_at: row.get("scheduled_at").unwrap(),
         fired_at: row.get("fired_at").unwrap(),
+        completed_at: row.get("completed_at").unwrap(),
         thread_id: row.get("thread_id").unwrap(),
         status: row.get("status").unwrap(),
         trigger_reason: row.get("trigger_reason").unwrap(),
@@ -516,6 +558,7 @@ mod tests {
             schedule_id: schedule_id.to_string(),
             scheduled_at,
             fired_at: Some(1001),
+            completed_at: None,
             thread_id: Some(format!("sched-{:032x}", scheduled_at)),
             status: status.to_string(),
             trigger_reason: "normal".to_string(),

@@ -63,6 +63,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     // Build YAML body
+    let registered_at = lillux::time::timestamp_millis();
     let mut body = serde_json::json!({
         "spec_version": 1,
         "section": "schedules",
@@ -72,6 +73,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "expression": req.expression,
         "timezone": timezone,
         "enabled": req.enabled,
+        "registered_at": registered_at,
     });
     if !req.params.is_null() {
         body["params"] = req.params.clone();

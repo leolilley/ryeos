@@ -27,6 +27,7 @@ pub struct FireRecord {
     pub schedule_id: String,
     pub scheduled_at: i64,
     pub fired_at: Option<i64>,
+    pub completed_at: Option<i64>,
     pub thread_id: Option<String>,
     pub status: String,
     pub trigger_reason: String,

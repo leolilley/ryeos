@@ -118,14 +118,20 @@ pub fn rebuild_specs_from_dir(
         }
 
         let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
-        let mtime = fs::metadata(&path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or_else(lillux::time::timestamp_millis);
+        // Use registered_at from YAML body if present, otherwise fall back to file mtime.
+        // registered_at is the canonical anchor for first-fire calculation.
+        let registered_at = body.get("registered_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| {
+                fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or_else(lillux::time::timestamp_millis)
+            });
 
-        let rec = spec_record_from_body(&body, &signer_fingerprint, &spec_hash, mtime);
+        let rec = spec_record_from_body(&body, &signer_fingerprint, &spec_hash, registered_at);
 
         if let Err(e) = db.upsert_spec(&rec) {
             tracing::error!(schedule_id = %schedule_id, error = %e, "failed to upsert spec projection");
@@ -227,6 +233,7 @@ fn fire_record_from_entry(entry: &serde_json::Value) -> FireRecord {
         schedule_id: entry_str(entry, "schedule_id"),
         scheduled_at: entry_int(entry, "scheduled_at"),
         fired_at: entry.get("fired_at").and_then(|v| v.as_i64()),
+        completed_at: entry.get("completed_at").and_then(|v| v.as_i64()),
         thread_id: entry.get("thread_id").and_then(|v| v.as_str()).map(String::from),
         status: entry_str(entry, "status"),
         trigger_reason: entry.get("trigger_reason").and_then(|v| v.as_str()).unwrap_or("normal").to_string(),
@@ -284,16 +291,8 @@ pub fn parse_signer_fingerprint_from_str(content: &str) -> Option<String> {
 
 fn parse_signer_fingerprint(content: &str) -> Option<String> {
     let first_line = content.lines().next()?;
-    // Signature line format: "# ryeos:signed:<ts>:<hash>:<sig_b64>:<fingerprint>"
-    let after_prefix = first_line.trim().strip_prefix("# ryeos:signed:")?;
-    let parts: Vec<&str> = after_prefix.split(':').collect();
-    // fingerprint is the last part (after the b64 sig which may contain = chars)
-    // Format: timestamp:hash:base64sig:fingerprint
-    if parts.len() >= 4 {
-        Some(parts[parts.len() - 1].trim().to_string())
-    } else {
-        None
-    }
+    let header = lillux::signature::parse_signature_line(first_line, "#", None)?;
+    Some(header.signer_fingerprint)
 }
 
 #[cfg(test)]

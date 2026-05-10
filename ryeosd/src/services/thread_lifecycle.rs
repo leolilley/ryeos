@@ -419,10 +419,10 @@ impl ThreadLifecycleService {
             if let Some(ref db) = *guard {
                 if let Ok(Some(fire)) = db.find_fire_by_thread(&params.thread_id) {
                     let terminal_status = normalize_terminal_status(&params.status)?;
-                    let fire_status = if terminal_status == "completed" {
-                        "completed"
-                    } else {
-                        "failed"
+                    let fire_status = match terminal_status {
+                        "completed" => "completed",
+                        "cancelled" => "cancelled",
+                        _ => "failed",
                     };
                     let outcome_str = params.outcome_code.as_deref().unwrap_or(fire_status);
                     let now = lillux::time::timestamp_millis();
@@ -438,6 +438,7 @@ impl ThreadLifecycleService {
                         status: fire_status.to_string(),
                         outcome: Some(outcome_str.to_string()),
                         fired_at: Some(now),
+                        completed_at: Some(now),
                         ..fire
                     };
                     if let Err(e) = db.upsert_fire(&updated) {
@@ -453,6 +454,7 @@ impl ThreadLifecycleService {
                         if let Some(ref sys_dir) = *dir_guard {
                             let entry = serde_json::json!({
                                 "entry_type": fire_status,
+                                "status": fire_status,
                                 "fire_id": jsonl_fire_id,
                                 "schedule_id": jsonl_schedule_id,
                                 "scheduled_at": jsonl_scheduled_at,

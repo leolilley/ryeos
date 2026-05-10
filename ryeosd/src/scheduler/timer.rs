@@ -11,17 +11,24 @@ use super::crontab;
 use super::misfire;
 use super::overlap;
 use super::projection;
-use super::types::{self, FireRecord, ReloadSignal, ScheduleSpecRecord};
+use super::types::{self, FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 use crate::state::AppState;
 
 /// Start the timer loop. Call after listeners are bound.
 pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>) {
     let mut specs = load_specs_or_log(&state);
+    let mut last_repair = lillux::time::timestamp_millis();
 
     tracing::info!(count = specs.len(), "scheduler: timer loop started");
 
     loop {
         let now = lillux::time::timestamp_millis();
+
+        // Periodic repair sweep: every 30 seconds, finalize stale dispatched fires
+        if now - last_repair >= 30_000 {
+            repair_stale_fires(&state).await;
+            last_repair = now;
+        }
 
         // Collect all specs that are due right now (fire time <= now).
         // We check by computing next fire relative to (now - 1ms) so that
@@ -56,6 +63,77 @@ pub async fn run(state: Arc<AppState>, mut reload: mpsc::Receiver<ReloadSignal>)
                 specs = load_specs_or_log(&state);
                 tracing::debug!(count = specs.len(), "scheduler: reloaded specs");
                 continue;
+            }
+        }
+    }
+}
+
+/// Repair sweep: finalize dispatched fires whose threads have completed.
+/// Catches cases where the finalize hook failed or the daemon crashed.
+async fn repair_stale_fires(state: &AppState) {
+    let stale = match state.scheduler_db.find_stale_dispatched_fires(30) {
+        Ok(fires) => fires,
+        Err(e) => {
+            tracing::error!(error = %e, "scheduler: repair sweep failed to query stale fires");
+            return;
+        }
+    };
+
+    for fire in &stale {
+        if let Some(ref thread_id) = fire.thread_id {
+            match state.threads.get_thread(thread_id) {
+                Ok(Some(thread)) => {
+                    if overlap::thread_is_terminal(&thread.status) {
+                        let fire_status = match thread.status.as_str() {
+                            "completed" => "completed",
+                            "cancelled" => "cancelled",
+                            _ => "failed",
+                        };
+                        let outcome = match fire_status {
+                            "completed" => "success",
+                            "cancelled" => "thread_cancelled",
+                            _ => "thread_failed",
+                        };
+                        let now = lillux::time::timestamp_millis();
+                        let rec = FireRecord {
+                            status: fire_status.to_string(),
+                            outcome: Some(outcome.to_string()),
+                            completed_at: Some(now),
+                            ..fire.clone()
+                        };
+                        if let Err(e) = state.scheduler_db.upsert_fire(&rec) {
+                            tracing::warn!(
+                                fire_id = %fire.fire_id,
+                                error = %e,
+                                "scheduler: repair sweep failed to finalize fire"
+                            );
+                        }
+                        tracing::info!(
+                            fire_id = %fire.fire_id,
+                            thread_id = %thread_id,
+                            status = %fire_status,
+                            "scheduler: repair sweep finalized stale fire"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    // Thread gone — mark as failed
+                    let now = lillux::time::timestamp_millis();
+                    let rec = FireRecord {
+                        status: "failed".to_string(),
+                        outcome: Some("thread_lost".to_string()),
+                        completed_at: Some(now),
+                        ..fire.clone()
+                    };
+                    let _ = state.scheduler_db.upsert_fire(&rec);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        fire_id = %fire.fire_id,
+                        error = %e,
+                        "scheduler: repair sweep failed to check thread"
+                    );
+                }
             }
         }
     }
@@ -211,29 +289,32 @@ async fn process_spec(spec: &ScheduleSpecRecord, state: &AppState) {
 
     let fid = types::fire_id(&spec.schedule_id, scheduled_at);
 
-    // ── Dedup check ──────────────────────────────────────────
-    if let Ok(Some(_)) = state.scheduler_db.get_fire(&fid) {
-        tracing::debug!(fire_id = %fid, "fire already exists — skipping");
-        return;
-    }
-
     // ── Misfire evaluation ───────────────────────────────────
-    let misfire_fires = misfire::evaluate_misfires(spec, state, now).await;
+    let mut misfire_fires = misfire::evaluate_misfires(spec, state, now).await;
 
-    // ── Process misfires first (chronological) ───────────────
-    for pending in misfire_fires {
+    // Gap 4.3: Exclude the current fire from misfires if it's there
+    misfire_fires.retain(|p| p.scheduled_at != scheduled_at);
+
+    // ── Build one ordered fire list (chronological) ──────────
+    // Each fire gets its own overlap check before dispatch.
+    let mut all_fires: Vec<PendingFire> = misfire_fires;
+    all_fires.push(PendingFire {
+        fire_id: fid,
+        scheduled_at,
+        reason: "normal",
+    });
+    all_fires.sort_by_key(|f| f.scheduled_at);
+
+    // ── Process each fire with overlap check ─────────────────
+    for pending in all_fires {
+        let overlap_ok = overlap::check_overlap(spec, state).await;
+        if !overlap_ok {
+            // Skip this fire and all subsequent fires
+            record_skip(state, &pending.fire_id, spec, pending.scheduled_at, "overlap_policy_skip").await;
+            return;
+        }
         dispatch_fire(state, &pending.fire_id, spec, pending.scheduled_at, pending.reason).await;
     }
-
-    // ── Overlap check for current fire ───────────────────────
-    let overlap_ok = overlap::check_overlap(spec, state).await;
-    if !overlap_ok {
-        record_skip(state, &fid, spec, scheduled_at, "overlap_policy_skip").await;
-        return;
-    }
-
-    // ── Dispatch current fire ────────────────────────────────
-    dispatch_fire(state, &fid, spec, scheduled_at, "normal").await;
 }
 
 pub async fn dispatch_fire(
@@ -249,6 +330,7 @@ pub async fn dispatch_fire(
     // ── Record dispatched to JSONL + DB (blocking I/O) ───────
     let entry = serde_json::json!({
         "entry_type": "dispatched",
+        "status": "dispatched",
         "fire_id": fire_id,
         "schedule_id": spec.schedule_id,
         "scheduled_at": scheduled_at,
@@ -265,6 +347,7 @@ pub async fn dispatch_fire(
         schedule_id: spec.schedule_id.clone(),
         scheduled_at,
         fired_at: Some(now),
+        completed_at: None,
         thread_id: Some(thread_id.clone()),
         status: "dispatched".to_string(),
         trigger_reason: trigger_reason.to_string(),
@@ -276,16 +359,34 @@ pub async fn dispatch_fire(
         let fires_path = fires_path.clone();
         let db = state.scheduler_db.clone();
         let fire_id_owned = fire_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append dispatched entry");
-            }
-            if let Err(e) = db.upsert_fire(&rec) {
-                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to upsert dispatched fire");
+        let claimed = tokio::task::spawn_blocking(move || {
+            // Atomic claim: only proceed if this fire_id doesn't exist yet.
+            // This prevents duplicate dispatch when recovery and timer race.
+            match db.claim_fire(&rec) {
+                Ok(true) => {
+                    // Claimed — append to JSONL
+                    if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
+                        tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append dispatched entry");
+                    }
+                    true
+                }
+                Ok(false) => {
+                    tracing::debug!(fire_id = %fire_id_owned, "fire already claimed — skipping dispatch");
+                    false
+                }
+                Err(e) => {
+                    tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to claim fire — proceeding anyway");
+                    true
+                }
             }
         }).await.unwrap_or_else(|e| {
-            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (dispatch persist)");
+            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (dispatch claim)");
+            false
         });
+
+        if !claimed {
+            return;
+        }
     }
 
     // ── Dispatch via existing dispatch path ──────────────────
@@ -360,6 +461,7 @@ pub async fn dispatch_fire(
             let now = lillux::time::timestamp_millis();
             let fail_entry = serde_json::json!({
                 "entry_type": "failed",
+                "status": "failed",
                 "fire_id": fire_id,
                 "schedule_id": spec.schedule_id,
                 "scheduled_at": scheduled_at,
@@ -375,6 +477,7 @@ pub async fn dispatch_fire(
                 schedule_id: spec.schedule_id.clone(),
                 scheduled_at,
                 fired_at: Some(now),
+                completed_at: Some(now),
                 thread_id: Some(thread_id),
                 status: "failed".to_string(),
                 trigger_reason: trigger_reason.to_string(),
@@ -419,6 +522,7 @@ async fn record_skip(
 
     let entry = serde_json::json!({
         "entry_type": "skipped",
+        "status": "skipped",
         "fire_id": fire_id,
         "schedule_id": spec.schedule_id,
         "scheduled_at": scheduled_at,
@@ -435,6 +539,7 @@ async fn record_skip(
         schedule_id: spec.schedule_id.clone(),
         scheduled_at,
         fired_at: Some(now),
+        completed_at: None,
         thread_id: None,
         status: "skipped".to_string(),
         trigger_reason: reason.to_string(),

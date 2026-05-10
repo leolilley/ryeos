@@ -113,6 +113,14 @@ async fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
                                     "recovered: thread failed during downtime"
                                 );
                             }
+                            "cancelled" => {
+                                update_fire_completed(state, fire, thread_id, "cancelled", "thread_cancelled").await?;
+                                tracing::info!(
+                                    fire_id = %fire.fire_id,
+                                    thread_id = %thread_id,
+                                    "recovered: thread cancelled during downtime"
+                                );
+                            }
                             status => {
                                 tracing::warn!(
                                     fire_id = %fire.fire_id,
@@ -124,18 +132,36 @@ async fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         }
                     }
                     Ok(None) => {
-                        // Thread row gone
-                        let fail_rec = FireRecord {
-                            status: "failed".to_string(),
-                            outcome: Some("thread_lost".to_string()),
-                            fired_at: Some(lillux::time::timestamp_millis()),
-                            ..fire.clone()
-                        };
-                        state.scheduler_db.upsert_fire(&fail_rec)?;
-                        tracing::warn!(
-                            fire_id = %fire.fire_id,
-                            "recovered: thread row missing — marking fire as failed"
-                        );
+                        // Thread row gone — try to redispatch if schedule exists
+                        let spec = state.scheduler_db.get_spec(&fire.schedule_id)?;
+                        match spec {
+                            Some(spec) if spec.enabled => {
+                                tracing::warn!(
+                                    fire_id = %fire.fire_id,
+                                    "recovered: thread row missing — collecting for redispatch"
+                                );
+                                intents.push(ResumeIntent {
+                                    fire_id: fire.fire_id.clone(),
+                                    spec,
+                                    scheduled_at: fire.scheduled_at,
+                                    trigger_reason: "recovery_thread_lost",
+                                });
+                            }
+                            _ => {
+                                let fail_rec = FireRecord {
+                                    status: "failed".to_string(),
+                                    outcome: Some("thread_lost".to_string()),
+                                    fired_at: Some(lillux::time::timestamp_millis()),
+                                    completed_at: None,
+                                    ..fire.clone()
+                                };
+                                state.scheduler_db.upsert_fire(&fail_rec)?;
+                                tracing::warn!(
+                                    fire_id = %fire.fire_id,
+                                    "recovered: thread row missing, schedule removed — marking fire as failed"
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
@@ -166,6 +192,7 @@ async fn recover_inflight_fires(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         let skip_rec = FireRecord {
                             status: "skipped".to_string(),
                             outcome: Some("recovery_schedule_removed".to_string()),
+                            completed_at: None,
                             ..fire.clone()
                         };
                         state.scheduler_db.upsert_fire(&skip_rec)?;
@@ -195,11 +222,13 @@ async fn update_fire_completed(
         status: status.to_string(),
         outcome: Some(outcome.to_string()),
         fired_at: Some(now),
+        completed_at: Some(now),
         ..fire.clone()
     };
 
     let entry = serde_json::json!({
         "entry_type": status,
+        "status": status,
         "fire_id": fire.fire_id,
         "schedule_id": fire.schedule_id,
         "scheduled_at": fire.scheduled_at,

@@ -76,7 +76,10 @@ pub fn detect_misfires(
                 if !existing_ids.contains(&fid) {
                     missed.push(scheduled_at);
                 }
-                cursor = scheduled_at + 1;
+                // Use the scheduled_at as the new cursor (not +1) to avoid
+                // drifting interval calculations. compute_next_fire handles
+                // finding the next fire from this anchor.
+                cursor = scheduled_at;
             }
             Some(_) => break,
             None => break,
@@ -162,8 +165,8 @@ pub async fn evaluate_misfires(
         }
 
         MisfirePolicy::CatchUpBounded(max) => {
-            // Take most recent `max` fires
-            let to_fire: Vec<i64> = missed.iter().rev().take(max).copied().collect();
+            // Take oldest `max` fires (already in chronological order)
+            let to_fire: Vec<i64> = missed.iter().take(max).copied().collect();
             let skipped_count = missed.len().saturating_sub(max);
             tracing::warn!(
                 schedule_id = %spec.schedule_id,
@@ -174,7 +177,8 @@ pub async fn evaluate_misfires(
                 max,
                 "misfires detected — catching up bounded"
             );
-            for &scheduled_at in &missed[..skipped_count] {
+            // Skip the fires beyond the bound (newest ones)
+            for &scheduled_at in &missed[max..] {
                 let fid = super::types::fire_id(&spec.schedule_id, scheduled_at);
                 record_skip(state, &fid, spec, scheduled_at, "misfire_skipped_bounded").await;
             }
@@ -227,6 +231,7 @@ async fn record_skip(
         schedule_id: spec.schedule_id.clone(),
         scheduled_at,
         fired_at: Some(now),
+        completed_at: None,
         thread_id: None,
         status: "skipped".to_string(),
         trigger_reason: reason.to_string(),
@@ -236,6 +241,7 @@ async fn record_skip(
 
     let entry = serde_json::json!({
         "entry_type": "skipped",
+        "status": "skipped",
         "fire_id": fire_id,
         "schedule_id": spec.schedule_id,
         "scheduled_at": scheduled_at,
