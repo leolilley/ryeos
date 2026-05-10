@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T06:33:15Z:5c929976819f38fc50d52e0cb663776b25ee4db866c8ca8b2ef4385ed1df1db8:WY6OVyXk9/X1fJ0j8xjdE1TWyx9Bas4P6JMLD0V1lKwWdIW7VnK/4UJ5kFwLde82Z4Yumd9wjnWvt2D0gUByDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-10T12:24:05Z:5c929976819f38fc50d52e0cb663776b25ee4db866c8ca8b2ef4385ed1df1db8:WY6OVyXk9/X1fJ0j8xjdE1TWyx9Bas4P6JMLD0V1lKwWdIW7VnK/4UJ5kFwLde82Z4Yumd9wjnWvt2D0gUByDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/python"
 description: "Python dunder metadata parser: extracts __name__ = \"value\" assignments"

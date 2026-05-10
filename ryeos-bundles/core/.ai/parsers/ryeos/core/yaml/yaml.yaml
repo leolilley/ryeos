@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T06:33:15Z:7809a4eec8a86e84b7499c38fddffb1886c9241bc1e94c19b85d6658bfb4961d:hyTh3PLac+aEa5Sv1kh2Nu7+uq5LSB/79CQ9DTRKAN0spJpYXKOfNvNOpJqB7xkrivT2WgLmtgIDLtt/OQMsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-10T12:24:05Z:7809a4eec8a86e84b7499c38fddffb1886c9241bc1e94c19b85d6658bfb4961d:hyTh3PLac+aEa5Sv1kh2Nu7+uq5LSB/79CQ9DTRKAN0spJpYXKOfNvNOpJqB7xkrivT2WgLmtgIDLtt/OQMsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/yaml"
 description: "YAML document parser: parses entire file as a YAML mapping"
