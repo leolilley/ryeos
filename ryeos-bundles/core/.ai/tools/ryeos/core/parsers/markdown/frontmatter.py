@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T12:24:05Z:5cb4785c56e37496a7eed0c5b9c587c294b028dd859ff4f073efbc6784a072bd:pJBwhW1NKjyerc0L1gjyx4hdJG3oJ4SA1cZUdniFkSWqxQ2AYdtZ9an8FuHp6gfWjZdn7JcyXYmxb6IV57yXCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-10T13:13:20Z:5cb4785c56e37496a7eed0c5b9c587c294b028dd859ff4f073efbc6784a072bd:pJBwhW1NKjyerc0L1gjyx4hdJG3oJ4SA1cZUdniFkSWqxQ2AYdtZ9an8FuHp6gfWjZdn7JcyXYmxb6IV57yXCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Markdown YAML parser for knowledge entries.
 
 Extracts YAML metadata from ```yaml code fences (matching how

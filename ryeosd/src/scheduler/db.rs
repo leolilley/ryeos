@@ -132,6 +132,16 @@ impl SchedulerDb {
         Ok(Self { inner: std::sync::Mutex::new(conn) })
     }
 
+    /// Open an in-memory database (for standalone mode and tests where
+    /// the scheduler is not actively running).
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()
+            .context("failed to open in-memory scheduler db")?;
+        let spec = scheduler_schema_spec();
+        sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, Path::new(":memory:"))?;
+        Ok(Self { inner: std::sync::Mutex::new(conn) })
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.inner.lock().map_err(|e| anyhow!("scheduler db lock poisoned: {}", e))
     }

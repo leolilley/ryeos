@@ -6,9 +6,12 @@ use serde_json::Value;
 // Re-export types now canonically owned by the shared model-resolution
 // module in ryeos-runtime. Existing `use crate::directive::*` imports
 // in the directive-runtime continue to resolve these names.
+#[allow(unused_imports)]
 pub use ryeos_runtime::model_resolution::{
-    MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig, ProviderConfig,
-    SamplingConfig, SystemMessageConfig, ToolResultConfig,
+    AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig,
+    ProtocolFamily, ProviderConfig, ProviderProfile, SamplingConfig, SchemasConfig, StreamPaths,
+    SystemMessageConfig, SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode,
+    ToolSchemaConfig,
 };
 
 /// Typed runtime view of a directive's effective header *after* the
@@ -195,8 +198,67 @@ pub struct ProviderMessage {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::upper_case_acronyms)] // Usage is a domain term, not an acronym leak
 pub enum StreamEvent {
+    /// Incremental assistant text.
     Delta(String),
-    ToolUse { id: String, name: String, arguments: String },
-    Done,
+    /// Incremental reasoning/thinking text. Emitted when the provider
+    /// streams thinking separately (Anthropic extended thinking, Gemini
+    /// thoughts, OpenAI o-series). Not all providers produce these.
+    #[allow(dead_code)] // Emitted by parser once reasoning extraction is wired
+    ReasoningDelta(String),
+    /// Complete tool call ready to dispatch.
+    ToolUse { id: Option<String>, name: String, arguments: Value },
+    /// Cumulative usage update from the provider. Emitted mid-stream
+    /// by providers that send incremental token counts.
+    #[allow(dead_code)] // Emitted by parser once usage extraction is wired
+    Usage(UsageUpdate),
+    /// Provider warning (safety, truncation, partial failure) that
+    /// doesn't terminate the stream.
+    #[allow(dead_code)] // Emitted by parser once warning extraction is wired
+    Warning { code: String, message: String },
+    /// Stream is finished. Terminal event — runner stops consuming.
+    /// Carries the normalized finish reason and the raw provider string.
+    Finish { reason: FinishReason, raw: Option<String> },
+}
+
+/// Normalized finish reason across all provider families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    /// Model produced end-of-turn.
+    Stop,
+    /// Model wants tools dispatched.
+    ToolCalls,
+    /// Hit max_tokens / output length limit.
+    Length,
+    /// Content filtered by provider safety.
+    ContentFilter,
+    /// Unmappable; check raw string.
+    Other,
+}
+
+/// Cumulative token usage from the provider.
+#[derive(Debug, Clone, Default)]
+pub struct UsageUpdate {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+}
+
+/// Normalize a provider-specific finish reason string to a canonical enum.
+/// Case-insensitive: Gemini sends uppercase `"STOP"`, Anthropic sends
+/// lowercase `"end_turn"`, OpenAI sends lowercase `"stop"`.
+pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
+    let lower = raw.map(|s| s.to_ascii_lowercase());
+    match lower.as_deref() {
+        Some("stop") | Some("end_turn") | Some("end_of_turn") => FinishReason::Stop,
+        Some("tool_calls") | Some("function_call") | Some("tool_use") => FinishReason::ToolCalls,
+        Some("length") | Some("max_tokens") | Some("model_length") => FinishReason::Length,
+        Some("content_filter") | Some("safety") | Some("recitation") | Some("blocklist") => {
+            FinishReason::ContentFilter
+        }
+        _ => FinishReason::Other,
+    }
 }

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::budget::BudgetTracker;
 use ryeos_runtime::callback_client::CallbackClient;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{ExecutionConfig, OutputSpec, ProviderMessage, SamplingConfig, StreamEvent, ToolSchema};
+use crate::directive::{ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig, StreamEvent, ToolSchema};
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{HookAction, Harness};
 use ryeos_runtime::envelope::RuntimeResult;
@@ -75,6 +75,10 @@ pub struct Runner {
     result_guard: ResultGuard,
     provider_config: crate::directive::ProviderConfig,
     provider_id: String,
+    /// Profile name that matched during daemon preflight.
+    matched_profile: Option<String>,
+    /// SHA-256 of the canonical-JSON provider config from the snapshot.
+    config_hash: String,
     execution: ExecutionConfig,
     model_name: String,
     thread_id: String,
@@ -88,6 +92,9 @@ pub struct Runner {
     /// Passed to the provider adapter for inclusion in request body.
     /// `None` = use provider defaults.
     sampling: Option<SamplingConfig>,
+    /// Shared HTTP client — created once and reused across all turns.
+    /// Connection pooling keeps TCP/TLS handshakes to a minimum.
+    http_client: reqwest::Client,
 }
 
 struct RunGuard {
@@ -125,6 +132,10 @@ pub struct RunnerConfig {
     pub context_window: u64,
     pub provider_config: crate::directive::ProviderConfig,
     pub provider_id: String,
+    /// Profile name that matched during daemon preflight.
+    pub matched_profile: Option<String>,
+    /// SHA-256 of the canonical-JSON provider config from the snapshot.
+    pub config_hash: String,
     pub execution: ExecutionConfig,
     pub model_name: String,
     pub thread_id: String,
@@ -151,6 +162,8 @@ impl Runner {
             hooks,
             outputs,
             sampling,
+            matched_profile,
+            config_hash,
         } = config;
         let mut initial_messages = Vec::new();
 
@@ -179,6 +192,8 @@ impl Runner {
             result_guard: ResultGuard::new(),
             provider_config,
             provider_id,
+            matched_profile,
+            config_hash,
             execution,
             model_name,
             thread_id,
@@ -186,6 +201,11 @@ impl Runner {
             hooks,
             directive_outputs: outputs,
             sampling,
+            http_client: reqwest::Client::builder()
+                .pool_max_idle_per_host(8)
+                .timeout(std::time::Duration::from_secs(600))
+                .build()
+                .expect("reqwest client builder"),
         }
     }
 
@@ -267,15 +287,7 @@ impl Runner {
                         continue;
                     }
 
-                    let client = reqwest::Client::new();
-                    // Persistence-first streaming: each provider delta
-                    // and tool_use is appended as a `cognition_out`
-                    // event INSIDE call_provider_streaming before the
-                    // next chunk is pulled. The runner here only sees
-                    // the accumulated AdapterResponse + the full event
-                    // sequence after the stream finishes. Live SSE
-                    // broadcast on the daemon side then re-publishes
-                    // these durable events.
+                    let cancel_flag = self.harness.cancelled_flag();
                     // Filter tools by effective_caps so the LLM only sees
                     // tools it can actually call (saves context, avoids the
                     // "model names a tool the dispatcher would reject" path).
@@ -287,9 +299,11 @@ impl Runner {
                     let visible_tools_owned: Vec<_> = visible_tools.into_iter().cloned().collect();
                     match crate::provider_adapter::call_provider_streaming(
                         crate::provider_adapter::StreamingCallInput {
-                            client: &client,
+                            client: &self.http_client,
                             provider: &self.provider_config,
                             provider_id: &self.provider_id,
+                            matched_profile: self.matched_profile.as_deref(),
+                            config_hash: &self.config_hash,
                             execution: &self.execution,
                             model: &self.model_name,
                             messages: &self.messages,
@@ -297,6 +311,7 @@ impl Runner {
                             callback: &self.callback,
                             turn,
                             sampling: self.sampling.as_ref(),
+                            cancel_flag: Some(cancel_flag),
                         },
                     )
                     .await
@@ -365,28 +380,67 @@ impl Runner {
                             .await,
                     );
 
-                    // Streaming-only diagnostic: count what arrived. The
-                    // typed accumulation lives on the AdapterResponse
-                    // message that CallingProvider already pushed onto
-                    // self.messages — message.content has the merged
-                    // text and message.tool_calls has the typed
-                    // ToolCall list. State::Streaming exists to (a)
-                    // emit the `stream_opened` marker and (b) record
-                    // diagnostics for the trace span.
                     let mut delta_count = 0u32;
                     let mut tool_use_count = 0u32;
-                    let mut done_seen = false;
+                    let mut reasoning_count = 0u32;
+                    let mut warning_count = 0u32;
+                    let mut finish_reason: Option<FinishReason> = None;
+
                     for ev in &events {
                         match ev {
                             StreamEvent::Delta(_) => delta_count += 1,
                             StreamEvent::ToolUse { .. } => tool_use_count += 1,
-                            StreamEvent::Done => done_seen = true,
+                            StreamEvent::Finish { reason, raw } => {
+                                finish_reason = Some(*reason);
+                                if let Some(raw_str) = raw {
+                                    tracing::debug!(
+                                        finish_reason = ?reason,
+                                        raw = %raw_str,
+                                        "stream finished"
+                                    );
+                                }
+                            }
+                            StreamEvent::ReasoningDelta(text) => {
+                                reasoning_count += 1;
+                                tracing::trace!(
+                                    len = text.len(),
+                                    "reasoning delta received"
+                                );
+                            }
+                            StreamEvent::Usage(update) => {
+                                // Mid-stream usage is informational — the
+                                // cumulative total arrives in
+                                // AdapterResponse.usage and is recorded in
+                                // CallingProvider. Logging here lets operators
+                                // see token growth in the trace.
+                                tracing::debug!(
+                                    input = ?update.input_tokens,
+                                    output = ?update.output_tokens,
+                                    reasoning = ?update.reasoning_tokens,
+                                    cache_read = ?update.cache_read_tokens,
+                                    cache_write = ?update.cache_write_tokens,
+                                    "mid-stream usage update"
+                                );
+                            }
+                            StreamEvent::Warning { code, message } => {
+                                warning_count += 1;
+                                tracing::warn!(
+                                    code = %code,
+                                    message = %message,
+                                    "provider warning during streaming"
+                                );
+                                warnings.push(format!(
+                                    "provider warning: [{code}] {message}"
+                                ));
+                            }
                         }
                     }
                     tracing::debug!(
                         delta_count,
                         tool_use_count,
-                        done_seen,
+                        reasoning_count,
+                        warning_count,
+                        finish_reason = ?finish_reason,
                         "stream events processed"
                     );
 
@@ -945,6 +999,7 @@ mod tests {
     fn compute_cost_with_pricing() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -955,6 +1010,8 @@ mod tests {
                 models: Default::default(),
             }),
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -968,6 +1025,8 @@ mod tests {
             context_window: 200_000,
             provider_config: provider,
             provider_id: "openai".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -984,12 +1043,15 @@ mod tests {
     fn finalize_extracts_string() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1003,6 +1065,8 @@ mod tests {
             context_window: 200_000,
             provider_config: provider,
             provider_id: "openai".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -1021,12 +1085,15 @@ mod tests {
     fn system_prompt_prepended() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1045,6 +1112,8 @@ mod tests {
             context_window: 200_000,
             provider_config: provider,
             provider_id: "openai".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -1062,12 +1131,15 @@ mod tests {
     fn directive_outputs_stored_from_config() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -1086,6 +1158,8 @@ mod tests {
             context_window: 200_000,
             provider_config: provider,
             provider_id: "openai".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -1102,12 +1176,15 @@ mod tests {
     fn sampling_stored_from_config() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
             pricing: None,
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1121,6 +1198,8 @@ mod tests {
             context_window: 200_000,
             provider_config: provider,
             provider_id: "openai".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -1149,6 +1228,7 @@ mod tests {
         );
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1159,6 +1239,8 @@ mod tests {
                 models,
             }),
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1172,6 +1254,8 @@ mod tests {
             context_window: 200_000,
             provider_config: provider,
             provider_id: "zen".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "claude-haiku-4-5".to_string(),
             thread_id: "T-test".to_string(),
@@ -1192,6 +1276,7 @@ mod tests {
     fn compute_cost_falls_back_to_provider_default_when_no_model_entry() {
         let provider = crate::directive::ProviderConfig {
             category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
             base_url: "http://localhost".to_string(),
             auth: Default::default(),
             headers: Default::default(),
@@ -1202,6 +1287,8 @@ mod tests {
                 models: Default::default(),
             }),
             extra: Default::default(),
+            body_template: None,
+            body_extra: None,
             profiles: vec![],
         };
 
@@ -1215,6 +1302,8 @@ mod tests {
             context_window: 200_000,
             provider_config: provider,
             provider_id: "zen".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
             execution: ExecutionConfig::default(),
             model_name: "unknown-model".to_string(),
             thread_id: "T-test".to_string(),

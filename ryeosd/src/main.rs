@@ -15,6 +15,7 @@ use ryeosd::services::command_service::CommandService;
 use ryeosd::services::event_store::EventStoreService;
 use ryeosd::services::thread_lifecycle::ThreadLifecycleService;
 use ryeosd::state::AppState;
+use ryeosd::scheduler::db::SchedulerDb;
 use ryeosd::{
     api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, scheduler, service_executor,
     service_registry, services, state, state_lock, state_store, uds,
@@ -35,8 +36,9 @@ async fn main() -> Result<()> {
     //
     // This intentionally does NOT walk or sign items in `system_space_dir`.
     // System-tier bundle items are operator/publisher-managed and out of
-    // scope for daemon init. To sign bundle items, use the explicit signer
-    // tool (`cargo run --example resign_yaml -p ryeos-engine -- <path>`).
+    // scope for daemon init. To re-sign bundle items, use:
+    //   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
+    // See docs/operations/signing-bundles.md.
     if cli.init_only {
         let force = cli.force;
         bootstrap::init(&config, &bootstrap::InitOptions { force })?;
@@ -233,12 +235,6 @@ async fn main() -> Result<()> {
             .context("SchedulerDb initialization failed")?,
     );
     tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
-
-    // Note: Schedule spec projection rebuild is handled by
-    // scheduler::reconcile::reconcile() below (line ~523), which is the
-    // single source of truth for CAS→DB sync. Do NOT add a second
-    // rebuild here — that would cause duplicate work and potential
-    // inconsistencies between the two passes.
 
     // Acquire operator state lock — prevents standalone services from
     // running while the daemon is up. Released on process exit (Drop).
@@ -655,7 +651,7 @@ async fn run_service_standalone(
         &state_lock::default_lock_path(&config.system_space_dir),
     ).context("failed to acquire state lock — is the daemon running?")?;
 
-    let state_root = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
+    let state_root = config.system_space_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     let write_barrier = ryeosd::write_barrier::WriteBarrier::new();
@@ -663,18 +659,12 @@ async fn run_service_standalone(
         state_root, runtime_db_path, signer, write_barrier.clone(),
     )?);
 
-    let scheduler_db_path = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("scheduler.sqlite3");
-    let scheduler_db = Arc::new(
-        scheduler::db::SchedulerDb::open(&scheduler_db_path)?,
-    );
-
     let events = Arc::new(services::event_store::EventStoreService::new(state_store.clone()));
     let threads = Arc::new(services::thread_lifecycle::ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
     )?);
-    threads.set_scheduler_db(scheduler_db.clone(), config.system_space_dir.clone());
     let commands = Arc::new(services::command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,
@@ -758,7 +748,7 @@ async fn run_service_standalone(
         verb_registry: standalone_vr,
         alias_registry: standalone_ar,
         authorizer: standalone_auth,
-        scheduler_db: scheduler_db.clone(),
+        scheduler_db: Arc::new(SchedulerDb::new_in_memory().context("scheduler in-memory db")?),
         scheduler_reload_tx: None,
     };
 

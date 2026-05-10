@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use serde::Serialize;
+use tokio::sync::mpsc;
 
 use ryeos_engine::engine::Engine;
 use ryeos_runtime::alias_registry::AliasRegistry;
@@ -76,8 +77,11 @@ pub struct AppState {
     /// All enforcement sites use this shared instance instead of constructing
     /// per-request.
     pub authorizer: Arc<Authorizer>,
+    /// Scheduler projection DB (SQLite, in-memory for tests, file-backed in prod).
     pub scheduler_db: Arc<SchedulerDb>,
-    pub scheduler_reload_tx: Option<tokio::sync::mpsc::Sender<ReloadSignal>>,
+    /// Channel to request scheduler reload after register/deregister/pause/resume.
+    /// `None` when the scheduler is not running (e.g. in unit tests).
+    pub scheduler_reload_tx: Option<mpsc::Sender<ReloadSignal>>,
 }
 
 #[derive(Debug, Serialize)]

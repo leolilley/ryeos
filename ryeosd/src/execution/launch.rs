@@ -440,7 +440,7 @@ pub(crate) fn preflight_inject_provider_secret(
     acting_principal: &str,
     item_ref_str: &str,
     bindings: &mut std::collections::HashMap<String, String>,
-) -> Result<(), MaterializationError> {
+) -> Result<ryeos_runtime::ResolvedProviderSnapshot, MaterializationError> {
     let header = ryeos_runtime::model_resolution::DirectiveModelHeader {
         model: extract_model_spec_from_resolved(composed)
             .map_err(|e| MaterializationError::Internal(e.to_string()))?,
@@ -488,7 +488,7 @@ pub(crate) fn preflight_inject_provider_secret(
             "provider declares no auth env var — no vault injection needed"
         );
     }
-    Ok(())
+    Ok(resolved_target)
 }
 
 pub struct NativeLaunchResult {
@@ -768,7 +768,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     //     inject only that provider's secret from the vault. Fail loud here
     //     so the operator gets a clear remediation hint before spawn.
     let mut effective_vault = vault_bindings.clone();
-    preflight_inject_provider_secret(
+    let provider_snapshot = preflight_inject_provider_secret(
         &resolution.composed,
         &engine_roots,
         state.vault.as_ref(),
@@ -819,6 +819,8 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         resolution,
     )
     .inventory(inventory)
+    .provider_snapshot(serde_json::to_value(&provider_snapshot)
+        .expect("ResolvedProviderSnapshot serializable"))
     .build();
 
     // 8. Write thread.json (status = created, pre-execution audit).

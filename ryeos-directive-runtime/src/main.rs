@@ -17,6 +17,7 @@ mod resume;
 mod runner;
 
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
+use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 
 fn main() {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_directive_runtime());
@@ -103,14 +104,29 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &thread_auth_token,
     );
 
+    let provider_snapshot: ResolvedProviderSnapshot = serde_json::from_value(
+        envelope
+            .provider_snapshot
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!(
+                "launch envelope missing provider_snapshot — the daemon must \
+                 embed the resolved provider config in the envelope"
+            ))?
+    ).map_err(|e| anyhow::anyhow!(
+        "failed to deserialize provider_snapshot from envelope: {e}"
+    ))?;
+
     let bootstrap_output = bootstrap::bootstrap(
-        &project_root,
-        user_root.as_deref(),
-        &system_roots,
+        &bootstrap::BootstrapRoots {
+            project_root: &project_root,
+            user_root: user_root.as_deref(),
+            system_roots: &system_roots,
+        },
         &envelope.resolution.composed,
         &envelope.policy.hard_limits,
         &verified_loader,
         &envelope.inventory,
+        &provider_snapshot,
     )?;
 
     let provider = bootstrap_output.provider.clone();
@@ -119,6 +135,8 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let context_window = bootstrap_output.context_window;
     let execution = bootstrap_output.config.execution.clone();
     let sampling = bootstrap_output.sampling.clone();
+    let matched_profile = provider_snapshot.matched_profile.clone();
+    let config_hash = provider_snapshot.config_hash.clone();
 
     let harness = harness::Harness::new(&envelope.policy, envelope.request.depth, bootstrap_output.config.risk_policy.clone());
 
@@ -182,6 +200,8 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 context_window,
                 provider_config: provider,
                 provider_id,
+                matched_profile,
+                config_hash,
                 execution,
                 model_name,
                 thread_id: envelope.thread_id.clone(),
@@ -264,6 +284,8 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             context_window,
             provider_config: provider,
             provider_id,
+            matched_profile,
+            config_hash,
             execution,
             model_name,
             thread_id: envelope.thread_id.clone(),

@@ -12,7 +12,6 @@ use ryeos_engine::trust::TrustStore;
 
 use super::sections::alias::AliasRecord;
 use super::sections::bundle::BundleSection;
-use super::sections::schedule::ScheduleRecord;
 use super::sections::verb::VerbRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, SectionSourcePolicy, SectionTable,
@@ -171,7 +170,6 @@ impl<'a> BootstrapLoader<'a> {
         let mut routes: Vec<RawRouteSpec> = Vec::new();
         let mut verbs: Vec<VerbRecord> = Vec::new();
         let mut aliases: Vec<AliasRecord> = Vec::new();
-        let mut schedules: Vec<ScheduleRecord> = Vec::new();
 
         for section_name in section_table.section_names() {
             let section = section_table
@@ -343,17 +341,6 @@ impl<'a> BootstrapLoader<'a> {
                             .clone();
                         record.source_file = path.clone();
                         aliases.push(record);
-                    } else if section_name == "schedules" {
-                        let record = section
-                            .parse(name, &body)
-                            .with_context(|| format!("failed to parse schedule record {}", path.display()))?;
-                        let mut record: ScheduleRecord = record
-                            .as_any()
-                            .downcast_ref::<ScheduleRecord>()
-                            .context("ScheduleSection::parse returned wrong type")?
-                            .clone();
-                        record.source_file = path.clone();
-                        schedules.push(record);
                     }
                 }
             }
@@ -368,7 +355,6 @@ impl<'a> BootstrapLoader<'a> {
             routes,
             verbs,
             aliases,
-            schedules,
         })
     }
 }

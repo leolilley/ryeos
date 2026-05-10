@@ -5,9 +5,7 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::directive::*;
 use ryeos_engine::resolution::KindComposedView;
-use ryeos_runtime::model_resolution::{
-    DirectiveModelHeader, resolve_model_target,
-};
+use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 use ryeos_runtime::verified_loader::VerifiedLoader;
 
 /// Conventional `derive_as` name on the directive kind's
@@ -31,14 +29,21 @@ pub struct BootstrapOutput {
     pub sampling: Option<SamplingConfig>,
 }
 
+/// Filesystem roots needed for bootstrap resolution.
+#[allow(dead_code)] // Used by future bootstrap features (context loading, etc.)
+pub struct BootstrapRoots<'a> {
+    pub project_root: &'a Path,
+    pub user_root: Option<&'a Path>,
+    pub system_roots: &'a [PathBuf],
+}
+
 pub fn bootstrap(
-    _project_root: &Path,
-    _user_root: Option<&Path>,
-    _system_roots: &[PathBuf],
+    _roots: &BootstrapRoots<'_>,
     composed_view: &KindComposedView,
     _envelope_limits: &ryeos_runtime::envelope::HardLimits,
     loader: &VerifiedLoader,
     inventory: &HashMap<String, Vec<ryeos_runtime::envelope::ItemDescriptor>>,
+    provider_snapshot: &ResolvedProviderSnapshot,
 ) -> Result<BootstrapOutput> {
     // The runtime no longer composes — the daemon-side composer has
     // already produced the effective header (in `composed`), the
@@ -63,34 +68,28 @@ pub fn bootstrap(
         .map_err(|e| anyhow!("loading config `execution`: {e}"))?
         .unwrap_or_default();
 
-    let model_routing = loader
-        .load_config_strict::<ModelRoutingConfig>("model_routing")
-        .map_err(|e| anyhow!("loading config `model_routing`: {e}"))?;
-
     // Consumer for the `category` round-trip fields on each typed
     // config — keeps `pub category: Option<String>` from being dead
     // code while making operators see a parity signal between bundle
     // and overlay configs at every launch.
     tracing::info!(
         execution_category = ?execution.category.as_deref(),
-        model_routing_category = ?model_routing.as_ref().and_then(|r| r.category.as_deref()),
-        model_routing_tier_count = model_routing.as_ref().map(|r| r.tiers.len()).unwrap_or(0),
         "directive runtime: typed config metadata"
     );
 
-    let resolved = {
-        let model_header = DirectiveModelHeader { model: header.model.clone() };
-        resolve_model_target(&model_header, &model_routing, loader)?
-    };
-
+    // Provider config is consumed from the daemon-resolved snapshot
+    // — the runtime never re-reads provider YAML from disk.
     tracing::info!(
-        provider_category = ?resolved.provider.category.as_deref(),
-        provider_id = %resolved.provider_id,
-        model_name = %resolved.model_name,
-        context_window = resolved.context_window,
-        source = %resolved.source,
-        "directive runtime: model target resolved"
+        provider_id = %provider_snapshot.provider_id,
+        model_name = %provider_snapshot.model_name,
+        context_window = provider_snapshot.context_window,
+        matched_profile = ?provider_snapshot.matched_profile,
+        source_root = %provider_snapshot.source_root,
+        config_hash = %provider_snapshot.config_hash,
+        "directive runtime: provider snapshot resolved"
     );
+
+    let resolved = provider_snapshot;
 
     // Tools come from the daemon-baked `LaunchEnvelope.inventory` —
     // the directive-runtime never re-scans, re-parses, or extracts
@@ -223,7 +222,7 @@ pub fn bootstrap(
     Ok(BootstrapOutput {
         config: BootstrapConfig {
             execution,
-            model_routing,
+            model_routing: None, // snapshot replaces runtime re-resolution
             provider: Some(resolved.provider.clone()),
             tools,
             system_prompt,
@@ -235,9 +234,9 @@ pub fn bootstrap(
             outputs: header.outputs,
             risk_policy,
         },
-        provider: resolved.provider,
-        provider_id: resolved.provider_id,
-        model_name: resolved.model_name,
+        provider: resolved.provider.clone(),
+        provider_id: resolved.provider_id.clone(),
+        model_name: resolved.model_name.clone(),
         context_window: resolved.context_window,
         sampling: header.model.as_ref().and_then(|m| m.sampling.clone()),
     })
@@ -385,7 +384,7 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
         // Read required fields with typed errors, not silent defaults.
         // Policy rules are safety-critical; silent defaults are risky.
         let pattern = entry_mapping
-            .get(&serde_yaml::Value::String("pattern".into()))
+            .get(serde_yaml::Value::String("pattern".into()))
             .ok_or_else(|| {
                 anyhow!(
                     "capability_risk config: policies[{idx}].pattern is required"
@@ -400,7 +399,7 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
             .to_string();
 
         let level_str = entry_mapping
-            .get(&serde_yaml::Value::String("level".into()))
+            .get(serde_yaml::Value::String("level".into()))
             .ok_or_else(|| {
                 anyhow!(
                     "capability_risk config: policies[{idx}].level is required"
@@ -415,7 +414,7 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
             })?;
 
         let requires_ack = entry_mapping
-            .get(&serde_yaml::Value::String("requires_ack".into()))
+            .get(serde_yaml::Value::String("requires_ack".into()))
             .ok_or_else(|| {
                 anyhow!(
                     "capability_risk config: policies[{idx}].requires_ack is required"

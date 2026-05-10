@@ -22,7 +22,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::node_config::sections::alias::AliasRecord;
-use crate::node_config::sections::schedule::ScheduleRecord;
 use crate::node_config::sections::verb::VerbRecord;
 use crate::routes::raw::RawRouteSpec;
 
@@ -60,8 +59,9 @@ pub struct NodeConfigSnapshot {
     pub verbs: Vec<VerbRecord>,
     /// All loaded alias definitions (routing sugar).
     pub aliases: Vec<AliasRecord>,
-    /// All loaded schedule specs.
-    pub schedules: Vec<ScheduleRecord>,
+}
+
+impl NodeConfigSnapshot {
 }
 
 /// Trait implemented by each node-config section handler.
@@ -109,10 +109,6 @@ impl SectionTable {
         sections.insert(
             "verbs",
             Box::new(sections::verb::VerbSection),
-        );
-        sections.insert(
-            "schedules",
-            Box::new(sections::schedule::ScheduleSection),
         );
         Self { sections }
     }

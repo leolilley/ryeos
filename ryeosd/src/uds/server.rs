@@ -438,18 +438,16 @@ mod tests {
                 missing_services: vec![],
             },
             services: Arc::new(crate::service_registry::build_service_registry()),
-            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![], schedules: vec![] }),
+            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }),
             route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
-                crate::routes::build_route_table_or_bail(&crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![], schedules: vec![] }).unwrap(),
+                crate::routes::build_route_table_or_bail(&crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }).unwrap(),
             )),
             webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
             vault: Arc::new(crate::vault::EmptyVault),
             verb_registry: test_vr,
             alias_registry: test_ar,
             authorizer: test_auth,
-            scheduler_db: Arc::new(
-                crate::scheduler::db::SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap(),
-            ),
+            scheduler_db: Arc::new(crate::scheduler::db::SchedulerDb::new_in_memory().unwrap()),
             scheduler_reload_tx: None,
         };
 

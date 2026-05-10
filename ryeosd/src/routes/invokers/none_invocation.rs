@@ -108,7 +108,6 @@ mod tests {
             routes: vec![],
             verbs: vec![],
             aliases: vec![],
-            schedules: vec![],
         };
         let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
             ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
@@ -149,9 +148,7 @@ mod tests {
             verb_registry: test_vr,
             alias_registry: test_ar,
             authorizer: test_auth,
-            scheduler_db: Arc::new(
-                crate::scheduler::db::SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap(),
-            ),
+            scheduler_db: Arc::new(crate::scheduler::db::SchedulerDb::new_in_memory().unwrap()),
             scheduler_reload_tx: None,
         };
         (tmpdir, state)

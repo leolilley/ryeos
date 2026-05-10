@@ -59,6 +59,15 @@ pub struct LaunchEnvelope {
     /// `ToolSchema`).
     #[serde(default)]
     pub inventory: HashMap<String, Vec<ItemDescriptor>>,
+    /// Daemon-resolved, frozen provider snapshot. The daemon resolves
+    /// the provider config once at preflight, validates it, and embeds
+    /// the result here. Runtimes deserialize into their own typed
+    /// `ResolvedProviderSnapshot` — the engine cannot depend on
+    /// `ryeos-runtime` so this is an opaque JSON value here.
+    ///
+    /// Absent for non-directive runtimes that don't need provider config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_snapshot: Option<Value>,
 }
 
 /// Builder for [`LaunchEnvelope`].
@@ -92,6 +101,7 @@ pub struct LaunchEnvelopeBuilder {
     callback: EnvelopeCallback,
     resolution: ResolutionOutput,
     inventory: HashMap<String, Vec<ItemDescriptor>>,
+    provider_snapshot: Option<Value>,
 }
 
 impl LaunchEnvelopeBuilder {
@@ -114,12 +124,19 @@ impl LaunchEnvelopeBuilder {
             callback,
             resolution,
             inventory: HashMap::new(),
+            provider_snapshot: None,
         }
     }
 
     /// Set the pre-baked inventory map.
     pub fn inventory(mut self, inventory: HashMap<String, Vec<ItemDescriptor>>) -> Self {
         self.inventory = inventory;
+        self
+    }
+
+    /// Set the daemon-resolved provider snapshot for directive runtimes.
+    pub fn provider_snapshot(mut self, snapshot: Value) -> Self {
+        self.provider_snapshot = Some(snapshot);
         self
     }
 
@@ -134,6 +151,7 @@ impl LaunchEnvelopeBuilder {
             callback: self.callback,
             resolution: self.resolution,
             inventory: self.inventory,
+            provider_snapshot: self.provider_snapshot,
         }
     }
 }
@@ -312,6 +330,7 @@ mod tests {
                 token: "cbt-test".to_string(),
             },
             inventory: HashMap::new(),
+            provider_snapshot: None,
             resolution: ResolutionOutput {
                 root: crate::resolution::ResolvedAncestor {
                     requested_id: "directive:my/agent".to_string(),
