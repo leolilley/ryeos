@@ -234,11 +234,6 @@ async fn record_skip(
         signer_fingerprint: Some(spec.signer_fingerprint.clone()),
     };
 
-    if let Err(e) = state.scheduler_db.upsert_fire(&rec) {
-        tracing::error!(fire_id = %fire_id, error = %e, "failed to record skipped fire");
-    }
-
-    // Append to JSONL
     let entry = serde_json::json!({
         "entry_type": "skipped",
         "fire_id": fire_id,
@@ -249,18 +244,21 @@ async fn record_skip(
         "skipped_reason": reason,
         "signer_fingerprint": spec.signer_fingerprint,
     });
-    append_fire_entry(
-        &state.config.system_space_dir,
-        &spec.schedule_id,
-        &entry,
-    );
-}
+    let fires_path = state.config.system_space_dir
+        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
+        .join(&spec.schedule_id).join("fires.jsonl");
 
-fn append_fire_entry(state_root: &std::path::Path, schedule_id: &str, entry: &serde_json::Value) {
-    let fires_dir = state_root.join(ryeos_engine::AI_DIR).join("state").join("schedules").join(schedule_id);
-    let fires_path = fires_dir.join("fires.jsonl");
-    if let Err(e) = super::projection::append_jsonl_entry(&fires_path, entry) {
-        tracing::error!(schedule_id = %schedule_id, error = %e, "failed to append fire entry");
+    {
+        let db = state.scheduler_db.clone();
+        let fire_id = fire_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = db.upsert_fire(&rec) {
+                tracing::error!(fire_id = %fire_id, error = %e, "failed to record skipped fire");
+            }
+            if let Err(e) = super::projection::append_jsonl_entry(&fires_path, &entry) {
+                tracing::error!(fire_id = %fire_id, error = %e, "failed to append fire entry");
+            }
+        }).await.ok();
     }
 }
 
