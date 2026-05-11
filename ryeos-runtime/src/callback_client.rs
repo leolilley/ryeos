@@ -23,6 +23,17 @@ pub fn storage_class_for(event_type: &str) -> &'static str {
     }
 }
 
+/// Inline cap for tool result bodies in `tool_call_result` SSE
+/// payloads. Bodies up to this size are serialized into the event
+/// directly; larger bodies are persisted in the transcript and the
+/// event carries `truncated:true, truncated_reason:"size_cap_exceeded"`.
+///
+/// 256 KiB chosen so that a render-tool envelope (single-digit KB)
+/// always inlines, and a search-tool result with several MB of rows
+/// stays in the transcript instead of bloating every SSE consumer's
+/// event log.
+pub const TOOL_RESULT_INLINE_MAX_BYTES: usize = 256 * 1024;
+
 pub struct CallbackClient {
     inner: Option<Arc<dyn RuntimeCallbackAPI>>,
     thread_id: String,
@@ -297,11 +308,39 @@ impl CallbackClient {
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to `tool_call_result`.
-    pub async fn emit_tool_result(&self, call_id: &str, truncated: bool) -> Result<()> {
-        self.append_event(
-            "tool_call_result",
-            serde_json::json!({"call_id": call_id, "truncated": truncated}),
-        ).await
+    ///
+    /// `body` is the model-visible result string (the same content the
+    /// runtime pushes into the LLM message stream). When the body is
+    /// larger than the inline cap, callers pass `body=None` plus
+    /// `truncated_reason=Some("size_cap_exceeded")` and `result_size_bytes`.
+    ///
+    /// Parsed JSON goes into `result`; opaque text goes into `result_text`.
+    /// Consumers always check `result` first.
+    pub async fn emit_tool_result(
+        &self,
+        call_id: &str,
+        body: Option<&str>,
+        truncated: bool,
+        truncated_reason: Option<&str>,
+        result_size_bytes: u64,
+    ) -> Result<()> {
+        let mut data = serde_json::json!({
+            "call_id": call_id,
+            "truncated": truncated,
+            "result_size_bytes": result_size_bytes,
+        });
+        if let Some(body_str) = body {
+            let parsed = serde_json::from_str::<serde_json::Value>(body_str)
+                .unwrap_or_else(|e| panic!(
+                    "emit_tool_result: body for call_id {call_id} is not valid JSON \
+                     (this is a programmer error — all callers produce JSON): {e}"
+                ));
+            data["result"] = parsed;
+        }
+        if let Some(reason) = truncated_reason {
+            data["truncated_reason"] = serde_json::json!(reason);
+        }
+        self.append_event("tool_call_result", data).await
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -396,9 +435,159 @@ impl CallbackClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::callback::{ActionPayload, DispatchActionRequest};
+    use crate::callback::{ActionPayload, CallbackError, DispatchActionRequest};
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // ── Mock callback that records events in memory ──────────────────
+
+    struct EventRecorder {
+        events: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl EventRecorder {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn last(&self, event_type: &str) -> Option<Value> {
+            let events = self.events.lock().unwrap();
+            events
+                .iter()
+                .rev()
+                .find(|(t, _)| t == event_type)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::callback::RuntimeCallbackAPI for EventRecorder {
+        async fn dispatch_action(
+            &self,
+            _request: DispatchActionRequest,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _thread_id: &str, _pid: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(&self, _thread_id: &str, _status: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn request_continuation(&self, _thread_id: &str, _prompt: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn append_event(
+            &self,
+            _thread_id: &str,
+            event_type: &str,
+            payload: Value,
+            _storage_class: &str,
+        ) -> Result<Value, CallbackError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((event_type.to_string(), payload));
+            Ok(json!({}))
+        }
+        async fn append_events(
+            &self,
+            _thread_id: &str,
+            _events: Vec<Value>,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn claim_commands(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _thread_id: &str,
+            _command_id: &str,
+            _result: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _thread_id: &str, _artifact: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+    }
+
+    fn make_recorder_client() -> (CallbackClient, Arc<EventRecorder>) {
+        let recorder = Arc::new(EventRecorder::new());
+        let client = CallbackClient::from_inner(
+            recorder.clone() as Arc<dyn crate::callback::RuntimeCallbackAPI>,
+            "T-test",
+            "/project",
+            "tat-test",
+        );
+        (client, recorder)
+    }
+
+    // ── New emit_tool_result tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn emit_tool_result_inlines_small_body_as_json() {
+        let (cb, recorder) = make_recorder_client();
+        cb.emit_tool_result(
+            "call_1",
+            Some(r#"{"ok":true,"workspace_card":{"chart_kind":"callout"}}"#),
+            false,
+            None,
+            58,
+        ).await.unwrap();
+
+        let evt = recorder.last("tool_call_result").unwrap();
+        assert_eq!(evt["call_id"], "call_1");
+        assert_eq!(evt["truncated"], false);
+        assert_eq!(evt["result_size_bytes"], 58);
+        assert_eq!(evt["result"]["ok"], true);
+        assert_eq!(evt["result"]["workspace_card"]["chart_kind"], "callout");
+        assert!(evt.get("truncated_reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn emit_tool_result_omits_body_when_size_capped() {
+        let (cb, recorder) = make_recorder_client();
+        cb.emit_tool_result("call_2", None, true, Some("size_cap_exceeded"), 524_288)
+            .await.unwrap();
+
+        let evt = recorder.last("tool_call_result").unwrap();
+        assert_eq!(evt["truncated"], true);
+        assert_eq!(evt["truncated_reason"], "size_cap_exceeded");
+        assert_eq!(evt["result_size_bytes"], 524_288);
+        assert!(evt.get("result").is_none());
+        assert!(evt.get("result_text").is_none());
+    }
+
+    #[tokio::test]
+    async fn emit_tool_result_inlines_body_with_nested_json() {
+        let (cb, recorder) = make_recorder_client();
+        let body = r#"{"ok":true,"data":{"nested":[1,2,3]}}"#;
+        cb.emit_tool_result("call_4", Some(body), false, None, body.len() as u64)
+            .await.unwrap();
+        let evt = recorder.last("tool_call_result").unwrap();
+        assert_eq!(evt["result"]["data"]["nested"][2], 3);
+        assert!(evt.get("result_text").is_none(),
+                "result_text must never appear — all callers produce JSON");
+    }
+
+    // ── Existing tests ───────────────────────────────────────────────
 
     fn make_callback() -> EnvelopeCallback {
         EnvelopeCallback {

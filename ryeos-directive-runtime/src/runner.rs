@@ -586,7 +586,15 @@ impl Runner {
                 }
 
                 State::ProcessingToolResult { call_id, tool_name, raw_args, pending, index } => {
-                    let tool_result_content = match self.dispatcher.resolve(&tool_name, &raw_args, Some(call_id.clone())) {
+                    /// Tracks tool result metadata for SSE emission.
+                    struct ToolResult {
+                        content: String,
+                        raw_size: u64,
+                        result_guard_truncated: bool,
+                        truncated_reason_override: Option<&'static str>,
+                    }
+
+                    let tool_result: ToolResult = match self.dispatcher.resolve(&tool_name, &raw_args, Some(call_id.clone())) {
                         Ok(dispatch_result) => {
                             // Record spawn for child executions (directive/graph)
                             match dispatch_result.dispatch_kind {
@@ -607,6 +615,8 @@ impl Runner {
                                     requires_ack = risk.requires_ack,
                                     "tool call blocked by risk policy"
                                 );
+                                let body_str = serde_json::to_string(&json!({"error": format!("blocked by risk policy: {}", dispatch_result.canonical_ref)}))
+                                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
                                 // Risk-policy block surfaces as a
                                 // `tool_call_result` with a `blocked`
                                 // status payload so the daemon's
@@ -628,8 +638,12 @@ impl Runner {
                                         )
                                         .await,
                                 );
-                                serde_json::to_string(&json!({"error": format!("blocked by risk policy: {}", dispatch_result.canonical_ref)}))
-                                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string())
+                                ToolResult {
+                                    raw_size: body_str.len() as u64,
+                                    content: body_str,
+                                    result_guard_truncated: false,
+                                    truncated_reason_override: Some("error_envelope"),
+                                }
                             } else {
                                 match self.callback.dispatch_action(ryeos_runtime::callback::DispatchActionRequest {
                                     thread_id: self.thread_id.clone(),
@@ -653,26 +667,69 @@ impl Runner {
                                                 tracing::warn!("failed to serialize dispatch result: {e}");
                                                 Vec::new()
                                             });
+                                        let raw_size = raw_bytes.len() as u64;
                                         let processed_bytes = self.result_guard.process_bytes(&raw_bytes);
-                                        String::from_utf8_lossy(&processed_bytes).to_string()
+                                        let result_guard_truncated = processed_bytes.len() != raw_bytes.len();
+                                        let content = String::from_utf8_lossy(&processed_bytes).to_string();
+                                        ToolResult {
+                                            content,
+                                            raw_size,
+                                            result_guard_truncated,
+                                            truncated_reason_override: None,
+                                        }
                                     }
                                     Err(e) => {
-                                        serde_json::to_string(&json!({"error": e.to_string()})).unwrap_or_else(|_| "{\"error\":\"dispatch failed\"}".to_string())
+                                        let body_str = serde_json::to_string(&json!({"error": e.to_string()})).unwrap_or_else(|_| "{\"error\":\"dispatch failed\"}".to_string());
+                                        ToolResult {
+                                            raw_size: body_str.len() as u64,
+                                            content: body_str,
+                                            result_guard_truncated: false,
+                                            truncated_reason_override: Some("error_envelope"),
+                                        }
                                     }
                                 }
                             }
                         }
-                        Err(e) => serde_json::to_string(&json!({"error": e})).unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string()),
+                        Err(e) => {
+                            let body_str = serde_json::to_string(&json!({"error": e})).unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string());
+                            ToolResult {
+                                raw_size: body_str.len() as u64,
+                                content: body_str,
+                                result_guard_truncated: false,
+                                truncated_reason_override: Some("error_envelope"),
+                            }
+                        }
                     };
 
-                    let truncated = tool_result_content.len() != raw_args.len();
-                    if let Err(e) = self.callback.emit_tool_result(&call_id, truncated).await {
+                    // Determine inline body and truncation flags
+                    let inline_capped = tool_result.content.len() > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
+                    let body: Option<&str>;
+                    let truncated: bool;
+                    let truncated_reason: Option<&str>;
+                    if inline_capped {
+                        body = None;
+                        truncated = true;
+                        truncated_reason = Some("size_cap_exceeded");
+                    } else if tool_result.result_guard_truncated {
+                        body = Some(&tool_result.content);
+                        truncated = true;
+                        truncated_reason = Some("result_guard");
+                    } else if let Some(reason) = tool_result.truncated_reason_override {
+                        body = Some(&tool_result.content);
+                        truncated = false;
+                        truncated_reason = Some(reason);
+                    } else {
+                        body = Some(&tool_result.content);
+                        truncated = false;
+                        truncated_reason = None;
+                    }
+                    if let Err(e) = self.callback.emit_tool_result(&call_id, body, truncated, truncated_reason, tool_result.raw_size).await {
                         state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
                         continue;
                     }
                     self.messages.push(ProviderMessage {
                         role: "tool".to_string(),
-                        content: Some(json!(tool_result_content)),
+                        content: Some(json!(tool_result.content)),
                         tool_calls: None,
                         tool_call_id: Some(call_id),
                     });
@@ -732,7 +789,9 @@ impl Runner {
                                 );
 
                                 // Fire tool_call_result for chain visibility
-                                if let Err(e) = self.callback.emit_tool_result(&call_id, false).await {
+                                let outputs_json = serde_json::to_string(&args).unwrap_or_default();
+                                let outputs_size = outputs_json.len() as u64;
+                                if let Err(e) = self.callback.emit_tool_result(&call_id, Some(&outputs_json), false, None, outputs_size).await {
                                     state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
                                     continue;
                                 }
@@ -763,7 +822,8 @@ impl Runner {
                     // Validation or parse failure: fire tool_call_result,
                     // push error as tool message, and let the LLM retry.
                     // (Non-fatal — the LLM can correct its outputs.)
-                    if let Err(e) = self.callback.emit_tool_result(&call_id, false).await {
+                    let failure_size = tool_result_content.len() as u64;
+                    if let Err(e) = self.callback.emit_tool_result(&call_id, Some(&tool_result_content), false, Some("error_envelope"), failure_size).await {
                         state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
                         continue;
                     }
