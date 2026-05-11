@@ -314,11 +314,12 @@ impl CallbackClient {
     /// larger than the inline cap, callers pass `body=None` plus
     /// `truncated_reason=Some("size_cap_exceeded")` and `result_size_bytes`.
     ///
-    /// Parsed JSON goes into `result`; opaque text goes into `result_text`.
-    /// Consumers always check `result` first.
+    /// `tool` is the canonical ref (e.g. `apps_tv_tracker_workspace_render_chart`)
+    /// so SSE consumers can route results without cross-referencing tool_call_start.
     pub async fn emit_tool_result(
         &self,
         call_id: &str,
+        tool: &str,
         body: Option<&str>,
         truncated: bool,
         truncated_reason: Option<&str>,
@@ -326,6 +327,7 @@ impl CallbackClient {
     ) -> Result<()> {
         let mut data = serde_json::json!({
             "call_id": call_id,
+            "tool": tool,
             "truncated": truncated,
             "result_size_bytes": result_size_bytes,
         });
@@ -546,6 +548,7 @@ mod tests {
         let (cb, recorder) = make_recorder_client();
         cb.emit_tool_result(
             "call_1",
+            "test/render_chart",
             Some(r#"{"ok":true,"workspace_card":{"chart_kind":"callout"}}"#),
             false,
             None,
@@ -554,6 +557,7 @@ mod tests {
 
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["call_id"], "call_1");
+        assert_eq!(evt["tool"], "test/render_chart");
         assert_eq!(evt["truncated"], false);
         assert_eq!(evt["result_size_bytes"], 58);
         assert_eq!(evt["result"]["ok"], true);
@@ -564,11 +568,12 @@ mod tests {
     #[tokio::test]
     async fn emit_tool_result_omits_body_when_size_capped() {
         let (cb, recorder) = make_recorder_client();
-        cb.emit_tool_result("call_2", None, true, Some("size_cap_exceeded"), 524_288)
+        cb.emit_tool_result("call_2", "test/search", None, true, Some("size_cap_exceeded"), 524_288)
             .await.unwrap();
 
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["truncated"], true);
+        assert_eq!(evt["tool"], "test/search");
         assert_eq!(evt["truncated_reason"], "size_cap_exceeded");
         assert_eq!(evt["result_size_bytes"], 524_288);
         assert!(evt.get("result").is_none());
@@ -579,7 +584,7 @@ mod tests {
     async fn emit_tool_result_inlines_body_with_nested_json() {
         let (cb, recorder) = make_recorder_client();
         let body = r#"{"ok":true,"data":{"nested":[1,2,3]}}"#;
-        cb.emit_tool_result("call_4", Some(body), false, None, body.len() as u64)
+        cb.emit_tool_result("call_4", "test/nested", Some(body), false, None, body.len() as u64)
             .await.unwrap();
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["result"]["data"]["nested"][2], 3);

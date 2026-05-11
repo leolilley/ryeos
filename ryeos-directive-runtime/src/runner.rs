@@ -588,6 +588,7 @@ impl Runner {
                 State::ProcessingToolResult { call_id, tool_name, raw_args, pending, index } => {
                     /// Tracks tool result metadata for SSE emission.
                     struct ToolResult {
+                        tool: String,
                         content: String,
                         raw_size: u64,
                         result_guard_truncated: bool,
@@ -639,6 +640,7 @@ impl Runner {
                                         .await,
                                 );
                                 ToolResult {
+                                    tool: dispatch_result.canonical_ref.clone(),
                                     raw_size: body_str.len() as u64,
                                     content: body_str,
                                     result_guard_truncated: false,
@@ -672,6 +674,7 @@ impl Runner {
                                         let result_guard_truncated = processed_bytes.len() != raw_bytes.len();
                                         let content = String::from_utf8_lossy(&processed_bytes).to_string();
                                         ToolResult {
+                                            tool: dispatch_result.canonical_ref.clone(),
                                             content,
                                             raw_size,
                                             result_guard_truncated,
@@ -681,6 +684,7 @@ impl Runner {
                                     Err(e) => {
                                         let body_str = serde_json::to_string(&json!({"error": e.to_string()})).unwrap_or_else(|_| "{\"error\":\"dispatch failed\"}".to_string());
                                         ToolResult {
+                                            tool: dispatch_result.canonical_ref.clone(),
                                             raw_size: body_str.len() as u64,
                                             content: body_str,
                                             result_guard_truncated: false,
@@ -693,6 +697,7 @@ impl Runner {
                         Err(e) => {
                             let body_str = serde_json::to_string(&json!({"error": e})).unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string());
                             ToolResult {
+                                tool: tool_name.clone(),
                                 raw_size: body_str.len() as u64,
                                 content: body_str,
                                 result_guard_truncated: false,
@@ -723,7 +728,7 @@ impl Runner {
                         truncated = false;
                         truncated_reason = None;
                     }
-                    if let Err(e) = self.callback.emit_tool_result(&call_id, body, truncated, truncated_reason, tool_result.raw_size).await {
+                    if let Err(e) = self.callback.emit_tool_result(&call_id, &tool_result.tool, body, truncated, truncated_reason, tool_result.raw_size).await {
                         state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
                         continue;
                     }
@@ -791,7 +796,7 @@ impl Runner {
                                 // Fire tool_call_result for chain visibility
                                 let outputs_json = serde_json::to_string(&args).unwrap_or_default();
                                 let outputs_size = outputs_json.len() as u64;
-                                if let Err(e) = self.callback.emit_tool_result(&call_id, Some(&outputs_json), false, None, outputs_size).await {
+                                if let Err(e) = self.callback.emit_tool_result(&call_id, "directive_return", Some(&outputs_json), false, None, outputs_size).await {
                                     state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
                                     continue;
                                 }
@@ -823,7 +828,7 @@ impl Runner {
                     // push error as tool message, and let the LLM retry.
                     // (Non-fatal — the LLM can correct its outputs.)
                     let failure_size = tool_result_content.len() as u64;
-                    if let Err(e) = self.callback.emit_tool_result(&call_id, Some(&tool_result_content), false, Some("error_envelope"), failure_size).await {
+                    if let Err(e) = self.callback.emit_tool_result(&call_id, "directive_return", Some(&tool_result_content), false, Some("error_envelope"), failure_size).await {
                         state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
                         continue;
                     }
