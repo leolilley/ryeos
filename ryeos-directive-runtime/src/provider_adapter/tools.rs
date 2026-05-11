@@ -59,6 +59,18 @@ fn serialize_with_template(tools: &[ToolSchema], cfg: &ToolSchemaConfig) -> Valu
 /// is removed here so the LLM never sees it. Saves context, removes
 /// confusion, prevents the "model tries to call something it can't"
 /// error path from being entered at all.
+///
+/// The cap format MUST match what the daemon's `enforce_callback_caps`
+/// uses (`ryeos.execute.<kind>.<bare_id>`) — otherwise this filter and
+/// the daemon-side enforcer disagree, and a tool can pass the filter
+/// (be advertised to the model) only to be denied at dispatch time
+/// with a confusing "callback denied" error.
+///
+/// `ToolSchema.item_id` may be either the full canonical ref
+/// (`tool:foo/bar`) or just the bare id (`foo/bar`) depending on
+/// where the schema came from — see `bootstrap::project_tool_inventory`
+/// and the in-tree test fixtures. We normalise both shapes to the
+/// canonical cap form before checking.
 pub fn filter_tools_by_caps<'a>(
     tools: &'a [ToolSchema],
     effective_caps: &[String],
@@ -66,12 +78,38 @@ pub fn filter_tools_by_caps<'a>(
     tools
         .iter()
         .filter(|t| {
-            let required = format!("ryeos.execute.tool.{}", t.item_id);
+            let required = required_cap_for(&t.item_id);
             effective_caps
                 .iter()
                 .any(|cap| ryeos_runtime::cap_matches(cap, &required))
         })
         .collect()
+}
+
+/// Build the capability string the daemon-side `enforce_callback_caps`
+/// will require for this tool. Splits a canonical ref `kind:bare_id`
+/// into `ryeos.execute.<kind>.<bare_id>` — the same shape
+/// `runtime_dispatch::enforce_callback_caps` produces, so this filter
+/// and the daemon enforcer always agree.
+///
+/// Hard-fails (panics) when `item_id` has no `:` separator. Every
+/// production `ToolSchema` is built from an `ItemDescriptor` whose
+/// `item_id` is already a canonical ref (`kind:bare_id`); see
+/// `ryeos_engine::inventory::build_descriptor_for_ref` and the
+/// synthesised lifecycle tools in `runner::build_directive_return_tool`.
+/// A bare-id slipping in here means an upstream invariant has been
+/// violated — silently falling back to a kind-less cap would mask the
+/// bug and reintroduce the filter/enforcer disagreement this helper
+/// exists to prevent.
+pub(crate) fn required_cap_for(item_id: &str) -> String {
+    let (kind, bare_id) = item_id.split_once(':').unwrap_or_else(|| {
+        panic!(
+            "tool ToolSchema.item_id `{item_id}` is missing the `kind:` prefix; \
+             every production ToolSchema must carry a canonical ref. Upstream \
+             inventory builder is broken — do not paper over with a fallback."
+        )
+    });
+    format!("ryeos.execute.{}.{}", kind, bare_id)
 }
 
 fn empty_object_schema() -> Value {
@@ -106,7 +144,7 @@ mod tests {
         vec![
             ToolSchema {
                 name: "bash".to_string(),
-                item_id: "ryeos/bash/bash".to_string(),
+                item_id: "tool:ryeos/bash/bash".to_string(),
                 description: Some("Run a bash command".to_string()),
                 input_schema: Some(json!({
                     "type": "object",
@@ -118,7 +156,7 @@ mod tests {
             },
             ToolSchema {
                 name: "read_file".to_string(),
-                item_id: "ryeos/core/read".to_string(),
+                item_id: "tool:ryeos/core/read".to_string(),
                 description: Some("Read a file".to_string()),
                 input_schema: None,
             },
@@ -158,7 +196,7 @@ mod tests {
     fn openai_tool_with_no_schema_gets_empty_object_default() {
         let tools = vec![ToolSchema {
             name: "no_schema_tool".to_string(),
-            item_id: "test/no-schema".to_string(),
+            item_id: "tool:test/no-schema".to_string(),
             description: Some("A tool with no schema".to_string()),
             input_schema: None,
         }];
@@ -173,13 +211,13 @@ mod tests {
         let tools = vec![
             ToolSchema {
                 name: "read".to_string(),
-                item_id: "ryeos/file-system/read".to_string(),
+                item_id: "tool:ryeos/file-system/read".to_string(),
                 description: Some("Read a file".to_string()),
                 input_schema: None,
             },
             ToolSchema {
                 name: "write".to_string(),
-                item_id: "ryeos/file-system/write".to_string(),
+                item_id: "tool:ryeos/file-system/write".to_string(),
                 description: Some("Write a file".to_string()),
                 input_schema: None,
             },
@@ -195,13 +233,13 @@ mod tests {
         let tools = vec![
             ToolSchema {
                 name: "read".to_string(),
-                item_id: "ryeos/file-system/read".to_string(),
+                item_id: "tool:ryeos/file-system/read".to_string(),
                 description: Some("Read".to_string()),
                 input_schema: None,
             },
             ToolSchema {
                 name: "write".to_string(),
-                item_id: "ryeos/file-system/write".to_string(),
+                item_id: "tool:ryeos/file-system/write".to_string(),
                 description: Some("Write".to_string()),
                 input_schema: None,
             },
@@ -212,10 +250,39 @@ mod tests {
     }
 
     #[test]
+    fn permission_filter_matches_daemon_enforcer_cap_format() {
+        // Regression: filter_tools_by_caps used to format the cap as
+        // `ryeos.execute.tool.{item_id}` which produced
+        // `ryeos.execute.tool.tool:foo/bar` for canonical-ref item_ids.
+        // The daemon's enforce_callback_caps uses
+        // `ryeos.execute.{kind}.{bare_id}` (= `ryeos.execute.tool.foo/bar`).
+        // The mismatch let tools pass the filter (be advertised to the
+        // model) only to be denied at dispatch time. Both must agree.
+        let tools = vec![ToolSchema {
+            name: "backend_client".to_string(),
+            item_id: "tool:apps/tv-tracker/api/backend-client".to_string(),
+            description: None,
+            input_schema: None,
+        }];
+        let caps = vec!["ryeos.execute.tool.apps/tv-tracker/api/*".to_string()];
+        let filtered = filter_tools_by_caps(&tools, &caps);
+        assert_eq!(filtered.len(), 1, "tool with canonical-ref item_id must match daemon cap format");
+    }
+
+    #[test]
+    #[should_panic(expected = "missing the `kind:` prefix")]
+    fn required_cap_for_panics_on_bare_id_to_force_invariant() {
+        // Production ToolSchema item_ids always carry the `kind:` prefix;
+        // a bare id arriving here means upstream is broken. We hard-fail
+        // rather than fall back so the bug surfaces immediately.
+        let _ = required_cap_for("apps/tv-tracker/api/backend-client");
+    }
+
+    #[test]
     fn permission_filter_no_caps_removes_all() {
         let tools = vec![ToolSchema {
             name: "read".to_string(),
-            item_id: "ryeos/file-system/read".to_string(),
+            item_id: "tool:ryeos/file-system/read".to_string(),
             description: Some("Read".to_string()),
             input_schema: None,
         }];
