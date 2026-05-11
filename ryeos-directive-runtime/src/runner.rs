@@ -640,7 +640,7 @@ impl Runner {
                                         .await,
                                 );
                                 ToolResult {
-                                    tool: dispatch_result.canonical_ref.clone(),
+                                    tool: tool_name.clone(),
                                     raw_size: body_str.len() as u64,
                                     content: body_str,
                                     result_guard_truncated: false,
@@ -674,7 +674,7 @@ impl Runner {
                                         let result_guard_truncated = processed_bytes.len() != raw_bytes.len();
                                         let content = String::from_utf8_lossy(&processed_bytes).to_string();
                                         ToolResult {
-                                            tool: dispatch_result.canonical_ref.clone(),
+                                            tool: tool_name.clone(),
                                             content,
                                             raw_size,
                                             result_guard_truncated,
@@ -684,7 +684,7 @@ impl Runner {
                                     Err(e) => {
                                         let body_str = serde_json::to_string(&json!({"error": e.to_string()})).unwrap_or_else(|_| "{\"error\":\"dispatch failed\"}".to_string());
                                         ToolResult {
-                                            tool: dispatch_result.canonical_ref.clone(),
+                                            tool: tool_name.clone(),
                                             raw_size: body_str.len() as u64,
                                             content: body_str,
                                             result_guard_truncated: false,
