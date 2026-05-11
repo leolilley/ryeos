@@ -34,6 +34,50 @@ use crate::resolution::TrustClass;
 /// daemon-injected bindings.
 pub const RESERVED_ENV_PREFIX: &str = "RYEOS_";
 
+// ── Host env passthrough ────────────────────────────────────────────────
+
+/// Operator-supplied allowlist + values for host-env passthrough into
+/// subprocess `env_config.env` values. The daemon builds this once at
+/// bootstrap from the `RYEOS_TOOL_ENV_PASSTHROUGH` env var (a comma-
+/// separated list of allowed names) and the daemon's current process
+/// environment.
+///
+/// Tools request a host var with `"${VAR}"` in an env value. The
+/// engine resolves the request only if `VAR` is in `allowed` AND has
+/// a value in `values`. Otherwise plan-build fails with a typed
+/// `EngineError` (see `HostEnvPassthroughNotAllowed`,
+/// `HostEnvPassthroughMissing`).
+///
+/// **Vault is for secrets.** `RYEOS_TOOL_ENV_PASSTHROUGH` is for
+/// non-secret deployment config (hostnames, URLs, ports). Secrets
+/// like API keys continue to use the vault + `required_secrets` path.
+#[derive(Debug, Clone, Default)]
+pub struct HostEnvBindings {
+    pub allowed: std::collections::HashSet<String>,
+    pub values: std::collections::HashMap<String, String>,
+}
+
+impl HostEnvBindings {
+    /// Build from an explicit allowlist (e.g. parsed from
+    /// `RYEOS_TOOL_ENV_PASSTHROUGH`), snapshotting current host env
+    /// values for each allowed key. Rejects reserved names.
+    pub fn from_allowlist(
+        allowed: impl IntoIterator<Item = String>,
+    ) -> Result<Self, EngineError> {
+        let mut out = Self::default();
+        for name in allowed {
+            if name.starts_with(RESERVED_ENV_PREFIX) {
+                return Err(EngineError::ReservedHostEnvPassthrough { var: name });
+            }
+            if let Ok(v) = std::env::var(&name) {
+                out.values.insert(name.clone(), v);
+            }
+            out.allowed.insert(name);
+        }
+        Ok(out)
+    }
+}
+
 // ── Chain hop (input to compilation) ─────────────────────────────────────
 
 /// One resolved hop in the executor chain. Identical shape to the
@@ -119,6 +163,70 @@ pub fn expand_template(template: &str, ctx: &TemplateContext) -> Result<String, 
     Ok(result)
 }
 
+/// Two-pass expansion for env-config env values:
+///   1. Resolve `${VAR}` from `host_env` (allowlisted host env).
+///   2. Run existing `{token}` expansion via `expand_template`.
+///
+/// This keeps host-env passthrough OUT of `command`, `args`, `cwd`,
+/// and stdin templates — those still call `expand_template` directly
+/// and reject unknown tokens loudly.
+///
+/// The `${VAR}` form is intentionally distinct from `{token}`: the
+/// `$` makes the intent explicit ("read from host env, not the
+/// template context") and avoids ambiguity with the existing tokens.
+///
+/// A literal `$` not followed by `{` is passed through untouched, so
+/// prose values like `"price: $5"` still work.
+pub fn expand_env_value(
+    raw: &str,
+    template_ctx: &TemplateContext,
+    host_env: &HostEnvBindings,
+) -> Result<String, EngineError> {
+    // Pass 1: ${VAR}. Scan from left to right, replace literal
+    // ${...} occurrences. Do NOT support nested expansions; a
+    // sigil immediately followed by `{` is the only trigger.
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            // Find the matching `}`.
+            let Some(close_rel) = raw[i + 2..].find('}') else {
+                // Unterminated `${`: bubble up as a typed error so
+                // operators see the offending YAML clearly.
+                return Err(EngineError::UnknownTemplateToken {
+                    token: raw[i..].to_string(),
+                });
+            };
+            let close = i + 2 + close_rel;
+            let var = &raw[i + 2..close];
+            if var.starts_with(RESERVED_ENV_PREFIX) {
+                return Err(EngineError::ReservedHostEnvPassthrough {
+                    var: var.to_string(),
+                });
+            }
+            if !host_env.allowed.contains(var) {
+                return Err(EngineError::HostEnvPassthroughNotAllowed {
+                    var: var.to_string(),
+                });
+            }
+            let Some(value) = host_env.values.get(var) else {
+                return Err(EngineError::HostEnvPassthroughMissing {
+                    var: var.to_string(),
+                });
+            };
+            out.push_str(value);
+            i = close + 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    // Pass 2: legacy `{token}` expansion.
+    expand_template(&out, template_ctx)
+}
+
 // ── Handler-side mutable state ───────────────────────────────────────────
 
 /// Subprocess spec fields a handler can write into. The final
@@ -162,6 +270,9 @@ pub struct CompileContext<'a> {
     pub trust_store: &'a TrustStore,
     pub project_root: Option<&'a Path>,
     pub root_trust_class: TrustClass,
+    /// Operator-supplied allowlist + snapshot for host-env passthrough.
+    /// Populated once at daemon bootstrap from `RYEOS_TOOL_ENV_PASSTHROUGH`.
+    pub host_env: &'a HostEnvBindings,
 }
 
 // ── Handler phasing & cardinality ────────────────────────────────────────
@@ -309,6 +420,7 @@ pub fn compile_with_handlers(
     registry: &RuntimeHandlerRegistry,
     params: &Value,
     plan_env: &HashMap<String, String>,
+    host_env: &HostEnvBindings,
     project_root: Option<&Path>,
     parsers: &ParserDispatcher,
     kinds: &KindRegistry,
@@ -330,6 +442,7 @@ pub fn compile_with_handlers(
         trust_store,
         project_root,
         root_trust_class,
+        host_env,
     };
     ctx.template_ctx.project_path = project_root.map(|p| p.to_path_buf());
     ctx.template_ctx.params_json = params.to_string();
@@ -458,6 +571,7 @@ pub fn compile_with_handlers(
         template_ctx,
         env,
         spec_overrides,
+        host_env: ctx_host_env,
         ..
     } = ctx;
 
@@ -507,7 +621,7 @@ pub fn compile_with_handlers(
     // Expand env values now that the template context is final.
     let mut expanded_env = HashMap::with_capacity(env.len());
     for (k, v) in env {
-        let expanded = expand_template(&v, &template_ctx)?;
+        let expanded = expand_env_value(&v, &template_ctx, ctx_host_env)?;
         expanded_env.insert(k, expanded);
     }
 
@@ -530,6 +644,102 @@ fn find_bundle_root(path: &Path) -> Option<PathBuf> {
             return Some(current.to_path_buf());
         }
         current = current.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_value_expands_allowed_host_env_passthrough() {
+        let mut host_env = HostEnvBindings::default();
+        host_env
+            .allowed
+            .insert("BACKEND_API_URL".into());
+        host_env.values.insert(
+            "BACKEND_API_URL".into(),
+            "http://host.docker.internal:4000".into(),
+        );
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let got = expand_env_value("${BACKEND_API_URL}/api/x", &ctx, &host_env).unwrap();
+        assert_eq!(got, "http://host.docker.internal:4000/api/x");
+    }
+
+    #[test]
+    fn env_value_rejects_unlisted_host_env_passthrough() {
+        let host_env = HostEnvBindings::default();
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let err = expand_env_value("${SECRET_KEY}", &ctx, &host_env).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EngineError::HostEnvPassthroughNotAllowed { ref var } if var == "SECRET_KEY"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn env_value_rejects_reserved_host_env_passthrough() {
+        let mut host_env = HostEnvBindings::default();
+        // Simulate misconfigured allowlist that somehow includes a
+        // reserved name — the expansion must still reject it.
+        host_env.allowed.insert("RYEOS_THREAD_ID".into());
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let err = expand_env_value("${RYEOS_THREAD_ID}", &ctx, &host_env).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ReservedHostEnvPassthrough { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn env_value_reports_allowed_but_missing() {
+        let mut host_env = HostEnvBindings::default();
+        host_env
+            .allowed
+            .insert("BACKEND_API_URL".into());
+        // No value populated.
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let err = expand_env_value("${BACKEND_API_URL}", &ctx, &host_env).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EngineError::HostEnvPassthroughMissing { ref var } if var == "BACKEND_API_URL"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn host_env_bindings_constructor_rejects_reserved_names() {
+        let err = HostEnvBindings::from_allowlist(["RYEOS_FOO".into()]).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ReservedHostEnvPassthrough { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn env_value_passthrough_dollar_without_brace() {
+        // A lone `$` not followed by `{` must pass through untouched.
+        let host_env = HostEnvBindings::default();
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let got = expand_env_value("price: $5", &ctx, &host_env).unwrap();
+        assert_eq!(got, "price: $5");
+    }
+
+    #[test]
+    fn env_value_expands_both_host_and_template() {
+        // Verify both passes work: `${VAR}` from host env AND
+        // `{tool_path}` from template context.
+        let mut host_env = HostEnvBindings::default();
+        host_env.allowed.insert("MY_HOST".into());
+        host_env.values.insert("MY_HOST".into(), "hello".into());
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let got = expand_env_value("${MY_HOST}-{tool_path}", &ctx, &host_env).unwrap();
+        assert_eq!(got, "hello-/tool.yaml");
     }
 }
 

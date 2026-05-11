@@ -336,7 +336,7 @@ mod tests {
     use crate::item_resolution::ResolutionRoots;
     use crate::kind_registry::KindRegistry;
     use crate::parsers::ParserDispatcher;
-    use crate::runtime::{ChainIntermediate, SpecOverrides, TemplateContext};
+    use crate::runtime::{ChainIntermediate, HostEnvBindings, SpecOverrides, TemplateContext};
     use crate::trust::TrustStore;
     use serde_json::{json, Map, Value};
     use std::collections::HashMap;
@@ -388,6 +388,8 @@ mod tests {
     }
 
     static NULL_PARAMS: Value = Value::Null;
+    static EMPTY_HOST_ENV: std::sync::LazyLock<HostEnvBindings> =
+        std::sync::LazyLock::new(HostEnvBindings::default);
 
     fn make_ctx<'a>(
         chain: &'a [ChainIntermediate],
@@ -410,6 +412,7 @@ mod tests {
             trust_store: trust,
             project_root: None,
             root_trust_class: crate::resolution::TrustClass::TrustedSystem,
+            host_env: &EMPTY_HOST_ENV,
         }
     }
 

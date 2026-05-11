@@ -23,7 +23,7 @@ use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::runtime::{
-    compile_with_handlers, ChainIntermediate, RuntimeHandlerRegistry,
+    compile_with_handlers, ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry,
 };
 use crate::trust::TrustStore;
 use crate::resolution::TrustClass;
@@ -293,6 +293,7 @@ pub struct BuildPlanInput<'a> {
     pub roots: &'a ResolutionRoots,
     pub registry_fingerprint: &'a str,
     pub trust_store: &'a TrustStore,
+    pub host_env: &'a HostEnvBindings,
 }
 
 #[tracing::instrument(
@@ -311,6 +312,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         roots,
         registry_fingerprint,
         trust_store,
+        host_env,
     } = input;
     let resolved = &item.resolved;
     let canonical_ref = resolved.canonical_ref.to_string();
@@ -436,6 +438,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         &registry,
         parameters,
         &plan_env,
+        host_env,
         project_root.as_deref(),
         parsers,
         kinds,
@@ -858,6 +861,7 @@ config:
                 roots: &roots,
                 registry_fingerprint: "fp:test",
                 trust_store: &ts,
+                host_env: &HostEnvBindings::default(),
             },
         )
         .unwrap();
@@ -908,6 +912,7 @@ config:
                 roots: &roots,
                 registry_fingerprint: "fp:test",
                 trust_store: &ts,
+                host_env: &HostEnvBindings::default(),
             },
         )
         .unwrap_err();
@@ -976,6 +981,7 @@ config:
                 roots: &roots,
                 registry_fingerprint: "fp:test",
                 trust_store: &ts,
+                host_env: &HostEnvBindings::default(),
             },
         )
         .unwrap_err();
@@ -1019,6 +1025,7 @@ config:
                 roots: &roots,
                 registry_fingerprint: "fp:test",
                 trust_store: &TrustStore::empty(),
+                host_env: &HostEnvBindings::default(),
             },
         )
         .unwrap_err();
@@ -1031,7 +1038,7 @@ config:
     // The plan_builder tests below cover the integrated path through
     // `compile_with_handlers`.
 
-    use crate::runtime::{compile_with_handlers, ChainIntermediate as RChainIntermediate, RuntimeHandlerRegistry};
+    use crate::runtime::{compile_with_handlers, ChainIntermediate as RChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry};
 
     fn empty_roots() -> ResolutionRoots {
         ResolutionRoots::from_flat(None, None, vec![])
@@ -1075,6 +1082,7 @@ config:
             &registry,
             &json!(null),
             &HashMap::new(),
+            &HostEnvBindings::default(),
             None,
             &parsers,
             &kinds,
@@ -1124,6 +1132,7 @@ config:
             &registry,
             &json!(null),
             &HashMap::new(),
+            &HostEnvBindings::default(),
             None,
             &parsers,
             &kinds,
@@ -1173,6 +1182,7 @@ config:
             &registry,
             &json!(null),
             &HashMap::new(),
+            &HostEnvBindings::default(),
             None,
             &parsers,
             &kinds,
@@ -1216,6 +1226,7 @@ config:
             &registry,
             &json!({"message": "hello"}),
             &HashMap::new(),
+            &HostEnvBindings::default(),
             Some(&project),
             &parsers,
             &kinds,
@@ -1259,6 +1270,7 @@ config:
             &registry,
             &json!(null),
             &HashMap::new(),
+            &HostEnvBindings::default(),
             None,
             &parsers,
             &kinds,
@@ -1353,6 +1365,7 @@ config:
                 roots: &roots,
                 registry_fingerprint: "fp:test",
                 trust_store: &ts,
+                host_env: &HostEnvBindings::default(),
             },
         )
         .unwrap_err();
@@ -1483,6 +1496,7 @@ category: ryeos/core/subprocess\n";
                 roots: &roots,
                 registry_fingerprint: "fp:test",
                 trust_store: &ts,
+                host_env: &HostEnvBindings::default(),
             },
         )
         .expect("build_plan should succeed for valid 3-hop chain");

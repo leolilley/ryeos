@@ -44,6 +44,12 @@ pub struct Engine {
     /// terminators. Empty by default for test compatibility.
     pub protocols: ProtocolRegistry,
 
+    /// Operator-supplied allowlist + snapshot for host-env passthrough
+    /// (`${VAR}` in tool env values). Populated once at daemon bootstrap
+    /// from `RYEOS_TOOL_ENV_PASSTHROUGH`. Empty by default for test
+    /// compatibility.
+    pub host_env: crate::runtime::HostEnvBindings,
+
     /// User-space root (parent of `AI_DIR`)
     pub user_root: Option<PathBuf>,
     /// System bundle roots (parents of `AI_DIR`)
@@ -64,6 +70,7 @@ impl Engine {
             composers: ComposerRegistry::new(),
             runtimes: RuntimeRegistry::default(),
             protocols: ProtocolRegistry::empty(),
+            host_env: crate::runtime::HostEnvBindings::default(),
             user_root,
             system_roots,
         }
@@ -95,6 +102,14 @@ impl Engine {
     /// init. Empty by default for test compatibility.
     pub fn with_protocols(mut self, protocols: ProtocolRegistry) -> Self {
         self.protocols = protocols;
+        self
+    }
+
+    /// Install the host-env passthrough bindings. Populated once at
+    /// daemon bootstrap from `RYEOS_TOOL_ENV_PASSTHROUGH`. Empty by
+    /// default for test compatibility.
+    pub fn with_host_env(mut self, host_env: crate::runtime::HostEnvBindings) -> Self {
+        self.host_env = host_env;
         self
     }
 
@@ -280,6 +295,7 @@ impl Engine {
                 roots: &roots,
                 registry_fingerprint: &effective_fp,
                 trust_store: &self.trust_store,
+                host_env: &self.host_env,
             },
         )
     }

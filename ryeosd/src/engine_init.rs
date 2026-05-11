@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use ryeos_engine::boot_validation::{validate_boot, validate_protocol_builder};
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::engine::Engine;
+use ryeos_engine::runtime::HostEnvBindings;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
@@ -228,9 +229,34 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
         .with_trust_store(trust_store)
         .with_composers(composers)
         .with_protocols(protocol_registry)
-        .with_runtimes(runtimes);
+        .with_runtimes(runtimes)
+        .with_host_env(load_host_env_passthrough_allowlist()?);
 
     Ok(engine)
+}
+
+/// Parse `RYEOS_TOOL_ENV_PASSTHROUGH` (a comma-separated list of
+/// allowed host-env var names) once at startup and build a
+/// `HostEnvBindings`. Empty or unset is fine — the common case
+/// produces an empty allowlist.
+fn load_host_env_passthrough_allowlist() -> Result<HostEnvBindings> {
+    let raw = std::env::var("RYEOS_TOOL_ENV_PASSTHROUGH").unwrap_or_default();
+    let names: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let bindings = HostEnvBindings::from_allowlist(names).map_err(|e| {
+        anyhow::anyhow!("invalid RYEOS_TOOL_ENV_PASSTHROUGH configuration: {e}")
+    })?;
+    let allowed_names: Vec<&str> = bindings.allowed.iter().map(String::as_str).collect();
+    tracing::info!(
+        count = bindings.allowed.len(),
+        names = ?allowed_names,
+        "host env passthrough allowlist loaded"
+    );
+    Ok(bindings)
 }
 
 /// Walk every kind schema's terminator and verify that `Subprocess`
