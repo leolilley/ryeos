@@ -108,18 +108,20 @@ def _error_result(message: str, error_type: str) -> list[TextContent]:
 
 
 def _resolve_bin() -> str:
-    """Find the `rye` binary via RYE_BIN env var or PATH lookup."""
+    """Find the `ryeos` binary via RYE_BIN env var or PATH lookup."""
     explicit = os.environ.get("RYE_BIN")
     if explicit:
         return explicit
-    found = shutil.which("rye")
-    if not found:
-        raise RuntimeError(
-            "rye binary not found on PATH and RYE_BIN not set. "
-            "Build via `cargo build -p ryeos-cli --bin rye` and "
-            "set RYE_BIN, or install ryeos-cli."
-        )
-    return found
+    # Try new binary name first, then old name for backwards compat
+    for name in ("ryeos", "rye"):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise RuntimeError(
+        "ryeos binary not found on PATH and RYE_BIN not set. "
+        "Build via `cargo build --release -p ryeos-cli` and "
+        "set RYE_BIN, or add target/release/ to PATH."
+    )
 
 
 async def _run_rye(

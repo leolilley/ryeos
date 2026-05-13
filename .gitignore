@@ -74,7 +74,9 @@ logs/
 
 ## User AI spaces (these are user-specific, not part of the system)
 # System bundle .ai/ dirs are INCLUDED
-/.ai/
+# Project .ai/knowledge/ is INCLUDED (project documentation)
+/.ai/*
+!.ai/knowledge/
 */.ai/
 !ryeos/rye/.ai/
 !ryeos/bundles/core/ryeos_core/.ai/
