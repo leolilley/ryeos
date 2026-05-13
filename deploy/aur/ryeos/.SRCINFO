@@ -1,0 +1,16 @@
+pkgbase = ryeos
+	pkgdesc = Portable operating system for AI — persistent, signed workspace for LLMs
+	pkgver = 0.4.6
+	pkgrel = 1
+	url = https://github.com/leolilley/ryeos
+	arch = x86_64
+	license = MIT
+	makedepends = rust
+	makedepends = cargo
+	makedepends = cc
+	depends = gcc-libs
+	depends = glibc
+	source = ryeos-0.4.6.tar.gz::https://github.com/leolilley/ryeos/archive/refs/tags/v0.4.6.tar.gz
+	sha256sums = SKIP
+
+pkgname = ryeos

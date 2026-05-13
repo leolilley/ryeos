@@ -1,0 +1,25 @@
+# Maintainer: Leo Lilley <leo.lml.lilley@gmail.com>
+pkgname=ryeos-mcp
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="MCP server wrapper for ryeos — stdio bridge to the ryeos CLI"
+arch=('any')
+url="https://github.com/leolilley/ryeos"
+license=('MIT')
+
+depends=('python>=3.10' 'python-mcp' 'ryeos')
+makedepends=('python-build' 'python-installer' 'python-hatchling')
+
+source=("$pkgname-$pkgver.tar.gz::https://github.com/leolilley/ryeos/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "ryeos-${pkgver}/ryeosd-mcp"
+    python -m build --wheel --no-isolation
+}
+
+package() {
+    cd "ryeos-${pkgver}/ryeosd-mcp"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+    install -Dm644 ../LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,0 +1,72 @@
+# Maintainer: Leo Lilley <leo.lml.lilley@gmail.com>
+pkgname=ryeos
+pkgver=0.4.6
+pkgrel=1
+pkgdesc="Portable operating system for AI — persistent, signed workspace for LLMs"
+arch=('x86_64')
+url="https://github.com/leolilley/ryeos"
+license=('MIT')
+
+# SQLite is bundled (libsqlite3-sys), TLS via rustls — no runtime system deps
+depends=('gcc-libs' 'glibc')
+
+# cc needed for bundled libsqlite3-sys C compilation
+makedepends=('rust' 'cargo' 'cc')
+
+source=("$pkgname-$pkgver.tar.gz::https://github.com/leolilley/ryeos/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+# Uncomment once a GPG signing key is set up for release tags
+# validpgpkeys=('')
+
+build() {
+    cd "ryeos-${pkgver}"
+    cargo build --release --locked
+}
+
+check() {
+    cd "ryeos-${pkgver}"
+    cargo test --release --locked
+}
+
+package() {
+    cd "ryeos-${pkgver}"
+
+    # ── Primary user-facing binaries ────────────────────────
+    install -Dm755 target/release/ryeosd                "$pkgdir/usr/bin/ryeosd"
+    install -Dm755 target/release/ryeos                 "$pkgdir/usr/bin/ryeos"
+    install -Dm755 target/release/lillux                "$pkgdir/usr/bin/lillux"
+
+    # ── Core tools ──────────────────────────────────────────
+    install -Dm755 target/release/ryeos-core-tools      "$pkgdir/usr/bin/ryeos-core-tools"
+
+    # ── Runtime binaries (spawned by ryeosd) ────────────────
+    install -Dm755 target/release/ryeos-directive-runtime  "$pkgdir/usr/bin/ryeos-directive-runtime"
+    install -Dm755 target/release/ryeos-graph-runtime      "$pkgdir/usr/bin/ryeos-graph-runtime"
+    install -Dm755 target/release/ryeos-knowledge-runtime   "$pkgdir/usr/bin/ryeos-knowledge-runtime"
+
+    # ── Handler parser/composer binaries ────────────────────
+    install -Dm755 target/release/rye-parser-yaml-document         "$pkgdir/usr/bin/rye-parser-yaml-document"
+    install -Dm755 target/release/rye-parser-yaml-header-document  "$pkgdir/usr/bin/rye-parser-yaml-header-document"
+    install -Dm755 target/release/rye-parser-regex-kv              "$pkgdir/usr/bin/rye-parser-regex-kv"
+    install -Dm755 target/release/rye-composer-extends-chain        "$pkgdir/usr/bin/rye-composer-extends-chain"
+    install -Dm755 target/release/rye-composer-graph-permissions    "$pkgdir/usr/bin/rye-composer-graph-permissions"
+    install -Dm755 target/release/rye-composer-identity             "$pkgdir/usr/bin/rye-composer-identity"
+
+    # ── Bundle YAML data ────────────────────────────────────
+    # Ship the source YAML definitions; strip derivable artifacts
+    # (bin/, objects/, refs/, PUBLISHER_TRUST.toml) that are
+    # generated at runtime by `ryeos publish`.
+    for bundle in core standard; do
+        mkdir -p "$pkgdir/usr/share/ryeos/bundles/$bundle"
+        cp -ra "ryeos-bundles/$bundle/.ai" \
+               "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai"
+        rm -rf "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai/bin"
+        rm -rf "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai/objects"
+        rm -rf "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai/refs"
+        rm -f  "$pkgdir/usr/share/ryeos/bundles/$bundle/PUBLISHER_TRUST.toml"
+    done
+
+    # ── License ─────────────────────────────────────────────
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
