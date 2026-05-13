@@ -1010,6 +1010,20 @@ impl StateStore {
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     ) -> Result<()> {
         let g = self.lock()?;
+        // Defensive: skip attach if the thread was already finalized
+        // (e.g. cancelled while the runner was between spawn and attach).
+        if let Some(thread) = g.state_db.get_thread(thread_id)? {
+            if is_terminal_status(&thread.status) {
+                tracing::warn!(
+                    thread_id,
+                    status = %thread.status,
+                    pid,
+                    pgid,
+                    "skipping attach_process — thread already terminal"
+                );
+                return Ok(());
+            }
+        }
         g.runtime_db
             .attach_process(thread_id, pid, pgid, launch_metadata)
     }

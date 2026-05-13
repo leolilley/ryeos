@@ -515,32 +515,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Resolve the cancellation policy for a thread to a concrete daemon action.
-///
-/// - `Some(CancellationMode::Hard)` → SIGKILL only (no SIGTERM).
-/// - `Some(CancellationMode::Graceful { grace_secs })` → SIGTERM, wait
-///   `grace_secs`, then SIGKILL.
-/// - `None` → default 3s graceful (used when a tool did not declare
-///   `native_async`).
-fn resolve_shutdown_action(
-    mode: Option<ryeos_engine::contracts::CancellationMode>,
-) -> ShutdownAction {
-    use ryeos_engine::contracts::CancellationMode;
-    match mode {
-        Some(CancellationMode::Hard) => ShutdownAction::Hard,
-        Some(CancellationMode::Graceful { grace_secs }) => {
-            ShutdownAction::Graceful(std::time::Duration::from_secs(grace_secs))
-        }
-        None => ShutdownAction::Graceful(std::time::Duration::from_secs(3)),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShutdownAction {
-    Hard,
-    Graceful(std::time::Duration),
-}
-
 fn drain_running_threads(state: &AppState) {
     let threads = match state.state_store.list_threads_by_status(&["running"]) {
         Ok(threads) => threads,
@@ -556,19 +530,9 @@ fn drain_running_threads(state: &AppState) {
 
     tracing::info!(count = threads.len(), "draining running threads");
 
-    let daemon_pgid = process::daemon_pgid();
-
     for thread in &threads {
         if let Some(pgid) = thread.runtime.pgid {
-            if pgid == daemon_pgid {
-                tracing::debug!(
-                    thread_id = %thread.thread_id,
-                    pgid,
-                    "skipping thread — PGID matches daemon"
-                );
-                continue;
-            }
-            let action = resolve_shutdown_action(
+            let action = process::resolve_shutdown_action(
                 thread.runtime.launch_metadata.as_ref().and_then(
                     |lm| lm.cancellation_mode,
                 ),
@@ -579,12 +543,7 @@ fn drain_running_threads(state: &AppState) {
                 action = ?action,
                 "killing process group"
             );
-            let result = match action {
-                ShutdownAction::Hard => process::hard_kill_process_group(pgid),
-                ShutdownAction::Graceful(grace) => {
-                    process::kill_process_group(pgid, grace)
-                }
-            };
+            let result = process::kill_by_action(pgid, action);
             if !result.success {
                 tracing::warn!(
                     pgid,
@@ -812,7 +771,7 @@ async fn run_service_standalone(
 
 #[cfg(test)]
 mod shutdown_mapping_tests {
-    use super::{resolve_shutdown_action, ShutdownAction};
+    use crate::process::{resolve_shutdown_action, ShutdownAction};
     use ryeos_engine::contracts::CancellationMode;
     use std::time::Duration;
 

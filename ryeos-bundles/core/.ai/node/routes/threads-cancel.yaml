@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-12T10:40:01Z:5675c0924e28fb34a62f5ded824181036067c7021c355524aface1a1f61f11b2:I3si9Y/iLPUhgcGiw+E2d0ZzR6IHy4EiLgp7GkWjKNUT4utKPrY1hcdZwcVmNvt1zYFYKUCmS9D3lCYMS/OkDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: threads/cancel
+path: /threads/{thread_id}/cancel
+methods:
+  - POST
+auth: ryeos_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:threads/cancel
+  source_config:
+    thread_id: "${path.thread_id}"

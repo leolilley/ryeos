@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T15:33:32Z:c144fc62fd23aa76697fe276d7c6eca708596bb49f3202b4e2c8c8f8ee256642:Jbvp5RXM9eLNwo8FGw1xIisJcpPV7S4oFrnP3I8zG5MwwfQPlrOvdULSQDboDx/Zy+NUkecBmQlqlqpG9VauBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-12T10:40:01Z:c144fc62fd23aa76697fe276d7c6eca708596bb49f3202b4e2c8c8f8ee256642:Jbvp5RXM9eLNwo8FGw1xIisJcpPV7S4oFrnP3I8zG5MwwfQPlrOvdULSQDboDx/Zy+NUkecBmQlqlqpG9VauBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Markdown XML parser for directives.
 
 Handles extraction of XML from markdown code fences and parsing

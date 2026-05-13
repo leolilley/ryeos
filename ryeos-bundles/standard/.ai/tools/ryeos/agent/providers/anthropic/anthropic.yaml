@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T15:33:34Z:35fd34a9fc6a183d58630eddd6e75898d07ead74787967c0d01a28a7956f4d5f:I/V0HuXOQlpb2QsjU6cXPAmJeIOai/WNSpbCbDxgvDVx9EkdhutK0/P9NvcynaMy1CYkXbdI8vZ6Z33s87SYAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-12T10:40:02Z:35fd34a9fc6a183d58630eddd6e75898d07ead74787967c0d01a28a7956f4d5f:I/V0HuXOQlpb2QsjU6cXPAmJeIOai/WNSpbCbDxgvDVx9EkdhutK0/P9NvcynaMy1CYkXbdI8vZ6Z33s87SYAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/agent/providers/anthropic"
 tool_id: anthropic
 tool_type: http

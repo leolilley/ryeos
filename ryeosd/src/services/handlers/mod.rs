@@ -30,6 +30,7 @@ pub mod scheduler_register;
 pub mod scheduler_resume;
 pub mod scheduler_show_fires;
 pub mod system_status;
+pub mod threads_cancel;
 pub mod threads_chain;
 pub mod threads_children;
 pub mod threads_get;
@@ -44,6 +45,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     system_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
+    threads_cancel::DESCRIPTOR,
     threads_children::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
     events_replay::DESCRIPTOR,
