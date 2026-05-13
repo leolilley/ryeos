@@ -42,4 +42,4 @@ echo "[entrypoint] init complete, starting daemon"
 exec ryeosd \
   --init-if-missing \
   --system-space-dir /data/core \
-  --bind "0.0.0.0:${PORT:-8000}"
+  --bind "[::]:${PORT:-8000}"

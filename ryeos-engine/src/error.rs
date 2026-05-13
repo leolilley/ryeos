@@ -193,6 +193,15 @@ pub enum EngineError {
     #[error("runtime config uses reserved env key: {key}")]
     ReservedEnvKey { key: String },
 
+    #[error("host env passthrough ${{{var}}} not allowed by daemon policy (RYEOS_TOOL_ENV_PASSTHROUGH allowlist)")]
+    HostEnvPassthroughNotAllowed { var: String },
+
+    #[error("host env passthrough ${{{var}}} is allowed but {var} is unset in the daemon process env")]
+    HostEnvPassthroughMissing { var: String },
+
+    #[error("reserved host env passthrough ${{{var}}} is not allowed (RYEOS_* prefix is reserved)")]
+    ReservedHostEnvPassthrough { var: String },
+
     #[error("unknown executor alias `{alias}` for kind `{kind}`")]
     UnknownAlias { alias: String, kind: String },
 

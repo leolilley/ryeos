@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-12T10:40:00Z:0b021654d7abe3dc2696635e04e5863117b394be18b471d652cb154bc1668a09:qiEKzMVoKHzjgN/4UiuOV081Rs1V0bafcWdPpuojRlIc3+VySUZfd87a9NdHTvDPwAsl1XT34Nh/Fr/cjVQVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "health"
+name: "status"
+kind: service
+endpoint: health.status
+required_caps: []
+description: "Daemon health: liveness check and catalog status"

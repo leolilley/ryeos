@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use crate::adapter::parse_tool_arguments;
 use crate::directive::ToolSchema;
+use crate::provider_adapter::tools::required_cap_for;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DispatchKind {
@@ -61,7 +62,10 @@ impl Dispatcher {
             .find_tool(tool_name)
             .ok_or_else(|| format!("unknown tool: {}", tool_name))?;
 
-        let required_cap = format!("ryeos.execute.tool.{}", canonical_ref);
+        // Same cap shape as filter_tools_by_caps and the daemon
+        // enforcer; required_cap_for hard-fails on a missing kind
+        // prefix so we never silently disagree with the daemon.
+        let required_cap = required_cap_for(&canonical_ref);
         if !self.check_permission(&required_cap) {
             return Err(format!(
                 "permission denied: {} (no matching capability)",

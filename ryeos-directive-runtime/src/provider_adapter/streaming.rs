@@ -174,10 +174,25 @@ fn parse_event_typed(
                             if tool_call_state.contains_key("current_tool_id")
                                 && tool_call_state.contains_key("current_tool_name")
                             {
-                                tool_call_state
+                                let total_len = tool_call_state
                                     .entry("current_tool_args".to_string())
                                     .and_modify(|e| e.push_str(input))
-                                    .or_insert_with(|| input.to_string());
+                                    .or_insert_with(|| input.to_string())
+                                    .len();
+                                let id = tool_call_state
+                                    .get("current_tool_id")
+                                    .cloned()
+                                    .filter(|s| !s.is_empty());
+                                let name = tool_call_state
+                                    .get("current_tool_name")
+                                    .cloned()
+                                    .unwrap_or_default();
+                                events.push(StreamEvent::ToolUsePartial {
+                                    id,
+                                    name,
+                                    delta: input.to_string(),
+                                    total_len,
+                                });
                             }
                         }
                     }
@@ -775,6 +790,12 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
 
     let mut byte_stream = resp.bytes_stream();
     let mut buffer = String::new();
+    // Holds the trailing partial UTF-8 sequence carried over between
+    // SSE chunks. A single multi-byte char (emoji, CJK, etc.) can
+    // straddle chunk boundaries; keep the incomplete tail here so the
+    // next chunk completes it instead of failing the whole stream
+    // with `non-utf8 SSE chunk`.
+    let mut utf8_carry: Vec<u8> = Vec::new();
     let mut all_events: Vec<StreamEvent> = Vec::new();
     let mut accumulated_text = String::new();
     let mut accumulated_tools: Vec<ToolCall> = Vec::new();
@@ -813,9 +834,36 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         };
 
         let chunk: Bytes = chunk_res.map_err(|e| anyhow!("stream chunk error: {e}"))?;
-        let text = std::str::from_utf8(&chunk)
-            .map_err(|e| anyhow!("non-utf8 SSE chunk: {e}"))?;
-        buffer.push_str(text);
+        // Prepend any partial UTF-8 sequence carried from the previous
+        // chunk and decode the longest complete-UTF-8 prefix. The
+        // incomplete tail (if any) is stashed back in `utf8_carry`
+        // for the next iteration. This is the standard streaming
+        // decoder pattern; without it, any SSE chunk boundary that
+        // splits a multi-byte char (emoji, CJK punctuation, etc.)
+        // aborts the whole stream.
+        utf8_carry.extend_from_slice(&chunk);
+        let (decoded, tail_start) = match std::str::from_utf8(&utf8_carry) {
+            Ok(s) => (s.to_string(), utf8_carry.len()),
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                // Safe by construction: valid_up_to is the prefix the
+                // validator already accepted as well-formed UTF-8.
+                let prefix = unsafe {
+                    std::str::from_utf8_unchecked(&utf8_carry[..valid_up_to])
+                }
+                .to_string();
+                if let Some(invalid_len) = e.error_len() {
+                    // A genuinely invalid byte sequence (not just a
+                    // truncated multi-byte char) — fail loud.
+                    return Err(anyhow!(
+                        "non-utf8 SSE chunk: invalid byte sequence of length {invalid_len} at index {valid_up_to}"
+                    ));
+                }
+                (prefix, valid_up_to)
+            }
+        };
+        utf8_carry.drain(..tail_start);
+        buffer.push_str(&decoded);
 
         // Drain complete SSE event blocks (separated by blank line).
         loop {
@@ -892,6 +940,28 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                                 )
                             })?;
                     }
+                    StreamEvent::ToolUsePartial { id, name, delta, total_len } => {
+                        callback
+                            .append_event(
+                                "cognition_out",
+                                json!({
+                                    "turn": turn,
+                                    "tool_use_partial": {
+                                        "id": id,
+                                        "name": name,
+                                        "delta": delta,
+                                        "total_len": total_len,
+                                    },
+                                }),
+                            )
+                            .await
+                            .map_err(|e| {
+                                anyhow!(
+                                    "persistence-first violation: cognition_out \
+                                     tool_use_partial append failed mid-stream: {e}"
+                                )
+                            })?;
+                    }
                     StreamEvent::Finish { .. } => {}
                     StreamEvent::Usage(_) => {}
                     StreamEvent::Warning { .. } => {}
@@ -953,6 +1023,28 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                             anyhow!(
                                 "persistence-first violation: cognition_out tool_use \
                                  append failed at stream end: {e}"
+                            )
+                        })?;
+                }
+                StreamEvent::ToolUsePartial { id, name, delta, total_len } => {
+                    callback
+                        .append_event(
+                            "cognition_out",
+                            json!({
+                                "turn": turn,
+                                "tool_use_partial": {
+                                    "id": id,
+                                    "name": name,
+                                    "delta": delta,
+                                    "total_len": total_len,
+                                },
+                            }),
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow!(
+                                "persistence-first violation: cognition_out \
+                                 tool_use_partial append failed at stream end: {e}"
                             )
                         })?;
                 }

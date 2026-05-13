@@ -111,11 +111,17 @@ async fn post_to_daemon(
     system_space_dir: &std::path::Path,
     body: &Value,
 ) -> Result<Value, CliError> {
-    let bind = crate::transport::http::read_daemon_bind(system_space_dir).await?;
+    let daemon_url = crate::transport::http::resolve_daemon_url(system_space_dir).await?;
     let signer = crate::transport::signing::Signer::resolve(system_space_dir)?;
+
+    // Discover the daemon's principal_id for audience binding.
+    let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
+
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", "/execute", &body_bytes)?;
-    let payload = crate::transport::http::post_json(&bind, &headers, &body_bytes).await?;
+    let headers = signer.sign("POST", "/execute", &body_bytes, &audience)?;
+
+    let url = format!("{}/execute", daemon_url);
+    let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
 }
 

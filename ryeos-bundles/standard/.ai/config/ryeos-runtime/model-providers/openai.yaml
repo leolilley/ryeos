@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T13:13:21Z:1b6cf6fc0175c73a06c38598f594102bd354c1bde8a882c19fd9273eb2efba4b:sQcAXQSHaiuMeyhJjobsFj17zRv44c4aE6vQJjwmvlvHBq/yeOMw2TmW3cB93h/b9zcRGvnhc0ZfQvE9wzsqDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-12T10:40:02Z:1b6cf6fc0175c73a06c38598f594102bd354c1bde8a882c19fd9273eb2efba4b:sQcAXQSHaiuMeyhJjobsFj17zRv44c4aE6vQJjwmvlvHBq/yeOMw2TmW3cB93h/b9zcRGvnhc0ZfQvE9wzsqDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://api.openai.com/v1"

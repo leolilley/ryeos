@@ -209,7 +209,25 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         "vault X25519 keypair ready"
     );
 
-    // 7. Bootstrap self-trust: write verifying keys as trusted key docs
+    // 7. Authorize the USER key so the local CLI can authenticate to
+    // the local daemon. The CLI signs requests with the user key
+    // (the operator's persistent identity at ~/.ai/config/keys/signing/).
+    // The authorized-key TOML must be signed by the node key per
+    // auth::load_authorized_key().
+    let user_auth_entry = config.authorized_keys_dir.join(format!(
+        "{}.toml",
+        user_identity.fingerprint()
+    ));
+    if options.force || !user_auth_entry.exists() {
+        write_user_authorized(
+            &config.authorized_keys_dir,
+            &user_auth_entry,
+            &user_identity,
+            node_identity.signing_key(),
+        )?;
+    }
+
+    // 8. Bootstrap self-trust: write verifying keys as trusted key docs
     // (trust_dir computed above, before node-key regeneration)
 
     // Node key trust doc
@@ -279,6 +297,52 @@ pem = "ed25519:{key_b64}"
         path = %trust_entry.display(),
         fingerprint = %fingerprint,
         "wrote self-signed trust entry"
+    );
+
+    Ok(())
+}
+
+/// Write a node-signed authorized-key TOML for the user key so the CLI
+/// can authenticate to the local daemon.
+///
+/// The daemon's `auth::load_authorized_key()` requires authorized-key
+/// files to be signed by the node key. The subject is the user's
+/// verifying key (the CLI's identity).
+fn write_user_authorized(
+    _auth_dir: &Path,
+    entry_path: &Path,
+    user_identity: &NodeIdentity,
+    node_signing_key: &lillux::crypto::SigningKey,
+) -> Result<()> {
+    let fp = user_identity.fingerprint();
+    let vk = user_identity.verifying_key();
+    let key_b64 = base64::engine::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        vk.as_bytes(),
+    );
+
+    let body = format!(
+        r#"fingerprint = "{fp}"
+public_key = "ed25519:{key_b64}"
+scopes = ["*"]
+label = "bootstrap-authorized-user"
+"#
+    );
+
+    // Sign with the NODE key — auth::load_authorized_key verifies
+    // the signer fingerprint matches the daemon's own node identity.
+    let signed = lillux::signature::sign_content(&body, node_signing_key, "#", None);
+
+    let tmp = entry_path.with_extension("tmp");
+    fs::write(&tmp, signed.as_bytes())
+        .with_context(|| format!("failed to write authorized-key entry {}", entry_path.display()))?;
+    fs::rename(&tmp, entry_path)
+        .with_context(|| format!("failed to rename {} → {}", tmp.display(), entry_path.display()))?;
+
+    tracing::info!(
+        path = %entry_path.display(),
+        fingerprint = %fp,
+        "wrote node-signed authorized-key entry for user"
     );
 
     Ok(())

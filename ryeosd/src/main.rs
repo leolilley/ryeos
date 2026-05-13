@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use axum::routing::{get, post};
 use axum::{serve, Router};
 use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
@@ -17,7 +16,7 @@ use ryeosd::services::thread_lifecycle::ThreadLifecycleService;
 use ryeosd::state::AppState;
 use ryeosd::scheduler::db::SchedulerDb;
 use ryeosd::{
-    api, auth, bootstrap, execution, kind_profiles, process, reconcile, routes, scheduler, service_executor,
+    bootstrap, execution, kind_profiles, process, reconcile, routes, scheduler, service_executor,
     service_registry, services, state, state_lock, state_store, uds,
 };
 
@@ -355,11 +354,11 @@ async fn main() -> Result<()> {
     let (scheduler_reload_tx, scheduler_reload_rx) = tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
     app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
 
-    let app = build_router(app_state.clone())
-        .layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            auth::auth_middleware,
-        ));
+    // Auth is per-route via the dispatcher's auth_invoker chain.
+    // No global middleware layer — each route declares its own auth
+    // policy (auth: "none" for public, auth: "ryeos_signed" for
+    // authenticated). The fallback dispatcher handles everything.
+    let app = build_router(app_state.clone());
     let tcp_listener = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.bind))?;
@@ -511,32 +510,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Resolve the cancellation policy for a thread to a concrete daemon action.
-///
-/// - `Some(CancellationMode::Hard)` → SIGKILL only (no SIGTERM).
-/// - `Some(CancellationMode::Graceful { grace_secs })` → SIGTERM, wait
-///   `grace_secs`, then SIGKILL.
-/// - `None` → default 3s graceful (used when a tool did not declare
-///   `native_async`).
-fn resolve_shutdown_action(
-    mode: Option<ryeos_engine::contracts::CancellationMode>,
-) -> ShutdownAction {
-    use ryeos_engine::contracts::CancellationMode;
-    match mode {
-        Some(CancellationMode::Hard) => ShutdownAction::Hard,
-        Some(CancellationMode::Graceful { grace_secs }) => {
-            ShutdownAction::Graceful(std::time::Duration::from_secs(grace_secs))
-        }
-        None => ShutdownAction::Graceful(std::time::Duration::from_secs(3)),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShutdownAction {
-    Hard,
-    Graceful(std::time::Duration),
-}
-
 fn drain_running_threads(state: &AppState) {
     let threads = match state.state_store.list_threads_by_status(&["running"]) {
         Ok(threads) => threads,
@@ -552,19 +525,9 @@ fn drain_running_threads(state: &AppState) {
 
     tracing::info!(count = threads.len(), "draining running threads");
 
-    let daemon_pgid = process::daemon_pgid();
-
     for thread in &threads {
         if let Some(pgid) = thread.runtime.pgid {
-            if pgid == daemon_pgid {
-                tracing::debug!(
-                    thread_id = %thread.thread_id,
-                    pgid,
-                    "skipping thread — PGID matches daemon"
-                );
-                continue;
-            }
-            let action = resolve_shutdown_action(
+            let action = process::resolve_shutdown_action(
                 thread.runtime.launch_metadata.as_ref().and_then(
                     |lm| lm.cancellation_mode,
                 ),
@@ -575,12 +538,7 @@ fn drain_running_threads(state: &AppState) {
                 action = ?action,
                 "killing process group"
             );
-            let result = match action {
-                ShutdownAction::Hard => process::hard_kill_process_group(pgid),
-                ShutdownAction::Graceful(grace) => {
-                    process::kill_process_group(pgid, grace)
-                }
-            };
+            let result = process::kill_by_action(pgid, action);
             if !result.success {
                 tracing::warn!(
                     pgid,
@@ -594,9 +552,7 @@ fn drain_running_threads(state: &AppState) {
 
 fn build_router(state: AppState) -> Router {
     Router::new()
-        .route("/health", get(api::health::health))
-        .route("/execute", post(api::execute::execute))
-        .fallback(routes::dispatcher::custom_route_dispatcher)
+        .fallback(routes::dispatcher::route_dispatcher)
         .with_state(state)
 }
 
@@ -804,7 +760,7 @@ async fn run_service_standalone(
 
 #[cfg(test)]
 mod shutdown_mapping_tests {
-    use super::{resolve_shutdown_action, ShutdownAction};
+    use crate::process::{resolve_shutdown_action, ShutdownAction};
     use ryeos_engine::contracts::CancellationMode;
     use std::time::Duration;
 

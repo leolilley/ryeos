@@ -1,5 +1,4 @@
 // Public library interface for ryeosd
-pub mod api;
 pub mod auth;
 pub mod bootstrap;
 pub mod config;
@@ -17,7 +16,6 @@ pub mod launch_augmentations;
 pub mod launch_metadata;
 pub mod maintenance;
 pub mod node_config;
-pub mod policy;
 pub mod process;
 pub mod reconcile;
 pub mod routes;

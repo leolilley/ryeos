@@ -12,7 +12,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::EngineError;
-use crate::runtime::{expand_template, CompileContext, RuntimeHandler, RESERVED_ENV_PREFIX};
+use crate::runtime::{
+    expand_env_value, CompileContext, HostEnvBindings, RuntimeHandler, RESERVED_ENV_PREFIX,
+};
 
 pub const KEY: &str = "env_config";
 
@@ -179,25 +181,26 @@ impl RuntimeHandler for EnvConfigHandler {
         // `runtime_dir`, `interpreter`, etc. already populated, so
         // bundle YAMLs can write `{prepend: ["{tool_dir}",
         // "{runtime_dir}/lib"]}` directly.
-        apply_env_paths(&env_config.env_paths, &mut ctx.env, &ctx.template_ctx)?;
+        apply_env_paths(&env_config.env_paths, &mut ctx.env, &ctx.template_ctx, ctx.host_env)?;
 
         Ok(())
     }
 }
 
 /// Apply `env_paths` mutations: prepend/append templated values to
-/// the existing `VAR` (from `env`, falling back to the host env),
-/// deduplicating against entries already present.
+/// the existing `VAR` (from `env`, falling back to the host-env
+/// bindings), deduplicating against entries already present.
 fn apply_env_paths(
     mutations: &HashMap<String, EnvPathMutation>,
     env: &mut HashMap<String, String>,
     template_ctx: &crate::runtime::TemplateContext,
+    host_env: &HostEnvBindings,
 ) -> Result<(), EngineError> {
     for (var_name, mutation) in mutations {
         let existing = env
             .get(var_name)
             .cloned()
-            .or_else(|| std::env::var(var_name).ok())
+            .or_else(|| host_env.values.get(var_name).cloned())
             .unwrap_or_default();
         let mut parts: Vec<String> = if existing.is_empty() {
             Vec::new()
@@ -209,14 +212,14 @@ fn apply_env_paths(
         // Reverse so the first listed prepend ends up at index 0
         // (matches Python `for path in reversed(prepend): parts.insert(0, ...)`).
         for tmpl in mutation.prepend.iter().rev() {
-            let resolved = expand_template(tmpl, template_ctx)?;
+            let resolved = expand_env_value(tmpl, template_ctx, host_env)?;
             if resolved.is_empty() || parts.iter().any(|p| p == &resolved) {
                 continue;
             }
             parts.insert(0, resolved);
         }
         for tmpl in &mutation.append {
-            let resolved = expand_template(tmpl, template_ctx)?;
+            let resolved = expand_env_value(tmpl, template_ctx, host_env)?;
             if resolved.is_empty() || parts.iter().any(|p| p == &resolved) {
                 continue;
             }

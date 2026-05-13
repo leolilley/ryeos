@@ -376,7 +376,7 @@ mod tests {
     use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
     use crate::kind_registry::KindRegistry;
     use crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors;
-    use crate::runtime::{ChainIntermediate, SpecOverrides, TemplateContext};
+    use crate::runtime::{ChainIntermediate, HostEnvBindings, SpecOverrides, TemplateContext};
     use crate::trust::TrustStore;
     use lillux::crypto::SigningKey;
     use serde_json::json;
@@ -522,6 +522,8 @@ metadata:
 
     /// Helper to build a CompileContext over a synthetic chain.
     static NULL_PARAMS: Value = Value::Null;
+    static EMPTY_HOST_ENV: std::sync::LazyLock<HostEnvBindings> =
+        std::sync::LazyLock::new(HostEnvBindings::default);
 
     fn run_handler(
         rig: &TestRig,
@@ -544,6 +546,7 @@ metadata:
             trust_store: &rig.trust,
             project_root: None,
             root_trust_class: crate::resolution::TrustClass::TrustedSystem,
+            host_env: &EMPTY_HOST_ENV,
         };
         ConfigResolveHandler.apply(&block, &mut ctx)?;
         Ok(ctx.params)

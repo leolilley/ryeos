@@ -506,4 +506,135 @@ mod integration_tests {
         let root_after = store.get_thread("T-e2e").expect("get_thread after").expect("thread exists after");
         assert_eq!(root_after.status, "completed", "status should be recovered");
     }
+
+    // ── Cancel / attach_process status guard tests ────────────────
+
+    #[test]
+    fn attach_process_skips_terminal_thread() {
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-skip-attach", "T-skip-attach", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store.mark_thread_running("T-skip-attach", None).expect("mark running");
+
+        // Finalize as cancelled.
+        let finalize = FinalizeThreadRecord {
+            status: "cancelled".to_string(),
+            outcome_code: Some("cancelled".to_string()),
+            result_json: None,
+            error_json: None,
+            artifacts: vec![],
+            final_cost: None,
+        };
+        store.finalize_thread("T-skip-attach", &finalize).expect("finalize");
+
+        // attach_thread_process should succeed but NOT write stale PGID.
+        store
+            .attach_thread_process(
+                "T-skip-attach",
+                99999,
+                99999,
+                &ryeosd::launch_metadata::RuntimeLaunchMetadata::default(),
+            )
+            .expect("attach_process on terminal thread should succeed (no-op)");
+
+        // Verify PGID was NOT written — the thread is terminal, attach
+        // should have been skipped.
+        let detail = store.get_thread("T-skip-attach")
+            .expect("get_thread")
+            .expect("thread exists");
+        assert_eq!(detail.status, "cancelled");
+        // runtime.pgid should still be None (never attached before finalize).
+        assert!(detail.runtime.pgid.is_none(),
+            "PGID should be None on a terminal thread that was never attached, got: {:?}",
+            detail.runtime.pgid);
+    }
+
+    #[test]
+    fn finalize_as_cancelled_works() {
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-cancel-1", "T-cancel-1", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store.mark_thread_running("T-cancel-1", None).expect("mark running");
+
+        let finalize = FinalizeThreadRecord {
+            status: "cancelled".to_string(),
+            outcome_code: Some("cancelled".to_string()),
+            result_json: None,
+            error_json: Some(serde_json::json!({"reason": "test_cancel"})),
+            artifacts: vec![],
+            final_cost: None,
+        };
+
+        let persisted = store.finalize_thread("T-cancel-1", &finalize).expect("finalize");
+        assert!(!persisted.is_empty());
+
+        // The terminal event should be thread_cancelled.
+        let terminal_events: Vec<_> = persisted.iter()
+            .filter(|e| e.event_type == "thread_cancelled")
+            .collect();
+        assert_eq!(terminal_events.len(), 1, "should have one thread_cancelled event");
+
+        let detail = store.get_thread("T-cancel-1").expect("get_thread").expect("exists");
+        assert_eq!(detail.status, "cancelled");
+    }
+
+    #[test]
+    fn finalize_as_cancelled_rejects_already_terminal() {
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-double", "T-double", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store.mark_thread_running("T-double", None).expect("mark running");
+
+        let finalize = FinalizeThreadRecord {
+            status: "completed".to_string(),
+            outcome_code: Some("success".to_string()),
+            result_json: None,
+            error_json: None,
+            artifacts: vec![],
+            final_cost: None,
+        };
+        store.finalize_thread("T-double", &finalize).expect("first finalize");
+
+        // Second finalize should fail.
+        let cancel_finalize = FinalizeThreadRecord {
+            status: "cancelled".to_string(),
+            outcome_code: Some("cancelled".to_string()),
+            result_json: None,
+            error_json: None,
+            artifacts: vec![],
+            final_cost: None,
+        };
+        let err = store.finalize_thread("T-double", &cancel_finalize).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid status transition"), "got: {msg}");
+    }
+
+    #[test]
+    fn cancel_created_thread_without_pgid() {
+        // A thread in "created" status (never started) can be finalized
+        // as cancelled — no PGID needed.
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-created-cancel", "T-created-cancel", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        // Don't mark running — stays in "created".
+
+        let finalize = FinalizeThreadRecord {
+            status: "cancelled".to_string(),
+            outcome_code: Some("cancelled".to_string()),
+            result_json: None,
+            error_json: None,
+            artifacts: vec![],
+            final_cost: None,
+        };
+
+        let persisted = store.finalize_thread("T-created-cancel", &finalize).expect("finalize created");
+        assert!(!persisted.is_empty());
+
+        let detail = store.get_thread("T-created-cancel").expect("get").expect("exists");
+        assert_eq!(detail.status, "cancelled");
+    }
 }

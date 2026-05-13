@@ -1,4 +1,5 @@
 pub mod event_stream_mode;
+pub mod execute_mode;
 pub mod json_mode;
 pub mod launch_mode;
 pub mod static_mode;
@@ -43,6 +44,7 @@ impl ResponseModeRegistry {
         r.register(Arc::new(event_stream_mode::EventStreamMode));
         r.register(Arc::new(launch_mode::LaunchMode::default()));
         r.register(Arc::new(json_mode::JsonMode));
+        r.register(Arc::new(execute_mode::ExecuteMode));
         // "accepted" is an alias for "launch" — both compile to CompiledLaunchInvocation.
         r.register(Arc::new(launch_mode::LaunchMode::with_key("accepted")));
         r

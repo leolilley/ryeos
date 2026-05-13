@@ -13,7 +13,7 @@ use crate::routes::invocation::{
 use crate::routes::limits::RouteLimiter;
 use crate::state::AppState;
 
-pub async fn custom_route_dispatcher(
+pub async fn route_dispatcher(
     State(state): State<AppState>,
     request: Request,
 ) -> Response {

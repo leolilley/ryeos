@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-10T13:13:21Z:2e8e11bcd7623bb1091882483d7f6d721743edc3f3f4d4d7d9da4377ef47d14a:cRwn68el96+hnPhLZSlXcG+fJHvZY7I3a8lRvead5kcEihxYD/s3AtJfGKsEuoTeAB1aG8ZgOgNdvs1vLSnGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-12T10:40:02Z:2e8e11bcd7623bb1091882483d7f6d721743edc3f3f4d4d7d9da4377ef47d14a:cRwn68el96+hnPhLZSlXcG+fJHvZY7I3a8lRvead5kcEihxYD/s3AtJfGKsEuoTeAB1aG8ZgOgNdvs1vLSnGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: anthropic_messages
 base_url: "https://api.anthropic.com/v1/messages"

@@ -80,6 +80,49 @@ pub struct KillResult {
     pub method: &'static str,
 }
 
+/// Policy for shutting down a thread's process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownAction {
+    /// SIGKILL immediately — no SIGTERM, no grace period.
+    Hard,
+    /// SIGTERM first, then SIGKILL after `grace` if the group survives.
+    Graceful(std::time::Duration),
+}
+
+/// Map a tool-declared `CancellationMode` to a `ShutdownAction`.
+///
+/// - `Some(Hard)` → SIGKILL only.
+/// - `Some(Graceful { grace_secs })` → SIGTERM, wait, then SIGKILL.
+/// - `None` → default 3-second graceful.
+pub fn resolve_shutdown_action(
+    mode: Option<ryeos_engine::contracts::CancellationMode>,
+) -> ShutdownAction {
+    use ryeos_engine::contracts::CancellationMode;
+    match mode {
+        Some(CancellationMode::Hard) => ShutdownAction::Hard,
+        Some(CancellationMode::Graceful { grace_secs }) => {
+            ShutdownAction::Graceful(std::time::Duration::from_secs(grace_secs))
+        }
+        None => ShutdownAction::Graceful(std::time::Duration::from_secs(3)),
+    }
+}
+
+/// Kill a process group according to the given shutdown action.
+///
+/// Skips if `pgid` matches the daemon's own PGID (would suicide).
+pub fn kill_by_action(pgid: i64, action: ShutdownAction) -> KillResult {
+    if pgid == daemon_pgid() {
+        return KillResult {
+            success: false,
+            method: "skipped_daemon_pgid",
+        };
+    }
+    match action {
+        ShutdownAction::Hard => hard_kill_process_group(pgid),
+        ShutdownAction::Graceful(grace) => kill_process_group(pgid, grace),
+    }
+}
+
 /// SIGKILL the entire process group immediately — no SIGTERM, no grace.
 ///
 /// Distinct from `kill_process_group(_, Duration::ZERO)` because the

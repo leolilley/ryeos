@@ -5,14 +5,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
-use axum::body::Body;
-use axum::extract::State;
-use axum::http::{Request, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
-use serde_json::json;
 
 use crate::identity::NodeIdentity;
 use crate::state::AppState;
@@ -354,62 +348,10 @@ pub(crate) fn verify_request(state: &AppState, method: &str, uri: &axum::http::U
 }
 
 // ---------------------------------------------------------------------------
-// Axum middleware
+// Auth middleware was deleted in v0.4.0.
+// All auth now happens per-route inside the dispatcher's auth_invoker chain.
+// verify_request() is still used by CompiledRyeosSignedVerifier.
 // ---------------------------------------------------------------------------
-
-pub async fn auth_middleware(
-    State(state): State<AppState>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    let path = request.uri().path();
-
-    // Skip auth for public endpoints
-    if matches!(path, "/health" | "/status" | "/public-key") {
-        return next.run(request).await;
-    }
-
-    // Skip if auth not required
-    if !state.config.require_auth {
-        return next.run(request).await;
-    }
-
-    // Extract parts we need before consuming the body
-    let method = request.method().to_string();
-    let uri = request.uri().clone();
-    let headers = request.headers().clone();
-
-    // Collect the body bytes
-    let (parts, body) = request.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                axum::Json(json!({ "error": "request body too large" })),
-            )
-                .into_response();
-        }
-    };
-
-    match verify_request(&state, &method, &uri, &headers, &body_bytes) {
-        Ok(principal) => {
-            tracing::debug!(
-                fingerprint = %principal.fingerprint,
-                owner = %principal.owner,
-                "authenticated request"
-            );
-            let mut request = Request::from_parts(parts, Body::from(body_bytes));
-            request.extensions_mut().insert(principal);
-            next.run(request).await
-        }
-        Err(msg) => (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(json!({ "error": msg })),
-        )
-            .into_response(),
-    }
-}
 
 #[cfg(test)]
 mod tests {

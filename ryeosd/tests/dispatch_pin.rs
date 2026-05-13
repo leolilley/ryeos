@@ -22,7 +22,9 @@ mod common;
 
 use std::path::Path;
 
+use base64::Engine;
 use common::DaemonHarness;
+use lillux::crypto::Signer as _;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -142,12 +144,42 @@ async fn post_execute_with_extras(
             obj.insert(k.clone(), v.clone());
         }
     }
-    let resp = reqwest::Client::new()
+    let body_bytes = serde_json::to_vec(&body).expect("serialize body");
+
+    let mut req = reqwest::Client::new()
         .post(format!("http://{}/execute", h.bind))
-        .json(&body)
-        .send()
-        .await
-        .expect("post /execute");
+        .header("content-type", "application/json")
+        .body(body_bytes.clone());
+
+    // Sign with the fast fixture keys if available.
+    if let (Some(user_key), Some(node_key)) = (&h.user_key, &h.node_key) {
+        use common::fast_fixture;
+        let fp = lillux::signature::compute_fingerprint(&user_key.verifying_key());
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+        let nonce = format!("{:016x}", rand::random::<u64>());
+        let audience = format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&node_key.verifying_key())
+        );
+        let body_hash = lillux::cas::sha256_hex(&body_bytes);
+        let string_to_sign = format!(
+            "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+            "POST", "/execute", body_hash, timestamp, nonce, audience,
+        );
+        let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
+        let sig: lillux::crypto::Signature = user_key.sign(content_hash.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+        req = req.header("x-ryeos-key-id", format!("fp:{fp}"));
+        req = req.header("x-ryeos-timestamp", &timestamp);
+        req = req.header("x-ryeos-nonce", &nonce);
+        req = req.header("x-ryeos-signature", &sig_b64);
+    }
+
+    let resp = req.send().await.expect("post /execute");
     let status = resp.status();
     let value = resp.json().await.unwrap_or(serde_json::json!({}));
     (status, value)
@@ -195,9 +227,12 @@ sys.exit(0)
 async fn native_synth_request(
     extras: serde_json::Value,
 ) -> (reqwest::StatusCode, serde_json::Value) {
-    let h = DaemonHarness::start_with_pre_init(install_pin_runtime, |_| {})
-        .await
-        .expect("start daemon with pin runtime");
+    let (h, _fixture) = DaemonHarness::start_fast_with(
+        |state_path, user_space, _fixture| install_pin_runtime(state_path, user_space),
+        |_| {},
+    )
+    .await
+    .expect("start daemon with pin runtime");
     let project = tempfile::tempdir().expect("project tempdir");
     let (status, value) = post_execute_with_extras(
         &h,
@@ -221,7 +256,7 @@ async fn native_synth_request(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_service_validate_only() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = post_execute_with_extras(
         &h,
         "service:bundle/list",
@@ -355,7 +390,7 @@ async fn pin_native_runtime_with_pushed_head() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_service_over_tcp_succeeds() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
         .post_execute("service:bundle/list", ".", serde_json::json!({}))
         .await
@@ -432,7 +467,7 @@ async fn pin_service_over_tcp_succeeds() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_subprocess_via_unified_dispatch_succeeds_for_tool_ref() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body, _project) = synth_tool_request(&h).await;
     assert_eq!(
         status,
@@ -464,7 +499,7 @@ async fn pin_subprocess_via_unified_dispatch_succeeds_for_tool_ref() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_tool_over_tcp_succeeds() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body, _project) = synth_tool_request(&h).await;
     assert_eq!(
         status,
