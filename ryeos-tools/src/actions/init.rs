@@ -49,7 +49,7 @@ use lillux::crypto::{
     DecodePrivateKey, EncodePrivateKey, SigningKey, VerifyingKey,
 };
 use rand::rngs::OsRng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
 
@@ -205,6 +205,10 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         bundles = ?discovered.iter().map(|(n, _)| n).collect::<Vec<_>>(),
         "discovered bundles"
     );
+
+    // ── 6b. Validate bundle manifest dependencies ──
+    validate_manifest_dependencies(&discovered)
+        .context("bundle manifest dependency check")?;
 
     // ── 7. Install each bundle (atomic stage → swap) ──
     let mut bundles_installed = Vec::new();
@@ -390,6 +394,109 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
     }
     name.chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+// ── Bundle manifest ──────────────────────────────────────────────────
+
+/// Bundle manifest parsed from `<bundle_root>/manifest.yaml`.
+///
+/// Optional file at the root of a bundle (next to `.ai/` and
+/// `PUBLISHER_TRUST.toml`) declaring what engine kinds the bundle
+/// provides and requires.
+///
+/// The manifest is informational — bundles without one still install and
+/// function. When present, init validates that the union of all installed
+/// bundles' `provides_kinds` covers every bundle's `requires_kinds`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleManifest {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub provides_kinds: Vec<String>,
+    #[serde(default)]
+    pub requires_kinds: Vec<String>,
+}
+
+/// Parse a `manifest.yaml` from a bundle source directory.
+///
+/// Looks for `<source>/manifest.yaml`. Returns `None` if the file doesn't
+/// exist (manifests are optional). Returns an error if the file exists but
+/// is malformed.
+pub fn parse_manifest(source: &Path) -> Result<Option<BundleManifest>> {
+    let path = source.join("manifest.yaml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("read manifest {}", path.display()))?;
+    let manifest: BundleManifest = serde_yaml::from_str(&content)
+        .with_context(|| format!("parse manifest {}", path.display()))?;
+    Ok(Some(manifest))
+}
+
+/// Validate that the discovered bundles' kind dependencies are satisfiable.
+///
+/// For every bundle that declares `requires_kinds`, each required kind must
+/// appear in at least one other (or the same) bundle's `provides_kinds`.
+///
+/// Returns `Ok(())` if all dependencies are satisfied, or an error listing
+/// the unsatisfied kinds and which bundles need them.
+fn validate_manifest_dependencies(
+    bundles: &[(String, PathBuf)],
+) -> Result<()> {
+    // Collect manifests
+    let mut manifests: Vec<(String, Option<BundleManifest>)> = Vec::new();
+    for (name, path) in bundles {
+        let mf = parse_manifest(path)
+            .with_context(|| format!("parse manifest for bundle {}", name))?;
+        manifests.push((name.clone(), mf));
+    }
+
+    // Union of all provides_kinds
+    let mut all_provides: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for (_, mf) in &manifests {
+        if let Some(m) = mf {
+            for k in &m.provides_kinds {
+                all_provides.insert(k.clone());
+            }
+        }
+    }
+
+    // Check every requires_kinds is covered
+    let mut missing: Vec<(String, Vec<String>)> = Vec::new(); // (bundle_name, missing_kinds)
+    for (name, mf) in &manifests {
+        let Some(m) = mf else { continue };
+        let mut unsatisfied: Vec<String> = Vec::new();
+        for req in &m.requires_kinds {
+            if !all_provides.contains(req) {
+                unsatisfied.push(req.clone());
+            }
+        }
+        if !unsatisfied.is_empty() {
+            missing.push((name.clone(), unsatisfied));
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = "bundle dependency check failed:\n".to_string();
+    for (name, kinds) in &missing {
+        msg.push_str(&format!(
+            "  bundle '{}' requires kinds not provided by any bundle: {}\n",
+            name,
+            kinds.join(", ")
+        ));
+    }
+    msg.push_str(&format!(
+        "\n  all provided kinds across bundles: {}",
+        all_provides.iter().cloned().collect::<Vec<_>>().join(", ")
+    ));
+    bail!("{}", msg)
 }
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
@@ -959,6 +1066,161 @@ mod tests {
         assert!(!is_valid_bundle_name("UPPER"));
         assert!(!is_valid_bundle_name("has space"));
         assert!(!is_valid_bundle_name(&"x".repeat(65)));
+    }
+
+    // ── Manifest tests ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_manifest_reads_core() {
+        let mf = parse_manifest(&workspace_root().join("ryeos-bundles/core"))
+            .expect("parse core manifest")
+            .expect("core has a manifest");
+        assert_eq!(mf.name, "core");
+        assert_eq!(mf.version, "0.5.0");
+        assert!(!mf.provides_kinds.is_empty());
+        assert!(mf.provides_kinds.contains(&"config".to_string()));
+        assert!(mf.provides_kinds.contains(&"handler".to_string()));
+        assert!(mf.provides_kinds.contains(&"parser".to_string()));
+        assert!(mf.provides_kinds.contains(&"runtime".to_string()));
+        assert!(mf.provides_kinds.contains(&"service".to_string()));
+        assert!(mf.provides_kinds.contains(&"tool".to_string()));
+        assert!(mf.requires_kinds.is_empty(), "core should have no requires");
+    }
+
+    #[test]
+    fn parse_manifest_reads_standard() {
+        let mf = parse_manifest(&workspace_root().join("ryeos-bundles/standard"))
+            .expect("parse standard manifest")
+            .expect("standard has a manifest");
+        assert_eq!(mf.name, "standard");
+        assert!(mf.provides_kinds.contains(&"directive".to_string()));
+        assert!(mf.provides_kinds.contains(&"graph".to_string()));
+        assert!(mf.provides_kinds.contains(&"knowledge".to_string()));
+        assert!(
+            mf.requires_kinds.contains(&"config".to_string()),
+            "standard requires config from core"
+        );
+        assert!(
+            mf.requires_kinds.contains(&"handler".to_string()),
+            "standard requires handler from core"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("no-manifest");
+        fs::create_dir_all(bundle.join(".ai")).unwrap();
+        assert!(parse_manifest(&bundle).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_manifest_rejects_invalid_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bad-manifest");
+        fs::create_dir_all(bundle.join(".ai")).unwrap();
+        fs::write(bundle.join("manifest.yaml"), "not: [valid\nyaml").unwrap();
+        assert!(parse_manifest(&bundle).is_err());
+    }
+
+    #[test]
+    fn validate_dependencies_core_and_standard_ok() {
+        let bundles = discover_bundles(&workspace_root().join("ryeos-bundles")).unwrap();
+        assert!(
+            validate_manifest_dependencies(&bundles).is_ok(),
+            "core + standard should satisfy all dependencies"
+        );
+    }
+
+    #[test]
+    fn validate_dependencies_fails_with_missing_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a bundle that requires "magic" kind — nothing provides it
+        let needy = tmp.path().join("needy");
+        fs::create_dir_all(needy.join(".ai")).unwrap();
+        fs::write(
+            needy.join("manifest.yaml"),
+            "name: needy\nversion: '1.0'\nrequires_kinds:\n  - magic\nprovides_kinds: []\n",
+        )
+        .unwrap();
+
+        let bundles = vec![("needy".to_string(), needy)];
+        let err = validate_manifest_dependencies(&bundles).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("magic"),
+            "error should mention missing kind 'magic': {msg}"
+        );
+        assert!(
+            msg.contains("needy"),
+            "error should mention bundle 'needy': {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_dependencies_skips_bundles_without_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No manifest.yaml — should be fine
+        let bare = tmp.path().join("bare");
+        fs::create_dir_all(bare.join(".ai")).unwrap();
+
+        let bundles = vec![("bare".to_string(), bare)];
+        assert!(
+            validate_manifest_dependencies(&bundles).is_ok(),
+            "bundles without manifests should pass"
+        );
+    }
+
+    #[test]
+    fn validate_dependencies_self_provide_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Bundle provides and requires the same kind — self-sufficient
+        let selfish = tmp.path().join("selfish");
+        fs::create_dir_all(selfish.join(".ai")).unwrap();
+        fs::write(
+            selfish.join("manifest.yaml"),
+            "name: selfish\nversion: '1.0'\nprovides_kinds:\n  - foo\nrequires_kinds:\n  - foo\n",
+        )
+        .unwrap();
+
+        let bundles = vec![("selfish".to_string(), selfish)];
+        assert!(
+            validate_manifest_dependencies(&bundles).is_ok(),
+            "self-providing bundle should pass"
+        );
+    }
+
+    #[test]
+    fn validate_dependencies_cross_bundle_satisfies() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Provider bundle
+        let provider = tmp.path().join("provider");
+        fs::create_dir_all(provider.join(".ai")).unwrap();
+        fs::write(
+            provider.join("manifest.yaml"),
+            "name: provider\nversion: '1.0'\nprovides_kinds:\n  - alpha\nrequires_kinds: []\n",
+        )
+        .unwrap();
+
+        // Consumer bundle
+        let consumer = tmp.path().join("consumer");
+        fs::create_dir_all(consumer.join(".ai")).unwrap();
+        fs::write(
+            consumer.join("manifest.yaml"),
+            "name: consumer\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds:\n  - alpha\n",
+        )
+        .unwrap();
+
+        let bundles = vec![
+            ("consumer".to_string(), consumer),
+            ("provider".to_string(), provider),
+        ];
+        assert!(
+            validate_manifest_dependencies(&bundles).is_ok(),
+            "cross-bundle dependency should be satisfied"
+        );
     }
 
     fn workspace_root() -> PathBuf {
