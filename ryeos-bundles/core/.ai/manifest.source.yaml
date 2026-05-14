@@ -1,14 +1,4 @@
 name: core
 version: "0.5.0"
 description: "Engine foundation: kind schemas, handlers, parsers, services, tools"
-provides_kinds:
-  - config
-  - handler
-  - node
-  - parser
-  - protocol
-  - runtime
-  - service
-  - streaming_tool
-  - tool
 requires_kinds: []

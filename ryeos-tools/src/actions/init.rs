@@ -396,17 +396,37 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-// ── Bundle manifest ──────────────────────────────────────────────────
+// ── Bundle manifest (v2: generated + signed) ───────────────────────
 
-/// Bundle manifest parsed from `<bundle_root>/manifest.yaml`.
+/// Hand-authored manifest source, written by bundle authors.
 ///
-/// Optional file at the root of a bundle (next to `.ai/` and
-/// `PUBLISHER_TRUST.toml`) declaring what engine kinds the bundle
-/// provides and requires.
+/// Located at `<bundle>/.ai/manifest.source.yaml`. Contains only fields
+/// that humans must provide — the system derives `provides_kinds` from
+/// actual kind schemas on disk.
 ///
-/// The manifest is informational — bundles without one still install and
-/// function. When present, init validates that the union of all installed
-/// bundles' `provides_kinds` covers every bundle's `requires_kinds`.
+/// The publish pipeline reads this, derives provides_kinds, and generates
+/// the final signed `.ai/manifest.yaml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleManifestSource {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub requires_kinds: Vec<String>,
+    // NO provides_kinds — derived from actual content by the system.
+}
+
+/// Generated bundle manifest, produced by the publish pipeline.
+///
+/// Located at `<bundle>/.ai/manifest.yaml` (signed with `# ryeos:signed:...`).
+/// `provides_kinds` is auto-derived from kind schemas present in
+/// `.ai/node/engine/kinds/`. The full manifest is signed by the publisher
+/// and verified during preflight.
+///
+/// Bundles without a manifest (no `manifest.source.yaml`) still install
+/// and function — they're treated as providing/requiring nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifest {
@@ -414,38 +434,112 @@ pub struct BundleManifest {
     pub version: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
     pub provides_kinds: Vec<String>,
     #[serde(default)]
     pub requires_kinds: Vec<String>,
 }
 
-/// Parse a `manifest.yaml` from a bundle source directory.
+/// Derive `provides_kinds` from actual kind schemas on disk.
 ///
-/// Looks for `<source>/manifest.yaml`. Returns `None` if the file doesn't
-/// exist (manifests are optional). Returns an error if the file exists but
-/// is malformed, or if `manifest.name` doesn't match `expected_name`.
-pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<BundleManifest>> {
-    let path = source.join("manifest.yaml");
-    if !path.exists() {
-        return Ok(None);
+/// Scans `<ai_dir>/node/engine/kinds/<name>/<name>.kind-schema.yaml`.
+/// If the schema file exists, the kind is provided. Returns sorted, deduped.
+pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
+    let kinds_dir = ai_dir.join("node").join("engine").join("kinds");
+    if !kinds_dir.is_dir() {
+        return Ok(Vec::new());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("read manifest {}", path.display()))?;
-    let manifest: BundleManifest = serde_yaml::from_str(&content)
-        .with_context(|| format!("parse manifest {}", path.display()))?;
+    let mut kinds: Vec<String> = Vec::new();
+    for entry in fs::read_dir(&kinds_dir)
+        .with_context(|| format!("read kinds dir {}", kinds_dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let schema = kinds_dir.join(&name).join(format!("{name}.kind-schema.yaml"));
+        if schema.exists() {
+            kinds.push(name);
+        }
+    }
+    kinds.sort();
+    kinds.dedup();
+    Ok(kinds)
+}
 
-    // Validate identity: manifest name must match directory name.
-    if manifest.name != expected_name {
+/// Materialize a full `BundleManifest` from a source + actual content.
+///
+/// Validates identity (name matches expected) and derives `provides_kinds`
+/// from kind schemas on disk. Used by both publish pipeline and dev-mode
+/// fallback — ensures `provides_kinds` is always derived, never defaulted.
+pub fn materialize_manifest(
+    source: BundleManifestSource,
+    ai_dir: &Path,
+    expected_name: &str,
+) -> Result<BundleManifest> {
+    if source.name != expected_name {
         bail!(
-            "manifest identity mismatch: bundle directory is '{}' but manifest.name is '{}' — \
-             update manifest.name to match the directory name",
-            expected_name,
-            manifest.name
+            "manifest identity mismatch: source.name is '{}' but expected '{}' — \
+             update manifest.source.yaml name to match the directory",
+            source.name,
+            expected_name
         );
     }
+    let provides_kinds = derive_provides_kinds(ai_dir)?;
+    Ok(BundleManifest {
+        name: source.name,
+        version: source.version,
+        description: source.description,
+        provides_kinds,
+        requires_kinds: source.requires_kinds,
+    })
+}
 
-    Ok(Some(manifest))
+/// Parse a bundle manifest from a source directory.
+///
+/// Tries in order:
+/// 1. `.ai/manifest.yaml` — generated + signed (from publish pipeline).
+///    Strips signature header, parses body.
+/// 2. `.ai/manifest.source.yaml` — hand-authored source (dev mode).
+///    Parses source, materializes provides_kinds from actual content.
+/// 3. Neither exists — returns `None` (manifests are optional).
+///
+/// In all cases, validates identity (`name` matches `expected_name`).
+pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<BundleManifest>> {
+    let ai_dir = source.join(".ai");
+
+    // 1. Try generated + signed manifest (published mode)
+    let manifest_path = ai_dir.join("manifest.yaml");
+    if manifest_path.exists() {
+        let raw = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+        let body = lillux::signature::strip_signature_lines(&raw);
+        let manifest: BundleManifest = serde_yaml::from_str(&body)
+            .with_context(|| format!("parse manifest {}", manifest_path.display()))?;
+        if manifest.name != expected_name {
+            bail!(
+                "manifest identity mismatch: manifest.yaml name is '{}' but expected '{}' — \
+                 regenerate the manifest",
+                manifest.name,
+                expected_name
+            );
+        }
+        return Ok(Some(manifest));
+    }
+
+    // 2. Fallback: dev mode — materialize from source + actual content
+    let source_path = ai_dir.join("manifest.source.yaml");
+    if source_path.exists() {
+        let raw = fs::read_to_string(&source_path)
+            .with_context(|| format!("read manifest source {}", source_path.display()))?;
+        let src: BundleManifestSource = serde_yaml::from_str(&raw)
+            .with_context(|| format!("parse manifest source {}", source_path.display()))?;
+        let manifest = materialize_manifest(src, &ai_dir, expected_name)?;
+        return Ok(Some(manifest));
+    }
+
+    // 3. No manifest — optional
+    Ok(None)
 }
 
 /// Validate that the discovered bundles' kind dependencies are satisfiable.
@@ -1131,7 +1225,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bad-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        fs::write(bundle.join("manifest.yaml"), "not: [valid\nyaml").unwrap();
+        fs::write(bundle.join(".ai/manifest.source.yaml"), "not: [valid\nyaml").unwrap();
         assert!(parse_manifest(&bundle, "bad-manifest").is_err());
     }
 
@@ -1152,8 +1246,8 @@ mod tests {
         let needy = tmp.path().join("needy");
         fs::create_dir_all(needy.join(".ai")).unwrap();
         fs::write(
-            needy.join("manifest.yaml"),
-            "name: needy\nversion: '1.0'\nrequires_kinds:\n  - magic\nprovides_kinds: []\n",
+            needy.join(".ai/manifest.source.yaml"),
+            "name: needy\nversion: '1.0'\nrequires_kinds:\n  - magic\n",
         )
         .unwrap();
 
@@ -1189,10 +1283,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Bundle provides and requires the same kind — self-sufficient
         let selfish = tmp.path().join("selfish");
-        fs::create_dir_all(selfish.join(".ai")).unwrap();
+        fs::create_dir_all(selfish.join(".ai/node/engine/kinds/foo")).unwrap();
         fs::write(
-            selfish.join("manifest.yaml"),
-            "name: selfish\nversion: '1.0'\nprovides_kinds:\n  - foo\nrequires_kinds:\n  - foo\n",
+            selfish.join(".ai/node/engine/kinds/foo/foo.kind-schema.yaml"),
+            "kind: config\ndirectory: foo\nextensions: []\n",
+        )
+        .unwrap();
+        fs::write(
+            selfish.join(".ai/manifest.source.yaml"),
+            "name: selfish\nversion: '1.0'\nrequires_kinds:\n  - foo\n",
         )
         .unwrap();
 
@@ -1207,12 +1306,17 @@ mod tests {
     fn validate_dependencies_cross_bundle_satisfies() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Provider bundle
+        // Provider bundle — has a kind schema for "alpha"
         let provider = tmp.path().join("provider");
-        fs::create_dir_all(provider.join(".ai")).unwrap();
+        fs::create_dir_all(provider.join(".ai/node/engine/kinds/alpha")).unwrap();
         fs::write(
-            provider.join("manifest.yaml"),
-            "name: provider\nversion: '1.0'\nprovides_kinds:\n  - alpha\nrequires_kinds: []\n",
+            provider.join(".ai/node/engine/kinds/alpha/alpha.kind-schema.yaml"),
+            "kind: config\ndirectory: alpha\nextensions: []\n",
+        )
+        .unwrap();
+        fs::write(
+            provider.join(".ai/manifest.source.yaml"),
+            "name: provider\nversion: '1.0'\nrequires_kinds: []\n",
         )
         .unwrap();
 
@@ -1220,8 +1324,8 @@ mod tests {
         let consumer = tmp.path().join("consumer");
         fs::create_dir_all(consumer.join(".ai")).unwrap();
         fs::write(
-            consumer.join("manifest.yaml"),
-            "name: consumer\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds:\n  - alpha\n",
+            consumer.join(".ai/manifest.source.yaml"),
+            "name: consumer\nversion: '1.0'\nrequires_kinds:\n  - alpha\n",
         )
         .unwrap();
 
@@ -1243,8 +1347,8 @@ mod tests {
         let bundle = tmp.path().join("real-name");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
         fs::write(
-            bundle.join("manifest.yaml"),
-            "name: wrong-name\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\n",
+            bundle.join(".ai/manifest.source.yaml"),
+            "name: wrong-name\nversion: '1.0'\nrequires_kinds: []\n",
         )
         .unwrap();
 
@@ -1294,8 +1398,8 @@ typo_field: oops
             fs::copy(&dev_trust, needy.join("PUBLISHER_TRUST.toml")).unwrap();
         }
         fs::write(
-            needy.join("manifest.yaml"),
-            "name: needy\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds:\n  - nonexistent-kind\n",
+            needy.join(".ai/manifest.source.yaml"),
+            "name: needy\nversion: '1.0'\nrequires_kinds:\n  - nonexistent-kind\n",
         )
         .unwrap();
 
@@ -1348,6 +1452,142 @@ typo_field: oops
                 "no registrations should exist on dep failure"
             );
         }
+    }
+
+    // ── v2 tests: derive, materialize, source split ────────────────
+
+    #[test]
+    fn derive_provides_kinds_scans_core_schemas() {
+        let ai_dir = workspace_root().join("ryeos-bundles/core/.ai");
+        let kinds = derive_provides_kinds(&ai_dir).expect("derive core provides_kinds");
+        assert!(
+            kinds.contains(&"config".to_string()),
+            "core must provide config: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"handler".to_string()),
+            "core must provide handler: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"tool".to_string()),
+            "core must provide tool: {kinds:?}"
+        );
+        // Standard kinds are NOT in core
+        assert!(
+            !kinds.contains(&"directive".to_string()),
+            "directive is a standard kind, not core: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn derive_provides_kinds_scans_standard_schemas() {
+        let ai_dir = workspace_root().join("ryeos-bundles/standard/.ai");
+        let kinds = derive_provides_kinds(&ai_dir).expect("derive standard provides_kinds");
+        assert!(
+            kinds.contains(&"directive".to_string()),
+            "standard must provide directive: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"graph".to_string()),
+            "standard must provide graph: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"knowledge".to_string()),
+            "standard must provide knowledge: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn derive_provides_kinds_returns_empty_without_kinds_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kinds = derive_provides_kinds(tmp.path()).unwrap();
+        assert!(kinds.is_empty());
+    }
+
+    #[test]
+    fn materialize_manifest_derives_provides_from_schemas() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("test-bundle");
+        let ai_dir = bundle.join(".ai");
+        fs::create_dir_all(ai_dir.join("node/engine/kinds/mykind")).unwrap();
+        fs::write(
+            ai_dir.join("node/engine/kinds/mykind/mykind.kind-schema.yaml"),
+            "kind: config\ndirectory: mykind\nextensions: []\n",
+        )
+        .unwrap();
+
+        let source = BundleManifestSource {
+            name: "test-bundle".to_string(),
+            version: "1.0".to_string(),
+            description: "test".to_string(),
+            requires_kinds: vec![],
+        };
+        let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
+        assert_eq!(manifest.provides_kinds, vec!["mykind"]);
+        assert_eq!(manifest.name, "test-bundle");
+    }
+
+    #[test]
+    fn parse_manifest_dev_mode_materializes_from_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("dev-bundle");
+        let ai_dir = bundle.join(".ai");
+        fs::create_dir_all(ai_dir.join("node/engine/kinds/custom")).unwrap();
+        fs::write(
+            ai_dir.join("node/engine/kinds/custom/custom.kind-schema.yaml"),
+            "kind: config\ndirectory: custom\nextensions: []\n",
+        )
+        .unwrap();
+        // No .ai/manifest.yaml (not published), only source
+        fs::write(
+            ai_dir.join("manifest.source.yaml"),
+            "name: dev-bundle\nversion: '0.1'\ndescription: 'dev test'\nrequires_kinds: []\n",
+        )
+        .unwrap();
+
+        let mf = parse_manifest(&bundle, "dev-bundle")
+            .unwrap()
+            .expect("should find manifest via source fallback");
+        assert_eq!(mf.name, "dev-bundle");
+        assert_eq!(mf.provides_kinds, vec!["custom"]);
+        assert!(mf.requires_kinds.is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_prefers_generated_over_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("pub-bundle");
+        let ai_dir = bundle.join(".ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        // Generated manifest (simulates publish output — not signed here, just the body)
+        fs::write(
+            ai_dir.join("manifest.yaml"),
+            "name: pub-bundle\nversion: '2.0'\nprovides_kinds:\n  - published-kind\nrequires_kinds: []\n",
+        )
+        .unwrap();
+        // Source exists too but should be ignored
+        fs::write(
+            ai_dir.join("manifest.source.yaml"),
+            "name: pub-bundle\nversion: '1.0'\ndescription: 'old source'\nrequires_kinds: []\n",
+        )
+        .unwrap();
+
+        let mf = parse_manifest(&bundle, "pub-bundle")
+            .unwrap()
+            .expect("should find manifest");
+        assert_eq!(mf.version, "2.0", "should read generated, not source");
+        assert_eq!(mf.provides_kinds, vec!["published-kind"]);
+    }
+
+    #[test]
+    fn source_rejects_unknown_fields() {
+        let yaml = r#"
+name: test
+version: "1.0"
+typo_field: oops
+"#;
+        let result: Result<BundleManifestSource, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "unknown field in source should be rejected");
     }
 
     fn workspace_root() -> PathBuf {

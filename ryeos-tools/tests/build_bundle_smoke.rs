@@ -1,12 +1,11 @@
-//! Smoke tests for the build-bundle pipeline (PR1b2 / V5.1).
+//! Smoke tests for the build-bundle pipeline (V5.4 / V6.0 manifest v2).
 //!
 //! These tests verify the *structure* of a built bundle without
 //! re-running the full build pipeline (which requires `cargo build`).
 //!
 //! Prerequisite: a populated `ryeos-bundles/standard/.ai/bin/<triple>/`
-//! plus its `MANIFEST.json`. Regenerate via:
-//!   `ryos publish ryeos-bundles/standard --key .dev-keys/PUBLISHER_DEV.pem`
-//! (or run the full build-bundle pipeline if binaries need rebuilding).
+//! plus CAS objects + refs. Regenerate via:
+//!   `ryeos publish ryeos-bundles/standard --key .dev-keys/PUBLISHER_DEV.pem`
 
 use sha2::Digest;
 use std::path::Path;
@@ -226,39 +225,6 @@ fn bundle_cas_contains_binary_blob() {
     let computed_hash = format!("{:x}", sha2::Sha256::digest(&blob_bytes));    assert_eq!(
         computed_hash, blob_hash,
         "blob content hash mismatch (corrupted blob)"
-    );
-}
-
-#[test]
-fn bundle_manifest_json_exists() {
-    let triple = host_triple();
-    let manifest_path = bundle_dir()
-        .join(".ai/bin")
-        .join(&triple)
-        .join("MANIFEST.json");
-
-    assert!(
-        manifest_path.exists(),
-        "MANIFEST.json not found at {manifest_path:?}"
-    );
-
-    let content = std::fs::read_to_string(&manifest_path)
-        .expect("read MANIFEST.json");
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .expect("MANIFEST.json should be valid JSON");
-
-    assert!(value.get("ryeos-directive-runtime").is_some(), "MANIFEST.json should have 'ryeos-directive-runtime' entry");
-    assert!(
-        value["ryeos-directive-runtime"].get("content_blob_hash").is_some(),
-        "MANIFEST.json ryos-directive-runtime entry should have content_blob_hash"
-    );
-    assert!(
-        value["ryeos-directive-runtime"].get("manifest_hash").is_some(),
-        "MANIFEST.json ryos-directive-runtime entry should have manifest_hash"
-    );
-    assert!(
-        value["ryeos-directive-runtime"].get("item_source_hash").is_some(),
-        "MANIFEST.json ryos-directive-runtime entry should have item_source_hash"
     );
 }
 

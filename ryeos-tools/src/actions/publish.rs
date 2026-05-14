@@ -2,15 +2,16 @@
 //!
 //! Runs the full publish dance against a bundle source tree:
 //!
-//!   1. Bootstrap-sign kind schemas + parser tools (cuts the chicken-and-egg).
-//!      See `docs/SIGNING-CHICKEN-AND-EGG.md` for the full rationale.
-//!   2. Sign every other signable item in the bundle (`sign_bundle_items`).
-//!   3. Rebuild the CAS manifest (`rebuild_bundle_manifest`).
-//!   4. Emit a publisher trust doc next to the bundle so downstream
-//!      operators have a one-file pointer to pin via `ryeos trust pin`.
-//!
-//! Replaces the prior three-step author dance:
-//! `bootstrap example` → `ryeos publish sign-items` → `rebuild-manifest`.
+//!   Phase 0:  Clean derived artifacts + strip stale signatures.
+//!   Phase 1:  Bootstrap-sign kind schemas + parser/handler descriptors.
+//!             Cuts the chicken-and-egg — these must be signed before the
+//!             engine can load registries for Phase 3.
+//!   Phase 2:  Rebuild CAS manifest (objects, refs, item_source sidecars).
+//!   Phase 3:  Sign every other signable item (full engine validation).
+//!   Phase 4:  Generate + sign bundle manifest (.ai/manifest.yaml).
+//!             Reads manifest.source.yaml, derives provides_kinds from
+//!             actual kind schemas, writes signed manifest.yaml.
+//!   Phase 5:  Emit publisher trust doc (PUBLISHER_TRUST.toml).
 //!
 //! Operates entirely on a publisher-provided source tree + signing key.
 //! No daemon, no operator state, no ambient trust assumptions.
@@ -24,6 +25,7 @@ use lillux::crypto::SigningKey;
 use serde::Serialize;
 
 use crate::actions::build_bundle::{self, RebuildReport};
+use crate::actions::init::{materialize_manifest, BundleManifestSource};
 use crate::actions::sign_bundle::{self, SignBundleReport};
 
 #[derive(Debug)]
@@ -52,6 +54,10 @@ pub struct PublishReport {
     pub bootstrap_parsers: Vec<String>,
     pub sign_report: SignBundleReport,
     pub rebuild_report: RebuildReport,
+    /// Path to the generated + signed `.ai/manifest.yaml`, if a
+    /// `manifest.source.yaml` was found. `None` for bundles without
+    /// a source manifest (manifests are optional for third-party bundles).
+    pub manifest_generated: Option<PathBuf>,
     pub publisher_trust_doc: Option<PathBuf>,
 }
 
@@ -113,7 +119,19 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         bail!("{msg}");
     }
 
-    // ── Phase 4: emit publisher trust doc ──
+    // ── Phase 4: generate + sign bundle manifest ──
+    // Reads .ai/manifest.source.yaml (hand-authored), derives provides_kinds
+    // from actual kind schemas on disk, writes .ai/manifest.yaml with a
+    // signed envelope. Skipped silently when no source manifest exists
+    // (manifests are optional for third-party bundles, required for official).
+    let manifest_generated = generate_and_sign_manifest(
+        &ai_dir,
+        &opts.bundle_source,
+        &opts.signing_key,
+    )
+    .context("manifest generation phase failed")?;
+
+    // ── Phase 5: emit publisher trust doc ──
     let publisher_trust_doc = if opts.emit_trust_doc {
         Some(write_publisher_trust_doc(
             &opts.bundle_source,
@@ -131,6 +149,7 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         bootstrap_parsers: parsers_signed,
         sign_report,
         rebuild_report,
+        manifest_generated,
         publisher_trust_doc,
     })
 }
@@ -206,6 +225,17 @@ fn sign_raw_in_place(
     Ok(())
 }
 
+/// Atomic write: stage to a temp file, then rename over the target.
+/// Ensures readers never see a partially-written file.
+fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&tmp, content.as_bytes())
+        .with_context(|| format!("write tmp {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
 fn collect_kind_schema_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -239,17 +269,15 @@ fn collect_yaml_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Remove derived CAS artifacts from a prior publish run so stale objects
-/// don't accumulate across re-publishes.
+/// Remove derived artifacts from a prior publish run.
 ///
-/// Called AFTER Phase 2 (sign items) and BEFORE Phase 3 (rebuild manifest)
-/// so that Phase 2's handler registry can still use the old manifest for
-/// binary resolution.
+/// Called as part of Phase 0 (before any signing or manifest generation)
+/// so that every phase works from a clean slate.
 ///
 /// Cleans:
 ///   - `<bundle_source>/.ai/objects/`  (CAS blob store)
 ///   - `<bundle_source>/.ai/refs/`     (manifest ref pointers)
-///   - `**/MANIFEST.json` under `.ai/bin/` (per-triple sidecars)
+///   - `<bundle_source>/.ai/manifest.yaml` (generated + signed manifest)
 ///   - `**/*.item_source.json` under `.ai/bin/` (signed sidecars)
 fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
     let ai_dir = bundle_source.join(ryeos_engine::AI_DIR);
@@ -266,6 +294,13 @@ fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
     if refs_dir.is_dir() {
         fs::remove_dir_all(&refs_dir)
             .with_context(|| format!("remove {}", refs_dir.display()))?;
+    }
+
+    // Generated bundle manifest (from prior publish run)
+    let generated_manifest = ai_dir.join("manifest.yaml");
+    if generated_manifest.is_file() {
+        fs::remove_file(&generated_manifest)
+            .with_context(|| format!("remove {}", generated_manifest.display()))?;
     }
 
     // Per-triple MANIFEST.json + *.item_source.json sidecars
@@ -336,6 +371,61 @@ fn strip_all_signatures(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Generate and sign the bundle manifest (Phase 4).
+///
+/// Reads `.ai/manifest.source.yaml` (hand-authored by the bundle author),
+/// derives `provides_kinds` from actual kind schemas on disk, materializes
+/// the full manifest, and writes it as `.ai/manifest.yaml` with a
+/// `# ryeos:signed:...` envelope.
+///
+/// Returns `Some(path)` to the generated manifest, or `None` if no
+/// `manifest.source.yaml` exists (manifests are optional for third-party
+/// bundles — official bundles should always have one).
+fn generate_and_sign_manifest(
+    ai_dir: &Path,
+    bundle_source: &Path,
+    signing_key: &SigningKey,
+) -> Result<Option<PathBuf>> {
+    let source_path = ai_dir.join("manifest.source.yaml");
+    if !source_path.exists() {
+        tracing::info!(
+            "no manifest.source.yaml — skipping manifest generation (optional for third-party bundles)"
+        );
+        return Ok(None);
+    }
+
+    // Derive bundle name from directory name (matches init.rs convention).
+    let bundle_name = bundle_source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("bundle_source path has no directory name"))?;
+
+    let raw = fs::read_to_string(&source_path)
+        .with_context(|| format!("read manifest source {}", source_path.display()))?;
+    let src: BundleManifestSource = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse manifest source {}", source_path.display()))?;
+
+    // Materialize: validates identity, derives provides_kinds from disk.
+    let manifest = materialize_manifest(src, ai_dir, bundle_name)
+        .context("materialize bundle manifest")?;
+
+    let body = serde_yaml::to_string(&manifest)
+        .context("serialize bundle manifest")?;
+    let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
+
+    let target = ai_dir.join("manifest.yaml");
+    atomic_write_str(&target, &signed)?;
+
+    tracing::info!(
+        path = %target.display(),
+        name = %manifest.name,
+        provides = ?manifest.provides_kinds,
+        "generated + signed bundle manifest"
+    );
+
+    Ok(Some(target))
 }
 
 /// Write `<bundle_source>/PUBLISHER_TRUST.toml` — the universal trust
