@@ -1,4 +1,4 @@
-//! Bundle parity guard: the canonical `ryeos-bundles/core` tree must
+//! Bundle parity guard: the canonical `ryeos-bundles/` tree must
 //! always load cleanly into the engine the daemon would boot with.
 //!
 //! If anyone changes a kind schema YAML — adds an unknown step, breaks
@@ -6,6 +6,10 @@
 //! re-sign after editing — this test fails before the daemon ever sees
 //! the bundle. That's the whole job: a minimal, hermetic, bundle-side
 //! drift detector that runs in CI without network or absolute paths.
+//!
+//! Also asserts correct bundle ownership: engine kinds live in core,
+//! workflow kinds live in standard. If someone accidentally moves a
+//! kind back to the wrong bundle, this catches it.
 //!
 //! The trusted-signers fixture under `tests/fixtures/trusted_signers/`
 //! is the bundle's own signing key — committed alongside the bundle so
@@ -33,67 +37,113 @@ fn workspace_root() -> PathBuf {
     manifest_dir().parent().expect("ryeosd has a parent dir").to_path_buf()
 }
 
-#[test]
-fn live_bundle_kind_registry_loads_with_pinned_signer() {
+fn core_kinds_dir() -> PathBuf {
+    workspace_root().join("ryeos-bundles/core/.ai/node/engine/kinds")
+}
+
+fn standard_kinds_dir() -> PathBuf {
+    workspace_root().join("ryeos-bundles/standard/.ai/node/engine/kinds")
+}
+
+fn fixture_trust_store() -> TrustStore {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
     assert!(
         trusted_dir.is_dir(),
         "trusted-signers fixture missing at {}",
         trusted_dir.display()
     );
-
     let trust_store = TrustStore::load_from_dir(&trusted_dir)
         .expect("load fixture trust store");
     assert!(
         !trust_store.is_empty(),
         "fixture trust store has no signers — fixture is empty"
     );
+    trust_store
+}
 
-    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/node/engine/kinds");
-    assert!(
-        kinds_dir.is_dir(),
-        "live bundle kinds dir missing at {}",
-        kinds_dir.display()
-    );
+// ── Bundle ownership assertions ──────────────────────────────────────
 
-    let registry = KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust_store)
+#[test]
+fn core_bundle_owns_engine_kinds_only() {
+    let trust_store = fixture_trust_store();
+    let kinds_dir = core_kinds_dir();
+    assert!(kinds_dir.is_dir(), "core kinds dir missing at {}", kinds_dir.display());
+
+    let registry = KindRegistry::load_base(&[kinds_dir], &trust_store)
+        .expect("core kinds load");
+
+    let kinds: Vec<&str> = registry.kinds().collect();
+    for expected in ["config", "handler", "parser", "protocol", "service",
+                     "node", "tool", "streaming_tool", "runtime"] {
+        assert!(
+            registry.contains(expected),
+            "core must own `{expected}` kind; got: {:?}", kinds
+        );
+    }
+
+    // Workflow kinds must NOT be in core
+    for forbidden in ["directive", "graph", "knowledge"] {
+        assert!(
+            !registry.contains(forbidden),
+            "core must NOT own `{forbidden}` kind — it belongs in standard; got: {:?}",
+            kinds
+        );
+    }
+}
+
+#[test]
+fn standard_bundle_owns_workflow_kinds() {
+    let trust_store = fixture_trust_store();
+    let kinds_dir = standard_kinds_dir();
+    assert!(kinds_dir.is_dir(), "standard kinds dir missing at {}", kinds_dir.display());
+
+    let registry = KindRegistry::load_base(&[kinds_dir], &trust_store)
+        .expect("standard kinds load");
+
+    for expected in ["directive", "graph", "knowledge"] {
+        assert!(
+            registry.contains(expected),
+            "standard must own `{expected}` kind; got: {:?}",
+            registry.kinds().collect::<Vec<_>>()
+        );
+    }
+}
+
+// ── Combined load and pipeline tests ─────────────────────────────────
+
+#[test]
+fn live_bundle_kind_registry_loads_with_pinned_signer() {
+    let trust_store = fixture_trust_store();
+
+    // Load kinds from BOTH bundles — that's what the engine does at boot.
+    let kinds_dirs = vec![core_kinds_dir(), standard_kinds_dir()];
+    for dir in &kinds_dirs {
+        assert!(dir.is_dir(), "kinds dir missing at {}", dir.display());
+    }
+
+    let registry = KindRegistry::load_base(&kinds_dirs, &trust_store)
         .unwrap_or_else(|e| {
-            panic!(
-                "live bundle kind registry failed to load from {}: {e}",
-                kinds_dir.display()
-            )
+            panic!("live bundle kind registry failed to load: {e}");
         });
 
-    // Every kind shipped in the live bundle must be present after load.
-    // If any of these go missing or get renamed, the daemon won't boot —
-    // catch it here, not in the daemon launch path.
+    // Every kind shipped in the live bundles must be present after load.
     for required in ["directive", "graph", "knowledge", "parser", "tool"] {
         assert!(
             registry.contains(required),
-            "live bundle is missing required kind `{required}`; loaded kinds = {:?}",
+            "live bundles missing required kind `{required}`; loaded = {:?}",
             registry.kinds().collect::<Vec<_>>()
         );
     }
 
-    // Every executable kind must declare the resolution pipeline shape
-    // the daemon expects (tagged-enum step decls). Loading already
-    // verifies they parse; assertions below make the contract explicit
-    // so a bundle edit that drops or renames the extends step fails
-    // here, not at first directive launch.
+    // Directive kind must be executable with extends-chain resolution.
     let directive = registry.get("directive").expect("directive kind present");
-    assert!(
-        directive.is_executable(),
-        "directive kind must be executable in the live bundle"
-    );
+    assert!(directive.is_executable(), "directive kind must be executable");
 
     let directive_exec = directive
         .execution
         .as_ref()
         .expect("directive kind has execution block");
 
-    // The directive kind must run an extends-chain step — the daemon
-    // resolves directives via this step, runtimes consume the
-    // pre-resolved chain. Drop or rename it and the runtime starves.
     let has_extends = directive_exec.resolution.iter().any(|d| {
         matches!(
             d,
@@ -102,18 +152,18 @@ fn live_bundle_kind_registry_loads_with_pinned_signer() {
     });
     assert!(
         has_extends,
-        "directive kind must declare resolve_extends_chain in execution.resolution; \
-         got {:?}",
+        "directive kind must declare resolve_extends_chain; got {:?}",
         directive_exec.resolution
     );
 }
 
-/// Build a `ParserDispatcher` from the live bundle's parser tool
+/// Build a `ParserDispatcher` from both live bundles' parser tool
 /// descriptors so dispatch goes through the same descriptors the
 /// daemon would load at boot.
 fn live_parser_dispatcher(trust_store: &TrustStore, kinds: &KindRegistry) -> ParserDispatcher {
-    let bundle_root = workspace_root().join("ryeos-bundles/core");
-    let (parsers, _dups) = ParserRegistry::load_base(&[bundle_root], trust_store, kinds)
+    let core_root = workspace_root().join("ryeos-bundles/core");
+    let std_root = workspace_root().join("ryeos-bundles/standard");
+    let (parsers, _dups) = ParserRegistry::load_base(&[core_root, std_root], trust_store, kinds)
         .expect("live bundle parser tools load");
     ParserDispatcher::new(
         parsers,
@@ -140,12 +190,11 @@ fn synth_project_with_directive(name: &str, body: &str) -> PathBuf {
 }
 
 fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution::ResolutionOutput {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store =
-        TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = fixture_trust_store();
 
-    let kinds_dir = workspace_root().join("ryeos-bundles/core/.ai/node/engine/kinds");
-    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store)
+    // Load kinds from BOTH bundles — directive kind lives in standard.
+    let kinds_dirs = vec![core_kinds_dir(), standard_kinds_dir()];
+    let kinds = KindRegistry::load_base(&kinds_dirs, &trust_store)
         .expect("live bundle kinds load");
     let parsers = live_parser_dispatcher(&trust_store, &kinds);
     let composers = ComposerRegistry::from_kinds(
