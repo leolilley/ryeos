@@ -93,8 +93,6 @@ pub struct InitOptions {
     ///   - `ryeos-bundles` (dev tree)
     ///   - `/opt/ryeos` (docker)
     pub source_dir: PathBuf,
-    /// Force-regenerate the node signing key. Does NOT touch the user key.
-    pub force_node_key: bool,
     /// Additional PUBLISHER_TRUST.toml files to pin before verifying bundles.
     /// Each file contains `public_key`, `fingerprint`, and `owner` fields.
     pub trust_files: Vec<PathBuf>,
@@ -164,7 +162,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .join("node")
         .join("identity")
         .join("private_key.pem");
-    let node_key = load_or_create_key(&node_key_path, opts.force_node_key)
+    let node_key = load_or_create_key(&node_key_path, false)
         .with_context(|| format!("node key at {}", node_key_path.display()))?;
     let node_fp = compute_fingerprint(&node_key.verifying_key());
 
@@ -208,7 +206,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         "discovered bundles"
     );
 
-    // ── 7. Install each bundle ──
+    // ── 7. Install each bundle (atomic stage → swap) ──
     let mut bundles_installed = Vec::new();
     for (name, source_path) in &discovered {
         let target = opts
@@ -218,7 +216,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .join(name);
 
         if target.exists() {
-            // Bundle already installed — verify structure and update.
+            // Bundle already installed — replace atomically.
             verify_bundle_structure(&target)?;
 
             if !opts.skip_preflight {
@@ -230,9 +228,9 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 .with_context(|| format!("verify {} source against pinned publisher key", name))?;
             }
 
-            copy_dir_recursive(source_path, &target).with_context(|| {
+            replace_bundle(source_path, &target).with_context(|| {
                 format!(
-                    "update {}: {} -> {}",
+                    "atomic replace {}: {} -> {}",
                     name,
                     source_path.display(),
                     target.display()
@@ -333,8 +331,9 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 /// Discover bundles in a source directory.
 ///
 /// Scans immediate children of `source_dir` for directories containing
-/// a `.ai/` subdirectory. Hidden directories (starting with `.`) are
-/// skipped. Returns `(name, source_path)` pairs sorted by name for
+/// a `.ai/` subdirectory. Hidden directories (starting with `.`) and
+/// names that don't pass [`is_valid_bundle_name`] are skipped.
+/// Returns `(name, source_path)` pairs sorted by name for
 /// deterministic registration order.
 fn discover_bundles(source_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     if !source_dir.is_dir() {
@@ -360,6 +359,15 @@ fn discover_bundles(source_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
             continue;
         }
 
+        // Skip names that don't meet bundle naming rules
+        if !is_valid_bundle_name(&name_str) {
+            tracing::warn!(
+                name = %name_str,
+                "skipping directory with invalid bundle name (must be lowercase alphanumeric, underscore, or hyphen, 1–64 chars)"
+            );
+            continue;
+        }
+
         let child_path = entry.path();
         if child_path.join(ryeos_engine::AI_DIR).is_dir() {
             bundles.push((name_str.into_owned(), child_path));
@@ -368,6 +376,20 @@ fn discover_bundles(source_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
 
     bundles.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(bundles)
+}
+
+/// Check whether a bundle name is valid.
+///
+/// Rules: 1–64 chars, lowercase ASCII letters, digits, underscore, or hyphen.
+/// This must match the validation in `bundle_install` and `bundle_remove`
+/// service handlers so that any name discoverable by init can also be
+/// managed via the service endpoints.
+pub fn is_valid_bundle_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
@@ -469,6 +491,53 @@ fn verify_bundle_structure(target: &Path) -> Result<()> {
             target.display()
         );
     }
+    Ok(())
+}
+
+/// Atomically replace an installed bundle with a new version.
+///
+/// Instead of copying on top (which leaves stale files), this:
+/// 1. Copies source to a staging directory
+/// 2. Moves old bundle to `.backup.prev`
+/// 3. Moves staging to final location
+///
+/// If step 3 fails, the old bundle is still at `.backup.prev` for recovery.
+/// One previous generation is kept for rollback; older backups are cleaned up.
+fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
+    let parent = target.parent().ok_or_else(|| anyhow!("bundle path has no parent"))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| anyhow!("bundle path has no name"))?
+        .to_string_lossy();
+
+    let staging = parent.join(format!(".{name}.staging"));
+    let backup = parent.join(format!("{name}.backup.prev"));
+
+    // Clean up any leftover staging from a previous failed attempt
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("clean up stale staging {}", staging.display()))?;
+    }
+
+    // 1. Copy source to staging
+    copy_dir_recursive(source, &staging)
+        .with_context(|| format!("stage {} -> {}", source.display(), staging.display()))?;
+
+    // 2. Move old to backup (one generation)
+    if target.exists() {
+        if backup.exists() {
+            // Clean up previous backup
+            fs::remove_dir_all(&backup)
+                .with_context(|| format!("remove old backup {}", backup.display()))?;
+        }
+        fs::rename(target, &backup)
+            .with_context(|| format!("backup {} -> {}", target.display(), backup.display()))?;
+    }
+
+    // 3. Move staging to final
+    fs::rename(&staging, target)
+        .with_context(|| format!("swap {} -> {}", staging.display(), target.display()))?;
+
     Ok(())
 }
 
@@ -712,18 +781,6 @@ mod tests {
             system_space_dir: state.to_path_buf(),
             user_root: user.to_path_buf(),
             source_dir: workspace_root().join("ryeos-bundles"),
-            force_node_key: false,
-            trust_files: vec![dev_trust_file()],
-            skip_preflight: true,
-        }
-    }
-
-    fn make_opts_force(state: &Path, user: &Path) -> InitOptions {
-        InitOptions {
-            system_space_dir: state.to_path_buf(),
-            user_root: user.to_path_buf(),
-            source_dir: workspace_root().join("ryeos-bundles"),
-            force_node_key: true,
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,
         }
@@ -834,17 +891,6 @@ mod tests {
     }
 
     #[test]
-    fn run_init_force_regenerates_node_key_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = tmp.path().join("state");
-        let user = tmp.path().join("home");
-        let r1 = run_init(&make_opts(&state, &user)).expect("init #1");
-        let r2 = run_init(&make_opts_force(&state, &user)).expect("init #2 (force)");
-        assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint, "user key must persist");
-        assert_ne!(r1.node_key_fingerprint, r2.node_key_fingerprint, "node key must rotate");
-    }
-
-    #[test]
     fn discover_bundles_finds_core_and_standard() {
         let bundles = discover_bundles(&workspace_root().join("ryeos-bundles")).unwrap();
         let names: Vec<&str> = bundles.iter().map(|(n, _)| n.as_str()).collect();
@@ -885,6 +931,34 @@ mod tests {
     fn discover_bundles_fails_on_missing_dir() {
         let result = discover_bundles(Path::new("/nonexistent/path"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn discover_bundles_skips_invalid_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Invalid names
+        for invalid in &["has.dot", "UPPER", "has space", "has/slash"] {
+            fs::create_dir_all(tmp.path().join(invalid).join(".ai")).unwrap();
+        }
+        // Valid name
+        fs::create_dir_all(tmp.path().join("valid-bundle").join(".ai")).unwrap();
+
+        let bundles = discover_bundles(tmp.path()).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].0, "valid-bundle");
+    }
+
+    #[test]
+    fn valid_bundle_name_rules() {
+        assert!(is_valid_bundle_name("core"));
+        assert!(is_valid_bundle_name("standard"));
+        assert!(is_valid_bundle_name("my-bundle_v2"));
+        assert!(is_valid_bundle_name("a"));
+        assert!(!is_valid_bundle_name(""));
+        assert!(!is_valid_bundle_name("has.dot"));
+        assert!(!is_valid_bundle_name("UPPER"));
+        assert!(!is_valid_bundle_name("has space"));
+        assert!(!is_valid_bundle_name(&"x".repeat(65)));
     }
 
     fn workspace_root() -> PathBuf {

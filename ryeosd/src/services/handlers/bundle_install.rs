@@ -31,13 +31,18 @@ pub struct Request {
 }
 
 fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty()
-        || name
-            .contains(|c: char| c == '/' || c == '\\' || c == '.' || c.is_whitespace())
+    if name.is_empty() || name.len() > 64 {
+        bail!(
+            "invalid bundle name '{}': must be 1–64 characters",
+            name
+        );
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
     {
         bail!(
-            "invalid bundle name '{}': must be non-empty and contain no path separators, \
-             dots, or whitespace",
+            "invalid bundle name '{}': must contain only lowercase letters, digits, underscore, or hyphen",
             name
         );
     }
@@ -180,12 +185,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_name_accepts_valid() {
-        assert!(validate_name("my-bundle_v2").is_ok());
+    fn validate_name_rejects_uppercase() {
+        assert!(validate_name("Foo").is_err());
     }
 
     #[test]
-    fn validate_name_accepts_core_and_standard() {
+    fn validate_name_rejects_spaces() {
+        assert!(validate_name("foo bar").is_err());
+    }
+
+    #[test]
+    fn validate_name_accepts_valid() {
+        assert!(validate_name("my-bundle_v2").is_ok());
         assert!(validate_name("core").is_ok());
         assert!(validate_name("standard").is_ok());
     }

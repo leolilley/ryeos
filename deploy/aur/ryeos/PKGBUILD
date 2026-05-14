@@ -54,16 +54,31 @@ package() {
     install -Dm755 target/release/rye-composer-identity             "$pkgdir/usr/bin/rye-composer-identity"
 
     # ── Bundle YAML data ────────────────────────────────────
-    # Ship each bundle directory as-is under /usr/share/ryeos/<name>/
-    # (including .ai/bin, .ai/objects, .ai/refs — runtime artifacts).
-    # `ryeos init --source /usr/share/ryeos` discovers and installs them.
+    # Ship each bundle under /usr/share/ryeos/<name>/.ai/
+    # `ryeos init --source /usr/share/ryeos` discovers immediate children
+    # containing .ai/ — so the layout must be:
+    #   /usr/share/ryeos/core/.ai/...
+    #   /usr/share/ryeos/standard/.ai/...
     mkdir -p "$pkgdir/usr/share/ryeos"
     for bundle_dir in ryeos-bundles/*/; do
         name=$(basename "$bundle_dir")
         mkdir -p "$pkgdir/usr/share/ryeos/$name"
-        cp -ra "$bundle_dir" "$pkgdir/usr/share/ryeos/$name/"
+        cp -ra "$bundle_dir/.ai" "$pkgdir/usr/share/ryeos/$name/.ai"
     done
 
     # ── License ─────────────────────────────────────────────
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+post_install() {
+    # Verify bundles have correct structure
+    for bundle_path in /usr/share/ryeos/*/; do
+        if [[ ! -d "$bundle_path/.ai" ]]; then
+            echo "ERROR: $bundle_path/.ai missing — bundle structure incorrect" >&2
+            return 1
+        fi
+    done
+
+    echo "ryeos bundles installed to /usr/share/ryeos"
+    echo "Initialize with: ryeos init --source /usr/share/ryeos"
 }

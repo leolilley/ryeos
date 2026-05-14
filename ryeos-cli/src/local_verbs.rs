@@ -113,10 +113,6 @@ struct InitArgs {
     /// Repeatable: `--trust-file a.toml --trust-file b.toml`.
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
     trust_files: Vec<PathBuf>,
-
-    /// Force-regenerate the node signing key. Does NOT touch the user key.
-    #[arg(long)]
-    force_node_key: bool,
 }
 
 fn run_init_verb(argv: &[String]) -> Result<()> {
@@ -128,7 +124,6 @@ fn run_init_verb(argv: &[String]) -> Result<()> {
         system_space_dir,
         user_root,
         source_dir: args.source,
-        force_node_key: args.force_node_key,
         trust_files: args.trust_files,
         skip_preflight: false,
     };

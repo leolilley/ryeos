@@ -23,14 +23,19 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    if req.name.is_empty()
-        || req
-            .name
-            .contains(|c: char| c == '/' || c == '\\' || c == '.' || c.is_whitespace())
+    if req.name.is_empty() || req.name.len() > 64 {
+        bail!(
+            "invalid bundle name '{}': must be 1–64 characters",
+            req.name
+        );
+    }
+    if !req
+        .name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
     {
         bail!(
-            "invalid bundle name '{}': must be non-empty and contain no path separators, \
-             dots, or whitespace",
+            "invalid bundle name '{}': must contain only lowercase letters, digits, underscore, or hyphen",
             req.name
         );
     }
