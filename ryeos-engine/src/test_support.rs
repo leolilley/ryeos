@@ -44,6 +44,11 @@ pub fn core_bundle_root() -> PathBuf {
     workspace_root().join("ryeos-bundles/core")
 }
 
+/// Absolute path to the canonical standard bundle shipped in this repo.
+pub fn standard_bundle_root() -> PathBuf {
+    workspace_root().join("ryeos-bundles/standard")
+}
+
 /// Platform-author verifying key (`09674c8...`) that signs every
 /// artifact shipped in `ryeos-bundles/core/` and `ryeos-bundles/standard/`
 /// in the dev tree — kind schemas, handler descriptor YAMLs, and the
@@ -99,18 +104,23 @@ pub fn live_trust_store() -> TrustStore {
     ])
 }
 
-/// Load the live `HandlerRegistry` from `ryeos-bundles/core/` using
-/// the standard test trust store. Requires that the handler binaries
-/// have been built and the bundle manifest signed (the wave's commit θ
-/// + `ryos publish rebuild-manifest` left them in that state).
+/// Load the live `HandlerRegistry` from both `ryeos-bundles/core/` and
+/// `ryeos-bundles/standard/` using the standard test trust store.
+/// Requires that the handler binaries have been built and the bundle
+/// manifest signed (e.g. via `populate-bundles.sh`).
 ///
 /// Panics on failure so test bodies stay terse — the registry MUST
 /// load for tests that drive the parser/composer dispatcher.
 pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
-    let root = core_bundle_root();
+    let core_root = core_bundle_root();
+    let std_root = standard_bundle_root();
     let trust_store = live_trust_store();
-    let registry = HandlerRegistry::load_base(&[(root, TrustClass::TrustedSystem)], &trust_store)
-        .expect("live HandlerRegistry must load from ryeos-bundles/core/");
+    let tagged_roots: Vec<(PathBuf, TrustClass)> = vec![
+        (core_root, TrustClass::TrustedSystem),
+        (std_root, TrustClass::TrustedSystem),
+    ];
+    let registry = HandlerRegistry::load_base(&tagged_roots, &trust_store)
+        .expect("live HandlerRegistry must load from ryeos-bundles/{core,standard}/");
     Arc::new(registry)
 }
 

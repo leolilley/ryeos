@@ -41,6 +41,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 TRIPLE="${TRIPLE:-x86_64-unknown-linux-gnu}"
 
+# Resolve target directory: read from .cargo/config.toml or fallback
+TARGET=""
+if [ -f "$ROOT/.cargo/config.toml" ]; then
+  TARGET="$(grep -o 'target-dir *= *"[^"]*' "$ROOT/.cargo/config.toml" 2>/dev/null | sed 's/.*"//' || true)"
+fi
+if [ -z "$TARGET" ]; then
+  TARGET="$ROOT/target"
+fi
+echo "[populate-bundles] target dir: $TARGET"
+
 CORE="$ROOT/ryeos-bundles/core"
 STD="$ROOT/ryeos-bundles/standard"
 
@@ -75,34 +85,36 @@ echo "[populate-bundles] building all release binaries (workspace)…"
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 
-echo "[populate-bundles] installing standard bundle binaries → $STD_BIN"
-install -m 0755 \
-  "$ROOT/target/release/ryeos-directive-runtime" \
-  "$ROOT/target/release/ryeos-graph-runtime" \
-  "$ROOT/target/release/ryeos-knowledge-runtime" \
-  "$STD_BIN/"
-
 echo "[populate-bundles] installing core bundle binaries → $CORE_BIN"
 install -m 0755 \
-  "$ROOT/target/release/rye-parser-yaml-document" \
-  "$ROOT/target/release/rye-parser-yaml-header-document" \
-  "$ROOT/target/release/rye-parser-regex-kv" \
-  "$ROOT/target/release/rye-composer-extends-chain" \
-  "$ROOT/target/release/rye-composer-graph-permissions" \
-  "$ROOT/target/release/rye-composer-identity" \
-  "$ROOT/target/release/ryeos-core-tools" \
+  "$TARGET/release/rye-parser-yaml-document" \
+  "$TARGET/release/rye-parser-yaml-header-document" \
+  "$TARGET/release/rye-parser-regex-kv" \
+  "$TARGET/release/rye-composer-identity" \
+  "$TARGET/release/ryeos-core-tools" \
   "$CORE_BIN/"
+
+echo "[populate-bundles] installing standard bundle binaries → $STD_BIN"
+install -m 0755 \
+  "$TARGET/release/ryeos-directive-runtime" \
+  "$TARGET/release/ryeos-graph-runtime" \
+  "$TARGET/release/ryeos-knowledge-runtime" \
+  "$TARGET/release/rye-composer-extends-chain" \
+  "$TARGET/release/rye-composer-graph-permissions" \
+  "$STD_BIN/"
 
 # ── Publish ──────────────────────────────────────────────────────────
 
 echo "[populate-bundles] publishing core bundle…"
-"$ROOT/target/release/ryeos" publish "$CORE" \
+"$TARGET/release/ryeos" publish "$CORE" \
   --registry-root "$CORE" \
   --key "$KEY" \
   --owner "$OWNER" >/dev/null
 
 echo "[populate-bundles] publishing standard bundle…"
-"$ROOT/target/release/ryeos" publish "$STD" \
+# Standard contains its own kind schemas (directive, graph, knowledge) now.
+# Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
+"$TARGET/release/ryeos" publish "$STD" \
   --registry-root "$CORE" \
   --key "$KEY" \
   --owner "$OWNER" >/dev/null

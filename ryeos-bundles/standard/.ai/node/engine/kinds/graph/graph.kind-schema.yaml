@@ -1,0 +1,57 @@
+# ryeos:signed:2026-05-13T13:48:49Z:dc1d0defb4f7705045b7b1b152313a90bdd0eeb46da8fe2ae1429354260650e1:Azupa7J0BdGpem8fbzIxc/4NT5L5uLkEGA6NNTjxlP2BUlJZpE0w+e3vb382C5IASxNUlTAn9na/3NAxBqi4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/graph"
+version: "1.0.0"
+location:
+  directory: graphs
+execution:
+  # Explicit delegation to the runtime registry. The dispatcher will
+  # call `RuntimeRegistry::lookup_for("graph")` to find the default
+  # runtime serving this kind (today: `runtime:graph-runtime`).
+  # Without this `delegate` block the dispatcher refuses to consult
+  # the registry — there is no implicit fallback.
+  delegate:
+    via: runtime_registry
+  thread_profile: graph_run
+  resolution:
+    - step: resolve_extends_chain
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Graph permissions composer — lifts `permissions:` from the graph item
+# into `policy_facts.effective_caps` so the daemon-side callback cap
+# enforcement (V5.5 P2) gates graph action callbacks the same way it
+# gates directive tool callbacks. Replaces the identity composer which
+# produced no policy facts (deny-all at the daemon boundary).
+composer: handler:ryeos/core/graph-permissions
+composed_value_contract:
+  root_type: mapping
+  required: {}
+  optional:
+    config:
+      type: single
+      prim: mapping
+    permissions:
+      type: single
+      prim: sequence
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path
+    executor_id:
+      from: path
+      key: executor_id

@@ -1,7 +1,7 @@
 # ryeos:signed:2026-04-09T00:59:52Z:dc5a156e96c8be6e4c6e95b8cf1ab20d0bf743b528cd2f0078702b8120b60358:2mpfvO1515ZXvhMUShx9u6hVFAFrNMJRydyoBWRXyUa0iTUTszNKFUl9L0zy0PTqiGiuI8nJxGQpTACDloi4Dw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state-graph/runtime
+executor_id: ryeos/core/runtimes/state-graph/runtime
 category: graphs
 description: "Spawn an LLM thread and monitor its progress via the thread registry"
 permissions:

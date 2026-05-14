@@ -1,7 +1,7 @@
 # ryeos:signed:2026-04-09T00:59:52Z:e6bf1a006cc3ffe722804d10e735c621c680c235ab1b1f3d841fc47e5978d292:kMbwS4EiwvlWlg9e6QK_-_xaP3WsiS2WvjeqGtvKGLPKRlJBUYPhb5Rk6xe_8DtV9S1VsA6rrwF3AflJFB60Cg:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state-graph/runtime
+executor_id: ryeos/core/runtimes/state-graph/runtime
 category: graphs
 description: "Bash-only graph exercising CAS persistence, node caching, conditional routing, foreach, and on_error"
 permissions:

@@ -1,7 +1,7 @@
 # ryeos:signed:2026-04-09T00:59:52Z:44c65e2e36ef1d8f4fa385818e416b042aac1d6d95693b45942b9f69e8cc087d:nm5qUSaBoe-cyKMusVficX7eB0_iQkp59ERXKHwKaf-fyMy3JHOnWKjXIzfr9n0X7DShpwJjBjRztE8JA_PsAA:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state-graph/runtime
+executor_id: ryeos/core/runtimes/state-graph/runtime
 category: graphs
 description: "Test conditional branching, on_error recovery, and state accumulation"
 permissions:

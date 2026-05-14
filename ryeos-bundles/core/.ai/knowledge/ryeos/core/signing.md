@@ -22,7 +22,6 @@ When you run `ryeos sign <ref>`:
 4. A signature header is prepended to the file:
 
 ```yaml
-# ryeos:signed: ts=2025-01-15T10:30:00Z hash=sha256:abc123... sig=base64... keyfp=741a8bc6...
 ```
 
 The signature covers:

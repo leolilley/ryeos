@@ -102,7 +102,7 @@ struct InitArgs {
     #[arg(long)]
     user_root: Option<PathBuf>,
 
-    /// Source tree to copy `core` from (e.g. `/usr/share/ryeos/bundles/core`
+    /// Source tree to copy `core` from (e.g. `/usr/share/ryeos/core`
     /// in a packaged install, or `ryeos-bundles/core` in dev).
     #[arg(long)]
     core_source: PathBuf,
@@ -139,6 +139,7 @@ fn run_init_verb(argv: &[String]) -> Result<()> {
         core_only: args.core_only,
         force_node_key: args.force_node_key,
         trust_files: args.trust_files,
+        skip_preflight: false,
     };
     let report = run_init(&opts).context("ryeos init failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);

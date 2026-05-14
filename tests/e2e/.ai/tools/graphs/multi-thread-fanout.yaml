@@ -1,7 +1,7 @@
 # ryeos:signed:2026-04-09T00:59:52Z:cb4112cc3417edcd839767748dcfcae83d0583d033099162a574e48186645db7:4xSHTt_TUR0iAxViEdLi5VY8nb3nZGr1aB85IFwDQuhWnQ-ES3ZciOYoyBOKt80Z9EmADtA8IWfQAHAg1wDgBw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state-graph/runtime
+executor_id: ryeos/core/runtimes/state-graph/runtime
 category: graphs
 description: "Fan out LLM threads to summarize multiple topics in parallel, then collect results"
 permissions:

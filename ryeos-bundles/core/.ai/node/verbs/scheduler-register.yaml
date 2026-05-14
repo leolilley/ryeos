@@ -1,6 +1,0 @@
-# ryeos:signed:2026-05-12T10:40:00Z:c3d626c574ec5aa64d8e0cddddf1504c7f9bc1c87278c301d516aac539f49249:IXM5A6Tn/tRZ56nbXiPe7kVogDtmKDuXTBX34l7Oh6MT1c4gLz/lNR3vdzYHFbf5hk6twzvc5E54SxadosslCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
-section: verbs
-name: scheduler-register
-description: "Create or update a schedule spec"
-execute: service:scheduler/register

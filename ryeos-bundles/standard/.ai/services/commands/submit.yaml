@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-13T13:48:49Z:c14ec83e75be65434eb7e40cd396a63354c9065397d76aff6e218fe057fc61ff:r2Dz0HrPEjlP9G7Nyc/sBcH9Hb0oqIqPpawmi6oIExmNW5Tn/aqcBwK5+KT4cxlbAxkv0XIB26+6HykyqbZlCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "commands"
+name: "submit"
+kind: service
+endpoint: commands.submit
+required_caps: ["ryeos.execute.service.commands/submit"]
+schema:
+  thread_id: string
+  command_type: string
+  params: object?
+description: "Submit a command (cancel, kill, interrupt, continue) to a thread"

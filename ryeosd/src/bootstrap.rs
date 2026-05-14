@@ -242,14 +242,10 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         write_self_trust(&trust_dir, &user_trust_entry, user_identity.verifying_key(), user_identity.signing_key())?;
     }
 
-    // NOTE: We intentionally do NOT write a node-config registration for the
-    // system bundle here. `engine_init::build_engine` always adds
-    // `config.system_space_dir` to its system roots unconditionally, so a
-    // `bundles` registration pointing back at it would cause Phase 1 to
-    // return that same path, which `engine_init` would then add a second
-    // time (producing duplicate parsers / kinds at boot). The `bundles`
-    // section is reserved for ADDITIONAL bundles installed via
-    // `bundle.install`.
+    // NOTE: Bundle registrations are written by `ryeos init` (ryeos-tools),
+    // not by daemon bootstrap. The daemon only reads registrations during
+    // `load_node_config_two_phase`. Both core and standard bundles are
+    // registered at `system_space_dir/.ai/node/bundles/{name}.yaml`.
 
     Ok(())
 }
@@ -358,15 +354,24 @@ label = "bootstrap-authorized-user"
 // See docs/operations/signing-bundles.md.
 
 fn create_directory_layout(config: &Config) -> Result<()> {
-    // Node root layout: config, auth, vault, and CAS state live under .ai/.
-    //
-    // The vault directory is currently a placeholder — keypair generation
-    // and sealed-envelope encryption land in a later step (see
-    // .tmp/POST-KINDS-FLIP-PLAN.md §7). Reserved here so the layout is
-    // stable across the v1 → vault upgrade.
+    // Model B layout: bundles live under .ai/bundles/{name}/, node state under .ai/node/,
+    // runtime state under .ai/state/.
     let dirs = [
+        // Node identity
+        config.system_space_dir.join(".ai").join("node").join("identity"),
+        // Node auth
         config.system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+        // Node vault (sealed secrets)
         config.system_space_dir.join(".ai").join("node").join("vault"),
+        // Node config (model routing, etc.)
+        config.system_space_dir.join(".ai").join("node").join("config"),
+        // Node bundle registrations
+        config.system_space_dir.join(".ai").join("node").join("bundles"),
+        // Node engine (merged kind schemas cache)
+        config.system_space_dir.join(".ai").join("node").join("engine").join("kinds"),
+        // Installed bundles
+        config.system_space_dir.join(".ai").join("bundles"),
+        // CAS state
         config.system_space_dir.join(".ai").join("state").join("objects"),
         config.system_space_dir.join(".ai").join("state").join("refs"),
     ];
@@ -387,7 +392,13 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Check if the daemon has been initialized.
+/// Check if the daemon has been initialized (Model B).
+///
+/// Verifies:
+/// - system_space_dir exists
+/// - core bundle registration exists at `.ai/node/bundles/core.yaml`
+/// - node signing key exists
+/// - user signing key exists
 pub fn verify_initialized(config: &Config) -> Result<()> {
     let system_space_dir = &config.system_space_dir;
     if !system_space_dir.exists() {
@@ -397,6 +408,21 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
             system_space_dir.display()
         );
     }
+
+    // Model B: core bundle registration is mandatory
+    let core_reg = system_space_dir
+        .join(".ai")
+        .join("node")
+        .join("bundles")
+        .join("core.yaml");
+    if !core_reg.exists() {
+        anyhow::bail!(
+            "core bundle registration missing at {}\n\
+             This system space uses the older layout. Run: ryeos init --repair",
+            core_reg.display()
+        );
+    }
+
     if !config.node_signing_key_path.exists() {
         tracing::warn!("no node signing key found — signed items will fail to verify");
     }

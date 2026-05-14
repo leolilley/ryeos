@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-13T13:48:49Z:3c06c17c6ecb7717979a811552ed027392084e886fcab744278c9f5f59bd5ed1:lS8KObSUCBzQAwT7JUS/sZxfRZgPBNBS+aGj28THlodakHfwOAGlaIqg13xLXmNZLiCf9u1ELJZ8ifQDJtmFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "routes"
+section: routes
+id: threads/detail
+path: /threads/{thread_id}
+methods:
+  - GET
+auth: ryeos_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:threads/get
+  source_config:
+    thread_id: "${path.thread_id}"

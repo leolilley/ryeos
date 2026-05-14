@@ -1,7 +1,7 @@
 # ryeos:signed:2026-04-09T00:59:52Z:946669fa4eff9fc6f81e41af8ca58b53b821f6bf3b126cf69bde147136a0567b:SbkcKD4BlpapnBfTU0rgzVB_vFQF26tpXqGz2r8suAhyIyX5MMO3Ht3foCw-ARs2SiaBCC2PbplEOmjqdUSbBw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state-graph/runtime
+executor_id: ryeos/core/runtimes/state-graph/runtime
 category: graphs
 description: "Read a Python file, analyze it with an LLM, and produce a structured report"
 permissions:

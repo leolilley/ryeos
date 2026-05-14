@@ -263,7 +263,7 @@ fn bundle_manifest_json_exists() {
 }
 
 #[test]
-fn bundle_tools_dir_has_13_signed_yamls() {
+fn bundle_tools_dir_has_expected_signed_yamls() {
     let tools_dir = bundle_dir().join(".ai").join("tools").join("ryeos");
     if !tools_dir.is_dir() {
         return; // Skip if bundle not built yet
@@ -272,17 +272,14 @@ fn bundle_tools_dir_has_13_signed_yamls() {
     let mut yaml_files = Vec::new();
     walk_yaml_files(&tools_dir, &mut yaml_files);
 
-    // Standard bundle's `tools/ryeos/` directory now only houses the
-    // three agent provider tool descriptors (anthropic, openai, zen).
-    // Everything else got moved out: runtimes (directive/graph/
-    // knowledge) live under `.ai/runtimes/`, the agent harness is
-    // gone, and `verify`/`fetch`/`identity/public_key` were converted
-    // to core-bundle tools when those services were toolified.
+    // Standard bundle's `tools/ryeos/` directory contains:
+    // - 3 agent provider tool descriptors (anthropic, openai, zen)
+    // - 1 state-graph runtime descriptor
     assert_eq!(
         yaml_files.len(),
-        3,
-        "expected exactly 3 tool YAMLs in standard bundle's tools/ryeos/ \
-         (the agent providers), found {}: {:?}",
+        4,
+        "expected exactly 4 tool YAMLs in standard bundle's tools/ryeos/ \
+         (3 agent providers + state-graph runtime), found {}: {:?}",
         yaml_files.len(),
         yaml_files
     );

@@ -1,7 +1,9 @@
-//! Engine initialization for ryeosd.
+//! Engine initialization for ryeosd (Model B).
 //!
 //! Constructs a `ryeos_engine::engine::Engine` at daemon startup using
-//! the daemon's config-driven system data directory and user space.
+//! only registered bundle roots — NOT the system_space_dir itself.
+//! Model B: bundles live under `<system_space_dir>/.ai/bundles/{name}/`,
+//! each registered at `<system_space_dir>/.ai/node/bundles/{name}.yaml`.
 //! The engine crate is kind-agnostic — all kind definitions come from
 //! `*.kind-schema.yaml` files found under `{AI_DIR}/node/engine/kinds/`.
 
@@ -24,25 +26,34 @@ use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
 
-/// Build the native engine from daemon configuration.
+/// Build the native engine from daemon configuration (Model B).
 ///
-/// Scans the config-provided system data directory and user space for kind
-/// schema files, loads the trust store from the daemon's trusted keys
-/// directory. Uses the provided `bundle_roots` for item resolution.
-pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine> {
+/// System roots come ONLY from registered bundles. The system_space_dir
+/// itself is never a root — it holds mutable node state (identity, vault,
+/// config, registrations) and installed bundles under `.ai/bundles/`.
+///
+/// `bundle_roots` is the resolved set of canonical paths from registered
+/// bundles (loaded by `bootstrap::load_node_config_two_phase` Phase 1).
+pub fn build_engine(_config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
+    if bundle_roots.is_empty() {
+        anyhow::bail!(
+            "no registered bundles found. Core bundle registration is \
+             required. Run: ryeos init"
+        );
+    }
     for root in bundle_roots {
         if !root.is_dir() {
             tracing::warn!(
                 path = %root.display(),
-                "configured bundle root does not exist or is not a directory"
+                "registered bundle root does not exist or is not a directory"
             );
         }
     }
 
-    // 2. Collect all system roots (system_space_dir + bundle_roots, ordered)
-    let mut system_roots = vec![config.system_space_dir.clone()];
-    system_roots.extend(bundle_roots.iter().cloned());
+    // 2. System roots = registered bundles only (Model B).
+    //    system_space_dir is NOT a root — it contains node state, not content.
+    let system_roots: Vec<PathBuf> = bundle_roots.to_vec();
     let user_root = roots::user_root().ok();
 
     // 3. Collect kind schema search roots from all system roots + user space

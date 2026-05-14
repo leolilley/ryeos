@@ -1,6 +1,0 @@
-# ryeos:signed:2026-05-12T10:40:01Z:c14c5af95fc414f5db76ebdbe834163f9ac436d6937b1e4464229a361af9d47a:Wq5AuSCB236dhvW1r5Da1iy4TE/+ZDJaNw2qjvKiPMcSsSDcngA0bwFUgPpVyi/isfAlxRXeKEhhO666Ay9IBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["commands", "submit"]
-verb: commands-submit
-description: "Submit a command to a running thread"

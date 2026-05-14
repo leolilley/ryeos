@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-13T13:48:50Z:e65950636b2e76026e0e8e6ecbd0f9eb3568dca23e39f5c39d9a22be8e5ced86:vkPQ5tmSxZYgOEM8uDxWiT1hUCSBduvtG+L1qFcDavIAhn+C8AVEXUlkPknLeM93PRA43ITBg67lhov0ELv+CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "events"
+name: "chain_replay"
+kind: service
+endpoint: events.chain_replay
+required_caps: []
+schema:
+  chain_root_id: string
+  after_chain_seq: integer?
+  limit: integer?
+description: "Replay events for a chain (by chain_root_id)"

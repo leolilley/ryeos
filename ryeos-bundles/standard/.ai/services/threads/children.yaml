@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-13T13:48:49Z:bfb482a7b4d7bf54488e3d152fcfa2b2585c00cebeb91fb45ec3f3fa4eac578d:nrEQuY6a2vQeArfM4yNU4AqMyxd7xfjRA46ImSQxDSWW6CsIX/s2TvRJSigaDvicDw9FR38k/SwkoTtQEDD7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "children"
+kind: service
+endpoint: threads.children
+required_caps: []
+schema:
+  thread_id: string
+description: "List child threads of a parent thread"

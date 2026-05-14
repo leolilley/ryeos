@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-13T13:48:49Z:828be30750dfca0207d7c8e1bc9fe1e1b1b9635f3c14eb1705b30ae2fbdb6067:8SmyPsWPnCJOZzOD61QJOz9c32IysIKDqIgirGv0Tj1Wh1n+R9luLN1yRkAgS7sIYIhpOoj85esj8QEXiVqDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "chain"
+kind: service
+endpoint: threads.chain
+required_caps: []
+schema:
+  thread_id: string
+description: "Get the chain (thread tree + edges) rooted at a thread"

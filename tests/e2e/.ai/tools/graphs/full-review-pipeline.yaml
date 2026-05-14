@@ -1,7 +1,7 @@
 # ryeos:signed:2026-04-09T00:59:52Z:3b0f92558298000b65657636edc406813aa61e7406c705f96513196ace53b94d:8qPf0qQFFDrBgmWdGyeTlwq_jnriNy3K0dS-uxJ4PaHf9daHEGhLya-buoHzojqxDi1be032Qbdi0B2-CFHTDw:4b987fd4e40303ac
 version: "1.0.0"
 tool_type: graph
-executor_id: rye/core/runtimes/state-graph/runtime
+executor_id: ryeos/core/runtimes/state-graph/runtime
 category: graphs
 description: "Complex pipeline: foreach analysis, conditional routing, nested LLM thread spawning via orchestrate_review, and nested graph execution"
 permissions:

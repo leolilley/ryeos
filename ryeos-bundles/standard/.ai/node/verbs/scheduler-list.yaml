@@ -1,0 +1,6 @@
+# ryeos:signed:2026-05-13T13:48:49Z:7a296d07c6761fd7c387bf34e6c533acec79247a3228726967a851d4bfd2c87d:AjvzIbowmo9rGpdiGfDZAoWfQVXfLIWYUMYGEmeW+nmzMA6HVYALAGA/3lCG9+QUOvfoZSt3jX+h+gJ9g3ZcCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "verbs"
+section: verbs
+name: scheduler-list
+description: "List all registered schedules"
+execute: service:scheduler/list
