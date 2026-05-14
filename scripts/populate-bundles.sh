@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Populate ryeos-bundles/{core,standard}/.ai/bin/<triple>/ with freshly built
-# binaries, then publish both bundles (sign items + rebuild CAS manifests).
+# Populate ryeos-bundles/*/.ai/bin/<triple>/ with freshly built
+# binaries, then publish all bundles (sign items + rebuild CAS manifests).
 #
 # Use this whenever bundle bin/ contents are missing or stale:
 #   - after a fresh checkout (binaries are .gitignored)
@@ -54,16 +54,15 @@ echo "[populate-bundles] target dir: $TARGET"
 CORE="$ROOT/ryeos-bundles/core"
 STD="$ROOT/ryeos-bundles/standard"
 
-# ── Clean derived state from both bundles ────────────────────────────
+# ── Clean derived state from all bundles ────────────────────────────
 # Wipe everything that will be regenerated so stale artifacts (old
 # binaries, old manifests, old trust docs) don't leak through.
 
-for BUNDLE in core standard; do
-  BUNDLE_DIR="$ROOT/ryeos-bundles/$BUNDLE"
-  rm -rf "$BUNDLE_DIR/.ai/bin"
-  rm -rf "$BUNDLE_DIR/.ai/objects"
-  rm -rf "$BUNDLE_DIR/.ai/refs"
-  rm -f  "$BUNDLE_DIR/PUBLISHER_TRUST.toml"
+for BUNDLE_DIR in "$ROOT/ryeos-bundles"/*/; do
+  rm -rf "$BUNDLE_DIR.ai/bin"
+  rm -rf "$BUNDLE_DIR.ai/objects"
+  rm -rf "$BUNDLE_DIR.ai/refs"
+  rm -f  "${BUNDLE_DIR%/}/PUBLISHER_TRUST.toml"
 done
 
 CORE_BIN="$CORE/.ai/bin/$TRIPLE"

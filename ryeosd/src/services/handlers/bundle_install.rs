@@ -3,8 +3,7 @@
 //! Copies source to `<system_space_dir>/.ai/bundles/<name>/`, writes a signed
 //! `kind: node` `section: bundles` item at `<system_space_dir>/.ai/node/bundles/<name>.yaml`.
 //!
-//! `core` cannot be installed — it is the packaged base root laid down at
-//! `system_space_dir` out-of-band (by the OS package installer or manual copy).
+//! Any bundle name is accepted — no special treatment for any name.
 //!
 //! OfflineOnly: the daemon must be stopped (engine reload not implemented).
 
@@ -32,13 +31,6 @@ pub struct Request {
 }
 
 fn validate_name(name: &str) -> Result<()> {
-    if name == "core" {
-        bail!(
-            "\"core\" cannot be installed via bundle.install — \
-             it is the packaged base root and must be laid down at \
-             system_space_dir out-of-band"
-        );
-    }
     if name.is_empty()
         || name
             .contains(|c: char| c == '/' || c == '\\' || c == '.' || c.is_whitespace())
@@ -193,12 +185,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_name_rejects_core() {
-        let err = validate_name("core").unwrap_err();
-        assert!(
-            err.to_string().contains("cannot be installed via bundle.install"),
-            "expected core refusal, got: {err}"
-        );
+    fn validate_name_accepts_core_and_standard() {
+        assert!(validate_name("core").is_ok());
+        assert!(validate_name("standard").is_ok());
     }
 
     #[test]

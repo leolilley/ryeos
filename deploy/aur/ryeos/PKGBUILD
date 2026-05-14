@@ -54,17 +54,14 @@ package() {
     install -Dm755 target/release/rye-composer-identity             "$pkgdir/usr/bin/rye-composer-identity"
 
     # ── Bundle YAML data ────────────────────────────────────
-    # Ship the source YAML definitions; strip derivable artifacts
-    # (bin/, objects/, refs/, PUBLISHER_TRUST.toml) that are
-    # generated at runtime by `ryeos publish`.
-    for bundle in core standard; do
-        mkdir -p "$pkgdir/usr/share/ryeos/bundles/$bundle"
-        cp -ra "ryeos-bundles/$bundle/.ai" \
-               "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai"
-        rm -rf "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai/bin"
-        rm -rf "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai/objects"
-        rm -rf "$pkgdir/usr/share/ryeos/bundles/$bundle/.ai/refs"
-        rm -f  "$pkgdir/usr/share/ryeos/bundles/$bundle/PUBLISHER_TRUST.toml"
+    # Ship each bundle directory as-is under /usr/share/ryeos/<name>/
+    # (including .ai/bin, .ai/objects, .ai/refs — runtime artifacts).
+    # `ryeos init --source /usr/share/ryeos` discovers and installs them.
+    mkdir -p "$pkgdir/usr/share/ryeos"
+    for bundle_dir in ryeos-bundles/*/; do
+        name=$(basename "$bundle_dir")
+        mkdir -p "$pkgdir/usr/share/ryeos/$name"
+        cp -ra "$bundle_dir" "$pkgdir/usr/share/ryeos/$name/"
     done
 
     # ── License ─────────────────────────────────────────────

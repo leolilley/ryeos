@@ -19,8 +19,7 @@ LOCAL="$ROOT/.local/ryeos"
 # Init operator state using dev trust
 "$ROOT/target/release/ryeos" init \
   --system-space-dir "$LOCAL" \
-  --core-source "$ROOT/ryeos-bundles/core" \
-  --standard-source "$ROOT/ryeos-bundles/standard" \
+  --source "$ROOT/ryeos-bundles" \
   --trust-file "$ROOT/.dev-keys/PUBLISHER_DEV_TRUST.toml"
 
 # Start daemon

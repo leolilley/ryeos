@@ -22,7 +22,7 @@ mkdir -p /data
 # dev images this is whichever key built the image. Either way, init
 # needs the bundle's signer trusted before it preflights bundle items.
 TRUST_ARGS=()
-for f in /opt/ryeos/core/PUBLISHER_TRUST.toml /opt/ryeos/standard/PUBLISHER_TRUST.toml; do
+for f in /opt/ryeos/*/PUBLISHER_TRUST.toml; do
   if [ -f "$f" ]; then
     TRUST_ARGS+=(--trust-file "$f")
   fi
@@ -31,8 +31,7 @@ done
 ryeos init \
   --system-space-dir /data/core \
   --user-root /data/user \
-  --core-source /opt/ryeos/core \
-  --standard-source /opt/ryeos/standard \
+  --source /opt/ryeos \
   "${TRUST_ARGS[@]}"
 
 echo "[entrypoint] init complete, starting daemon"

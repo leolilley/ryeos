@@ -90,7 +90,7 @@ fn map_local_err(e: anyhow::Error) -> CliError {
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos init",
-    about = "Bootstrap user + node keys, lay down core, pin publisher keys",
+    about = "Bootstrap user + node keys, discover and install bundles, pin publisher keys",
     no_binary_name = true
 )]
 struct InitArgs {
@@ -102,18 +102,11 @@ struct InitArgs {
     #[arg(long)]
     user_root: Option<PathBuf>,
 
-    /// Source tree to copy `core` from (e.g. `/usr/share/ryeos/core`
-    /// in a packaged install, or `ryeos-bundles/core` in dev).
+    /// Source directory containing bundle subdirectories.
+    /// Each immediate child with a `.ai/` subdirectory is installed as a bundle.
+    /// Examples: `/usr/share/ryeos` (packaged), `ryeos-bundles` (dev), `/opt/ryeos` (docker).
     #[arg(long)]
-    core_source: PathBuf,
-
-    /// Source tree to copy `standard` from. Required unless `--core-only`.
-    #[arg(long)]
-    standard_source: Option<PathBuf>,
-
-    /// Skip installing the standard bundle (positive framing — opt-in to bare core).
-    #[arg(long)]
-    core_only: bool,
+    source: PathBuf,
 
     /// Additional publisher trust doc(s) to pin before verifying bundles.
     /// Each file should be a PUBLISHER_TRUST.toml with public_key and fingerprint.
@@ -134,9 +127,7 @@ fn run_init_verb(argv: &[String]) -> Result<()> {
     let opts = InitOptions {
         system_space_dir,
         user_root,
-        core_source: args.core_source,
-        standard_source: args.standard_source,
-        core_only: args.core_only,
+        source_dir: args.source,
         force_node_key: args.force_node_key,
         trust_files: args.trust_files,
         skip_preflight: false,

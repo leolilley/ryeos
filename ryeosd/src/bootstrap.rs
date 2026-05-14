@@ -396,30 +396,50 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
 ///
 /// Verifies:
 /// - system_space_dir exists
-/// - core bundle registration exists at `.ai/node/bundles/core.yaml`
+/// - at least one bundle registration exists at `.ai/node/bundles/*.yaml`
 /// - node signing key exists
 /// - user signing key exists
+///
+/// No bundle names are checked — the engine is agnostic about what's
+/// installed. Any registered bundle contributes its kinds and items.
 pub fn verify_initialized(config: &Config) -> Result<()> {
     let system_space_dir = &config.system_space_dir;
     if !system_space_dir.exists() {
         anyhow::bail!(
             "ryeosd not initialized: system space dir missing at {}\n\
-             Run: ryeos init",
+             Run: ryeos init --source <path>",
             system_space_dir.display()
         );
     }
 
-    // Model B: core bundle registration is mandatory
-    let core_reg = system_space_dir
+    let bundles_dir = system_space_dir
         .join(".ai")
         .join("node")
-        .join("bundles")
-        .join("core.yaml");
-    if !core_reg.exists() {
+        .join("bundles");
+
+    if !bundles_dir.is_dir() {
         anyhow::bail!(
-            "core bundle registration missing at {}\n\
-             This system space uses the older layout. Run: ryeos init --repair",
-            core_reg.display()
+            "bundle registration directory missing at {}\n\
+             Run: ryeos init --source <path>",
+            bundles_dir.display()
+        );
+    }
+
+    // At least one registered bundle is required for the engine to load kinds.
+    let has_any_registration = fs::read_dir(&bundles_dir)
+        .with_context(|| format!("read {}", bundles_dir.display()))?
+        .any(|entry| {
+            entry.ok().and_then(|e| {
+                e.path().extension()
+                    .and_then(|ext| ext.to_str().map(|s| s == "yaml"))
+            }).unwrap_or(false)
+        });
+
+    if !has_any_registration {
+        anyhow::bail!(
+            "no bundles registered at {}\n\
+             Run: ryeos init --source <path>",
+            bundles_dir.display()
         );
     }
 

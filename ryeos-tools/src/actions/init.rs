@@ -1,17 +1,44 @@
 //! Operator-side `ryeos init` (Model B) — bootstraps user space, node space,
-//! pins the official publisher key into the operator's trust store, installs
-//! both core and standard bundles under `<system_space_dir>/.ai/bundles/`,
-//! and writes signed registration records at
-//! `<system_space_dir>/.ai/node/bundles/{core,standard}.yaml`.
+//! pins the official publisher key into the operator's trust store, discovers
+//! bundles from a source directory, installs them under
+//! `<system_space_dir>/.ai/bundles/`, and writes signed registration records
+//! at `<system_space_dir>/.ai/node/bundles/<name>.yaml`.
 //!
-//! Idempotent. Re-running keeps existing keys; only fills in missing pieces.
-//! Refuses on inconsistent state — e.g. trust-doc fingerprint doesn't match
-//! the key on disk. Refusing means a wipe-and-reinit recovery is required.
+//! # Bundle discovery
 //!
-//! `ryeos init` does NOT auto-import trust docs from any bundle. The official
-//! publisher key is hardcoded in this source ([`OFFICIAL_PUBLISHER_PUBKEY`]) and
-//! pinned explicitly. Third-party bundle authors are pinned via
-//! `ryeos trust pin <fingerprint>` or `--trust-file <PUBLISHER_TRUST.toml>`.
+//! `--source` points to a directory containing bundle subdirectories.
+//! Each immediate child directory that contains a `.ai/` subdirectory
+//! is recognized as a bundle. The bundle name is the directory name.
+//!
+//! Source layout (e.g. `/usr/share/ryeos`):
+//! ```text
+//! core/
+//!   .ai/
+//!     handlers/ parsers/ services/ tools/ config/ knowledge/
+//!     node/engine/kinds/ node/verbs/ node/aliases/ node/routes/
+//!     bin/<triple>/
+//!     PUBLISHER_TRUST.toml
+//! standard/
+//!   .ai/
+//!     ...same shape...
+//! ```
+//!
+//! After init, installed at `<system_space_dir>/.ai/bundles/`:
+//! ```text
+//! core/.ai/...      ← copied from source/core/
+//! standard/.ai/...  ← copied from source/standard/
+//! ```
+//!
+//! The entire source bundle directory is copied as-is. Source bundles
+//! are expected to contain only bundle content (handlers, parsers, kinds,
+//! tools, config, knowledge, binaries). Runtime-only state directories
+//! (`state/objects/`, `state/refs/`, `node/identity/`, `node/vault/`,
+//! `node/bundles/`) are never present in source bundles and are not
+//! created by init — they belong to the system space runtime layout.
+//!
+//! Directories that are NOT immediate children of `--source`, or that
+//! lack a `.ai/` subdirectory, are silently skipped. Hidden directories
+//! (starting with `.`) are also skipped.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,17 +84,18 @@ pub struct InitOptions {
     pub system_space_dir: PathBuf,
     /// User space root (parent of `~/.ai/`). Defaults to `$HOME`.
     pub user_root: PathBuf,
-    /// Source tree to copy `core` from. Required — the operator points this
-    /// at the packaged core (e.g. `/usr/share/ryeos/core`) or at the dev
-    /// tree `ryeos-bundles/core`.
-    pub core_source: PathBuf,
-    /// Source tree to copy `standard` from. Required unless `core_only`.
-    pub standard_source: Option<PathBuf>,
-    /// Skip installing standard. Positive framing — opt-in to bare core.
-    pub core_only: bool,
+    /// Source directory containing one or more bundle subdirectories.
+    /// Each immediate child that contains a `.ai/` directory is a bundle;
+    /// the bundle name is its directory name.
+    ///
+    /// Examples:
+    ///   - `/usr/share/ryeos` (packaged install)
+    ///   - `ryeos-bundles` (dev tree)
+    ///   - `/opt/ryeos` (docker)
+    pub source_dir: PathBuf,
     /// Force-regenerate the node signing key. Does NOT touch the user key.
     pub force_node_key: bool,
-    /// Additional PUBLISHER_TRUST.tomL files to pin before verifying bundles.
+    /// Additional PUBLISHER_TRUST.toml files to pin before verifying bundles.
     /// Each file contains `public_key`, `fingerprint`, and `owner` fields.
     pub trust_files: Vec<PathBuf>,
     /// Skip preflight verification of source bundles (trust + signatures).
@@ -78,17 +106,16 @@ pub struct InitOptions {
 
 #[derive(Debug, Serialize)]
 pub struct InitReport {
+    pub system_space_dir: PathBuf,
     pub user_key_fingerprint: String,
     pub node_key_fingerprint: String,
     pub official_publisher_pinned: String,
-    pub core_installed_at: PathBuf,
-    pub standard_installed_at: Option<PathBuf>,
-    pub vault_dir: PathBuf,
     /// SHA-256 fingerprint of the X25519 vault public key. Surfaced
     /// so operators can sanity-check that subsequent vault writes are
     /// being sealed to the right key (and so audit logs can pin it).
     pub vault_pubkey_fingerprint: String,
-    pub trust_dir: PathBuf,
+    /// Names of bundles discovered and installed from `source_dir`.
+    pub bundles_installed: Vec<String>,
     pub next_steps: Vec<String>,
 }
 
@@ -100,8 +127,8 @@ pub struct InitReport {
 ///   3. Node key (load-or-create at `<system_space_dir>/.ai/node/identity/private_key.pem`)
 ///   4. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
 ///   5. Pin official publisher key into user trust dir + additional trust files
-///   6. Install core bundle at `<system_space_dir>/.ai/bundles/core/` + registration
-///   7. Install standard bundle at `<system_space_dir>/.ai/bundles/standard/` + registration
+///   6. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
+///   7. Install each discovered bundle + write registration record
 ///   8. Vault X25519 keypair
 ///   9. Post-init trust verification
 pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
@@ -166,157 +193,78 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .with_context(|| format!("pin trust file {}", trust_file.display()))?;
     }
 
-    // ── 6. Install core bundle ──
-    // Model B: core installs to <system_space_dir>/.ai/bundles/core/
-    // (NOT directly to system_space_dir root).
-    if !opts.core_source.is_dir() {
+    // ── 6. Discover bundles in source_dir ──
+    let discovered = discover_bundles(&opts.source_dir)?;
+    if discovered.is_empty() {
         bail!(
-            "core_source is not a directory: {}",
-            opts.core_source.display()
+            "no bundles found in {} — expected immediate child directories \
+             containing a `.ai/` subdirectory",
+            opts.source_dir.display()
         );
     }
-    let core_target = opts
-        .system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("bundles")
-        .join("core");
+    tracing::info!(
+        source = %opts.source_dir.display(),
+        bundles = ?discovered.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+        "discovered bundles"
+    );
 
-    if core_target.exists() {
-        // Core bundle already installed — verify structure and update.
-        verify_bundle_structure(&core_target)?;
-
-        // Verify the source before re-copying.
-        if !opts.skip_preflight {
-            crate::actions::install::preflight_verify_bundle(
-                &opts.core_source,
-                &opts.core_source,
-                Some(opts.user_root.as_path()),
-            )
-            .context("verify core source against pinned publisher key")?;
-        }
-
-        // Re-copy to bring it up to date.
-        copy_dir_recursive(&opts.core_source, &core_target).with_context(|| {
-            format!(
-                "update core: {} -> {}",
-                opts.core_source.display(),
-                core_target.display()
-            )
-        })?;
-
-        // Ensure registration exists and is valid.
-        let core_canonical = core_target.canonicalize()?;
-        ensure_node_bundle_registration(
-            &opts.system_space_dir,
-            "core",
-            &core_canonical,
-            &node_key,
-        )
-        .context("verify/recreate node/bundles/core.yaml")?;
-    } else {
-        // Fresh install.
-        if !opts.skip_preflight {
-            crate::actions::install::preflight_verify_bundle(
-                &opts.core_source,
-                &opts.core_source,
-                Some(opts.user_root.as_path()),
-            )
-            .context("verify core source against pinned publisher key")?;
-        }
-
-        fs::create_dir_all(core_target.parent().unwrap())
-            .with_context(|| format!("create bundles parent for {}", core_target.display()))?;
-        copy_dir_recursive(&opts.core_source, &core_target).with_context(|| {
-            format!(
-                "install core: {} -> {}",
-                opts.core_source.display(),
-                core_target.display()
-            )
-        })?;
-
-        let core_canonical = core_target.canonicalize()?;
-        let node_dir = opts.system_space_dir.join(ryeos_engine::AI_DIR).join("node");
-        write_node_bundle_registration(&node_dir, "core", &core_canonical, &node_key)?;
-    }
-
-    let core_installed_at = core_target.canonicalize()?;
-
-    // ── 7. Install standard bundle ──
-    let standard_installed_at = if opts.core_only {
-        None
-    } else {
-        let standard_source = opts
-            .standard_source
-            .as_ref()
-            .ok_or_else(|| anyhow!("standard_source is required unless --core-only"))?;
-        if !standard_source.is_dir() {
-            bail!(
-                "standard_source is not a directory: {}",
-                standard_source.display()
-            );
-        }
+    // ── 7. Install each bundle ──
+    let mut bundles_installed = Vec::new();
+    for (name, source_path) in &discovered {
         let target = opts
             .system_space_dir
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
-            .join("standard");
+            .join(name);
 
         if target.exists() {
-            // Standard bundle already installed.
+            // Bundle already installed — verify structure and update.
             verify_bundle_structure(&target)?;
 
             if !opts.skip_preflight {
                 crate::actions::install::preflight_verify_bundle(
-                    &target,
+                    source_path,
                     &opts.system_space_dir,
                     Some(opts.user_root.as_path()),
                 )
-                .context("verify installed standard bundle against operator trust")?;
-
-                crate::actions::install::preflight_verify_bundle(
-                    standard_source,
-                    &opts.system_space_dir,
-                    Some(opts.user_root.as_path()),
-                )
-                .context("verify standard source signatures")?;
+                .with_context(|| format!("verify {} source against pinned publisher key", name))?;
             }
 
-            copy_dir_recursive(standard_source, &target).with_context(|| {
+            copy_dir_recursive(source_path, &target).with_context(|| {
                 format!(
-                    "update standard: {} -> {}",
-                    standard_source.display(),
+                    "update {}: {} -> {}",
+                    name,
+                    source_path.display(),
                     target.display()
                 )
             })?;
 
             ensure_node_bundle_registration(
                 &opts.system_space_dir,
-                "standard",
+                name,
                 &target.canonicalize()?,
                 &node_key,
             )
-            .context("verify/recreate node/bundles/standard.yaml")?;
-
-            Some(target.canonicalize()?)
+            .with_context(|| format!("verify/recreate node/bundles/{}.yaml", name))?;
         } else {
             install_bundle(
                 &opts.system_space_dir,
-                "standard",
-                standard_source,
+                name,
+                source_path,
                 &node_key,
                 &opts.system_space_dir,
                 opts.user_root.as_path(),
                 opts.skip_preflight,
-            )?
+            )?;
         }
-    };
+
+        bundles_installed.push(name.clone());
+    }
 
     // ── 8. Vault X25519 keypair ──
     let vault_dir = opts.system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("vault");
     fs::create_dir_all(&vault_dir)
         .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
-    // Separate from Ed25519 node identity so node-key rotation does NOT
-    // brick the vault. Idempotent: load if present, generate otherwise.
     let vault_secret_path = vault_dir.join("private_key.pem");
     let vault_public_path = vault_dir.join("public_key.pem");
     let vault_sk = if vault_secret_path.exists() {
@@ -363,32 +311,63 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         );
     }
 
-    let mut next_steps = vec![
+    let next_steps = vec![
         format!(
             "Start the daemon: ryeosd --system-space-dir {}",
             opts.system_space_dir.display()
         ),
         "Try a verb: ryeos status".to_string(),
     ];
-    if opts.core_only {
-        next_steps.push(
-            "Install the standard bundle later: ryeos bundle install --name standard \
-             --source-path <path>"
-                .to_string(),
-        );
-    }
 
     Ok(InitReport {
+        system_space_dir: opts.system_space_dir.clone(),
         user_key_fingerprint: user_fp,
         node_key_fingerprint: node_fp,
         official_publisher_pinned: OFFICIAL_PUBLISHER_FP.to_string(),
-        core_installed_at,
-        standard_installed_at,
-        vault_dir,
         vault_pubkey_fingerprint: vault_sk.public_key().fingerprint(),
-        trust_dir,
+        bundles_installed,
         next_steps,
     })
+}
+
+/// Discover bundles in a source directory.
+///
+/// Scans immediate children of `source_dir` for directories containing
+/// a `.ai/` subdirectory. Hidden directories (starting with `.`) are
+/// skipped. Returns `(name, source_path)` pairs sorted by name for
+/// deterministic registration order.
+fn discover_bundles(source_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    if !source_dir.is_dir() {
+        bail!("source directory does not exist: {}", source_dir.display());
+    }
+
+    let mut bundles = Vec::new();
+    let entries = fs::read_dir(source_dir)
+        .with_context(|| format!("read source directory {}", source_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.context("read source dir entry")?;
+        let file_type = entry.file_type().context("read source dir entry type")?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden directories (e.g. .staging, .git)
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        let child_path = entry.path();
+        if child_path.join(ryeos_engine::AI_DIR).is_dir() {
+            bundles.push((name_str.into_owned(), child_path));
+        }
+    }
+
+    bundles.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(bundles)
 }
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
@@ -498,6 +477,8 @@ fn verify_bundle_structure(target: &Path) -> Result<()> {
 /// Mirrors `service:bundle/install` semantics but runs in-process (no daemon
 /// required). The official publisher trust must already be pinned so
 /// preflight verification passes.
+///
+/// Returns the canonical path of the installed bundle.
 fn install_bundle(
     system_space_dir: &Path,
     name: &str,
@@ -506,7 +487,7 @@ fn install_bundle(
     system_space_dir_for_kinds: &Path,
     user_root: &Path,
     skip_preflight: bool,
-) -> Result<Option<PathBuf>> {
+) -> Result<PathBuf> {
     if !skip_preflight {
         // Preflight: load trust store from operator state.
         let trust_store = TrustStore::load_three_tier(
@@ -547,7 +528,7 @@ fn install_bundle(
     let node_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("node");
     write_node_bundle_registration(&node_dir, name, &canonical, node_key)?;
 
-    Ok(Some(canonical))
+    Ok(canonical)
 }
 
 /// Write a signed `kind: node` `section: bundles` registration record.
@@ -726,13 +707,11 @@ mod tests {
         workspace_root().join(".dev-keys/PUBLISHER_DEV_TRUST.toml")
     }
 
-    fn make_opts_core_only(state: &Path, user: &Path) -> InitOptions {
+    fn make_opts(state: &Path, user: &Path) -> InitOptions {
         InitOptions {
             system_space_dir: state.to_path_buf(),
             user_root: user.to_path_buf(),
-            core_source: workspace_root().join("ryeos-bundles/core"),
-            standard_source: None,
-            core_only: true,
+            source_dir: workspace_root().join("ryeos-bundles"),
             force_node_key: false,
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,
@@ -743,9 +722,7 @@ mod tests {
         InitOptions {
             system_space_dir: state.to_path_buf(),
             user_root: user.to_path_buf(),
-            core_source: workspace_root().join("ryeos-bundles/core"),
-            standard_source: None,
-            core_only: true,
+            source_dir: workspace_root().join("ryeos-bundles"),
             force_node_key: true,
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,
@@ -753,31 +730,43 @@ mod tests {
     }
 
     #[test]
-    fn run_installs_core_to_bundles_dir() {
+    fn run_installs_discovered_bundles() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        let opts = make_opts_core_only(&state, &user);
-        let report = run_init(&opts).expect("init");
+        let report = run_init(&make_opts(&state, &user)).expect("init");
         assert_eq!(report.official_publisher_pinned, OFFICIAL_PUBLISHER_FP);
 
-        // Core should be at .ai/bundles/core/.ai/ (Model B)
+        // Both bundles discovered and installed
+        assert!(
+            report.bundles_installed.contains(&"core".to_string()),
+            "core must be in installed list: {:?}",
+            report.bundles_installed
+        );
+        assert!(
+            report.bundles_installed.contains(&"standard".to_string()),
+            "standard must be in installed list: {:?}",
+            report.bundles_installed
+        );
+
+        // Core at .ai/bundles/core/.ai/
         assert!(
             state.join(".ai/bundles/core/.ai").is_dir(),
             "core should be installed at .ai/bundles/core/.ai/"
         );
-        // Core registration should exist
+        // Standard at .ai/bundles/standard/.ai/
         assert!(
-            state.join(".ai/node/bundles/core.yaml").exists(),
-            "core bundle registration must exist"
+            state.join(".ai/bundles/standard/.ai").is_dir(),
+            "standard should be installed at .ai/bundles/standard/.ai/"
         );
-        // Kind schemas should be inside the core bundle
+        // Registrations
+        assert!(state.join(".ai/node/bundles/core.yaml").exists());
+        assert!(state.join(".ai/node/bundles/standard.yaml").exists());
+        // Kind schemas inside core
         assert!(
             state.join(".ai/bundles/core/.ai/node/engine/kinds").is_dir(),
             "core kind schemas must be inside the installed bundle"
         );
-        // No standard installed
-        assert!(report.standard_installed_at.is_none());
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(user.join(".ai/config/keys/signing/private_key.pem").exists());
@@ -788,10 +777,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        let opts = make_opts_core_only(&state, &user);
-        let report = run_init(&opts).expect("init");
+        let report = run_init(&make_opts(&state, &user)).expect("init");
         assert_eq!(report.official_publisher_pinned, OFFICIAL_PUBLISHER_FP);
-        assert!(report.standard_installed_at.is_none());
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(user.join(".ai/config/keys/signing/private_key.pem").exists());
@@ -806,8 +793,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        let opts = make_opts_core_only(&state, &user);
-        let report = run_init(&opts).expect("init");
+        let report = run_init(&make_opts(&state, &user)).expect("init");
         let vault_priv = state.join(".ai/node/vault/private_key.pem");
         let vault_pub = state.join(".ai/node/vault/public_key.pem");
         assert!(vault_priv.exists(), "vault private key must exist");
@@ -825,7 +811,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        let opts = make_opts_core_only(&state, &user);
+        let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(
@@ -839,11 +825,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        let opts = make_opts_core_only(&state, &user);
+        let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
         assert_eq!(r1.node_key_fingerprint, r2.node_key_fingerprint);
+        assert_eq!(r1.bundles_installed, r2.bundles_installed);
     }
 
     #[test]
@@ -851,46 +838,56 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        let r1 = run_init(&make_opts_core_only(&state, &user)).expect("init #1");
+        let r1 = run_init(&make_opts(&state, &user)).expect("init #1");
         let r2 = run_init(&make_opts_force(&state, &user)).expect("init #2 (force)");
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint, "user key must persist");
         assert_ne!(r1.node_key_fingerprint, r2.node_key_fingerprint, "node key must rotate");
     }
 
     #[test]
-    fn run_init_with_both_bundles() {
+    fn discover_bundles_finds_core_and_standard() {
+        let bundles = discover_bundles(&workspace_root().join("ryeos-bundles")).unwrap();
+        let names: Vec<&str> = bundles.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"core"), "must find core: {:?}", names);
+        assert!(names.contains(&"standard"), "must find standard: {:?}", names);
+    }
+
+    #[test]
+    fn discover_bundles_skips_hidden_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = tmp.path().join("state");
-        let user = tmp.path().join("home");
+        // Create a hidden dir with .ai/ — should be skipped
+        let hidden = tmp.path().join(".hidden");
+        fs::create_dir_all(hidden.join(".ai")).unwrap();
+        // Create a valid bundle
+        let valid = tmp.path().join("my-bundle");
+        fs::create_dir_all(valid.join(".ai")).unwrap();
 
-        let opts = InitOptions {
-            system_space_dir: state.clone(),
-            user_root: user.clone(),
-            core_source: workspace_root().join("ryeos-bundles/core"),
-            standard_source: Some(workspace_root().join("ryeos-bundles/standard")),
-            core_only: false,
-            force_node_key: false,
-            trust_files: vec![dev_trust_file()],
-            skip_preflight: true,
-        };
-        let report = run_init(&opts).expect("init");
+        let bundles = discover_bundles(tmp.path()).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].0, "my-bundle");
+    }
 
-        // Both bundles installed
-        assert!(state.join(".ai/bundles/core/.ai").is_dir(), "core must be installed");
-        assert!(state.join(".ai/bundles/standard/.ai").is_dir(), "standard must be installed");
+    #[test]
+    fn discover_bundles_skips_non_bundle_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Dir without .ai/ — not a bundle
+        fs::create_dir_all(tmp.path().join("not-a-bundle")).unwrap();
+        // Valid bundle
+        let valid = tmp.path().join("real-bundle");
+        fs::create_dir_all(valid.join(".ai")).unwrap();
 
-        // Both registrations exist
-        assert!(state.join(".ai/node/bundles/core.yaml").exists(), "core registration");
-        assert!(state.join(".ai/node/bundles/standard.yaml").exists(), "standard registration");
+        let bundles = discover_bundles(tmp.path()).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].0, "real-bundle");
+    }
 
-        // Report paths
-        assert!(report.core_installed_at.exists());
-        assert!(report.standard_installed_at.is_some());
-        assert!(report.standard_installed_at.unwrap().exists());
+    #[test]
+    fn discover_bundles_fails_on_missing_dir() {
+        let result = discover_bundles(Path::new("/nonexistent/path"));
+        assert!(result.is_err());
     }
 
     fn workspace_root() -> PathBuf {
-        // ryeos-tools/Cargo.toml is at workspace_root/ryeos-tools/
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
