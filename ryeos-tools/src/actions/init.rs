@@ -408,6 +408,7 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
 /// function. When present, init validates that the union of all installed
 /// bundles' `provides_kinds` covers every bundle's `requires_kinds`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BundleManifest {
     pub name: String,
     pub version: String,
@@ -423,8 +424,8 @@ pub struct BundleManifest {
 ///
 /// Looks for `<source>/manifest.yaml`. Returns `None` if the file doesn't
 /// exist (manifests are optional). Returns an error if the file exists but
-/// is malformed.
-pub fn parse_manifest(source: &Path) -> Result<Option<BundleManifest>> {
+/// is malformed, or if `manifest.name` doesn't match `expected_name`.
+pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<BundleManifest>> {
     let path = source.join("manifest.yaml");
     if !path.exists() {
         return Ok(None);
@@ -433,6 +434,17 @@ pub fn parse_manifest(source: &Path) -> Result<Option<BundleManifest>> {
         .with_context(|| format!("read manifest {}", path.display()))?;
     let manifest: BundleManifest = serde_yaml::from_str(&content)
         .with_context(|| format!("parse manifest {}", path.display()))?;
+
+    // Validate identity: manifest name must match directory name.
+    if manifest.name != expected_name {
+        bail!(
+            "manifest identity mismatch: bundle directory is '{}' but manifest.name is '{}' — \
+             update manifest.name to match the directory name",
+            expected_name,
+            manifest.name
+        );
+    }
+
     Ok(Some(manifest))
 }
 
@@ -449,7 +461,7 @@ fn validate_manifest_dependencies(
     // Collect manifests
     let mut manifests: Vec<(String, Option<BundleManifest>)> = Vec::new();
     for (name, path) in bundles {
-        let mf = parse_manifest(path)
+        let mf = parse_manifest(path, name)
             .with_context(|| format!("parse manifest for bundle {}", name))?;
         manifests.push((name.clone(), mf));
     }
@@ -1072,7 +1084,7 @@ mod tests {
 
     #[test]
     fn parse_manifest_reads_core() {
-        let mf = parse_manifest(&workspace_root().join("ryeos-bundles/core"))
+        let mf = parse_manifest(&workspace_root().join("ryeos-bundles/core"), "core")
             .expect("parse core manifest")
             .expect("core has a manifest");
         assert_eq!(mf.name, "core");
@@ -1089,7 +1101,7 @@ mod tests {
 
     #[test]
     fn parse_manifest_reads_standard() {
-        let mf = parse_manifest(&workspace_root().join("ryeos-bundles/standard"))
+        let mf = parse_manifest(&workspace_root().join("ryeos-bundles/standard"), "standard")
             .expect("parse standard manifest")
             .expect("standard has a manifest");
         assert_eq!(mf.name, "standard");
@@ -1111,7 +1123,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("no-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        assert!(parse_manifest(&bundle).unwrap().is_none());
+        assert!(parse_manifest(&bundle, "no-manifest").unwrap().is_none());
     }
 
     #[test]
@@ -1120,7 +1132,7 @@ mod tests {
         let bundle = tmp.path().join("bad-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
         fs::write(bundle.join("manifest.yaml"), "not: [valid\nyaml").unwrap();
-        assert!(parse_manifest(&bundle).is_err());
+        assert!(parse_manifest(&bundle, "bad-manifest").is_err());
     }
 
     #[test]
@@ -1221,6 +1233,121 @@ mod tests {
             validate_manifest_dependencies(&bundles).is_ok(),
             "cross-bundle dependency should be satisfied"
         );
+    }
+
+    // ── Follow-up tests (2.1, 2.2, 2.3) ───────────────────────────
+
+    #[test]
+    fn manifest_name_must_match_bundle_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("real-name");
+        fs::create_dir_all(bundle.join(".ai")).unwrap();
+        fs::write(
+            bundle.join("manifest.yaml"),
+            "name: wrong-name\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\n",
+        )
+        .unwrap();
+
+        let err = parse_manifest(&bundle, "real-name").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mismatch"),
+            "error should mention mismatch: {msg}"
+        );
+        assert!(
+            msg.contains("real-name") && msg.contains("wrong-name"),
+            "error should name both: {msg}"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_unknown_fields() {
+        let yaml = r#"
+name: test
+version: "1.0"
+provides_kinds: []
+requires_kinds: []
+typo_field: oops
+"#;
+        let result: Result<BundleManifest, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "unknown field should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unknown field"),
+            "error should mention unknown field: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_init_aborts_before_install_on_unsatisfied_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+
+        // Create a source dir with a bundle that requires an unsatisfied kind
+        let source = tmp.path().join("source");
+        let needy = source.join("needy");
+        fs::create_dir_all(needy.join(".ai")).unwrap();
+        // Need a PUBLISHER_TRUST.toml for the bundle (copy from dev keys)
+        let dev_trust = workspace_root().join(".dev-keys/PUBLISHER_DEV_TRUST.toml");
+        if dev_trust.exists() {
+            fs::copy(&dev_trust, needy.join("PUBLISHER_TRUST.toml")).unwrap();
+        }
+        fs::write(
+            needy.join("manifest.yaml"),
+            "name: needy\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds:\n  - nonexistent-kind\n",
+        )
+        .unwrap();
+
+        let opts = InitOptions {
+            system_space_dir: state.clone(),
+            user_root: user,
+            source_dir: source,
+            trust_files: vec![],
+            skip_preflight: true,
+        };
+
+        let result = run_init(&opts);
+        assert!(result.is_err(), "init should fail with unsatisfied deps");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("nonexistent-kind"),
+            "error should mention the missing kind: {err_msg}"
+        );
+
+        // Critical: no bundles should be installed (non-mutating failure)
+        let bundles_dir = state.join(".ai/bundles");
+        if bundles_dir.exists() {
+            let installed: Vec<_> = fs::read_dir(&bundles_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .collect();
+            assert!(
+                installed.is_empty(),
+                "no bundles should be installed on dep failure, found: {:?}",
+                installed.iter().map(|e| e.path().display().to_string()).collect::<Vec<_>>()
+            );
+        }
+
+        // No registrations written
+        let regs_dir = state.join(".ai/node/bundles");
+        if regs_dir.exists() {
+            let regs: Vec<_> = fs::read_dir(&regs_dir)
+                .unwrap()
+                .filter_map(|e| {
+                    let e = e.ok()?;
+                    if e.path().extension().map(|ext| ext == "yaml").unwrap_or(false) {
+                        Some(e)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert!(
+                regs.is_empty(),
+                "no registrations should exist on dep failure"
+            );
+        }
     }
 
     fn workspace_root() -> PathBuf {
