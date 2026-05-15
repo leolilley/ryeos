@@ -130,6 +130,18 @@ pub struct InitReport {
 ///   8. Vault X25519 keypair
 ///   9. Post-init trust verification
 pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
+    // ── 0. Source exists? ──
+    if !opts.source_dir.is_dir() {
+        bail!(
+            "bundle source directory not found: {}\n\
+             \n\
+             If you installed from a package, the default source is /usr/share/ryeos.\n\
+             For development, use: ryeos init --source ryeos-bundles\n\
+             For Docker, use: ryeos init --source /opt/ryeos",
+            opts.source_dir.display()
+        );
+    }
+
     // ── 1. Layout ──
     create_layout(&opts.system_space_dir, &opts.user_root)?;
 

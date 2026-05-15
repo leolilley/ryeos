@@ -104,8 +104,9 @@ struct InitArgs {
 
     /// Source directory containing bundle subdirectories.
     /// Each immediate child with a `.ai/` subdirectory is installed as a bundle.
-    /// Examples: `/usr/share/ryeos` (packaged), `ryeos-bundles` (dev), `/opt/ryeos` (docker).
-    #[arg(long)]
+    /// Defaults to `/usr/share/ryeos` (packaged install).
+    /// Override for dev (`ryeos-bundles`), Docker (`/opt/ryeos`), etc.
+    #[arg(long, default_value = "/usr/share/ryeos")]
     source: PathBuf,
 
     /// Additional publisher trust doc(s) to pin before verifying bundles.

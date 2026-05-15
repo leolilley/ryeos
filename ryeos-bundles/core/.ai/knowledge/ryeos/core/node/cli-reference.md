@@ -1,7 +1,7 @@
 ---
 category: ryeos/core
 tags: [reference, cli, verbs, aliases]
-version: "1.0.0"
+version: "2.0.0"
 description: >
   Complete reference for the ryeos CLI — all verbs, aliases,
   and their arguments.
@@ -11,6 +11,41 @@ description: >
 
 The `ryeos` CLI communicates with the daemon via HTTP. Commands are
 dispatched through **verbs** (full names) and **aliases** (shortcuts).
+
+## Setup
+
+### `ryeos init`
+Bootstrap user + node keys, discover and install bundles from a source
+directory, pin publisher keys. Must be run before starting the daemon.
+
+```
+ryeos init [--source <dir>] [--system-space-dir <dir>] [--user-root <dir>]
+           [--trust-file <file>...]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--source` | `/usr/share/ryeos` | Directory containing bundle subdirectories |
+| `--system-space-dir` | XDG data dir / ryeos | Daemon state and installed bundles |
+| `--user-root` | `$HOME` | User space root |
+| `--trust-file` | (none) | Additional publisher trust docs to pin (repeatable) |
+
+Init is **idempotent** — running it again preserves keys, atomically
+updates bundles, and re-validates registrations.
+
+Development usage:
+```bash
+ryeos init --source ryeos-bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+```
+
+### `ryeos trust pin`
+Pin a publisher's Ed25519 public key into the operator trust store.
+
+```
+ryeos trust pin --from <PUBLISHER_TRUST.toml>
+```
+
+Required before installing bundles from a third-party publisher.
 
 ## Core Verbs
 
