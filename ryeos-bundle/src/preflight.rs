@@ -26,12 +26,20 @@ pub fn preflight_verify_bundle(
         );
     }
 
+    // ── Discover installed bundle roots (Model B) ──
+    // Runtime uses registered bundle paths under .ai/bundles/*, NOT
+    // system_space_dir itself. Preflight must mirror this so that
+    // bundle-install / init can verify a bundle whose dependencies
+    // are provided by a previously-installed bundle (e.g. standard
+    // depends on core's parsers and kind schemas).
+    let installed_bundle_roots = discover_installed_bundle_roots(system_space_dir);
+
     let mut schema_roots = Vec::new();
-    let system_kinds = system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join(ryeos_engine::KIND_SCHEMAS_DIR);
-    if system_kinds.is_dir() {
-        schema_roots.push(system_kinds);
+    for root in &installed_bundle_roots {
+        let kinds_dir = root.join(ryeos_engine::AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
+        if kinds_dir.is_dir() {
+            schema_roots.push(kinds_dir);
+        }
     }
     let bundle_kinds = ai_dir.join(ryeos_engine::KIND_SCHEMAS_DIR);
     if bundle_kinds.is_dir() {
@@ -39,8 +47,7 @@ pub fn preflight_verify_bundle(
     }
     if schema_roots.is_empty() {
         bail!(
-            "preflight: no kind schemas in system_space_dir ({}) or bundle ({})",
-            system_space_dir.display(),
+            "preflight: no kind schemas in installed bundles or candidate bundle ({})",
             bundle_kinds.display()
         );
     }
@@ -69,10 +76,14 @@ pub fn preflight_verify_bundle(
             roots.push((path, trust));
         }
     };
-    push_unique(system_space_dir.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem, &mut parser_search_roots, &mut seen_roots);
+    // Installed bundles are trusted system roots (mirrors daemon's Model B).
+    for root in &installed_bundle_roots {
+        push_unique(root.clone(), ryeos_engine::resolution::TrustClass::TrustedSystem, &mut parser_search_roots, &mut seen_roots);
+    }
     if let Some(ur) = user_root {
         push_unique(ur.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser, &mut parser_search_roots, &mut seen_roots);
     }
+    // Candidate bundle being verified (last, so installed content takes precedence).
     push_unique(source_path.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser, &mut parser_search_roots, &mut seen_roots);
 
     let legacy_trust = source_path
@@ -314,6 +325,33 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Enumerate installed bundle roots under `system_space_dir/.ai/bundles/`.
+/// Each immediate child directory that contains an `.ai/` subdirectory is
+/// treated as an installed bundle root (mirrors the daemon's Model B).
+/// Returns an empty Vec if the bundles directory doesn't exist or is empty —
+/// this is valid for a clean first-bundle install.
+fn discover_installed_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
+    let bundles_dir = system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("bundles");
+
+    let Ok(entries) = fs::read_dir(&bundles_dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() && path.join(ryeos_engine::AI_DIR).is_dir() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -111,12 +111,7 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<Bundl
 pub fn validate_manifest_dependencies(
     bundles: &[(String, PathBuf)],
 ) -> Result<()> {
-    let mut manifests: Vec<(String, Option<BundleManifest>)> = Vec::new();
-    for (name, path) in bundles {
-        let mf = parse_manifest(path, name)
-            .with_context(|| format!("parse manifest for bundle {}", name))?;
-        manifests.push((name.clone(), mf));
-    }
+    let manifests = parse_all_manifests(bundles)?;
 
     let mut all_provides: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -159,6 +154,119 @@ pub fn validate_manifest_dependencies(
         all_provides.iter().cloned().collect::<Vec<_>>().join(", ")
     ));
     bail!("{}", msg)
+}
+
+/// Sort discovered bundles into installation order based on manifest dependencies.
+///
+/// Bundles with no `requires_kinds` come first. Bundles whose requirements are
+/// fully satisfied by earlier bundles come next. Falls back to alphabetical
+/// order for bundles without manifests or when no dependency information exists.
+///
+/// Returns a topologically-sorted copy of `bundles`.
+pub fn sort_bundles_by_dependency(
+    bundles: &[(String, PathBuf)],
+) -> Result<Vec<(String, PathBuf)>> {
+    if bundles.len() <= 1 {
+        return Ok(bundles.to_vec());
+    }
+
+    let manifests = parse_all_manifests(bundles)?;
+
+    // Build (name, requires_kinds, provides_kinds) for each bundle.
+    // Bundles without manifests get empty deps (treated as leaf nodes).
+    let mut bundle_deps: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    for (name, mf) in &manifests {
+        match mf {
+            Some(m) => {
+                bundle_deps.push((name.clone(), m.requires_kinds.clone(), m.provides_kinds.clone()));
+            }
+            None => {
+                bundle_deps.push((name.clone(), Vec::new(), Vec::new()));
+            }
+        }
+    }
+
+    // Kahn's algorithm for topological sort.
+    // Build adjacency: bundle A must come before bundle B if B requires a kind that A provides.
+    let n = bundle_deps.len();
+    let mut in_degree = vec![0usize; n];
+
+    // For each bundle, which kinds does it provide?
+    let provides: Vec<std::collections::HashSet<String>> = bundle_deps
+        .iter()
+        .map(|(_, _, prov)| prov.iter().cloned().collect())
+        .collect();
+
+    // For each bundle, which other bundles must precede it?
+    // edges[j] = set of indices that must come before j
+    let mut edges: Vec<std::collections::HashSet<usize>> =
+        vec![std::collections::HashSet::new(); n];
+
+    for j in 0..n {
+        for req in &bundle_deps[j].1 {
+            for i in 0..n {
+                if i != j && provides[i].contains(req) {
+                    if edges[j].insert(i) {
+                        in_degree[j] += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Seed with zero-degree nodes, sorted alphabetically for determinism.
+    let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(String, usize)>> =
+        std::collections::BinaryHeap::new();
+    for i in 0..n {
+        if in_degree[i] == 0 {
+            queue.push(std::cmp::Reverse((bundle_deps[i].0.clone(), i)));
+        }
+    }
+
+    let mut sorted_indices: Vec<usize> = Vec::new();
+    while let Some(std::cmp::Reverse((_, idx))) = queue.pop() {
+        sorted_indices.push(idx);
+        // For every other bundle j, if idx -> j was an edge, decrement in-degree.
+        for j in 0..n {
+            if edges[j].contains(&idx) {
+                in_degree[j] -= 1;
+                if in_degree[j] == 0 {
+                    queue.push(std::cmp::Reverse((bundle_deps[j].0.clone(), j)));
+                }
+            }
+        }
+    }
+
+    if sorted_indices.len() != n {
+        // Cycle detected. This shouldn't happen with well-formed bundles.
+        bail!(
+            "circular dependency detected among bundles: {}",
+            bundle_deps.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    // Map sorted indices back to the original (name, path) pairs.
+    let name_to_bundle: std::collections::HashMap<String, (String, PathBuf)> = bundles
+        .iter()
+        .map(|(name, path)| (name.clone(), (name.clone(), path.clone())))
+        .collect();
+
+    let result: Vec<(String, PathBuf)> = sorted_indices
+        .iter()
+        .filter_map(|&idx| name_to_bundle.get(&bundle_deps[idx].0).cloned())
+        .collect();
+
+    Ok(result)
+}
+
+fn parse_all_manifests(bundles: &[(String, PathBuf)]) -> Result<Vec<(String, Option<BundleManifest>)>> {
+    let mut manifests: Vec<(String, Option<BundleManifest>)> = Vec::new();
+    for (name, path) in bundles {
+        let mf = parse_manifest(path, name)
+            .with_context(|| format!("parse manifest for bundle {}", name))?;
+        manifests.push((name.clone(), mf));
+    }
+    Ok(manifests)
 }
 
 #[cfg(test)]

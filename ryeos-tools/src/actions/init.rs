@@ -222,6 +222,17 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     validate_manifest_dependencies(&discovered)
         .context("bundle manifest dependency check")?;
 
+    // ── 6c. Sort bundles by dependency order ──
+    // Ensures bundles providing kinds (e.g. core) are installed before
+    // bundles requiring them (e.g. standard), so preflight verification
+    // can resolve parsers and kind schemas from already-installed bundles.
+    let discovered = sort_bundles_by_dependency(&discovered)
+        .context("bundle dependency ordering")?;
+    tracing::info!(
+        order = ?discovered.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+        "installation order determined"
+    );
+
     // ── 7. Install each bundle (atomic stage → swap) ──
     let mut bundles_installed = Vec::new();
     for (name, source_path) in &discovered {
@@ -411,7 +422,8 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
 // ── Bundle manifest (v2: generated + signed) ───────────────────────
 pub use ryeos_bundle::manifest::{
     derive_provides_kinds, materialize_manifest, parse_manifest,
-    validate_manifest_dependencies, BundleManifest, BundleManifestSource,
+    sort_bundles_by_dependency, validate_manifest_dependencies,
+    BundleManifest, BundleManifestSource,
 };
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
