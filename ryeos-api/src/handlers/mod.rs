@@ -28,7 +28,6 @@ pub mod node_sign;
 pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
-pub mod ownership;
 pub mod push_head;
 pub mod rebuild;
 pub mod remote_authorize;

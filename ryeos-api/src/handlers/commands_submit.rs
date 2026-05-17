@@ -13,7 +13,6 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_context::HandlerContext;
-use crate::handler_error::HandlerError;
 use ryeos_app::command_service::CommandSubmitParams;
 use ryeos_app::state::AppState;
 

@@ -88,7 +88,6 @@ pub async fn discover_audience(daemon_url: &str) -> Result<String, CliTransportE
 async fn collect_body(
     body: hyper::body::Incoming,
 ) -> Result<Vec<u8>, CliTransportError> {
-    use hyper::body::Body;
     let mut bufs = Vec::new();
     let mut body = body;
     while let Some(chunk) = body.frame().await {

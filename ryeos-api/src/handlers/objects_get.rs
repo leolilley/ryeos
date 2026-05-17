@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use base64::Engine as _;
-use serde::Deserialize;
 use serde_json::Value;
 
 use ryeos_executor::executor::ServiceAvailability;
