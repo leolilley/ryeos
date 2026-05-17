@@ -1,24 +1,23 @@
-<!-- ryeos:signed:2026-05-17T21:57:14Z:40d1199a95ec38fc0e7f2e4f66552f0008b75130c268dbe77d329db75ae27b65:/xB6Mg92ZoDVtzNXTj60qiX88pztznJMQ9JHErjHxs1Dq+YsCjMgFzIZI0tuprPhLUtg28e0DGgqGmB6MVhBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  How directives work — YAML frontmatter, inheritance (extends),
-  permissions, limits, context blocks, and actions.
+  How directives work — YAML frontmatter, XML process body,
+  inheritance (extends), permissions, limits, and context blocks.
 ---
 
 # Directives
 
 Directives are the primary LLM-facing item in Rye OS. A directive is a
-markdown file that combines a structured YAML header with a prompt body,
-defining a complete workflow for an LLM agent.
+markdown file with a YAML frontmatter header (metadata) and an XML process
+body (instructions for the LLM to follow).
 
 ## File Format
 
 ```markdown
 ---
-name: deploy
-description: Deploy the project to staging
+description: "Deploy the project to staging"
+version: "1.0.0"
 extends: "directive:base/workflow"
 model:
   tier: high
@@ -35,32 +34,52 @@ context:
     ref: "knowledge:ryeos/core/signing"
   - position: system
     content: "Project uses pnpm and deploys to AWS."
-inputs:
-  - name: environment
-    type: string
-    required: true
-outputs:
-  - name: result
-    type: string
-actions:
-  execute:
-    item_id: "tool:my/project/deploy"
-  fetch:
-    item_id: "tool:ryeos/core/fetch"
-  sign:
-    item_id: "tool:ryeos/core/sign"
 ---
 
-You are deploying the project. Follow these steps:
-...
+<process>
+  <step name="validate">
+    <instruction>
+      Validate that {input:environment} is one of: staging, production.
+    </instruction>
+  </step>
+
+  <step name="deploy">
+    <instruction>
+      Deploy the project:
+      `rye_execute(item_id="tool:my/project/deploy", parameters={"env": "{input:environment}"})`
+    </instruction>
+  </step>
+
+  <step name="confirm">
+    <render>
+    Deployed to {input:environment} successfully.
+    </render>
+  </step>
+</process>
 ```
 
-## Frontmatter Fields
+The `name` and `category` fields are NOT in the frontmatter — they are
+derived automatically from the file path:
+- `name` comes from the filename (e.g., `deploy.md` → name: `deploy`)
+- `category` comes from the parent directory (e.g., `my-project/deploy.md` → category: `my-project`)
 
-### Identity
-- `name` — unique directive name
-- `description` — what this directive does
-- `extends` — optional parent directive canonical ref
+## Body: XML Process Tags
+
+The body uses structured XML tags to give the LLM clear, parseable instructions:
+
+- `<process>` — top-level container for all steps
+- `<step name="...">` — named execution step, optional `condition` attribute
+- `<instruction>` — tells the LLM what to do (followed silently)
+- `<render>` — text output verbatim to the user (not interpreted by the LLM)
+- `<Identity>` — establishes the LLM's persona (placed before `<process>`)
+
+Rules:
+- Output `<render>` blocks verbatim — do not summarize or rephrase
+- Follow `<instruction>` blocks silently — do not narrate the thinking
+- Steps run in order unless a `condition` is specified
+- Use `{input:name}` for input interpolation, `{env:VAR}` for environment variables
+
+## Frontmatter Fields
 
 ### Model Selection
 - `model.tier` — abstract capability tier: `fast`, `general`, `high`,
@@ -85,7 +104,7 @@ the parent's permissions, never expand them.
 - `limits.duration_seconds` — wall-clock timeout
 
 ### Context
-Context blocks are injected into the LLM prompt:
+Context blocks inject knowledge into the LLM prompt:
 
 ```yaml
 context:
@@ -100,35 +119,6 @@ context:
 Context merges through extends chains using
 `dict_merge_string_seq_root_last` — the child's context entries
 are appended after the parent's.
-
-### Inputs and Outputs
-Typed parameters and return values:
-
-```yaml
-inputs:
-  - name: target
-    type: string
-    required: true
-  - name: dry_run
-    type: boolean
-    default: false
-outputs:
-  - name: result
-    type: string
-```
-
-### Actions
-Named operations the directive can invoke:
-
-```yaml
-actions:
-  execute:
-    item_id: "tool:ryeos/core/subprocess/execute"
-  fetch:
-    item_id: "tool:ryeos/core/fetch"
-  sign:
-    item_id: "tool:ryeos/core/sign"
-```
 
 ## Inheritance (Extends)
 
