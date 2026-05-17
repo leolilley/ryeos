@@ -13,7 +13,6 @@ ryeos-app = { path = "../ryeos-app" }
 ryeos-engine = { path = "../ryeos-engine" }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-state = { path = "../ryeos-state" }
-ryeos-tools = { path = "../ryeos-tools" }
 ryeos-tracing = { path = "../ryeos-tracing" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

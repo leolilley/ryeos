@@ -239,11 +239,15 @@ pub async fn execute_service_verified(
     //    Handlers opt in via `_ctx: HandlerContext` with `#[serde(default)]`.
     //    For executor-sourced requests (CLI/UDS), we inject here;
     //    for route-sourced requests, service_invocation.rs does it.
+    //    Both live and standalone modes inject verified=true:
+    //    - live: cap enforcement already passed (step 5)
+    //    - standalone: operator authority from filesystem
     let mut enriched_params = params.clone();
     if let Value::Object(ref mut map) = enriched_params {
         map.insert("_ctx".to_string(), serde_json::json!({
             "fingerprint": ctx.principal_fingerprint,
             "scopes": ctx.caller_scopes,
+            "verified": true,
         }));
     }
 

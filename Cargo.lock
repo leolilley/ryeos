@@ -2138,7 +2138,6 @@ dependencies = [
  "ryeos-engine",
  "ryeos-runtime",
  "ryeos-state",
- "ryeos-tools",
  "ryeos-tracing",
  "serde",
  "serde_json",
