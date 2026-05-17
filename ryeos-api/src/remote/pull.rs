@@ -167,10 +167,11 @@ enum PlannedChange {
 /// New files from remote that would overwrite a pre-existing local file are
 /// also treated as conflicts.
 ///
-/// **Atomicity:** All writes are staged in a temporary directory first.
-/// Only after every file is successfully staged do we swap them into place.
-/// If anything fails (missing CAS content, I/O error), the workspace is
-/// left untouched.
+/// **Atomicity:** All writes are staged in a temporary directory first
+/// (Phase B). Only after staging succeeds do we backup originals and swap
+/// them into place (Phase C). If any swap operation fails, all previously
+/// applied changes are rolled back from the backup, restoring the workspace
+/// to its pre-apply state. The workspace is never left in a partial state.
 fn apply_manifest_diff(
     local_cas: &CasStore,
     local_project_root: &Path,
@@ -237,68 +238,169 @@ fn apply_manifest_diff(
         }
     }
 
-    // Phase B: all content resolved successfully. Now stage writes into a
-    // temp directory, then swap into place atomically.
+    // Phase B: all content resolved successfully. Stage writes into a
+    // temp directory. This is the only phase that touches the filesystem
+    // before Phase C — if anything fails here the workspace is untouched.
     let staging_dir = local_project_root.join(".ryeos-pull-staging");
     // Clean up any leftover staging dir from a previous failed attempt
     let _ = std::fs::remove_dir_all(&staging_dir);
 
-    let mut files_updated = 0usize;
-    let mut files_deleted = 0usize;
-
-    // Stage all writes
     for change in &planned {
-        match change {
-            PlannedChange::Write { rel_path, content } => {
-                let staged_path = staging_dir.join(rel_path);
-                if let Some(parent) = staged_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("create staging dir for {}", rel_path))
-                        .map_err(PullResultsError::Other)?;
-                }
-                std::fs::write(&staged_path, content)
-                    .with_context(|| format!("stage file {}", rel_path))
+        if let PlannedChange::Write { rel_path, content } = change {
+            let staged_path = staging_dir.join(rel_path);
+            if let Some(parent) = staged_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create staging dir for {}", rel_path))
                     .map_err(PullResultsError::Other)?;
             }
-            PlannedChange::Delete { .. } => {
-                // Deletes don't need staging, but we track them
-            }
+            std::fs::write(&staged_path, content)
+                .with_context(|| format!("stage file {}", rel_path))
+                .map_err(PullResultsError::Other)?;
         }
     }
 
-    // Phase C: all writes staged successfully. Now swap staged files into
-    // place and perform deletes. This is not perfectly atomic (individual
-    // renames), but at least all file *content* was written before we
-    // touch the live tree.
+    // Phase C: atomic swap. We backup originals to `.ryeos-pull-backup/`,
+    // then swap staged files into place and perform deletes. If anything
+    // fails mid-swap, we roll back from the backup so the workspace is
+    // never left in a partial state.
+    let backup_dir = local_project_root.join(".ryeos-pull-backup");
+    let _ = std::fs::remove_dir_all(&backup_dir);
+
+    let mut files_updated = 0usize;
+    let mut files_deleted = 0usize;
+
+    // C.1: Backup any live files that will be overwritten or deleted.
     for change in &planned {
+        let rel_path = match change {
+            PlannedChange::Write { rel_path, .. } => rel_path,
+            PlannedChange::Delete { rel_path } => rel_path,
+        };
+        let live_path = local_project_root.join(rel_path);
+        if live_path.exists() {
+            let backup_path = backup_dir.join(rel_path);
+            if let Some(parent) = backup_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Copy (not rename) so the live file stays in place until swap.
+            std::fs::copy(&live_path, &backup_path)
+                .with_context(|| format!("backup {} for rollback", rel_path))
+                .map_err(PullResultsError::Other)?;
+        }
+    }
+
+    // C.2: Apply writes and deletes. On any failure, roll back.
+    let apply_result = apply_with_rollback(
+        &planned,
+        &staging_dir,
+        &backup_dir,
+        local_project_root,
+        &mut files_updated,
+        &mut files_deleted,
+    );
+
+    // C.3: Clean up staging + backup dirs regardless of outcome.
+    let _ = std::fs::remove_dir_all(&staging_dir);
+    let _ = std::fs::remove_dir_all(&backup_dir);
+
+    apply_result
+}
+
+/// Apply planned writes and deletes with rollback on failure.
+///
+/// If any individual operation fails, restores all previously-applied
+/// changes from the backup directory so the workspace is left in its
+/// original state.
+fn apply_with_rollback(
+    planned: &[PlannedChange],
+    staging_dir: &Path,
+    backup_dir: &Path,
+    local_project_root: &Path,
+    files_updated: &mut usize,
+    files_deleted: &mut usize,
+) -> Result<(usize, usize), PullResultsError> {
+    // Track what we've applied so far for rollback.
+    let mut applied_writes: Vec<String> = Vec::new();
+    let mut applied_deletes: Vec<String> = Vec::new();
+
+    for change in planned {
         match change {
             PlannedChange::Write { rel_path, .. } => {
                 let staged_path = staging_dir.join(rel_path);
                 let live_path = local_project_root.join(rel_path);
                 if let Some(parent) = live_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("create dir for {}", rel_path))
-                        .map_err(PullResultsError::Other)?;
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        rollback_writes_and_deletes(
+                            &applied_writes, &applied_deletes,
+                            backup_dir, local_project_root,
+                        );
+                        return Err(PullResultsError::Other(
+                            anyhow::anyhow!("create dir for {}: {e}", rel_path)
+                        ));
+                    }
                 }
-                std::fs::rename(&staged_path, &live_path)
-                    .with_context(|| format!("swap staged file {}", rel_path))
-                    .map_err(PullResultsError::Other)?;
-                files_updated += 1;
+                if let Err(e) = std::fs::rename(&staged_path, &live_path) {
+                    // rename may fail cross-device; fall back to copy+delete
+                    if let Err(e2) = std::fs::copy(&staged_path, &live_path)
+                        .and_then(|_| std::fs::remove_file(&staged_path))
+                    {
+                        rollback_writes_and_deletes(
+                            &applied_writes, &applied_deletes,
+                            backup_dir, local_project_root,
+                        );
+                        return Err(PullResultsError::Other(
+                            anyhow::anyhow!("swap staged file {}: {e}, fallback copy: {e2}", rel_path)
+                        ));
+                    }
+                }
+                applied_writes.push(rel_path.clone());
+                *files_updated += 1;
             }
             PlannedChange::Delete { rel_path } => {
                 let live_path = local_project_root.join(rel_path);
-                std::fs::remove_file(&live_path)
-                    .with_context(|| format!("delete file {}", rel_path))
-                    .map_err(PullResultsError::Other)?;
-                files_deleted += 1;
+                if let Err(e) = std::fs::remove_file(&live_path) {
+                    rollback_writes_and_deletes(
+                        &applied_writes, &applied_deletes,
+                        backup_dir, local_project_root,
+                    );
+                    return Err(PullResultsError::Other(
+                        anyhow::anyhow!("delete file {}: {e}", rel_path)
+                    ));
+                }
+                applied_deletes.push(rel_path.clone());
+                *files_deleted += 1;
             }
         }
     }
 
-    // Clean up staging dir
-    let _ = std::fs::remove_dir_all(&staging_dir);
+    Ok((*files_updated, *files_deleted))
+}
 
-    Ok((files_updated, files_deleted))
+/// Roll back applied writes and deletes by restoring from backup.
+fn rollback_writes_and_deletes(
+    applied_writes: &[String],
+    applied_deletes: &[String],
+    backup_dir: &Path,
+    local_project_root: &Path,
+) {
+    // Restore backed-up files for writes (overwrites the partial new content).
+    for rel_path in applied_writes {
+        let backup_path = backup_dir.join(rel_path);
+        let live_path = local_project_root.join(rel_path);
+        if backup_path.exists() {
+            let _ = std::fs::copy(&backup_path, &live_path);
+        }
+    }
+    // Restore deleted files from backup.
+    for rel_path in applied_deletes {
+        let backup_path = backup_dir.join(rel_path);
+        let live_path = local_project_root.join(rel_path);
+        if backup_path.exists() {
+            if let Some(parent) = live_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&backup_path, &live_path);
+        }
+    }
 }
 
 /// Read a local file, returning None if it doesn't exist.
@@ -387,4 +489,204 @@ fn parse_manifest(val: &Value) -> Result<SourceManifest, PullResultsError> {
         }
     }
     Ok(SourceManifest { item_source_hashes: items })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::cas::CasStore;
+
+    /// Helper: create a CAS with a single blob and its corresponding item
+    /// source object. Returns the item hash.
+    fn store_blob_and_item(cas: &CasStore, content: &[u8]) -> String {
+        let blob_hash = cas.store_blob(content).unwrap();
+        let item = serde_json::json!({
+            "content_blob_hash": blob_hash,
+        });
+        cas.store_object(&item).unwrap()
+    }
+
+    fn make_manifest(items: &[(&str, &str)]) -> SourceManifest {
+        SourceManifest {
+            item_source_hashes: items.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    // ── R3-3a: pull/apply conflict detection ──
+
+    #[test]
+    fn apply_detects_local_conflict_on_tracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        // Write a file with hash "aaa..." but manifest says it should be "bbb..."
+        std::fs::write(project_root.join("file.txt"), "original content").unwrap();
+
+        let base = make_manifest(&[("file.txt", "sha256:original_hash")]);
+        let remote = make_manifest(&[("file.txt", "sha256:changed_hash")]);
+
+        let cas_root = tmp.path().join("cas");
+        let cas = CasStore::new(cas_root);
+
+        let result = apply_manifest_diff(&cas, project_root, &base, &remote);
+        match result {
+            Err(PullResultsError::LocalConflict(path)) => {
+                assert_eq!(path, "file.txt");
+            }
+            other => panic!("expected LocalConflict, got {:?}", other),
+        }
+
+        // Workspace should be untouched
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("file.txt")).unwrap(),
+            "original content"
+        );
+    }
+
+    #[test]
+    fn apply_detects_new_remote_file_overwrites_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        // A file exists locally that the remote also wants to create
+        std::fs::write(project_root.join("new.txt"), "local content").unwrap();
+
+        let base = make_manifest(&[]); // empty base — file wasn't tracked
+        let remote = make_manifest(&[("new.txt", "sha256:some_hash")]);
+
+        let cas_root = tmp.path().join("cas");
+        let cas = CasStore::new(cas_root);
+
+        let result = apply_manifest_diff(&cas, project_root, &base, &remote);
+        match result {
+            Err(PullResultsError::LocalConflict(msg)) => {
+                assert!(msg.contains("new.txt"), "got: {msg}");
+                assert!(msg.contains("new remote file would overwrite local"), "got: {msg}");
+            }
+            other => panic!("expected LocalConflict, got {:?}", other),
+        }
+    }
+
+    // ── R3-3a: rollback on missing CAS content ──
+
+    #[test]
+    fn apply_rollback_on_missing_cas_leaves_workspace_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        // Two files in base and remote. File A is changed (content in CAS).
+        // File B is changed but CAS content is MISSING. This should cause
+        // the entire apply to fail during Phase A (validation), before
+        // any files are written.
+        let content_a = "original A";
+        let content_b = "original B";
+        std::fs::write(project_root.join("a.txt"), content_a).unwrap();
+        std::fs::write(project_root.join("b.txt"), content_b).unwrap();
+
+        let cas_root = tmp.path().join("cas");
+        let cas = CasStore::new(cas_root);
+
+        // Store content for file A only
+        let hash_a = store_blob_and_item(&cas, b"new A content");
+        let hash_a_old = lillux::cas::sha256_hex(content_a.as_bytes());
+        let hash_b_old = lillux::cas::sha256_hex(content_b.as_bytes());
+        // File B's hash doesn't exist in CAS — will trigger strict failure
+
+        let base = make_manifest(&[
+            ("a.txt", &hash_a_old),
+            ("b.txt", &hash_b_old),
+        ]);
+        let remote = make_manifest(&[
+            ("a.txt", &hash_a),
+            ("b.txt", "sha256:missing_hash"),
+        ]);
+
+        let result = apply_manifest_diff(&cas, project_root, &base, &remote);
+        assert!(result.is_err(), "should fail on missing CAS content");
+
+        // Workspace should be completely untouched — no partial apply
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("a.txt")).unwrap(),
+            "original A",
+            "file a.txt should NOT have been updated"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("b.txt")).unwrap(),
+            "original B",
+            "file b.txt should NOT have been updated"
+        );
+    }
+
+    #[test]
+    fn apply_happy_path_writes_and_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        // File A: changed, File B: deleted, File C: unchanged, File D: new
+        let content_a = "old A";
+        let content_b = "to be deleted";
+        let content_c = "unchanged";
+        std::fs::write(project_root.join("a.txt"), content_a).unwrap();
+        std::fs::write(project_root.join("b.txt"), content_b).unwrap();
+        std::fs::write(project_root.join("c.txt"), content_c).unwrap();
+
+        let cas_root = tmp.path().join("cas");
+        let cas = CasStore::new(cas_root);
+
+        let hash_a_old = lillux::cas::sha256_hex(content_a.as_bytes());
+        let hash_b_old = lillux::cas::sha256_hex(content_b.as_bytes());
+        let hash_c = lillux::cas::sha256_hex(content_c.as_bytes());
+
+        let hash_a_new = store_blob_and_item(&cas, b"new A");
+        let hash_d = store_blob_and_item(&cas, b"brand new D");
+
+        let base = make_manifest(&[
+            ("a.txt", &hash_a_old),
+            ("b.txt", &hash_b_old),
+            ("c.txt", &hash_c),
+        ]);
+        let remote = make_manifest(&[
+            ("a.txt", &hash_a_new),
+            // b.txt absent → deleted
+            ("c.txt", &hash_c),
+            ("d.txt", &hash_d),
+        ]);
+
+        let (updated, deleted) = apply_manifest_diff(&cas, project_root, &base, &remote).unwrap();
+        assert_eq!(updated, 2); // a.txt + d.txt
+        assert_eq!(deleted, 1); // b.txt
+
+        assert_eq!(std::fs::read_to_string(project_root.join("a.txt")).unwrap(), "new A");
+        assert!(!project_root.join("b.txt").exists(), "b.txt should be deleted");
+        assert_eq!(std::fs::read_to_string(project_root.join("c.txt")).unwrap(), "unchanged");
+        assert_eq!(std::fs::read_to_string(project_root.join("d.txt")).unwrap(), "brand new D");
+    }
+
+    // ── extract_snapshot_hash coverage ──
+
+    #[test]
+    fn extract_snapshot_hash_top_level() {
+        let v = serde_json::json!({ "snapshot_hash": "abc123" });
+        assert_eq!(extract_snapshot_hash(&v), Some("abc123".into()));
+    }
+
+    #[test]
+    fn extract_snapshot_hash_from_facets() {
+        let v = serde_json::json!({ "facets": { "snapshot_hash": "fac123" } });
+        assert_eq!(extract_snapshot_hash(&v), Some("fac123".into()));
+    }
+
+    #[test]
+    fn extract_snapshot_hash_from_thread_result() {
+        let v = serde_json::json!({ "thread": { "result": { "snapshot_hash": "thr123" } } });
+        assert_eq!(extract_snapshot_hash(&v), Some("thr123".into()));
+    }
+
+    #[test]
+    fn extract_snapshot_hash_missing() {
+        let v = serde_json::json!({ "other": "data" });
+        assert!(extract_snapshot_hash(&v).is_none());
+    }
 }

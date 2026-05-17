@@ -495,4 +495,28 @@ mod tests {
             "/threads/abc?after=42&limit=10"
         );
     }
+
+    #[test]
+    fn canonicalize_path_repeated_keys() {
+        // Repeated query keys must be preserved and sorted together.
+        // Key "tag" appears twice: tag=b sorts before tag=a only if
+        // the full pair (tag, b) < (tag, a), but since k is the same,
+        // the value is the tiebreaker.
+        assert_eq!(
+            canonicalize_path("/objects/get?hashes=abc&hashes=def"),
+            "/objects/get?hashes=abc&hashes=def"
+        );
+        assert_eq!(
+            canonicalize_path("/search?tag=b&limit=5&tag=a"),
+            "/search?limit=5&tag=a&tag=b"
+        );
+    }
+
+    #[test]
+    fn canonicalize_path_empty_value() {
+        assert_eq!(
+            canonicalize_path("/path?flag&other=val"),
+            "/path?flag&other=val"
+        );
+    }
 }

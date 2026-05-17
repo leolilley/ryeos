@@ -707,4 +707,90 @@ mod tests {
         // Confirm we only got the one we asked for — no multi-key
         // injection in the return value.
     }
+
+    // ── Vault CRUD tests via SealedEnvelopeVault ──
+
+    #[test]
+    fn vault_set_list_delete_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        // Set secrets
+        v.set_secret("op", "API_KEY", "sk-123").unwrap();
+        v.set_secret("op", "DB_URL", "postgres://host/db").unwrap();
+
+        // List keys
+        let mut keys = v.list_keys("op").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["API_KEY", "DB_URL"]);
+
+        // Read back
+        let all = v.read_all("op").unwrap();
+        assert_eq!(all.get("API_KEY"), Some(&"sk-123".to_string()));
+        assert_eq!(all.get("DB_URL"), Some(&"postgres://host/db".to_string()));
+
+        // Delete one
+        let deleted = v.delete_secret("op", "API_KEY").unwrap();
+        assert!(deleted, "should return true for existing key");
+
+        // Verify deleted
+        let keys = v.list_keys("op").unwrap();
+        assert_eq!(keys, vec!["DB_URL"]);
+
+        // Delete non-existent returns false
+        let deleted = v.delete_secret("op", "NOPE").unwrap();
+        assert!(!deleted, "should return false for missing key");
+    }
+
+    #[test]
+    fn vault_set_rejects_invalid_key_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        // Hyphens are not allowed (only [A-Za-z0-9_])
+        let err = v.set_secret("op", "my-key", "val").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("key name"), "expected key name error, got: {msg}");
+
+        // Blocked name
+        let err = v.set_secret("op", "PATH", "/evil").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("blocked"), "expected blocked error, got: {msg}");
+
+        // Empty name
+        let err = v.set_secret("op", "", "val").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("empty"), "expected empty error, got: {msg}");
+    }
+
+    #[test]
+    fn vault_delete_rejects_invalid_key_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        let err = v.delete_secret("op", "bad-key").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("key name"), "expected key name error, got: {msg}");
+    }
+
+    #[test]
+    fn vault_set_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        v.set_secret("op", "KEY", "old").unwrap();
+        v.set_secret("op", "KEY", "new").unwrap();
+
+        let all = v.read_all("op").unwrap();
+        assert_eq!(all.get("KEY"), Some(&"new".to_string()));
+        assert_eq!(all.len(), 1, "should have exactly one key");
+    }
 }

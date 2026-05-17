@@ -38,16 +38,13 @@
 
 ## 2. v1 Trust Boundary
 
-v1 remote execution operates under the following trust boundary:
+v1 remote execution is for operator-trusted remotes, not mutually
+untrusted tenants.
 
-- **Shared CAS within a node.** All authorized keys share the same
-  content-addressed storage. There is no per-principal CAS isolation.
-- **Single shared vault store.** All authorized keys share the same
-  encrypted secret store. Any authorized key can read, set, or delete
-  any vault secret within its granted scopes.
-- **Operator-trusted remotes only.** Remote nodes are not multi-tenant.
-  Every remote is trusted by the operator who configured it. There is
-  no untrusted-third-party remote execution in v1.
+- CAS is shared/global within a node; capability checks protect access,
+  not storage partitioning.
+- Vault is a single shared store in v1; capability checks protect
+  mutation/listing, not per-principal isolation.
 
 ## 3. No Wildcard Delegation
 
@@ -88,7 +85,11 @@ ryeos remote configure --name production --url https://ryeos.example.com
 ```
 
 If no cached rules are available (first push after config, or cache
-      miss), the push handler fetches the remote's ignore rules inline.
+miss), the push handler fetches the remote's ignore rules inline and
+persists them to `remotes.yaml` for future use. If the inline fetch
+fails, the push is **aborted** — the handler does not silently fall
+back to local ignore rules. Run `ryeos remote configure` first or
+ensure the remote is reachable.
 
 ## 6. End-to-End Workflow (Synchronous v1)
 

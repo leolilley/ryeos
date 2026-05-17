@@ -38,13 +38,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             }
         })?;
 
-    let vault_fingerprint = state.vault_fingerprint.clone()
-        .unwrap_or_default();
-
-    Ok(serde_json::json!({
+    let mut response = serde_json::json!({
         "name": req.name,
-        "vault_fingerprint": vault_fingerprint,
-    }))
+    });
+    if let Some(ref fp) = state.vault_fingerprint {
+        response["vault_fingerprint"] = serde_json::Value::String(fp.clone());
+    }
+
+    Ok(response)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

@@ -128,4 +128,32 @@ mod tests {
             other => panic!("expected Forbidden, got {other:?}"),
         }
     }
+
+    #[test]
+    fn extract_through_anyhow_context() {
+        // Wrap a HandlerError with anyhow::Context — the source-chain
+        // walker should still recover the typed error.
+        let original = HandlerError::NotFound;
+        let anyhow_err: anyhow::Error = anyhow::Error::new(original)
+            .context("looking up schedule xyz");
+        let extracted = extract_handler_error(&anyhow_err);
+        assert!(
+            matches!(extracted, Some(HandlerError::NotFound)),
+            "expected NotFound through Context, got {:?}",
+            extracted
+        );
+    }
+
+    #[test]
+    fn extract_through_double_context() {
+        let original = HandlerError::BadRequest("bad input".into());
+        let anyhow_err: anyhow::Error = anyhow::Error::new(original)
+            .context("first layer")
+            .context("second layer");
+        let extracted = extract_handler_error(&anyhow_err);
+        match extracted {
+            Some(HandlerError::BadRequest(msg)) => assert_eq!(msg, "bad input"),
+            other => panic!("expected BadRequest through double Context, got {other:?}"),
+        }
+    }
 }

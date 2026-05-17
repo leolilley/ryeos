@@ -243,4 +243,36 @@ mod tests {
     fn reject_spaces() {
         assert!(validate_scope_pattern("ryeos exec").is_err());
     }
+
+    // ── Wildcard delegation rejection ──
+
+    #[test]
+    fn reject_wildcard_scope() {
+        // The handler rejects "*" at step 6, but validate_scope_pattern
+        // also rejects it because '*' doesn't match [a-z0-9\-_/].
+        // Test both paths:
+        assert!(validate_scope_pattern("*").is_err());
+    }
+
+    #[test]
+    fn reject_wildcard_in_scope_list() {
+        // Parse a request with wildcard — struct is valid, but the
+        // handler would reject at step 6. Test the scope grammar rejects.
+        let req = serde_json::from_value::<Request>(serde_json::json!({
+            "public_key": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "label": "test",
+            "scopes": ["*"],
+        }))
+        .unwrap();
+        // Scope grammar rejects "*"
+        for scope in &req.scopes {
+            assert!(validate_scope_pattern(scope).is_err(), "scope '{}' should be rejected", scope);
+        }
+    }
+
+    #[test]
+    fn reject_glob_pattern_scope() {
+        assert!(validate_scope_pattern("ryeos.*").is_err());
+        assert!(validate_scope_pattern("ryeos.execute.*").is_err());
+    }
 }
