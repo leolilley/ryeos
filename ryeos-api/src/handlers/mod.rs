@@ -13,6 +13,7 @@
 use crate::registry::ServiceDescriptor;
 
 pub mod authorize_key;
+pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
 pub mod bundle_remove;
@@ -31,9 +32,11 @@ pub mod ownership;
 pub mod push_head;
 pub mod rebuild;
 pub mod remote_authorize;
+pub mod remote_bundle_install;
 pub mod remote_configure;
 pub mod remote_execute;
 pub mod remote_list;
+pub mod remote_pull;
 pub mod remote_push;
 pub mod remote_status;
 pub mod remote_thread_status;
@@ -78,6 +81,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     events_chain_replay::DESCRIPTOR,
     commands_submit::DESCRIPTOR,
     bundle_install::DESCRIPTOR,
+    bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
@@ -94,10 +98,12 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_list::DESCRIPTOR,
     remote_status::DESCRIPTOR,
     remote_push::DESCRIPTOR,
+    remote_pull::DESCRIPTOR,
     remote_execute::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
     remote_threads::DESCRIPTOR,
     remote_thread_status::DESCRIPTOR,
+    remote_bundle_install::DESCRIPTOR,
     remote_vault_set::DESCRIPTOR,
     remote_vault_list::DESCRIPTOR,
     remote_vault_delete::DESCRIPTOR,

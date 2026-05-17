@@ -30,7 +30,7 @@ pub struct Request {
     pub source_path: PathBuf,
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 64 {
         bail!(
             "invalid bundle name '{}': must be 1–64 characters",

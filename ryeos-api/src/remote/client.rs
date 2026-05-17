@@ -274,6 +274,12 @@ impl RemoteClient {
         self.signed_get(&format!("/threads/{}", thread_id)).await
     }
 
+    /// POST /bundle/export (authenticated) — export a bundle as CAS objects.
+    pub async fn bundle_export(&self, bundle_name: &str) -> Result<Value> {
+        let body = serde_json::json!({ "bundle_name": bundle_name });
+        self.signed_post("/bundle/export", &body).await
+    }
+
     // ── Internal ──────────────────────────────────────────────────
 
     async fn signed_get(&self, path: &str) -> Result<Value> {

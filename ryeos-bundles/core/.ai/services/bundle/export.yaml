@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-17T09:18:06Z:b83dfd22199697bacf4015f3453eb71006385afd3e38096f76435afcc352c9ea:zoRVg0qJ6I+wTNK27shBDzcIiXvlQDhr7g8RTg3LonnoaGtv5OArwF5OeZ38PZLdtWS5tCg65g7c+dY6JIFEAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "bundle"
+name: "export"
+kind: service
+endpoint: bundle.export
+required_caps: ["ryeos.execute.service.bundle/export"]
+schema:
+  bundle_name: string
+description: "Export an installed bundle as CAS objects. Walks the bundle directory tree, ingests every file into the node's CAS, and returns a manifest of file hashes."

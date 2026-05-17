@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-17T09:18:06Z:e437be62f0394bfa06575aa6f5ae8d565562e76ee93cd67620216d5535705ee5:Raqa4tDo33xcIQVKLDzEF9kvhdrpFLQJJeD8jF6IwB7JdBBXdf7SXDkmGlYfS2Ol60jUt5cDCTRAjFD88CZODg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "remote"
+name: "pull"
+kind: service
+endpoint: remote.pull
+required_caps: ["ryeos.execute.service.objects/get"]
+schema:
+  remote: string?
+  hashes: string[]
+  output_dir: string?
+description: "Fetch arbitrary CAS objects from a remote node and store in local CAS"
