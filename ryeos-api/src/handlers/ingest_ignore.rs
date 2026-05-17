@@ -32,7 +32,7 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ingest-ignore",
+    service_ref: "service:system/ingest-ignore",
     endpoint: "ingest_ignore.get",
     availability: ServiceAvailability::Both,
     required_caps: &[],
