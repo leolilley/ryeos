@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-17T12:18:02Z:f91196b1abe5bfb5649ebbb3fed017856ae761345e8c8c1756843b94bd776d1f:EeJtEyYXQeCvNypQlAW4xzlMPgrRPxzOCsG9pTtLzQkwdJ0VmMXsFRPkUUj2MOoM4lVqnsIhBzAq3SnthLA0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-17T21:26:07Z:36efa2091874bb6a55b31462683eefcf6582b76aa7cf0fa3479713f29dbf6430:TSVPjUexsBx5wOVyBnsNdNWjpk8vZfYyhNsObuz4/cbcRFAdV84RkUKCsmyQ/AfNvUpc/jv50G5sOSyMkxs4CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: routes
 section: routes
 id: push-head
@@ -14,4 +14,4 @@ limits:
   concurrent_max: 32
 response:
   mode: json
-  source: service:push-head
+  source: service:system/push-head

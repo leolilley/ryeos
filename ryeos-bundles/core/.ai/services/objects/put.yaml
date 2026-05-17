@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-17T21:26:08Z:b9201277dacabb2bd82ee9cb4a4de078bbb91efd6e1dd8a1cba9fff9dd3cda77:f3WHfnKKKqOYrmrxY5nXERShGGwDU8REKkgfHfJQ/TsZ7ql0t6TwNWC1jWg5QWURfeGzJDpNYkUTj204VbKaDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "objects"
+name: "put"
+kind: service
+endpoint: objects.put
+required_caps: ["ryeos.execute.service.objects/put"]
+schema:
+  hash: string
+  content: string
+description: "Store a CAS object"
