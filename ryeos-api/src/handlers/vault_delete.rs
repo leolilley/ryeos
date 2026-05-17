@@ -21,6 +21,8 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+    req._ctx.require_verified()?;
+
     let deleted = state
         .vault
         .delete_secret(&req._ctx.fingerprint, &req.name)

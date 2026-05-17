@@ -22,7 +22,7 @@
    ryeos remote authorize \
      --public-key "ed25519:<base64>" \
      --label "ci-pipeline" \
-     --scopes '["ryeos.execute.service.remote/execute"]'
+      --scopes '["ryeos.execute.service.remote.execute"]'
    ```
    This creates a node-signed authorized-key TOML with fine-grained
    scopes. Wildcard (`*`) delegation is rejected in v1.
@@ -121,6 +121,7 @@ The synchronous `remote execute` command:
 
 If the pull detects that any local tracked file has changed since the
 push, the entire apply is aborted (clean-base policy). No partial writes.
+On abort, the local HEAD ref is rolled back to its pre-push state.
 
 ## 7. Async Limitations
 
@@ -167,6 +168,54 @@ ryeos remote thread-status --remote production --thread-id abc123
 3. On the caller: re-run `ryeos remote configure` to pick up any changes.
 4. On the remote: remove the old authorized-key TOML from
    `.ai/node/auth/authorized_keys/`.
+
+## Bundle Synchronization
+
+### Remote pull — fetch CAS objects
+
+Fetch arbitrary CAS objects (blobs or JSON objects) from a remote node
+and store them in the local CAS. Optionally materialize to a directory.
+
+```
+ryeos remote pull --remote production --hashes abc123 def456
+ryeos remote pull --remote production --hashes abc123 --output-dir /tmp/objects
+```
+
+Fail-closed: if **any** requested hash is missing on the remote, the
+entire operation is aborted. No partial fetches.
+
+Required capability: `ryeos.execute.service.objects/get`
+
+### Remote bundle install
+
+Install a complete bundle from a remote node via the CAS pipeline:
+
+1. Calls `bundle.export` on the remote to walk the bundle tree and
+   ingest every file into the remote's CAS.
+2. Fetches all file blobs via `objects.get`.
+3. Materializes them into the local bundle install directory.
+4. Runs preflight verification on the materialized bundle.
+5. Writes a signed node-config bundle registration.
+
+```
+ryeos remote bundle-install --remote production --bundle-name standard
+```
+
+Fail-closed guarantees:
+- If any blob is missing, the install is aborted before materialization.
+- If preflight verification fails, the partial directory is cleaned up.
+- No signed registration is written unless preflight passes.
+
+Required capability: `ryeos.execute.service.bundle/install`
+
+### Bundle export (server-side only)
+
+Walk an installed bundle's directory tree, ingest every file into the
+node's CAS, and return a manifest of file hashes. This is the
+server-side half of remote bundle install — callers don't invoke it
+directly; `remote bundle-install` calls it on the remote automatically.
+
+Required capability: `ryeos.execute.service.bundle/export`
 
 ## Configuration File
 

@@ -20,6 +20,8 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+    req._ctx.require_verified()?;
+
     let keys = state
         .vault
         .list_keys(&req._ctx.fingerprint)

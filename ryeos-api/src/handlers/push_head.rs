@@ -30,6 +30,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let refs_root = state.state_store.refs_root()?;
     let cas = lillux::cas::CasStore::new(cas_root.clone());
 
+    // Caller identity used for principal-scoped storage — must be verified.
+    req._ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+
     // 1. Validate snapshot exists in CAS
     let snap_obj = cas
         .get_object(&req.snapshot_hash)?

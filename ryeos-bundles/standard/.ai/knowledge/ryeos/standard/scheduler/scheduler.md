@@ -24,7 +24,10 @@ controls.
 | `scheduler/resume`     | `scheduler.resume`    | Resume a paused schedule       |
 | `scheduler/show_fires` | `scheduler.show_fires`| Show fire history for a schedule |
 
-All scheduler services require no capabilities (`required_caps: []`).
+All scheduler services require the caller to hold the corresponding
+capability scope (e.g., `ryeos.execute.service.scheduler/register`).
+Ownership is enforced: only the schedule's creator (or an admin) can
+update, pause, resume, or deregister it.
 
 ## CLI Verbs
 

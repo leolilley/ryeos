@@ -41,6 +41,9 @@ pub struct Response {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+    // Caller identity used for scope delegation — must be verified.
+    req._ctx.require_verified()?;
+
     // 1. Parse public_key: must be "ed25519:<b64>"
     let key_b64 = req
         .public_key

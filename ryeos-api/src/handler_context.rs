@@ -57,6 +57,21 @@ impl HandlerContext {
         self.verified && !self.fingerprint.is_empty()
     }
 
+    /// Returns `Ok(())` when the caller is cryptographically verified.
+    ///
+    /// Use this as a guard at the top of handlers that read
+    /// `fingerprint` or `scopes` directly (not through `require_owner`).
+    /// Returns `HandlerError::BadRequest` with a clear message.
+    pub fn require_verified(&self) -> Result<(), HandlerError> {
+        if self.verified && !self.fingerprint.is_empty() {
+            Ok(())
+        } else {
+            Err(HandlerError::BadRequest(
+                "verified caller context required".to_string(),
+            ))
+        }
+    }
+
     /// Returns true when the caller is verified and is an admin or
     /// matches the resource owner.
     pub fn is_owner_or_admin(&self, owner: Option<&str>) -> bool {
@@ -189,5 +204,24 @@ mod tests {
         let ctx = HandlerContext::default();
         assert!(!ctx.verified);
         assert!(!ctx.is_present());
+    }
+
+    #[test]
+    fn require_verified_ok_for_verified_context() {
+        let ctx = ctx("fp:abc", &["execute"]);
+        assert!(ctx.require_verified().is_ok());
+    }
+
+    #[test]
+    fn require_verified_rejects_unverified() {
+        let anon = unverified_ctx("route:health", &[]);
+        let err = anon.require_verified().unwrap_err();
+        assert!(matches!(err, HandlerError::BadRequest(_)));
+    }
+
+    #[test]
+    fn require_verified_rejects_default() {
+        let ctx = HandlerContext::default();
+        assert!(ctx.require_verified().is_err());
     }
 }

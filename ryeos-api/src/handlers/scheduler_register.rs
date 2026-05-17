@@ -41,6 +41,9 @@ pub struct Request {
 fn default_true() -> bool { true }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    // Caller identity is used for execution authority — must be verified.
+    req._ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+
     // Validate
     crontab::validate_schedule_id(&req.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)

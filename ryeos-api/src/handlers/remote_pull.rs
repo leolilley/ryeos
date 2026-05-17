@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
@@ -41,6 +41,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let mut fetched = 0usize;
     let mut stored_hashes: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
 
     let cas_root = state.state_store.cas_root()?;
     let cas = lillux::cas::CasStore::new(cas_root);
@@ -79,10 +80,21 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 }
             }
             "missing" => {
-                // Skip — hash not found on remote.
+                missing.push(entry.hash.clone());
             }
             _ => {}
         }
+    }
+
+    // Fail-closed: if any requested hash was not found on the remote,
+    // abort and report all missing hashes.
+    if !missing.is_empty() {
+        bail!(
+            "remote.pull: {} of {} requested hashes not found on remote: {}",
+            missing.len(),
+            req.hashes.len(),
+            missing.join(", ")
+        );
     }
 
     Ok(serde_json::json!({

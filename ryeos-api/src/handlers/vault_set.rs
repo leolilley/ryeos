@@ -23,6 +23,9 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+    // Vault writes are scoped to the caller's fingerprint — must be verified.
+    req._ctx.require_verified()?;
+
     state
         .vault
         .set_secret(&req._ctx.fingerprint, &req.name, &req.value)
