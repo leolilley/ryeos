@@ -1,5 +1,5 @@
+<!-- ryeos:signed:2026-05-17T12:20:01Z:ebb45fe87187b75fa9b35b82d6605aed0f91884917ae9982d292ddc5bb487d4d:5YjeoF8jPW+Tf/Vm26OMW9ca21Y5/SFAafU6MaD9O1zyk0eA/4WW5l0wnyeP3LuSdXvMZJ2wxYz2S2BvGL2dDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
-category: ryeos/standard
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
 version: "1.0.0"
 description: >

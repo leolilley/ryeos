@@ -75,25 +75,42 @@ pub fn sign_bundle_items(
         label: Some("author".to_string()),
     }]);
 
-    // 2. Load KindRegistry from registry_root ONLY (no system/user/project layering)
-    let schema_root = registry_root.join(AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
-    if !schema_root.is_dir() {
+    // 2. Load KindRegistry from registry_root AND source bundle's own kind schemas.
+    //    The registry_root provides base kinds (core); the source bundle may provide
+    //    additional kinds (e.g. standard provides knowledge, directive, graph).
+    let mut schema_roots = Vec::new();
+    let registry_schema_root = registry_root.join(AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
+    if registry_schema_root.is_dir() {
+        schema_roots.push(registry_schema_root);
+    }
+    let source_schema_root = source.join(AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
+    if source_schema_root.is_dir() {
+        schema_roots.push(source_schema_root);
+    }
+    if schema_roots.is_empty() {
         bail!(
-            "registry root has no kind schemas at {}",
-            schema_root.display()
+            "no kind schemas found in registry root or source bundle"
         );
     }
     let kinds =
-        KindRegistry::load_base(&[schema_root], &trust_store).context("load kind schemas")?;
+        KindRegistry::load_base(&schema_roots, &trust_store).context("load kind schemas")?;
 
-    // 3. Build ParserDispatcher from registry_root.
+    // 3. Build ParserDispatcher from registry_root AND source bundle.
     //    Requires: kind schemas AND parser tool YAMLs must already be signed
     //    (done by the bootstrap_sign_core_kind_schemas example, which signs
     //    both kind schemas and parser descriptors in one pass).
+    let mut parser_roots = vec![registry_root.to_path_buf()];
+    if source != registry_root {
+        parser_roots.push(source.to_path_buf());
+    }
     let (parser_tools, _dups) =
-        ParserRegistry::load_base(&[registry_root.to_path_buf()], &trust_store, &kinds)
+        ParserRegistry::load_base(&parser_roots, &trust_store, &kinds)
             .context("load parser tools")?;
-    let handlers = HandlerRegistry::load_base(&[(registry_root.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem)], &trust_store)
+    let mut handler_roots = vec![(registry_root.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem)];
+    if source != registry_root {
+        handler_roots.push((source.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem));
+    }
+    let handlers = HandlerRegistry::load_base(&handler_roots, &trust_store)
         .context("load handler descriptors")?;
     let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handlers));
 

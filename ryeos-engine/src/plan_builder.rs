@@ -183,6 +183,7 @@ fn resolve_executor_chain(
             &parsed,
             &kind_schema.extraction_rules,
             &source_path,
+            &kind_schema.directory,
         );
 
         // Accumulate this intermediate

@@ -199,6 +199,7 @@ impl Engine {
             &parsed,
             &kind_schema.extraction_rules,
             &result.winner_path,
+            &kind_schema.directory,
         );
 
         tracing::debug!(

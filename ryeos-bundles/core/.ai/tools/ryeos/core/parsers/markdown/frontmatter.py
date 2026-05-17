@@ -1,22 +1,62 @@
-# ryeos:signed:2026-05-17T11:31:07Z:5cb4785c56e37496a7eed0c5b9c587c294b028dd859ff4f073efbc6784a072bd:pJBwhW1NKjyerc0L1gjyx4hdJG3oJ4SA1cZUdniFkSWqxQ2AYdtZ9an8FuHp6gfWjZdn7JcyXYmxb6IV57yXCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-17T12:18:01Z:f72cc3eb12ba09a220324c18c732d5b06500795139cd0fd3a511ca5c505ea29d:jdSVuRSv80wDGqf3RopgyFO1Y5KO7Rk33UBsUhf1wTBnE30HifB/Z2i/7YKOjVtGZz4Iu0NBILM1ZyzcS1zfAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Markdown YAML parser for knowledge entries.
 
-Extracts YAML metadata from ```yaml code fences (matching how
-directives use ```xml fences) and separates it from body content.
+Extracts YAML metadata from --- frontmatter (canonical) or ```yaml
+code fences (backward compat), and separates it from body content.
 Also handles pure YAML files (.yaml/.yml) with no fences.
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 __tool_type__ = "parser"
 __category__ = "ryeos/core/parsers/markdown"
 __description__ = (
-    "Markdown YAML parser - extracts YAML metadata from code fences in markdown files"
+    "Markdown YAML parser - extracts YAML metadata from frontmatter "
+    "or code fences in markdown files"
 )
 
 import re
 from typing import Any, Dict, Optional, Tuple
 
 import yaml
+
+
+def _skip_signature_comment(content: str) -> str:
+    stripped = content.lstrip()
+    if stripped.startswith("<!--"):
+        end = stripped.find("-->")
+        if end != -1:
+            return stripped[end + 3:].lstrip("\r\n")
+    return content
+
+
+def _extract_dashes_frontmatter(content: str) -> Tuple[Optional[str], str]:
+    """Extract YAML from --- frontmatter (canonical markdown format).
+
+    Returns (yaml_content, body) where:
+      - yaml_content: the YAML string between the delimiters, or None
+      - body: everything after the closing ---
+    """
+    stripped = _skip_signature_comment(content)
+    if not stripped.startswith("---"):
+        return None, ""
+
+    after_opening = stripped[3:]
+    # The character right after --- must be a newline or EOF
+    if after_opening and after_opening[0] not in ("\n", "\r"):
+        return None, ""  # e.g. ----something, not a frontmatter delimiter
+
+    rest = after_opening.lstrip("\r\n")
+
+    # Find closing --- on its own line
+    lines = rest.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "---":
+            yaml_str = "\n".join(lines[:i]).strip()
+            body_lines = lines[i + 1:]
+            body = "\n".join(body_lines).strip()
+            return yaml_str, body
+
+    return None, ""  # unclosed — fall through to other formats
 
 
 def _extract_yaml_block(content: str) -> Tuple[Optional[str], str]:
@@ -50,29 +90,30 @@ def _extract_yaml_block(content: str) -> Tuple[Optional[str], str]:
     return None, ""
 
 
-def _detect_dashes_frontmatter(content: str) -> bool:
-    """Detect unsupported --- YAML frontmatter format."""
-    stripped = content.lstrip()
-    # Skip HTML signature comment
-    if stripped.startswith("<!--"):
-        end = stripped.find("-->")
-        if end != -1:
-            stripped = stripped[end + 3:].lstrip()
-    return stripped.startswith("---")
-
-
 def parse(content: str) -> Dict[str, Any]:
     """Parse knowledge entry content.
 
-    For .md files: extracts YAML from ```yaml code fence, body is the rest.
-    For .yaml/.yml files: parses entire content as YAML metadata.
+    For .md files: extracts YAML metadata, body is the rest.
+    Tries formats in order:
+      1. --- frontmatter (canonical, standard markdown convention)
+      2. ```yaml fenced code block (backward compat)
+      3. Pure YAML (.yaml/.yml files)
     """
     result: Dict[str, Any] = {
         "body": "",
         "raw": content,
     }
 
-    # Try ```yaml code fence extraction
+    # 1. Try --- frontmatter (canonical)
+    yaml_str, body = _extract_dashes_frontmatter(content)
+    if yaml_str is not None:
+        data = yaml.safe_load(yaml_str)
+        if isinstance(data, dict):
+            result.update(data)
+        result["body"] = body
+        return result
+
+    # 2. Try ```yaml code fence (backward compat)
     yaml_str, body = _extract_yaml_block(content)
     if yaml_str is not None:
         data = yaml.safe_load(yaml_str)
@@ -81,17 +122,7 @@ def parse(content: str) -> Dict[str, Any]:
         result["body"] = body
         return result
 
-    # Reject --- frontmatter with a clear error
-    if _detect_dashes_frontmatter(content):
-        return {
-            "error": (
-                "Found --- YAML frontmatter (unsupported). "
-                "Use a ```yaml fenced code block for metadata instead."
-            ),
-            "raw": content,
-        }
-
-    # Pure YAML file — strip signature comment then parse as metadata
+    # 3. Pure YAML file — strip signature comment then parse as metadata
     try:
         stripped = content
         if stripped.startswith("<!--"):

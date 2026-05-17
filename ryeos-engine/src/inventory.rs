@@ -199,6 +199,7 @@ fn build_descriptor_for_ref(
         &parsed,
         &target_schema.extraction_rules,
         &resolution.winner_path,
+        &target_schema.directory,
     );
 
     let description = metadata.description.clone();

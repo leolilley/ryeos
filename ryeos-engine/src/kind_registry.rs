@@ -30,11 +30,12 @@ pub fn apply_extraction_rules(
     parsed: &Value,
     rules: &HashMap<String, MetadataRule>,
     file_path: &Path,
+    kind_directory: &str,
 ) -> ItemMetadata {
     let mut metadata = ItemMetadata::default();
 
     for (field, rule) in rules {
-        let result = extract_rule_value(&rule.extractor, parsed, file_path);
+        let result = extract_rule_value(&rule.extractor, parsed, file_path, kind_directory);
         assign_extracted_field(&mut metadata, field, result);
     }
 
@@ -47,6 +48,7 @@ fn extract_rule_value(
     extractor: &ExtractionRule,
     parsed: &Value,
     file_path: &Path,
+    kind_directory: &str,
 ) -> RuleResult {
     match extractor {
         ExtractionRule::Filename => RuleResult::String(
@@ -61,6 +63,32 @@ fn extract_rule_value(
         }
         ExtractionRule::PathStringSeq { key } => {
             RuleResult::StringSeq(extract_string_seq_from_value(parsed, key))
+        }
+        ExtractionRule::RelativeDir => {
+            // Derive from file's parent dir relative to the kind directory.
+            // kind_directory is the kind's `directory` field (e.g. "knowledge").
+            // file_path is the absolute path to the item file.
+            // We walk up from file_path looking for a parent named kind_directory.
+            let parent = file_path.parent().unwrap_or(file_path);
+            let result = parent
+                .ancestors()
+                .find_map(|ancestor| {
+                    let ancestor_dir_name = ancestor.file_name()?.to_str()?;
+                    if ancestor_dir_name == kind_directory {
+                        // ancestor is the kind dir, parent is relative to it
+                        Some(parent.strip_prefix(ancestor).ok()?)
+                    } else {
+                        None
+                    }
+                })
+                .map(|relative| {
+                    relative
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                });
+            RuleResult::String(result)
         }
     }
 }
@@ -154,16 +182,19 @@ pub struct ExtensionSpec {
 pub enum ExtractionRule {
     /// Extract from the filename (stem, no extension)
     Filename,
-    /// Use a constant value
+    /// A fixed string, not derived from the document or path at all.
     Constant { value: String },
     /// Extract a scalar string from a key path in the parsed document
     Path { key: String },
     /// Extract a `Vec<String>` from a key path in the parsed document.
-    /// The value at the path must be an array; non-string entries are
-    /// dropped silently. Used for typed-list metadata fields like
-    /// `required_secrets` so engine code does NOT special-case
-    /// specific field names.
     PathStringSeq { key: String },
+    /// Derive the value from the file's parent directory path relative
+    /// to the kind directory. For a file at
+    /// `.ai/knowledge/ryeos/standard/scheduler/scheduler.md` with
+    /// kind_directory `"knowledge"`, this produces `"ryeos/standard/scheduler"`.
+    /// Files at the root of the kind directory produce `""`.
+    /// Incompatible with `key:` and `match:` — the value IS the path.
+    RelativeDir,
 }
 
 /// Path-anchoring constraint declared on a metadata rule.
@@ -292,7 +323,7 @@ pub fn validate_metadata_anchoring(
 
     for field in field_names {
         let rule = &rules[field];
-        let result = extract_rule_value(&rule.extractor, parsed, file_path);
+        let result = extract_rule_value(&rule.extractor, parsed, file_path, kind_directory);
 
         // Required check: extractor must produce a value. An empty
         // string IS a value (it's the legal path-component for items
@@ -1412,6 +1443,18 @@ fn parse_extraction_rules(
                     })?;
                 ExtractionRule::PathStringSeq { key }
             }
+            "relative_dir" => {
+                // Incompatible with `key:` and `match:`.
+                if rule_map.iter().any(|(rk, _)| rk.as_str() == Some("key")) {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: metadata.rules.{field} from=relative_dir does not accept `key` \
+                             — the value is derived from the file's directory path"
+                        ),
+                    });
+                }
+                ExtractionRule::RelativeDir
+            }
             other => {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!("{display}: metadata.rules.{field} unknown from `{other}`"),
@@ -1477,6 +1520,17 @@ fn parse_extraction_rules(
                             "{display}: metadata.rules.{field} cannot declare \
                              `match` on a `path_string_seq` extractor — anchors \
                              require a scalar value"
+                        ),
+                    });
+                }
+                // RelativeDir derives from the path directly — matching
+                // against the same path would be tautological.
+                if matches!(extractor, ExtractionRule::RelativeDir) {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: metadata.rules.{field} cannot declare \
+                             `match` on a `relative_dir` extractor — the value \
+                             IS the path, so matching would be tautological"
                         ),
                     });
                 }

@@ -1,5 +1,5 @@
+<!-- ryeos:signed:2026-05-17T12:20:01Z:14acb11481d9f5a6b1be578f3c5c97ff3dd1bb9a1d8ede771363cec8ca899c90:Z6JldMs6JbiGGBq0iKl+NotdX2QCRlGik0tNnUxbV9a2UcMt+E6Y6IK3YQ6u3ph9eZP6wQiMEIj4U5FyFmonBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
-category: ryeos/core
 tags: [fundamentals, threads, execution, lifecycle]
 version: "1.0.0"
 description: >

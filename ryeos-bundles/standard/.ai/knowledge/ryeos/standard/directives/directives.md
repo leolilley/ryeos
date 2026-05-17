@@ -1,5 +1,5 @@
+<!-- ryeos:signed:2026-05-17T12:20:01Z:40d1199a95ec38fc0e7f2e4f66552f0008b75130c268dbe77d329db75ae27b65:/xB6Mg92ZoDVtzNXTj60qiX88pztznJMQ9JHErjHxs1Dq+YsCjMgFzIZI0tuprPhLUtg28e0DGgqGmB6MVhBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
-category: ryeos/core
 tags: [fundamentals, directives, workflows, prompts]
 version: "1.0.0"
 description: >

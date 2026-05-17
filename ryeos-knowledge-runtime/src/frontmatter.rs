@@ -38,6 +38,44 @@ pub fn strip_markdown_frontmatter(content: &str) -> Result<String, KnowledgeErro
     Ok(body.to_string())
 }
 
+/// Strip a top-of-document ```yaml fenced code block.
+/// Only matches at the start of the document (after optional signature comments).
+/// Does NOT touch fenced blocks in the body — those are content.
+pub fn strip_fenced_yaml_block(content: &str) -> Result<String, KnowledgeError> {
+    let trimmed = skip_signature_comment(content);
+    if !trimmed.starts_with("```yaml") {
+        return Ok(content.to_string());
+    }
+
+    // Find closing ``` on its own line
+    let after_fence = &trimmed[7..]; // skip "```yaml\n"
+    let rest = after_fence.trim_start_matches(['\r', '\n']);
+
+    for line in rest.lines() {
+        if line.trim() == "```" {
+            let body_start = rest.find(line).unwrap() + line.len();
+            let body = rest[body_start..].trim_start_matches(['\r', '\n']);
+            return Ok(body.to_string());
+        }
+    }
+
+    Err(KnowledgeError::FrontmatterParse {
+        item_id: "<unknown>".to_string(),
+        reason: "unclosed ```yaml fenced block at document start".to_string(),
+    })
+}
+
+/// Skip leading HTML signature comment (<!-- ryeos:signed:... -->).
+fn skip_signature_comment(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    if trimmed.starts_with("<!--") {
+        if let Some(end) = trimmed.find("-->") {
+            return trimmed[end + 3..].trim_start();
+        }
+    }
+    trimmed
+}
+
 /// Strip signed YAML frontmatter (`# ryeos:signed:...` line + body).
 /// Returns the body verbatim.
 pub fn strip_signed_yaml_frontmatter(content: &str) -> String {
@@ -52,12 +90,29 @@ pub fn strip_signed_yaml_frontmatter(content: &str) -> String {
 }
 
 /// Strip frontmatter from content, detecting whether it's markdown or YAML.
+/// Tries formats in the same order as the parser:
+///   1. `---` frontmatter (canonical)
+///   2. ` ```yaml` fenced block at doc start (backward compat)
+///   3. Signed YAML `# ryeos:signed:...`
 pub fn strip_frontmatter(content: &str, item_id: &str) -> Result<String, KnowledgeError> {
     let trimmed = content.trim_start();
 
-    // Markdown frontmatter
+    // Markdown --- frontmatter
     if trimmed.starts_with("---") {
         return strip_markdown_frontmatter(content)
+            .map_err(|e| KnowledgeError::FrontmatterParse {
+                item_id: item_id.to_string(),
+                reason: match e {
+                    KnowledgeError::FrontmatterParse { reason, .. } => reason,
+                    _ => "unknown frontmatter parse error".to_string(),
+                },
+            });
+    }
+
+    // Fenced ```yaml block at doc start (after optional signature)
+    let after_sig = skip_signature_comment(content);
+    if after_sig.trim_start().starts_with("```yaml") {
+        return strip_fenced_yaml_block(content)
             .map_err(|e| KnowledgeError::FrontmatterParse {
                 item_id: item_id.to_string(),
                 reason: match e {
@@ -119,5 +174,40 @@ mod tests {
         let input = "No frontmatter here";
         let result = strip_frontmatter(input, "test:item").unwrap();
         assert_eq!(result, "No frontmatter here");
+    }
+
+    #[test]
+    fn strip_fenced_yaml_block_basic() {
+        let input = "```yaml\ntitle: Foo\n```\nBody text";
+        let result = strip_fenced_yaml_block(input).unwrap();
+        assert_eq!(result, "Body text");
+    }
+
+    #[test]
+    fn strip_fenced_yaml_block_no_block() {
+        let input = "Just body text";
+        let result = strip_fenced_yaml_block(input).unwrap();
+        assert_eq!(result, "Just body text");
+    }
+
+    #[test]
+    fn strip_fenced_yaml_block_unclosed() {
+        let input = "```yaml\ntitle: Foo\nNo closing fence";
+        let result = strip_fenced_yaml_block(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn strip_fenced_yaml_block_ignores_body_fences() {
+        let input = "Body with ```yaml\nnot metadata\n```\nstill body";
+        let result = strip_fenced_yaml_block(input).unwrap();
+        assert_eq!(result, input); // unchanged — not at doc start
+    }
+
+    #[test]
+    fn strip_frontmatter_fenced_yaml() {
+        let input = "```yaml\ntitle: Test\n```\nContent here";
+        let result = strip_frontmatter(input, "test:item").unwrap();
+        assert_eq!(result, "Content here");
     }
 }
