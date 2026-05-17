@@ -10,6 +10,7 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 
 #[derive(serde::Deserialize)]
@@ -18,15 +19,13 @@ pub struct Request {
     pub name: String,
     pub value: String,
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
     state
         .vault
-        .set_secret(&req._caller_fingerprint, &req.name, &req.value)
+        .set_secret(&req._ctx.fingerprint, &req.name, &req.value)
         .map_err(|e| {
             // Vault validation errors (key name, blocked names) are user
             // errors → 400. Anything else is 500.

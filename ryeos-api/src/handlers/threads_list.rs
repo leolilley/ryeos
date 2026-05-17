@@ -1,8 +1,7 @@
 //! `threads.list` — paginated thread listing.
 //!
-//! Supports optional owner filtering: when `_caller_fingerprint` is
-//! present and the caller is not an admin, only threads owned by the
-//! caller are returned.
+//! Supports optional owner filtering: when the caller is authenticated
+//! and is not an admin, only threads owned by the caller are returned.
 
 use std::sync::Arc;
 
@@ -13,8 +12,8 @@ use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 
+use crate::handler_context::HandlerContext;
 use super::default_list_limit;
-use super::ownership::is_admin;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,16 +22,13 @@ pub struct Request {
     pub limit: usize,
     /// Injected by service_invocation for caller-aware filtering.
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    /// Injected by service_invocation for caller-aware filtering.
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Non-admin callers see only their own threads.
-    let filter_principal = if !req._caller_fingerprint.is_empty() && !is_admin(&req._caller_scopes) {
-        Some(req._caller_fingerprint.as_str())
+    let filter_principal = if req._ctx.is_present() && !req._ctx.is_admin() {
+        Some(req._ctx.fingerprint.as_str())
     } else {
         None
     };

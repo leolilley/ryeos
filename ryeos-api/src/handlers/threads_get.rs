@@ -11,7 +11,7 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_error::HandlerError;
-use crate::handlers::ownership::require_owner_or_admin;
+use crate::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 
 #[derive(serde::Deserialize)]
@@ -20,10 +20,7 @@ pub struct Request {
     pub thread_id: String,
     /// Injected by service_invocation for ownership checks.
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    /// Injected by service_invocation for ownership checks.
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
@@ -34,11 +31,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
 
     match thread {
         Some(detail) => {
-            require_owner_or_admin(
-                detail.requested_by.as_deref(),
-                &req._caller_fingerprint,
-                &req._caller_scopes,
-            )?;
+            req._ctx.require_owner(detail.requested_by.as_deref())?;
 
             let facets = state.state_store.get_facets(&req.thread_id)
                 .map_err(|e| HandlerError::Internal(e.to_string()))?;

@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
+use crate::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 
 #[derive(serde::Deserialize)]
@@ -20,11 +21,8 @@ pub struct Request {
     pub project_path: String,
     /// CAS hash of the `ProjectSnapshot` to point HEAD at.
     pub snapshot_hash: String,
-    /// Injected by service_invocation layer (not client-supplied).
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
@@ -59,7 +57,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     // 4. Compute principal-scoped project key
-    let principal_key = ryeos_state::refs::principal_storage_key(&req._caller_fingerprint);
+    let principal_key = ryeos_state::refs::principal_storage_key(&req._ctx.fingerprint);
     let project_hash = lillux::cas::sha256_hex(req.project_path.as_bytes());
 
     // 5. Write the HEAD ref (with CAS compare-and-swap if HEAD already exists)

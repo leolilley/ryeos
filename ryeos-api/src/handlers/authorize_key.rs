@@ -15,6 +15,7 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 
 #[derive(serde::Deserialize)]
@@ -26,12 +27,8 @@ pub struct Request {
     pub label: String,
     /// Capabilities to grant. Must be a subset of caller's scopes.
     pub scopes: Vec<String>,
-    /// Injected by service_invocation for caller context.
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    /// Injected by service_invocation for caller context.
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: HandlerContext,
 }
 
 #[derive(serde::Serialize)]
@@ -111,7 +108,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         let permitted = state
             .authorizer
             .authorize(
-                &req._caller_scopes,
+                &req._ctx.scopes,
                 &ryeos_runtime::authorizer::AuthorizationPolicy::require(scope.as_str()),
             )
             .is_ok();
@@ -139,7 +136,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         key_b64,
         &normalized,
         &req.label,
-        &req._caller_fingerprint,
+        &req._ctx.fingerprint,
         &now,
         state.identity.signing_key(),
     )
@@ -149,7 +146,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         fingerprint,
         label: req.label,
         scopes: normalized,
-        granted_by: req._caller_fingerprint,
+        granted_by: req._ctx.fingerprint,
         created_at: now,
     };
 

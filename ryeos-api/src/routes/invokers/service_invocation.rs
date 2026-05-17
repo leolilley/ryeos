@@ -75,21 +75,18 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                 ))
             })?;
 
-        // Inject principal context into the input for handlers that need
-        // caller identity. Fields prefixed with `_` to signal they're
-        // framework-injected (not client-supplied). Handlers opt in by
-        // declaring these fields in their Request struct with
-        // `#[serde(default)]`.
+        // Inject typed handler context for principal-aware handlers.
+        // Handlers opt in by including `_ctx: HandlerContext` (with
+        // `#[serde(default)]`) in their Request struct.
         let mut input = ctx.input;
         if let Some(ref principal) = ctx.principal {
             if let serde_json::Value::Object(ref mut map) = input {
                 map.insert(
-                    "_caller_fingerprint".into(),
-                    serde_json::Value::String(principal.id.clone()),
-                );
-                map.insert(
-                    "_caller_scopes".into(),
-                    serde_json::json!(principal.scopes),
+                    "_ctx".into(),
+                    serde_json::json!({
+                        "fingerprint": principal.id,
+                        "scopes": principal.scopes,
+                    }),
                 );
             }
         }

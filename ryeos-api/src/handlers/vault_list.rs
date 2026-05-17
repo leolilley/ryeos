@@ -9,21 +9,20 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
     let keys = state
         .vault
-        .list_keys(&req._caller_fingerprint)
+        .list_keys(&req._ctx.fingerprint)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     Ok(serde_json::json!({

@@ -33,14 +33,9 @@ pub struct Request {
     pub enabled: bool,
     #[serde(default)]
     pub project_root: Option<String>,
-    /// Injected by execute_service_verified from ExecutionContext.
-    /// The caller's fingerprint — used as the schedule's acting principal.
-    #[serde(default, rename = "_caller_fingerprint")]
-    pub caller_fingerprint: Option<String>,
-    /// Injected by execute_service_verified from ExecutionContext.
-    /// The caller's capabilities — the schedule runs with only these.
-    #[serde(default, rename = "_caller_scopes")]
-    pub caller_capabilities: Option<Vec<String>>,
+    /// Injected by service_invocation / executor. Typed caller context.
+    #[serde(default)]
+    pub _ctx: crate::handler_context::HandlerContext,
 }
 
 fn default_true() -> bool { true }
@@ -79,13 +74,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // requester (or admin). On create, no ownership check needed —
     // the caller becomes the owner.
     if let Some(ref existing) = existing_spec {
-        let caller_fp = req.caller_fingerprint.as_deref().unwrap_or("");
-        let caller_caps = req.caller_capabilities.as_deref().unwrap_or(&[]);
-        crate::handlers::ownership::require_owner_or_admin(
-            Some(&existing.requester_fingerprint),
-            caller_fp,
-            caller_caps,
-        ).map_err(|e| -> anyhow::Error { e.into() })?;
+        req._ctx.require_owner(Some(&existing.requester_fingerprint))
+            .map_err(|e| -> anyhow::Error { e.into() })?;
     }
 
     // Disallow schedule_id reuse if fire history exists from a previous schedule.
@@ -150,20 +140,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         body["overlap_policy"] = Value::String(p.clone());
     }
     // Determine execution authority from caller context.
-    // The service executor injects these from ExecutionContext before
+    // The service executor injects _ctx from ExecutionContext before
     // dispatching the handler. Fail-closed: if injection didn't happen,
     // error out rather than silently degrading to node identity.
-    let caller_fingerprint = req.caller_fingerprint.clone()
-        .ok_or_else(|| anyhow::anyhow!(
-            "scheduler.register requires verified caller context \
-             (executor must inject _caller_fingerprint)"
-        ))?;
-    let capabilities = req.caller_capabilities.clone()
-        .filter(|caps| !caps.is_empty())
-        .ok_or_else(|| anyhow::anyhow!(
-            "scheduler.register requires verified caller context \
-             with non-empty _caller_scopes"
-        ))?;
+    let caller_fingerprint = if req._ctx.fingerprint.is_empty() {
+        bail!("scheduler.register requires verified caller context (executor must inject _ctx)");
+    } else {
+        req._ctx.fingerprint.clone()
+    };
+    let capabilities = if req._ctx.scopes.is_empty() {
+        bail!("scheduler.register requires verified caller context with non-empty scopes");
+    } else {
+        req._ctx.scopes.clone()
+    };
 
     // On UPDATE, preserve the existing requester_fingerprint — only the
     // original owner (or admin) can update, but the owner identity stays

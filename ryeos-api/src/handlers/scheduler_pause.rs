@@ -12,19 +12,15 @@ use ryeos_app::node_config::writer;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_error::HandlerError;
-use crate::handlers::ownership::require_owner_or_admin;
 use ryeos_app::state::AppState;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub schedule_id: String,
-    /// Injected by service_invocation for ownership checks.
+    /// Injected by service_invocation / executor. Typed caller context.
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    /// Injected by service_invocation for ownership checks.
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: crate::handler_context::HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
@@ -34,11 +30,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    require_owner_or_admin(
-        Some(&spec.requester_fingerprint),
-        &req._caller_fingerprint,
-        &req._caller_scopes,
-    )?;
+    req._ctx.require_owner(Some(&spec.requester_fingerprint))?;
 
     if !spec.enabled {
         return Ok(serde_json::json!({

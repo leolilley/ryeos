@@ -15,7 +15,7 @@ use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_error::HandlerError;
-use crate::handlers::ownership::require_owner_or_admin;
+use crate::handler_context::HandlerContext;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_app::state::AppState;
 
@@ -25,10 +25,7 @@ pub struct Request {
     pub thread_id: String,
     /// Injected by service_invocation for ownership checks.
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    /// Injected by service_invocation for ownership checks.
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
@@ -39,11 +36,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         .ok_or(HandlerError::NotFound)?;
 
     // Ownership check: non-admin callers can only cancel their own threads.
-    require_owner_or_admin(
-        thread.requested_by.as_deref(),
-        &req._caller_fingerprint,
-        &req._caller_scopes,
-    )?;
+    req._ctx.require_owner(thread.requested_by.as_deref())?;
 
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
@@ -186,17 +179,16 @@ mod tests {
     fn request_deserialize_with_caller_fields() {
         let req: Request = serde_json::from_value(json!({
             "thread_id": "T-1234",
-            "_caller_fingerprint": "fp:abc",
-            "_caller_scopes": ["execute"],
+            "_ctx": {"fingerprint": "fp:abc", "scopes": ["execute"]},
         })).unwrap();
         assert_eq!(req.thread_id, "T-1234");
-        assert_eq!(req._caller_fingerprint, "fp:abc");
+        assert_eq!(req._ctx.fingerprint, "fp:abc");
     }
 
     #[test]
     fn request_deserialize_accepts_valid_without_caller() {
         let req: Request = serde_json::from_value(json!({"thread_id": "T-1234"})).unwrap();
         assert_eq!(req.thread_id, "T-1234");
-        assert!(req._caller_fingerprint.is_empty());
+        assert!(req._ctx.fingerprint.is_empty());
     }
 }

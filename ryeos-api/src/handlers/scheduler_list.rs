@@ -1,6 +1,6 @@
 //! `scheduler.list` — list registered schedules.
 //!
-//! Supports optional owner filtering: when `_caller_fingerprint` is
+//! Supports optional owner filtering: when `_ctx` is
 //! present and the caller is not an admin, only schedules owned by
 //! the caller are returned.
 
@@ -13,7 +13,6 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
-use crate::handlers::ownership::is_admin;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,17 +21,14 @@ pub struct Request {
     pub enabled_only: bool,
     #[serde(default)]
     pub schedule_type: Option<String>,
-    /// Injected by service_invocation for caller-aware filtering.
+    /// Injected by service_invocation / executor. Typed caller context.
     #[serde(default)]
-    pub _caller_fingerprint: String,
-    /// Injected by service_invocation for caller-aware filtering.
-    #[serde(default)]
-    pub _caller_scopes: Vec<String>,
+    pub _ctx: crate::handler_context::HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let filter_requester = if !req._caller_fingerprint.is_empty() && !is_admin(&req._caller_scopes) {
-        Some(req._caller_fingerprint.as_str())
+    let filter_requester = if req._ctx.is_present() && !req._ctx.is_admin() {
+        Some(req._ctx.fingerprint.as_str())
     } else {
         None
     };
