@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:d5965fc4bc2f06174987d08892800bbe3d19415939c20f9876f9210addb29944:tLfI0LCUpdMXivGSRKicTPMgJYiG5bSKp5xeXeizvWOLJwDTLbaPcguMfmnK2ZMiGVnxY92v84t/k+coHLdeCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "remote"
-name: "authorize"
+# ryeos:signed:2026-05-17T21:33:43Z:cc50e2f708bc42f59714f852aa906f1a6648ad1ca3fcfa31f9f99078b2597656:QCM2GkBDSwN5qVL8a6w6u2m/65KZUx39pVqYhOG5GxmehDncSmL9Nr+euKin3e6uUu0zd59oP0WZcPoxwU5ECQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.authorize
 required_caps: ["ryeos.execute.service.remote.execute"]

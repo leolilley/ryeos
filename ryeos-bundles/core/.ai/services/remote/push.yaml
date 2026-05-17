@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:f6e87ae44ded465f9d085bd637d1627556f811e99eeff7bdb5ac078bb9e646d0:lYkPblS9DorMzneUxcYfwhtgZTOTCG2SB7WcH3xPW9/1x0nOb0FYsb0uvIIbRXMrWl4eEe3/t6JHVeSXpK+6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "remote"
-name: "push"
+# ryeos:signed:2026-05-17T21:33:43Z:36f3d989e4a44a26da6e43c2bc7ae1232fb5c09eac4901b912bb9397892da60e:GuH/Fr2AxDGtBrk4kVLwiTQnGFdUNQp6HSDnZKIrK5beqs2FL647ZUnAyv/RK8TYsQT8phjHi0uxr6UmbDfrBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.push
 required_caps: ["ryeos.execute.service.remote.push"]

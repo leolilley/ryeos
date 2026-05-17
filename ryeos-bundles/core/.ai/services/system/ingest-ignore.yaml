@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:ace4341c6a6d6afe203436a7fdc90d5d3e898557f6cd06f59e46844855184ba7:ZvWmMn3bRC3nI0cxqBNU0W5kG3YxnunwktV3MfGumYiJSg/zAfCCaT8sdJsYoqvhcM/4UwewZYnfTITx7w63Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "system"
-name: "ingest-ignore"
+# ryeos:signed:2026-05-17T21:33:43Z:353f2aabb48ef5d0616c97f3445e1ad6701745d33e77365d462c2ee561a2853a:tbJrN+GJBLpaoBIQJ8yx0ZqGE7xHet78gluTbb/TdqpxHn4pPKZUhXWWUr24l2aCDH71nsMCR3E5zcHeJX32Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: ingest_ignore.get
 required_caps: []

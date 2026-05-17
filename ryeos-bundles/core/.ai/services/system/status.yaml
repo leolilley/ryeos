@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:07Z:87a612c00403139c5cb95ef7df8fa369b9912552b309c6bd74d73b1dcfe7ecb7:D0IYVsoUoEw1rW7NDfkETsoXu80q7WsDwRBlChxdXIMsgTe2tz3rZMDhV+QGemv3AGSxTlXAdcwQqXXSnmJQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "system"
-name: "status"
+# ryeos:signed:2026-05-17T21:33:43Z:a3ca97c8d1f2e98f6e4033e6f89c5578c58b07da154037cce9c9eccd4fd77904:xcReLIptUxel6f1X0761/xlJg1g1+kEMbFi5iH3qkSimeSDpVY5bKakRYxpG5O0pvr+hSlqWJA95nYnJU2ipAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: system.status
 required_caps: []

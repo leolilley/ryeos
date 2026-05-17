@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:bfdce6e02e042f66916a070d7213ad8d9b446ddfae7b1de1edc454d71fd2338d:wEZWRS6vhIbqsBj0zs0W1dphEN7R6lZUscqVuKUniyHDLYqnK0tEGANfzVjvs0UmWm32Pw/5Mr1yfYDZYa1xAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "bundle"
-name: "list"
+# ryeos:signed:2026-05-17T21:33:43Z:e96932b95c2fb81cd88fddbf66fecce90e870ba795954184e494d8ecf920b55f:HD4UbF9knNGMFE4bsWyRmj16eWkKoQ7boPYf8/qPhg/JMwHdz3rpbuTZ0owY6BUCd5kS39bs27UxaXn/fiFZCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.list
 required_caps: []

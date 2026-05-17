@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:e437be62f0394bfa06575aa6f5ae8d565562e76ee93cd67620216d5535705ee5:Raqa4tDo33xcIQVKLDzEF9kvhdrpFLQJJeD8jF6IwB7JdBBXdf7SXDkmGlYfS2Ol60jUt5cDCTRAjFD88CZODg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "remote"
-name: "pull"
+# ryeos:signed:2026-05-17T21:33:44Z:d821add7da0cb6130d4983d7a7ccb380ffba5780ab740f745e91f9b5f7e463c2:NzobaEchcA9KSYmOueYPOZjih+OL/sNiDWb3iFP7uUUraYxrnZReFkhNoRPq3H8U7hx5iyzO/6Xxl/b3LXI4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.pull
 required_caps: ["ryeos.execute.service.objects/get"]

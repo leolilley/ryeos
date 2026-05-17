@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:07Z:fd96a3d4ddc9be4a2591eb7b39bae615dcd01aedbd8be9764a8421526c45025e:KCf30XTCmXbKfkCTktyy+8pXF2/JcRFUeQOUDbxw1mOm7UraY8DQY9JSU4S011T82ZlLG/XYdTW+xhGeAZD6Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-17T21:33:43Z:cb0a1f0b70f111c494aba560963e3684d7524381ed75863b364aed05d234b38e:wwRyzSygNfE6ftJLyTCwKVDIySW5sNKbDoLiUZ5VvCRG14yiFmrc06Tbnuh1C14RkufW3Q1Bo8HmRpglP8lzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -22,18 +22,14 @@ composed_value_contract:
 metadata:
   rules:
     name:
-      from: path
-      key: name
+      from: filename
       required: true
-      match: filename
     version:
       from: path
       key: version
     category:
-      from: path
-      key: category
+      from: relative_dir
       required: true
-      match: path
     endpoint:
       from: path
       key: endpoint

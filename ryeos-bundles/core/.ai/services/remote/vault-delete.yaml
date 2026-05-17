@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:d570f933e47e6a3f2442eb5664325cf279eef859310d677a5664a2c9f99c4905:GFQaRBBHs0iC3vdGQ3IOaiORhtdEu/xZbwFZfn9NOXb3aovqpFfo8ylGNHMkaEM4HhzKlrVhTT2NqCLmG4GODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "remote"
-name: "vault-delete"
+# ryeos:signed:2026-05-17T21:33:44Z:337c9288cef1308e2e00eb14291812295a64ac64a49ed0bb5039230ffc1a661a:jfRmMIseiLp2CbCoMeUAks4hRQKfkLsklLJRyIhAvvk3BjD5pzNWiqxyvQUq8sb26JE2MWrVYFX9bB6KUelDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.vault_delete
 required_caps: ["ryeos.execute.service.remote.execute"]

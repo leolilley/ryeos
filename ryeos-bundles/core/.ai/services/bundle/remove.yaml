@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:2675cf039d6e830e62a97ed4d9172c3060df7fd53f078b71c2e0424c8cf7f201:3eRF96XYx+0tyRFABF9sVXxgBIKisTRyxMEQNdQyTlAkC6ce+Jee/AZmKr55K2Y9tSJlT4sy0swDsFMclI57Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "bundle"
-name: "remove"
+# ryeos:signed:2026-05-17T21:33:43Z:049e3cc0adc0a96c198aa528e54361fabe203d0ec95f9e9fa4828a1b35d16f4c:WBCiebDjS4ppJEXWLsRMK0pyFyqRatK/qw+wrSGx8e/FNDK+xo3LWqO8f/eGtaGY4UzkTRi1F/4hVrOchFLWBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.remove
 required_caps: ["ryeos.execute.service.bundle/remove"]

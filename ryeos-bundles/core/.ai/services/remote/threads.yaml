@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:11e06ec1bd7c1489f384761e2279f616ffc1023190585fb3d5c71e39f0090d76:5h/eyYBs+QQVr8LrWvNvkmawyVrB1sDg32k96riXRPxHqF9Ap45SZIXywMTRJ8du/or7/mnhz0iZdjIbHIEYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "remote"
-name: "threads"
+# ryeos:signed:2026-05-17T21:33:44Z:95af5bba3e87f91007221d6c541091ad45146ff8c9679aeecf8bbceb1e89b47f:ccqtDOkRKfcNBstzDh4D43UadWPc1N6OX3ax1feIFbsPu834eBrSnAWQjpLwNiOgfYSLuQceW1uXO4lu8QrzCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.threads
 required_caps: ["ryeos.execute.service.remote.execute"]

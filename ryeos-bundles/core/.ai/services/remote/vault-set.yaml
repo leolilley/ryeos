@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:99f96b35d3e007ea23dd256abd671bd417dd286ac408265b88a0565ce4bbc7dc:7o+E7AYWR2/S02PfWuVUhibWa7UqzY05+I//TfAGZtsvIM5xdZe7LOy4aTs8K7TbJzax1cMdF1Oiw9MgZvABAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "remote"
-name: "vault-set"
+# ryeos:signed:2026-05-17T21:33:44Z:fa458e1bc58e54b94de556ff02fefc7fbb6e9be2a374d26beea1d8e1cdabbdc8:RsiyTBLrVLeRC5HahSmGsf/iDRmEGRQBvf7lntH0OZs32C1G/4zY/pdvniTb6gXLCIk7DEda8WgjyxlFR/TJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.vault_set
 required_caps: ["ryeos.execute.service.remote.execute"]

@@ -1,6 +1,4 @@
-# ryeos:signed:2026-05-17T21:26:08Z:bd48447216bd3405fcfcaddf1be8236f786b0e0a55815f1464e57ccd3e965434:mz/HEXasdBEsgT1CpJkw1Tcs9NJ3zalSQ8pKoob87yNCdv69AtNDqH9r7FcIgc9dJYE+CXEScjtaWfP7nHnpDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "identity"
-name: "authorize-key"
+# ryeos:signed:2026-05-17T21:33:44Z:c605e824c9e5bb45f520886040bd2c9416843c1dcec40e161d64fb9d720a71a5:/6Ss4tNRqZo44o1Pz6WkXlCBXsfsSSH32VGyeV3l6MEgepfInjF2YmDvaNLPPM16EPx5gOhbV0rfmn5vaTbRCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: authorize_key.set
 required_caps: ["ryeos.execute.service.authorize-key"]
