@@ -27,8 +27,6 @@ pub struct Request {
     pub label: String,
     /// Capabilities to grant. Must be a subset of caller's scopes.
     pub scopes: Vec<String>,
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
 #[derive(serde::Serialize)]
@@ -40,9 +38,9 @@ pub struct Response {
     pub created_at: String,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
     // Caller identity used for scope delegation — must be verified.
-    req._ctx.require_verified()?;
+    ctx.require_verified()?;
 
     // 1. Parse public_key: must be "ed25519:<b64>"
     let key_b64 = req
@@ -111,7 +109,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         let permitted = state
             .authorizer
             .authorize(
-                &req._ctx.scopes,
+                &ctx.scopes,
                 &ryeos_runtime::authorizer::AuthorizationPolicy::require(scope.as_str()),
             )
             .is_ok();
@@ -139,7 +137,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         key_b64,
         &normalized,
         &req.label,
-        &req._ctx.fingerprint,
+        &ctx.fingerprint,
         &now,
         state.identity.signing_key(),
     )
@@ -149,7 +147,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         fingerprint,
         label: req.label,
         scopes: normalized,
-        granted_by: req._ctx.fingerprint,
+        granted_by: ctx.fingerprint,
         created_at: now,
     };
 
@@ -161,10 +159,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "authorize_key.set",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.authorize-key"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

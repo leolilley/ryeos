@@ -242,14 +242,12 @@ pub async fn execute_service_verified(
     //    Both live and standalone modes inject verified=true:
     //    - live: cap enforcement already passed (step 5)
     //    - standalone: operator authority from filesystem
-    let mut enriched_params = params.clone();
-    if let Value::Object(ref mut map) = enriched_params {
-        map.insert("_ctx".to_string(), serde_json::json!({
-            "fingerprint": ctx.principal_fingerprint,
-            "scopes": ctx.caller_scopes,
-            "verified": true,
-        }));
-    }
+
+    let hctx = ryeos_app::handler_context::HandlerContext::new(
+        ctx.principal_fingerprint.clone(),
+        ctx.caller_scopes.clone(),
+        true,
+    );
 
     // 7. Dispatch to handler
     let handler = state.services.get(&endpoint)
@@ -257,7 +255,7 @@ pub async fn execute_service_verified(
         .clone();
 
     let state_arc = Arc::new(state.clone());
-    let dispatch_result = handler(enriched_params, state_arc).await;
+    let dispatch_result = handler(params.clone(), hctx, state_arc).await;
 
     // 7b. Finalize audit with success or failure
     if audit_ok {

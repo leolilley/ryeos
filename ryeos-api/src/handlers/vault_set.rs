@@ -18,17 +18,15 @@ use ryeos_app::state::AppState;
 pub struct Request {
     pub name: String,
     pub value: String,
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
     // Vault writes are scoped to the caller's fingerprint — must be verified.
-    req._ctx.require_verified()?;
+    ctx.require_verified()?;
 
     state
         .vault
-        .set_secret(&req._ctx.fingerprint, &req.name, &req.value)
+        .set_secret(&ctx.fingerprint, &req.name, &req.value)
         .map_err(|e| {
             // Vault validation errors (key name, blocked names) are user
             // errors → 400. Anything else is 500.
@@ -55,10 +53,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "vault.set",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.vault/set"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

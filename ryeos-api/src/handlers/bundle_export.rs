@@ -12,7 +12,6 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use crate::handler_error::HandlerError;
-use crate::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 
 #[derive(serde::Deserialize)]
@@ -20,8 +19,6 @@ use ryeos_app::state::AppState;
 pub struct Request {
     /// Bundle name to export.
     pub bundle_name: String,
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
@@ -105,7 +102,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "bundle.export",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle/export"],
-    handler: |params, state| {
+    handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await.map_err(Into::into)

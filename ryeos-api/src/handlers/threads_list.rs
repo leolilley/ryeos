@@ -20,15 +20,12 @@ use super::default_list_limit;
 pub struct Request {
     #[serde(default = "default_list_limit")]
     pub limit: usize,
-    /// Injected by service_invocation for caller-aware filtering.
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Non-admin callers see only their own threads.
-    let filter_principal = if req._ctx.is_present() && !req._ctx.is_admin() {
-        Some(req._ctx.fingerprint.as_str())
+    let filter_principal = if ctx.is_present() && !ctx.is_admin() {
+        Some(ctx.fingerprint.as_str())
     } else {
         None
     };
@@ -40,10 +37,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "threads.list",
     availability: ServiceAvailability::Both,
     required_caps: &[],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

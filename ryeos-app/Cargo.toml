@@ -20,6 +20,7 @@ ryeos-scheduler = { path = "../ryeos-scheduler" }
 ryeos-state = { path = "../ryeos-state" }
 ryeos-vault = { path = "../ryeos-vault" }
 toml = "0.8"
+thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

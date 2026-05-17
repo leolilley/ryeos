@@ -36,7 +36,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "ingest_ignore.get",
     availability: ServiceAvailability::Both,
     required_caps: &[],
-    handler: |params, state| {
+    handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = if params.is_null() {
                 Request::default()

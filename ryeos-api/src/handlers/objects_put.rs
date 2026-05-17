@@ -15,7 +15,6 @@ use serde_json::Value;
 
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
-use crate::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 
 #[derive(serde::Deserialize)]
@@ -39,8 +38,6 @@ pub struct Request {
     pub blobs: Vec<BlobEntry>,
     #[serde(default)]
     pub objects: Vec<ObjectEntry>,
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
@@ -76,7 +73,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "objects.put",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/put"],
-    handler: |params, state| {
+    handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await

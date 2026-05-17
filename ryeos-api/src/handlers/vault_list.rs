@@ -15,16 +15,14 @@ use ryeos_app::state::AppState;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
-    req._ctx.require_verified()?;
+pub async fn handle(_req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
+    ctx.require_verified()?;
 
     let keys = state
         .vault
-        .list_keys(&req._ctx.fingerprint)
+        .list_keys(&ctx.fingerprint)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     Ok(serde_json::json!({
@@ -37,10 +35,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "vault.list",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.vault/list"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

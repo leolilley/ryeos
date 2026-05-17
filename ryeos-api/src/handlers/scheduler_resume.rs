@@ -18,19 +18,16 @@ use ryeos_app::state::AppState;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub schedule_id: String,
-    /// Injected by service_invocation / executor. Typed caller context.
-    #[serde(default)]
-    pub _ctx: crate::handler_context::HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
     ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
     let spec = state.scheduler_db.get_spec(&req.schedule_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    req._ctx.require_owner(Some(&spec.requester_fingerprint))?;
+    ctx.require_owner(Some(&spec.requester_fingerprint))?;
 
     if spec.enabled {
         return Ok(serde_json::json!({
@@ -82,10 +79,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "scheduler.resume",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.scheduler/resume"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

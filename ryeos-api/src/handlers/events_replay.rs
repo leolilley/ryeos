@@ -30,11 +30,9 @@ pub struct Request {
     pub after_chain_seq: Option<i64>,
     #[serde(default = "default_replay_limit")]
     pub limit: usize,
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
     // Ownership check against the thread.
     let thread = state
         .state_store
@@ -43,7 +41,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
 
     match thread {
         Some(detail) => {
-            req._ctx.require_owner(detail.requested_by.as_deref())?;
+            ctx.require_owner(detail.requested_by.as_deref())?;
         }
         None => return Err(HandlerError::NotFound),
     }
@@ -66,10 +64,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "events.replay",
     availability: ServiceAvailability::Both,
     required_caps: &[],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

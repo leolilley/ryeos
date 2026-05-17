@@ -18,12 +18,9 @@ use ryeos_app::state::AppState;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
-    /// Injected by service_invocation for ownership checks.
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
@@ -31,7 +28,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
 
     match thread {
         Some(detail) => {
-            req._ctx.require_owner(detail.requested_by.as_deref())?;
+            ctx.require_owner(detail.requested_by.as_deref())?;
 
             let facets = state.state_store.get_facets(&req.thread_id)
                 .map_err(|e| HandlerError::Internal(e.to_string()))?;
@@ -59,10 +56,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "threads.get",
     availability: ServiceAvailability::Both,
     required_caps: &[],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

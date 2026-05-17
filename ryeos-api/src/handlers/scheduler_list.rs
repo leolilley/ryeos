@@ -21,14 +21,11 @@ pub struct Request {
     pub enabled_only: bool,
     #[serde(default)]
     pub schedule_type: Option<String>,
-    /// Injected by service_invocation / executor. Typed caller context.
-    #[serde(default)]
-    pub _ctx: crate::handler_context::HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let filter_requester = if req._ctx.is_present() && !req._ctx.is_admin() {
-        Some(req._ctx.fingerprint.as_str())
+pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let filter_requester = if ctx.is_present() && !ctx.is_admin() {
+        Some(ctx.fingerprint.as_str())
     } else {
         None
     };
@@ -73,10 +70,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "scheduler.list",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

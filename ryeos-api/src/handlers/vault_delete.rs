@@ -16,16 +16,14 @@ use ryeos_app::state::AppState;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub name: String,
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
-    req._ctx.require_verified()?;
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
+    ctx.require_verified()?;
 
     let deleted = state
         .vault
-        .delete_secret(&req._ctx.fingerprint, &req.name)
+        .delete_secret(&ctx.fingerprint, &req.name)
         .map_err(|e| {
             let msg = format!("{e:#}");
             if msg.starts_with("vault: key name") {
@@ -46,10 +44,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "vault.delete",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.vault/delete"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

@@ -33,16 +33,13 @@ pub struct Request {
     pub enabled: bool,
     #[serde(default)]
     pub project_root: Option<String>,
-    /// Injected by service_invocation / executor. Typed caller context.
-    #[serde(default)]
-    pub _ctx: crate::handler_context::HandlerContext,
 }
 
 fn default_true() -> bool { true }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Caller identity is used for execution authority — must be verified.
-    req._ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
 
     // Validate
     crontab::validate_schedule_id(&req.schedule_id)?;
@@ -77,7 +74,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // requester (or admin). On create, no ownership check needed —
     // the caller becomes the owner.
     if let Some(ref existing) = existing_spec {
-        req._ctx.require_owner(Some(&existing.requester_fingerprint))
+        ctx.require_owner(Some(&existing.requester_fingerprint))
             .map_err(|e| -> anyhow::Error { e.into() })?;
     }
 
@@ -146,15 +143,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // The service executor injects _ctx from ExecutionContext before
     // dispatching the handler. Fail-closed: if injection didn't happen,
     // error out rather than silently degrading to node identity.
-    let caller_fingerprint = if req._ctx.fingerprint.is_empty() {
+    let caller_fingerprint = if ctx.fingerprint.is_empty() {
         bail!("scheduler.register requires verified caller context (executor must inject _ctx)");
     } else {
-        req._ctx.fingerprint.clone()
+        ctx.fingerprint.clone()
     };
-    let capabilities = if req._ctx.scopes.is_empty() {
+    let capabilities = if ctx.scopes.is_empty() {
         bail!("scheduler.register requires verified caller context with non-empty scopes");
     } else {
-        req._ctx.scopes.clone()
+        ctx.scopes.clone()
     };
 
     // On UPDATE, preserve the existing requester_fingerprint — only the
@@ -261,10 +258,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "scheduler.register",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.scheduler/register"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

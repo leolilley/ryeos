@@ -21,17 +21,15 @@ pub struct Request {
     pub project_path: String,
     /// CAS hash of the `ProjectSnapshot` to point HEAD at.
     pub snapshot_hash: String,
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let cas_root = state.state_store.cas_root()?;
     let refs_root = state.state_store.refs_root()?;
     let cas = lillux::cas::CasStore::new(cas_root.clone());
 
     // Caller identity used for principal-scoped storage — must be verified.
-    req._ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
 
     // 1. Validate snapshot exists in CAS
     let snap_obj = cas
@@ -60,7 +58,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     // 4. Compute principal-scoped project key
-    let principal_key = ryeos_state::refs::principal_storage_key(&req._ctx.fingerprint);
+    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint);
     let project_hash = lillux::cas::sha256_hex(req.project_path.as_bytes());
 
     // 5. Write the HEAD ref (with CAS compare-and-swap if HEAD already exists)
@@ -117,10 +115,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "push_head",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.push-head"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

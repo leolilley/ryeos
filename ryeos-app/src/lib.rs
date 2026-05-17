@@ -8,6 +8,8 @@ pub mod command_service;
 pub mod config;
 pub mod event_store_service;
 pub mod event_stream;
+pub mod handler_context;
+pub mod handler_error;
 pub mod identity;
 pub mod ignore;
 #[path = "io/mod.rs"]

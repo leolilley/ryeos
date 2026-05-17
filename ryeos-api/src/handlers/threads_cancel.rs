@@ -23,12 +23,9 @@ use ryeos_app::state::AppState;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
-    /// Injected by service_invocation for ownership checks.
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
@@ -36,7 +33,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         .ok_or(HandlerError::NotFound)?;
 
     // Ownership check: non-admin callers can only cancel their own threads.
-    req._ctx.require_owner(thread.requested_by.as_deref())?;
+    ctx.require_owner(thread.requested_by.as_deref())?;
 
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
@@ -139,10 +136,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "threads.cancel",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.threads/cancel"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };
@@ -179,16 +176,13 @@ mod tests {
     fn request_deserialize_with_caller_fields() {
         let req: Request = serde_json::from_value(json!({
             "thread_id": "T-1234",
-            "_ctx": {"fingerprint": "fp:abc", "scopes": ["execute"]},
         })).unwrap();
         assert_eq!(req.thread_id, "T-1234");
-        assert_eq!(req._ctx.fingerprint, "fp:abc");
     }
 
     #[test]
     fn request_deserialize_accepts_valid_without_caller() {
         let req: Request = serde_json::from_value(json!({"thread_id": "T-1234"})).unwrap();
         assert_eq!(req.thread_id, "T-1234");
-        assert!(req._ctx.fingerprint.is_empty());
     }
 }

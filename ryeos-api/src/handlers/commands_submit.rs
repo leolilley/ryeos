@@ -23,16 +23,13 @@ pub struct Request {
     pub command_type: String,
     #[serde(default)]
     pub params: Option<Value>,
-    /// Injected by service_invocation / executor. Typed caller context.
-    #[serde(default)]
-    pub _ctx: HandlerContext,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Derive requested_by from verified caller context.
     // Only cryptographically verified callers get recorded.
-    let requested_by = if req._ctx.is_present() {
-        Some(req._ctx.fingerprint.clone())
+    let requested_by = if ctx.is_present() {
+        Some(ctx.fingerprint.clone())
     } else {
         None
     };
@@ -51,10 +48,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "commands.submit",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.commands/submit"],
-    handler: |params, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };
@@ -71,7 +68,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(req.thread_id, "t:123");
-        assert!(req._ctx.fingerprint.is_empty()); // no caller context injected
     }
 
     #[test]
@@ -84,38 +80,5 @@ mod tests {
             "requested_by": "fp:attacker",
         }));
         assert!(result.is_err(), "spoofed requested_by should be rejected by deny_unknown_fields");
-    }
-
-    #[test]
-    fn ctx_fingerprint_used_as_requested_by() {
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "thread_id": "t:123",
-            "command_type": "cancel",
-            "_ctx": {
-                "fingerprint": "fp:abc",
-                "scopes": ["execute"],
-                "verified": true,
-            },
-        }))
-        .unwrap();
-        // Handler would derive requested_by = Some("fp:abc")
-        assert!(req._ctx.is_present());
-        assert_eq!(req._ctx.fingerprint, "fp:abc");
-    }
-
-    #[test]
-    fn unverified_ctx_not_used_as_requested_by() {
-        let req: Request = serde_json::from_value(serde_json::json!({
-            "thread_id": "t:123",
-            "command_type": "cancel",
-            "_ctx": {
-                "fingerprint": "route:health",
-                "scopes": [],
-                "verified": false,
-            },
-        }))
-        .unwrap();
-        // Handler would derive requested_by = None (unverified)
-        assert!(!req._ctx.is_present());
     }
 }

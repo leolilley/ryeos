@@ -28,12 +28,14 @@ pub enum ServiceAvailability {
     OfflineOnly,
 }
 
+use crate::handler_context::HandlerContext;
+
 /// Type-erased async service handler function.
 ///
 /// Each handler deserializes `params` into its own request struct,
 /// executes, and serializes the response into a JSON value.
 type HandlerFn = Arc<
-    dyn Fn(Value, Arc<AppState>) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> + Send + Sync,
+    dyn Fn(Value, HandlerContext, Arc<AppState>) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> + Send + Sync,
 >;
 
 /// Raw fn-pointer form used by per-handler `DESCRIPTOR` constants.
@@ -41,7 +43,7 @@ type HandlerFn = Arc<
 /// Plain `fn` (not `Arc<dyn Fn>`) so each handler module can declare a
 /// `pub const DESCRIPTOR: ServiceDescriptor` at module scope.
 pub type RawHandlerFn =
-    fn(Value, Arc<AppState>) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
+    fn(Value, HandlerContext, Arc<AppState>) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
 
 /// Single source of truth for a daemon-supported service.
 ///
