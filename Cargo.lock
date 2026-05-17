@@ -1983,12 +1983,12 @@ dependencies = [
  "reqwest",
  "rmp-serde",
  "ryeos-app",
+ "ryeos-bundle",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
- "ryeos-tools",
  "ryeos-tracing",
  "serde",
  "serde_json",
@@ -2022,7 +2022,7 @@ dependencies = [
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
- "ryeos-tools",
+ "ryeos-vault",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2031,6 +2031,20 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "ryeos-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "rand 0.8.5",
+ "ryeos-engine",
+ "serde",
+ "serde_yaml",
+ "tempfile",
  "tracing",
 ]
 
@@ -2268,9 +2282,11 @@ dependencies = [
  "lillux",
  "rand 0.8.5",
  "rmp-serde",
+ "ryeos-bundle",
  "ryeos-engine",
  "ryeos-state",
  "ryeos-tracing",
+ "ryeos-vault",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2290,6 +2306,18 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ryeos-vault"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "ryeos-engine",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

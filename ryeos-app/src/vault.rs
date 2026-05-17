@@ -62,10 +62,9 @@ use ryeos_engine::roots;
 // `ryeos vault {put,list,remove,rewrap}` verbs without a circular
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
-pub use ryeos_tools::actions::vault::{
-    default_sealed_store_path, validate_decrypted_keys, write_sealed_secrets,
-    BLOCKED_NAMES,
-};
+pub use ryeos_vault::policy::{validate_key_name, validate_decrypted_keys, BLOCKED_NAMES};
+pub use ryeos_vault::sealed::write_sealed_secrets;
+pub use ryeos_vault::paths::default_sealed_store_path;
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
@@ -131,7 +130,7 @@ pub fn read_required_secrets(
         return Ok(HashMap::new());
     }
     let vault_map = vault.read_all(principal)?;
-    let dotenv_map = ryeos_tools::actions::vault::read_dotenv_overlay(dotenv_search_dirs)
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
         .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     let mut out = HashMap::with_capacity(required_secrets.len());
     let mut missing: Vec<&str> = Vec::new();
@@ -179,20 +178,7 @@ pub fn dotenv_search_dirs(project_path: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
-/// Validate a vault key name. Must match `[A-Za-z0-9_]+` and not be
-/// on the blocked list.
-fn validate_key_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        bail!("vault: key name must not be empty");
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        bail!("vault: key name '{}' must match [A-Za-z0-9_]+", name);
-    }
-    if BLOCKED_NAMES.contains(&name) {
-        bail!("vault: key name '{}' is on the blocked list", name);
-    }
-    Ok(())
-}
+
 
 /// Stub vault — used only when the daemon is constructed for a unit
 /// test that doesn't want to depend on the operator's filesystem.

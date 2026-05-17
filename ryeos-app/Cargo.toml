@@ -18,7 +18,7 @@ ryeos-engine = { path = "../ryeos-engine" }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-scheduler = { path = "../ryeos-scheduler" }
 ryeos-state = { path = "../ryeos-state" }
-ryeos-tools = { path = "../ryeos-tools" }
+ryeos-vault = { path = "../ryeos-vault" }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

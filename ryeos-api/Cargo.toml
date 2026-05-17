@@ -28,7 +28,7 @@ ryeos-executor = { path = "../ryeos-executor" }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-scheduler = { path = "../ryeos-scheduler" }
 ryeos-state = { path = "../ryeos-state" }
-ryeos-tools = { path = "../ryeos-tools" }
+ryeos-bundle = { path = "../ryeos-bundle" }
 ryeos-tracing = { path = "../ryeos-tracing" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

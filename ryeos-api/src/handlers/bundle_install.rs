@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use ryeos_engine::roots;
-use ryeos_tools::actions::install::preflight_verify_bundle;
+use ryeos_bundle::preflight::preflight_verify_bundle;
 
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
