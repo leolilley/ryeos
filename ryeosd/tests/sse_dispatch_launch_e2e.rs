@@ -422,10 +422,10 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 /// is OsRng-backed and operationally collision-free.
 #[test]
 fn sse_dispatch_launch_collision() {
-    use ryeosd::identity::NodeIdentity;
-    use ryeosd::services::thread_lifecycle::new_thread_id;
-    use ryeosd::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
-    use ryeosd::write_barrier::WriteBarrier;
+    use ryeos_app::identity::NodeIdentity;
+    use ryeos_app::thread_lifecycle::new_thread_id;
+    use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
+    use ryeos_app::write_barrier::WriteBarrier;
     use std::sync::Arc;
 
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
@@ -478,7 +478,7 @@ fn sse_dispatch_launch_collision() {
 /// space).
 #[test]
 fn new_thread_id_format_and_uniqueness() {
-    use ryeosd::services::thread_lifecycle::new_thread_id;
+    use ryeos_app::thread_lifecycle::new_thread_id;
 
     let a = new_thread_id();
     let b = new_thread_id();

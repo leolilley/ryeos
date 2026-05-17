@@ -16,7 +16,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
-use ryeosd::{service_handlers, ServiceDescriptor};
+use ryeos_api::{handlers as service_handlers, ServiceDescriptor};
 
 /// Iterate the canonical descriptor table.
 fn descriptors() -> &'static [ServiceDescriptor] {

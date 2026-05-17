@@ -25,12 +25,12 @@ fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
         .join("vault")
         .join("public_key.pem");
     let pub_key = lillux::vault::read_public_key(&pub_path)?;
-    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
+    let store_path = ryeos_app::vault::default_sealed_store_path(state_path);
     let secrets = HashMap::from([(
         "ZEN_API_KEY".to_string(),
         "test-zen-api-key-value".to_string(),
     )]);
-    ryeosd::vault::write_sealed_secrets(&store_path, &pub_key, &secrets)?;
+    ryeos_app::vault::write_sealed_secrets(&store_path, &pub_key, &secrets)?;
     Ok(())
 }
 

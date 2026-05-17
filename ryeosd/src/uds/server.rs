@@ -5,16 +5,16 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::services::command_service::{
+use ryeos_app::command_service::{
     CommandClaimParams, CommandCompleteParams, CommandSubmitParams,
 };
-use crate::services::event_store::{EventAppendBatchParams, EventAppendParams, EventReplayParams};
-use crate::services::thread_lifecycle::{
+use ryeos_app::event_store_service::{EventAppendBatchParams, EventAppendParams, EventReplayParams};
+use ryeos_app::thread_lifecycle::{
     ArtifactPublishParams, ThreadAttachProcessParams,
     ThreadContinuationParams, ThreadFinalizeParams, ThreadGetParams,
     ThreadMarkRunningParams,
 };
-use crate::state::AppState;
+use ryeos_app::state::AppState;
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
@@ -128,7 +128,7 @@ pub async fn dispatch_runtime_method(
 
     match method {
         "runtime.dispatch_action" => {
-            crate::execution::runtime_dispatch::handle(params, state).await
+            ryeos_executor::execution::runtime_dispatch::handle(params, state).await
         }
         "runtime.append_event" => handle_append_event(&clean_params, state),
         "runtime.append_events" => handle_append_event_batch(&clean_params, state),
@@ -343,17 +343,17 @@ async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
-    use crate::execution::callback_token::CallbackCapabilityStore;
-    use crate::identity::NodeIdentity;
-    use crate::kind_profiles::KindProfileRegistry;
-    use crate::services::command_service::CommandService;
-    use crate::services::event_store::EventStoreService;
-    use crate::services::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
-    use crate::state::AppState;
-    use crate::state_store::StateStore;
+    use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+    use ryeos_app::callback_token::CallbackCapabilityStore;
+    use ryeos_app::identity::NodeIdentity;
+    use ryeos_app::kind_profiles::KindProfileRegistry;
+    use ryeos_app::command_service::CommandService;
+    use ryeos_app::event_store_service::EventStoreService;
+    use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
+    use ryeos_app::state::AppState;
+    use ryeos_app::state_store::StateStore;
     use crate::uds::protocol::RpcError;
-    use crate::write_barrier::WriteBarrier;
+    use ryeos_app::write_barrier::WriteBarrier;
     use std::sync::Arc;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -382,7 +382,7 @@ mod tests {
         ).unwrap();
 
         let signer = Arc::new(
-            crate::state_store::NodeIdentitySigner::from_identity(&identity),
+            ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
         let write_barrier = WriteBarrier::new();
         let state_store = Arc::new(
@@ -429,26 +429,24 @@ mod tests {
             event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
-            thread_auth: Arc::new(crate::execution::callback_token::ThreadAuthStore::new()),
+            thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
             write_barrier: Arc::new(WriteBarrier::new()),
             started_at: Instant::now(),
             started_at_iso: lillux::time::iso8601_now(),
-            catalog_health: crate::state::CatalogHealth {
+            catalog_health: ryeos_app::state::CatalogHealth {
                 status: "ok".into(),
                 missing_services: vec![],
             },
-            services: Arc::new(crate::service_registry::build_service_registry()),
-            node_config: Arc::new(crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }),
-            route_table: Arc::new(arc_swap::ArcSwap::from_pointee(
-                crate::routes::build_route_table_or_bail(&crate::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }).unwrap(),
-            )),
-            webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
-            vault: Arc::new(crate::vault::EmptyVault),
+            services: Arc::new(ryeos_api::build_service_registry()),
+            service_descriptors: ryeos_api::handlers::ALL,
+            node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }),
+            vault: Arc::new(ryeos_app::vault::EmptyVault),
             verb_registry: test_vr,
             alias_registry: test_ar,
             authorizer: test_auth,
             scheduler_db: Arc::new(crate::scheduler::db::SchedulerDb::new_in_memory().unwrap()),
             scheduler_reload_tx: None,
+            ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
         };
 
         (tmpdir, state)

@@ -11,11 +11,11 @@
 
 use std::sync::Arc;
 
-use ryeosd::launch_metadata::RuntimeLaunchMetadata;
-use ryeosd::state_store::{
+use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
+use ryeos_app::state_store::{
     FinalizeThreadRecord, NewThreadRecord, StateStore,
 };
-use ryeosd::write_barrier::WriteBarrier;
+use ryeos_app::write_barrier::WriteBarrier;
 use tempfile::TempDir;
 
 fn setup_state_store() -> (TempDir, Arc<StateStore>) {
@@ -24,9 +24,9 @@ fn setup_state_store() -> (TempDir, Arc<StateStore>) {
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
     let test_key_path = tmpdir.path().join("test_key.pem");
-    let identity = ryeosd::identity::NodeIdentity::create(&test_key_path)
+    let identity = ryeos_app::identity::NodeIdentity::create(&test_key_path)
         .expect("test identity creation should succeed");
-    let signer = Arc::new(ryeosd::state_store::NodeIdentitySigner::from_identity(
+    let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
 

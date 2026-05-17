@@ -1,7 +1,7 @@
 //! End-to-end proof: the engine pipeline executes a Python tool from a
 //! project space and the daemon's dispatch layer captures stdout.
 //!
-//! Mirrors `ryeosd::services::thread_lifecycle::spawn_item`'s shape
+//! Mirrors `ryeos_app::thread_lifecycle::spawn_item`'s shape
 //! (resolve → verify → build_plan → execute_plan), skipping HTTP, the
 //! thread DB, and the spawn/wait split. We call execute_plan directly
 //! so we can inspect the captured stdout in the returned

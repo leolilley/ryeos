@@ -29,6 +29,10 @@ rand = "0.8"
 rmp-serde = "1"
 ryeos-engine = { path = "../ryeos-engine" }
 ryeos-state = { path = "../ryeos-state" }
+ryeos-scheduler = { path = "../ryeos-scheduler" }
+ryeos-app = { path = "../ryeos-app" }
+ryeos-executor = { path = "../ryeos-executor" }
+ryeos-api = { path = "../ryeos-api" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -49,6 +53,8 @@ regex = "1"
 chrono = "0.4"
 chrono-tz = "0.10"
 cron = "0.16"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"
@@ -56,7 +62,6 @@ ryeos-engine = { path = "../ryeos-engine", features = ["test-support"] }
 ryeos-tools = { path = "../ryeos-tools", features = ["test-support"] }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-tracing = { path = "../ryeos-tracing", features = ["test-harness"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }

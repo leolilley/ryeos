@@ -10,8 +10,8 @@ use ryeos_engine::trust::TrustStore;
 use ryeos_engine::AI_DIR;
 
 use crate::config::Config;
-use crate::identity::NodeIdentity;
-use crate::node_config::{NodeConfigSnapshot, SectionTable};
+use ryeos_app::identity::NodeIdentity;
+use ryeos_app::node_config::{NodeConfigSnapshot, SectionTable};
 
 /// Bootstrap options.
 ///
@@ -484,7 +484,7 @@ pub fn load_node_config_two_phase(
     )
     .context("failed to load bootstrap trust store for node-config verification")?;
 
-    let bootstrap_loader = crate::node_config::loader::BootstrapLoader {
+    let bootstrap_loader = ryeos_app::node_config::loader::BootstrapLoader {
         system_space_dir,
         trust_store: &bootstrap_trust_store,
     };
@@ -512,7 +512,7 @@ pub fn load_node_config_two_phase(
 
     // ── Phase 2: full node-config scan ──
     let section_table = SectionTable::new();
-    let full_loader = crate::node_config::loader::BootstrapLoader {
+    let full_loader = ryeos_app::node_config::loader::BootstrapLoader {
         system_space_dir,
         trust_store: &bootstrap_trust_store,
     };
@@ -533,7 +533,7 @@ pub fn load_node_config_two_phase(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::NodeIdentity;
+    use ryeos_app::identity::NodeIdentity;
 
     /// Build a minimal Config for testing with all paths under a tempdir.
     fn test_config(tmp: &std::path::Path) -> Config {

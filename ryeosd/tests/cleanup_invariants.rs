@@ -22,7 +22,7 @@ use ryeos_engine::contracts::{
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
-use ryeosd::{service_handlers, ServiceAvailability, ServiceDescriptor};
+use ryeos_api::{handlers as service_handlers, ServiceAvailability, ServiceDescriptor};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

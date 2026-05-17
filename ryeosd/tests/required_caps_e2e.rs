@@ -153,7 +153,7 @@ fn cap_enforcement_denies_when_caller_lacks_required_cap() {
 #[test]
 fn extract_required_caps_returns_empty_for_uncapped_tool() {
     let extra: HashMap<String, serde_json::Value> = HashMap::new();
-    let caps = ryeosd::service_registry::extract_required_caps(&extra);
+    let caps = ryeos_api::registry::extract_required_caps(&extra);
     assert!(caps.is_empty(), "no required_caps key → empty vec");
 }
 
@@ -165,6 +165,6 @@ fn extract_required_caps_parses_json_array() {
         "required_caps".to_string(),
         serde_json::json!(["node.admin", "execute"]),
     );
-    let caps = ryeosd::service_registry::extract_required_caps(&extra);
+    let caps = ryeos_api::registry::extract_required_caps(&extra);
     assert_eq!(caps, vec!["node.admin", "execute"]);
 }

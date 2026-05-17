@@ -1,10 +1,10 @@
 use anyhow::Result;
 use serde_json::json;
 
-use crate::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
-use crate::process::pgid_alive;
-use crate::services::thread_lifecycle::ThreadFinalizeParams;
-use crate::state::AppState;
+use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+use ryeos_app::process::pgid_alive;
+use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+use ryeos_app::state::AppState;
 
 /// Decision the reconciler makes for a single dead thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,7 +333,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_metadata::ResumeContext;
+    use ryeos_app::launch_metadata::ResumeContext;
     use ryeos_engine::contracts::{
         EffectivePrincipal, ExecutionHints, NativeResumeSpec, Principal, ProjectContext,
     };

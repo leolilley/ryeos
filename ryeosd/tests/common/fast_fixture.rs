@@ -172,7 +172,7 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     // would otherwise see a null result. Mirrors what
     // `bootstrap::init` writes after generating the node key.
     let public_identity_path = node_identity_dir.join("public-identity.json");
-    ryeosd::identity::NodeIdentity::load(&node_identity_dir.join("private_key.pem"))
+    ryeos_app::identity::NodeIdentity::load(&node_identity_dir.join("private_key.pem"))
         .context("re-load node identity to write public doc")?
         .write_public_identity_at(&public_identity_path, FAST_FIXTURE_TIME)
         .context("write node public identity")?;
@@ -212,6 +212,31 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     super::populate_user_space(user_space);
 
     Ok(FastFixture { publisher, node, user, vault })
+}
+
+/// Write a `kind: node, section: bundles` record registering the core
+/// bundle that lives at `state_path` itself (the daemon harness copies
+/// `ryeos-bundles/core` into the test tempdir and uses that as
+/// `system_space_dir`). `bootstrap::verify_initialized` requires at
+/// least one registered bundle, so the harness calls this before
+/// spawning the daemon.
+pub fn register_core_bundle_at_state(
+    state_path: &Path,
+    fixture: &FastFixture,
+) -> Result<()> {
+    let abs = state_path.canonicalize()
+        .with_context(|| format!("canonicalize {}", state_path.display()))?;
+    let dir = state_path.join(AI_DIR).join("node").join("bundles");
+    fs::create_dir_all(&dir)?;
+    let body = format!(
+        "kind: node\nsection: bundles\nid: core\npath: {}\n",
+        abs.display()
+    );
+    let signed = lillux::signature::sign_content_at(
+        &body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME,
+    );
+    fs::write(dir.join("core.yaml"), signed)?;
+    Ok(())
 }
 
 /// Write a `kind: node, section: bundles` record pointing at

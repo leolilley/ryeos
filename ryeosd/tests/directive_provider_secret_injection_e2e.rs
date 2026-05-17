@@ -351,8 +351,8 @@ fn plant_sealed_vault_secrets(
         .join("public_key.pem");
     lillux::vault::write_public_key(&pub_path, &pk)?;
 
-    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
-    ryeosd::vault::write_sealed_secrets(&store_path, &pk, secrets)?;
+    let store_path = ryeos_app::vault::default_sealed_store_path(state_path);
+    ryeos_app::vault::write_sealed_secrets(&store_path, &pk, secrets)?;
     Ok(())
 }
 
@@ -600,7 +600,7 @@ fn plant_poisoned_sealed_store(
 
     let envelope = lillux::vault::seal(&sk.public_key(), plaintext_toml.as_bytes())?;
     let envelope_toml = toml::to_string(&envelope)?;
-    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
+    let store_path = ryeos_app::vault::default_sealed_store_path(state_path);
     if let Some(parent) = store_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

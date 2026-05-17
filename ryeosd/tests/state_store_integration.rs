@@ -11,10 +11,10 @@
 mod integration_tests {
     use std::sync::Arc;
 
-    use ryeosd::state_store::{
+    use ryeos_app::state_store::{
         StateStore, NewThreadRecord, NewArtifactRecord, FinalizeThreadRecord,
     };
-    use ryeosd::write_barrier::WriteBarrier;
+    use ryeos_app::write_barrier::WriteBarrier;
     use tempfile::TempDir;
 
     fn setup_state_store() -> (TempDir, Arc<StateStore>) {
@@ -23,10 +23,10 @@ mod integration_tests {
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
         let test_key_path = tmpdir.path().join("test_key.pem");
-        let identity = ryeosd::identity::NodeIdentity::create(&test_key_path)
+        let identity = ryeos_app::identity::NodeIdentity::create(&test_key_path)
             .expect("test identity creation should succeed");
         let signer = Arc::new(
-            ryeosd::state_store::NodeIdentitySigner::from_identity(&identity)
+            ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity)
         );
 
         let write_barrier = WriteBarrier::new();
@@ -97,7 +97,7 @@ mod integration_tests {
                 "T-proc-1",
                 12345,
                 67890,
-                &ryeosd::launch_metadata::RuntimeLaunchMetadata::default(),
+                &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
             .expect("attach_thread_process should succeed");
     }
@@ -534,7 +534,7 @@ mod integration_tests {
                 "T-skip-attach",
                 99999,
                 99999,
-                &ryeosd::launch_metadata::RuntimeLaunchMetadata::default(),
+                &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
             .expect("attach_process on terminal thread should succeed (no-op)");
 

@@ -1,0 +1,119 @@
+//! Daemon-side `SchedulerContext` implementation for `AppState`.
+//!
+//! The trait lives in `ryeos_scheduler` and AppState lives in `ryeos_app`.
+//! Rust orphan rules: only crates that define one of the two can implement
+//! the trait. Both `AppState` and `SchedulerContext` are external to this
+//! crate, but the `dispatch_scheduled_item` method calls `ryeos_executor::dispatch`
+//! and `ryeos_executor::executor` (both daemon/executor-private) — so we use the
+//! orphan-friendly approach of expressing the impl through a newtype:
+//! daemon code wraps `AppState` in a tiny adapter and the impl is on that
+//! wrapper.
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use ryeos_app::state::AppState;
+use ryeos_scheduler::db::SchedulerDb;
+use ryeos_scheduler::types::ScheduleSpecRecord;
+use ryeos_scheduler::SchedulerContext;
+
+/// Newtype wrapper around `AppState` so we can implement
+/// `SchedulerContext` from `ryeos_scheduler` for state defined in
+/// `ryeos_app` — Rust orphan rules require either the trait or the type
+/// to be local to this crate.
+#[derive(Clone)]
+pub struct AppSchedulerContext(pub Arc<AppState>);
+
+impl SchedulerContext for AppSchedulerContext {
+    fn system_space_dir(&self) -> &std::path::Path {
+        &self.0.config.system_space_dir
+    }
+
+    fn scheduler_db(&self) -> Arc<SchedulerDb> {
+        self.0.scheduler_db.clone()
+    }
+
+    fn trust_store(&self) -> &ryeos_engine::trust::TrustStore {
+        &self.0.engine.trust_store
+    }
+
+    fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {
+        match self.0.threads.get_thread(thread_id) {
+            Ok(Some(thread)) => Ok(Some(thread.status.clone())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn submit_cancel(&self, thread_id: &str) -> Result<()> {
+        self.0
+            .commands
+            .submit(&ryeos_app::command_service::CommandSubmitParams {
+                thread_id: thread_id.to_string(),
+                command_type: "cancel".to_string(),
+                requested_by: None,
+                params: None,
+            })?;
+        Ok(())
+    }
+
+    async fn dispatch_scheduled_item(
+        &self,
+        spec: &ScheduleSpecRecord,
+        _fire_id: &str,
+        thread_id: &str,
+        _scheduled_at: i64,
+        _trigger_reason: &str,
+    ) -> Result<()> {
+        let params: serde_json::Value = serde_json::from_str(&spec.params)?;
+        let project_path = spec.project_root.as_deref().unwrap_or_else(|| {
+            self.0.config.system_space_dir.to_str().expect(
+                "system_space_dir must be valid UTF-8 — it is configured from a known directory",
+            )
+        });
+        let project_path_buf = std::path::PathBuf::from(project_path);
+
+        let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
+            launch_mode: "detached",
+            target_site_id: None,
+            project_source_is_pushed_head: false,
+            validate_only: false,
+            params,
+            acting_principal: &spec.requester_fingerprint,
+            project_path: std::path::Path::new(project_path),
+            original_project_path: project_path_buf.clone(),
+            snapshot_hash: None,
+            temp_dir: None,
+            original_root_kind: "directive",
+            pre_minted_thread_id: Some(thread_id.to_string()),
+            operation: None,
+            inputs: None,
+        };
+
+        let exec_ctx = ryeos_executor::executor::ExecutionContext {
+            principal_fingerprint: spec.requester_fingerprint.clone(),
+            caller_scopes: spec.capabilities.clone(),
+            engine: self.0.engine.clone(),
+            plan_ctx: ryeos_engine::contracts::PlanContext {
+                requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                    ryeos_engine::contracts::Principal {
+                        fingerprint: spec.requester_fingerprint.clone(),
+                        scopes: vec![],
+                    },
+                ),
+                project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+                    path: project_path_buf,
+                },
+                current_site_id: "site:local".into(),
+                origin_site_id: "site:local".into(),
+                execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+                validate_only: false,
+            },
+            requested_op: None,
+            requested_inputs: None,
+        };
+
+        ryeos_executor::dispatch::dispatch(&spec.item_ref, &dispatch_req, &exec_ctx, &self.0).await?;
+        Ok(())
+    }
+}

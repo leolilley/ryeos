@@ -492,6 +492,11 @@ impl DaemonHarness {
         let (core_bundle_tmp, state_path) = copy_core_to_temp();
 
         let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
+        // The harness copies `ryeos-bundles/core` to `state_path`. Register it
+        // so `bootstrap::verify_initialized` sees at least one bundle. Tests
+        // that need additional bundles call `register_standard_bundle` from
+        // their `plant` hook.
+        fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
         plant(&state_path, user_space.path(), &fixture)?;
 
         // Always authorize the user key so `post_execute` can sign requests.

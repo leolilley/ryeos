@@ -33,7 +33,7 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use ryeos_runtime::CheckpointWriter;
-use ryeosd::launch_metadata::RuntimeLaunchMetadata;
+use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

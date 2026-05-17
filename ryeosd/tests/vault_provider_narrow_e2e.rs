@@ -143,8 +143,8 @@ fn plant_sealed_vault_secrets(
         .join("vault")
         .join("public_key.pem");
     lillux::vault::write_public_key(&pub_path, &sk.public_key())?;
-    let store_path = ryeosd::vault::default_sealed_store_path(state_path);
-    ryeosd::vault::write_sealed_secrets(&store_path, &sk.public_key(), secrets)?;
+    let store_path = ryeos_app::vault::default_sealed_store_path(state_path);
+    ryeos_app::vault::write_sealed_secrets(&store_path, &sk.public_key(), secrets)?;
     Ok(())
 }
 
