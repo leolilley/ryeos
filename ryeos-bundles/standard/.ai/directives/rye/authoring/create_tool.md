@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:e25b2d679e87ebb28a3576f72bf4e69427a4ddfde1eb752c7b9bddd9759975e5:9JcK/IOLu5jaSHY+Q6EdEC/iNTtt90jZLT/YAFdBYY/O1rNvptifjhkz+nlppV5+v6k3vybEJc7ZaL6k0CKFAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Create a tool file with correct metadata headers and parameter schema, then sign it."
 version: "3.0.0"

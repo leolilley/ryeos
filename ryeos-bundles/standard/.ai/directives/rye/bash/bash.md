@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:37Z:80b9eaa778505c3f4f1d65238cfa339ff1277a7018d2b9a83fe3ab8c1b81f98d:dYxoWXI/iDIVEFDcKdJDr/SRUKmnzbL8vwqwbXFKJ2ugRFitxK1k53gbHmCmomDcRrd8HDWMgmz24IqH/wcsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Execute a shell command via subprocess with optional timeout and working directory."
 version: "1.0.0"

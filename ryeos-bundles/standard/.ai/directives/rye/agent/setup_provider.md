@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:0c8cb87426436b9c80e41eca307da924588394ef644f8e7f29305ecffc5c0f0a:xR92+I1gnSZlH8F7hG9uVgad7oiq6ZNTD8RnlXuLAw3Gn1PaUDMEyL03R1ESXcC0Bn6e89n85P9VjNVTMP4GCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Configure an LLM provider by writing/updating the provider YAML config with API key env var reference and default model."
 version: "1.0.0"

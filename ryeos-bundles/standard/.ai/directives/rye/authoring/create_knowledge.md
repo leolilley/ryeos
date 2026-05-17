@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:4a47161bbd74326044870f5e8dcd58217f884203d2ab6218619a931382154e80:i+J+AfLVeIuMaDbyGc1uCpadzUwaJ2N8oQHEMjDcNaga2MWlGpXRrG1QQxVIgFTAQCf9dl9sGooHB/K7y+GcAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Create a knowledge entry file with YAML frontmatter and markdown content, then sign it."
 version: "3.0.0"

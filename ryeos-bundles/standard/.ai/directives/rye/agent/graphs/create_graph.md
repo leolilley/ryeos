@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:ccac0798f958a6f4e9fe69e1091e92e9b37d063b7f23be5344b8ddb460f40b70:5tX5V+5D/qJyxW0b7wM9cRlvXFgGgBdFNLPfz35h7qr/BAU+q9R0BO3lhXdeM/zy6PZrJqtcltR+BfbMwHqdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Creates a state graph tool YAML with nodes, edges, assign expressions, and optional hooks. The graph is executed by state-graph/runtime."
 version: "2.0.0"

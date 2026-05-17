@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:adefb0f38bfbb112ded15cf6a822c2580f5efdd38f5994585e393e4e8ee02354:P/E2IZ+1t4mq/07zeX2bZVuYGHtTR10c5QVCptK9YYdeSFDu7fPZG9mseWwkNo/POHK583AN2zqZGHMCY1UBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Graph-specific orchestration operations: resume interrupted runs, read persisted state, list graph runs, cancel running graphs, and check status. Complements the thread orchestrator — graph runs share the thread registry so wait_threads and get_status also work via the thread orchestrator."
 version: "1.0.0"

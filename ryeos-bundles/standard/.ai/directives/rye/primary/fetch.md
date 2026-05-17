@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:abfd8aef73379049ef99fc5561cc17024c76bcc5f75af943f50a18425e2ceacc:MBhObHFaI8Zkrr/gpcUg6QVtHejl0NXvxK9X3QIUnWmzGj0/Prfk1AVZkpfKrjHhgeEOXdNl8cwm5NtEEEvVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Resolve a name to items. Two modes: ID mode (item_id) returns content, query mode (query+scope) discovers matches."
 version: "1.0.0"

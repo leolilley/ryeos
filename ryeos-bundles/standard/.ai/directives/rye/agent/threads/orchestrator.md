@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:549da0f163120db3770da41614fe730c861daffcb8ce7c37953128819286cbc7:UN1/EYspMvWzExrtpX8q+4g1VV4TrHRnNr/+mp4l4qzr6s2cUtr3hNGH0NSvlrpDUG/iSavewDKvEyy+tye0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Multi-thread orchestration operations: wait, cancel, status, resume, handoff, and result aggregation."
 version: "1.0.0"

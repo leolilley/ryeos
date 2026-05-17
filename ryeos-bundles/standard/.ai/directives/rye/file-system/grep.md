@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:37Z:1c306ecfaa921e3768a9abdf81e03b2494fc233a0fbd619c61f9951bcfef42aa:xpLO89LitaInTVH74nKEVJkw+k9JullEZCj99cZlrlXS9JWtnSYGCZIWQwEaGzzQv+xgemNqqsfP2B9xhhejAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Search file contents for a text or regex pattern, optionally filtered by path and file glob."
 version: "1.0.0"

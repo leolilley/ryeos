@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:f293a0fa244035b49924e0d796c7b230050affbcf0ff128ff47423a9c50e20e9:1DHh4q9ld63DlKqh8gSFrvcTmhEovqej//HNoCMPuXRSXVdocUaYbMw+ej8COsTY3ITIgHTyU+M45v33v1OXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Execute a state graph tool. Walks a declarative YAML graph, dispatching rye_execute for each node with state persistence and registry tracking."
 version: "1.0.0"

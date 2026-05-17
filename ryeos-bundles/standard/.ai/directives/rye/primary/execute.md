@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:a36c12df4bd5c548955956f5653023477be1288044a888108d87c25897e5ac5b:NO9ILSaoVMrsxG0V9QyLQ5UvXekOd54deWZ0KLTWzdTVWmvzUT2pr1nBDWkST78qGGzG6ZwfrecIFIvN7WiUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Execute a directive, tool, or knowledge item. Supports dry_run mode for validation without side effects."
 version: "1.0.0"

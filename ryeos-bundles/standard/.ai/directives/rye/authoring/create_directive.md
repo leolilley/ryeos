@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:ce60cf4b28dd34a1b8283eb4a209f8b3bf1b201b17ef706e9086fae06d892aee:h7pfgp2sBxclRIsUhnYKb46mIlpgXc1tla9wMpdHmmVlc7lN7DWMkRyWyDFwE/D//68+hn8VesLK1E32ZvCtDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Create a directive file with minimal required fields, check for duplicates, write to disk, and sign it."
 version: "3.0.0"

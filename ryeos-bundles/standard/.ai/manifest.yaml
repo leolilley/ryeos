@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-17T21:33:50Z:a06ab9f4414c3682357351ffb5210af2aafd3f80288bbad7a795c4a58d0950e8:ZPtcsUato7EvIuPP6ZmgACurB0Jy0etzFXU3wORfF+TRzDde07uhme7Rf9DPscHq+u0lJalA9Nou9WY1RdRKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-17T21:44:38Z:a06ab9f4414c3682357351ffb5210af2aafd3f80288bbad7a795c4a58d0950e8:ZPtcsUato7EvIuPP6ZmgACurB0Jy0etzFXU3wORfF+TRzDde07uhme7Rf9DPscHq+u0lJalA9Nou9WY1RdRKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: standard
 version: 0.5.0
 description: 'Workflow: directives, graphs, knowledge, model providers, scheduler, threads'

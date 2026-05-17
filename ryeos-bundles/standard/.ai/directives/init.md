@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:2d2e6ca256b55d100f6060b380d1b4095bb5bb1d9b0a8167a52e9402dc0ae570:nBBsecue6quVTWA7E8EugQhGSpsN9VsMfBKw8V53dr64ko/zhIALj/i2oBIHzV/aBzU63wEEGKq5+m1PuuhbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Welcome guide for Rye OS. Initializes the .ai/ directory. The first directive a new user runs."
 version: "1.0.0"

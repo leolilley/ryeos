@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:aeef30e23f6b7439765c811d612d3b6ff4a417bfc1e0f7794424c57ae89e3c54:UzV7usW6dXZhIc0vqEd1pij3mmaJz30aABUc5xUGt6ZzXWQ0HJ9Q6VPvZtBaho7NQeieJkAhhr62g7CIk3QXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Edit specific lines in a file by line ID. Requires reading the file first to obtain line IDs."
 version: "1.0.0"

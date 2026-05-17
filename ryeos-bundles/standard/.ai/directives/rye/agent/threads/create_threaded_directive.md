@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-17T21:44:36Z:80cfc45457ae646f0ab34ba020a14077fb8f94375022518d47c867dfe4a9cbc7:CYLsgG0kYcNdk9b/flayDLVJbz98Gzr+vuRUux/T1CSHqlK5wzjVu1IE30rsXgrGYE4MLebpicH66ae3PBJbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Creates directives with full thread execution support — model configuration, cost limits, capability permissions for autonomous thread-based execution."
 version: "2.0.0"
