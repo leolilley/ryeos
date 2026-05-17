@@ -76,6 +76,17 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
     /// fingerprint, matching Python `ryeos-node/ryeos_node/vault.py`'s
     /// `<cas_base>/<fingerprint>/vault/<NAME>.json` layout.
     fn read_all(&self, principal: &str) -> Result<HashMap<String, String>>;
+
+    /// Set a secret. Server-side sealing: the daemon re-encrypts the
+    /// entire store. The `principal` param is accepted but ignored in v1
+    /// (single shared store per trust boundary).
+    fn set_secret(&self, principal: &str, name: &str, value: &str) -> Result<()>;
+
+    /// List secret key names (never values).
+    fn list_keys(&self, principal: &str) -> Result<Vec<String>>;
+
+    /// Delete a secret by name. Returns `true` if the key existed.
+    fn delete_secret(&self, principal: &str, name: &str) -> Result<bool>;
 }
 
 /// Read only the secrets declared on the spawning item's
@@ -168,6 +179,21 @@ pub fn dotenv_search_dirs(project_path: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
+/// Validate a vault key name. Must match `[A-Za-z0-9_]+` and not be
+/// on the blocked list.
+fn validate_key_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("vault: key name must not be empty");
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        bail!("vault: key name '{}' must match [A-Za-z0-9_]+", name);
+    }
+    if BLOCKED_NAMES.contains(&name) {
+        bail!("vault: key name '{}' is on the blocked list", name);
+    }
+    Ok(())
+}
+
 /// Stub vault — used only when the daemon is constructed for a unit
 /// test that doesn't want to depend on the operator's filesystem.
 /// Always returns an empty map.
@@ -177,6 +203,18 @@ pub struct EmptyVault;
 impl NodeVault for EmptyVault {
     fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
+    }
+
+    fn set_secret(&self, _principal: &str, _name: &str, _value: &str) -> Result<()> {
+        bail!("vault: EmptyVault does not support writes")
+    }
+
+    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    fn delete_secret(&self, _principal: &str, _name: &str) -> Result<bool> {
+        Ok(false)
     }
 }
 
@@ -231,10 +269,9 @@ impl SealedEnvelopeVault {
     pub fn public_key(&self) -> lillux::vault::VaultPublicKey {
         self.secret_key.public_key()
     }
-}
 
-impl NodeVault for SealedEnvelopeVault {
-    fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
+    /// Internal read-all without the trait dispatch.
+    fn read_all_internal(&self) -> Result<HashMap<String, String>> {
         if !self.store_path.exists() {
             return Ok(HashMap::new());
         }
@@ -261,6 +298,57 @@ impl NodeVault for SealedEnvelopeVault {
         })?;
         validate_decrypted_keys(&map, &self.store_path)?;
         Ok(map)
+    }
+
+    /// Atomic read-modify-write on the sealed store.
+    ///
+    /// If the store file exists but cannot be read (corrupt, wrong key,
+    /// etc.), this returns an error rather than silently starting from
+    /// an empty store. A missing store file is fine (first write).
+    fn read_modify_write<T>(
+        &self,
+        modify: impl FnOnce(&mut HashMap<String, String>) -> Result<T>,
+    ) -> Result<T> {
+        let mut map = if self.store_path.exists() {
+            self.read_all_internal()?
+        } else {
+            HashMap::new()
+        };
+        let result = modify(&mut map)?;
+        validate_decrypted_keys(&map, &self.store_path)?;
+        let pk = self.secret_key.public_key();
+        write_sealed_secrets(&self.store_path, &pk, &map)?;
+        Ok(result)
+    }
+}
+
+impl NodeVault for SealedEnvelopeVault {
+    fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
+        self.read_all_internal()
+    }
+
+    fn set_secret(&self, _principal: &str, name: &str, value: &str) -> Result<()> {
+        // Validate key name
+        validate_key_name(name)?;
+        self.read_modify_write(|map| {
+            map.insert(name.to_string(), value.to_string());
+            Ok(())
+        })
+    }
+
+    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+        let map = self.read_all_internal()?;
+        let mut keys: Vec<String> = map.into_keys().collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    fn delete_secret(&self, _principal: &str, name: &str) -> Result<bool> {
+        // Validate key name before attempting delete
+        validate_key_name(name)?;
+        self.read_modify_write(|map| {
+            Ok(map.remove(name).is_some())
+        })
     }
 }
 
@@ -292,6 +380,18 @@ mod tests {
         fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
             Ok(self.0.clone())
         }
+        fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            bail!("FixedVault does not support writes")
+        }
+        fn list_keys(&self, principal: &str) -> Result<Vec<String>> {
+            let map = self.read_all(principal)?;
+            let mut keys: Vec<String> = map.into_keys().collect();
+            keys.sort();
+            Ok(keys)
+        }
+        fn delete_secret(&self, _: &str, _: &str) -> Result<bool> {
+            bail!("FixedVault does not support writes")
+        }
     }
 
     #[test]
@@ -302,6 +402,15 @@ mod tests {
         impl NodeVault for PanicVault {
             fn read_all(&self, _: &str) -> Result<HashMap<String, String>> {
                 panic!("read_all should not be called when required is empty");
+            }
+            fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<()> {
+                panic!("set_secret should not be called")
+            }
+            fn list_keys(&self, _: &str) -> Result<Vec<String>> {
+                panic!("list_keys should not be called")
+            }
+            fn delete_secret(&self, _: &str, _: &str) -> Result<bool> {
+                panic!("delete_secret should not be called")
             }
         }
         let bindings = read_required_secrets(&PanicVault, "op", &[], &[]).unwrap();

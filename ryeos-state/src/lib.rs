@@ -10,6 +10,7 @@
 pub mod chain;
 pub mod gc;
 pub mod head_cache;
+pub mod ignore;
 pub mod locators;
 pub mod objects;
 pub mod projection;

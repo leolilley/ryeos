@@ -346,6 +346,18 @@ async fn main() -> Result<()> {
             ryeos_app::ignore::load_from_system_space(&config.system_space_dir)
                 .context("load ingest ignore config — did `ryeos init` run?")?
         ),
+        vault_fingerprint: {
+            let vault_pk_path = config.system_space_dir
+                .join(ryeos_engine::AI_DIR)
+                .join("node/vault/public_key.pem");
+            if vault_pk_path.exists() {
+                lillux::vault::read_public_key(&vault_pk_path)
+                    .ok()
+                    .map(|pk| pk.fingerprint())
+            } else {
+                None
+            }
+        },
     };
     let webhook_dedupe = Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new());
 
@@ -713,6 +725,7 @@ async fn run_service_standalone(
         scheduler_db: Arc::new(SchedulerDb::new_in_memory().context("scheduler in-memory db")?),
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+        vault_fingerprint: None,
     };
 
     let params: serde_json::Value = match params_json {

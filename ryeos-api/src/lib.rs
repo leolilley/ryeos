@@ -7,6 +7,7 @@
 
 pub mod api_state;
 pub mod auth;
+pub mod handler_error;
 pub mod handlers;
 pub mod maintenance;
 pub mod registry;

@@ -20,10 +20,14 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let principal_id = state.identity.principal_id();
     let fingerprint = state.identity.fingerprint().to_string();
-    Ok(serde_json::json!({
+    let mut resp = serde_json::json!({
         "principal_id": principal_id,
         "fingerprint": fingerprint,
-    }))
+    });
+    if let Some(ref vfp) = state.vault_fingerprint {
+        resp["vault_fingerprint"] = Value::String(vfp.clone());
+    }
+    Ok(resp)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -36,7 +40,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
             let req: Request = if params.is_null() {
                 Request::default()
             } else {
-                serde_json::from_value(params)?
+                crate::handler_error::parse_request(params)?
             };
             handle(req, state).await
         })

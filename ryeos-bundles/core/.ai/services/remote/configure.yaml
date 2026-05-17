@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-17T07:19:44Z:973728907bd52da259fc1f679c9f5d2e79dd551ef44ca9926bc2576bf5d09f90:/pUFogNI9L42LdENgYxfApI1ujSotLjlGrH5GK9whrEfIp4NwIn9cJd9TJJAueUDxzkZVO8vgcycj1yP8s0nAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "remote"
+name: "configure"
+kind: service
+endpoint: remote.configure
+required_caps: ["ryeos.execute.service.remote.configure"]
+schema:
+  name: string
+  url: string
+description: "Add or update a remote node configuration"

@@ -220,7 +220,6 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     ));
     if options.force || !user_auth_entry.exists() {
         write_user_authorized(
-            &config.authorized_keys_dir,
             &user_auth_entry,
             &user_identity,
             node_identity.signing_key(),
@@ -302,10 +301,10 @@ pem = "ed25519:{key_b64}"
 /// can authenticate to the local daemon.
 ///
 /// The daemon's `auth::load_authorized_key()` requires authorized-key
-/// files to be signed by the node key. The subject is the user's
-/// verifying key (the CLI's identity).
+/// Write a node-signed authorized-key TOML entry for the bootstrap
+/// operator user. Delegates to the shared `write_authorized_key_toml`
+/// so there is exactly one TOML emitter.
 fn write_user_authorized(
-    _auth_dir: &Path,
     entry_path: &Path,
     user_identity: &NodeIdentity,
     node_signing_key: &lillux::crypto::SigningKey,
@@ -317,23 +316,21 @@ fn write_user_authorized(
         vk.as_bytes(),
     );
 
-    let body = format!(
-        r#"fingerprint = "{fp}"
-public_key = "ed25519:{key_b64}"
-scopes = ["*"]
-label = "bootstrap-authorized-user"
-"#
-    );
+    let auth_dir = entry_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("authorized-key path has no parent directory"))?;
+    let now = lillux::time::iso8601_now();
 
-    // Sign with the NODE key — auth::load_authorized_key verifies
-    // the signer fingerprint matches the daemon's own node identity.
-    let signed = lillux::signature::sign_content(&body, node_signing_key, "#", None);
-
-    let tmp = entry_path.with_extension("tmp");
-    fs::write(&tmp, signed.as_bytes())
-        .with_context(|| format!("failed to write authorized-key entry {}", entry_path.display()))?;
-    fs::rename(&tmp, entry_path)
-        .with_context(|| format!("failed to rename {} → {}", tmp.display(), entry_path.display()))?;
+    let _path = ryeos_app::identity::write_authorized_key_toml(
+        auth_dir,
+        fp,
+        &key_b64,
+        &["*".to_string()],
+        "bootstrap-authorized-user",
+        fp,
+        &now,
+        node_signing_key,
+    )?;
 
     tracing::info!(
         path = %entry_path.display(),

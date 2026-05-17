@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-17T07:19:46Z:f91196b1abe5bfb5649ebbb3fed017856ae761345e8c8c1756843b94bd776d1f:EeJtEyYXQeCvNypQlAW4xzlMPgrRPxzOCsG9pTtLzQkwdJ0VmMXsFRPkUUj2MOoM4lVqnsIhBzAq3SnthLA0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: push-head
+path: /push-head
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:push-head

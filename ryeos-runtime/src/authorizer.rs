@@ -794,3 +794,42 @@ mod tests {
         assert!(cap_matches("ryeos.execute.*", &canonical_cap("directive", "ryeos/code/review", "execute")));
     }
 }
+
+/// Validate a scope string's grammar for authorization requests.
+///
+/// Valid scopes are dot-separated segments of lowercase ASCII
+/// alphanumerics, hyphens, underscores, and forward slashes.
+/// No empty segments, no leading/trailing dots, no consecutive dots.
+///
+/// Returns `Ok(())` if valid, or a descriptive error string.
+pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
+    if scope.is_empty() {
+        return Err("scope must not be empty".into());
+    }
+    if scope.starts_with('.') || scope.ends_with('.') {
+        return Err(format!("scope '{}' must not start or end with '.'", scope));
+    }
+    if scope.contains("..") {
+        return Err(format!("scope '{}' must not contain consecutive dots", scope));
+    }
+    for segment in scope.split('.') {
+        if segment.is_empty() {
+            return Err(format!("scope '{}' has an empty segment", scope));
+        }
+        for ch in segment.chars() {
+            if !ch.is_ascii_lowercase()
+                && !ch.is_ascii_digit()
+                && ch != '-'
+                && ch != '_'
+                && ch != '/'
+            {
+                return Err(format!(
+                    "scope '{}' contains invalid character '{}': \
+                     only lowercase a-z, 0-9, '-', '_', '/' allowed",
+                    scope, ch
+                ));
+            }
+        }
+    }
+    Ok(())
+}

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-17T07:19:44Z:99f96b35d3e007ea23dd256abd671bd417dd286ac408265b88a0565ce4bbc7dc:7o+E7AYWR2/S02PfWuVUhibWa7UqzY05+I//TfAGZtsvIM5xdZe7LOy4aTs8K7TbJzax1cMdF1Oiw9MgZvABAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "remote"
+name: "vault-set"
+kind: service
+endpoint: remote.vault_set
+required_caps: ["ryeos.execute.service.remote.execute"]
+schema:
+  remote: string?
+  name: string
+  value: string
+description: "Set a secret on a remote node's vault"

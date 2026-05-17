@@ -98,7 +98,29 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
         let state_arc = Arc::new(ctx.state);
         let result = handler(input, state_arc)
             .await
-            .map_err(|e| RouteDispatchError::Internal(format!("service error: {e}")))?;
+            .map_err(|e| {
+                // Try to extract a typed HandlerError and map it to
+                // the appropriate RouteDispatchError variant. Generic
+                // errors become 500.
+                if let Some(he) = crate::handler_error::extract_handler_error(&e) {
+                    match he {
+                        crate::handler_error::HandlerError::NotFound => {
+                            RouteDispatchError::NotFound
+                        }
+                        crate::handler_error::HandlerError::Forbidden(msg) => {
+                            RouteDispatchError::Forbidden(msg)
+                        }
+                        crate::handler_error::HandlerError::BadRequest(msg) => {
+                            RouteDispatchError::BadRequest(msg)
+                        }
+                        crate::handler_error::HandlerError::Internal(msg) => {
+                            RouteDispatchError::Internal(msg)
+                        }
+                    }
+                } else {
+                    RouteDispatchError::Internal(format!("service error: {e}"))
+                }
+            })?;
 
         Ok(RouteInvocationResult::Json(result))
     }

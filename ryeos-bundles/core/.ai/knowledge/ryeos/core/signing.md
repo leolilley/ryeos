@@ -36,7 +36,6 @@ When you run `ryeos sign <ref>`:
 4. A signature header is prepended to the file:
 
 ```yaml
-# ryeos:signed:<timestamp>:<content_hash>:<signature_b64>:<signer_fingerprint>
 ```
 
 The signature covers:

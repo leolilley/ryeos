@@ -20,9 +20,14 @@ pub struct RemoteConfig {
     pub url: String,
     /// Pinned principal_id of the remote node (from `/public-key`).
     pub principal_id: String,
-    /// Remote node's vault X25519 public key (base64), if known.
+    /// Remote node's vault X25519 public key fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault_public_key: Option<String>,
+    pub vault_fingerprint: Option<String>,
+    /// Cached remote ingest-ignore config, populated during
+    /// `remote configure`. Used by `remote push` to match the
+    /// remote's ignore rules instead of the local ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_ignore: Option<ryeos_app::ignore::IgnoreConfig>,
 }
 
 /// Full remotes file.
@@ -121,7 +126,8 @@ mod tests {
             name: "default".into(),
             url: "https://example.com".into(),
             principal_id: "fp:abc123".into(),
-            vault_public_key: None,
+            vault_fingerprint: None,
+            ingest_ignore: None,
         });
         save_remotes(tmpdir.path(), &remotes).unwrap();
         let loaded = load_remotes(tmpdir.path()).unwrap();

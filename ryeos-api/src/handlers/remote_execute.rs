@@ -1,14 +1,23 @@
-//! `remote/execute` — execute an item on a remote node.
+//! `remote/execute` — synchronous push → execute → pull → apply orchestrator.
+//!
+//! The canonical end-to-end remote execution command. Builds/pushes the
+//! local project, executes on the remote node, fetches results, and
+//! applies changes back to the local workspace.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
 use serde_json::Value;
 
 use crate::remote::client::RemoteClient;
+use crate::remote::config;
+use crate::remote::push::push_project;
+use crate::remote::pull::{pull_results, extract_snapshot_hash, PullResultsError};
+use crate::handler_error::{HandlerError, HandlerResult};
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_app::ignore::IgnoreMatcher;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,19 +43,118 @@ fn default_project_path() -> String {
     ".".to_string()
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+    let client = RemoteClient::from_named_remote(&state, &req.remote)
+        .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
 
-    let result = client
+    // Resolve local project path
+    let project_path = PathBuf::from(&req.project_path);
+    let abs_project_path = if project_path.is_absolute() {
+        project_path
+    } else {
+        std::env::current_dir()
+            .map_err(|e| HandlerError::Internal(format!("cwd: {e}")))?
+            .join(&project_path)
+    };
+
+    // Load remote's cached ignore rules (if configured)
+    let remotes = config::load_remotes(&state.config.system_space_dir)
+        .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+    let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
+    let remote_ignore = match remote_cfg.as_ref().and_then(|c| c.ingest_ignore.as_ref()) {
+        Some(ic) => Some(IgnoreMatcher::from_config(ic)
+            .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?),
+        None => {
+            // Cache miss — fetch inline from remote
+            client.get_ingest_ignore().await.ok()
+                .map(|ic| IgnoreMatcher::from_config(&ic)
+                    .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}"))))
+                .transpose()?
+        }
+    };
+
+    // 1. Push current local project
+    let push_result = push_project(
+        &client,
+        &state,
+        &abs_project_path,
+        &req.project_path,
+        &state.ignore_matcher,
+        remote_ignore.as_ref(),
+    )
+    .await
+    .map_err(|e| HandlerError::Internal(format!("push failed: {e:#}")))?;
+
+    // 2. Execute on remote with project_source: pushed_head
+    let remote_result = client
         .execute(
             &req.item_ref,
             &req.project_path,
             &req.parameters,
-            "cas",
+            "pushed_head",
         )
-        .await?;
+        .await
+        .map_err(|e| HandlerError::Internal(format!("remote execute failed: {e:#}")))?;
 
-    Ok(result)
+    // 3. Extract snapshot hash from remote result
+    let snapshot_hash = extract_snapshot_hash(&remote_result)
+        .ok_or_else(|| HandlerError::BadRequest(
+            "remote execution completed but no snapshot_hash in result — \
+             async remote execute not supported in v1".into()
+        ))?;
+
+    // 4. Pull results and apply to local workspace
+    let pull_result = match pull_results(
+        &client,
+        &state.config.system_space_dir,
+        &snapshot_hash,
+        &abs_project_path,
+        &push_result.manifest,
+    )
+    .await
+    {
+        Ok(pr) => pr,
+        Err(PullResultsError::LocalConflict(path)) => {
+            return Err(HandlerError::BadRequest(format!(
+                "local workspace conflict at '{}' — local files changed since push. \
+                 Resolve conflicts and retry.",
+                path
+            )));
+        }
+        Err(PullResultsError::MissingSnapshotHash) => {
+            return Err(HandlerError::BadRequest(
+                "remote execution result missing snapshot_hash".into(),
+            ));
+        }
+        Err(PullResultsError::InvalidRemoteSnapshot(msg)) => {
+            return Err(HandlerError::BadRequest(format!(
+                "invalid remote snapshot: {}", msg
+            )));
+        }
+        Err(PullResultsError::Other(e)) => {
+            return Err(HandlerError::Internal(format!("pull results failed: {e:#}")));
+        }
+    };
+
+    // 5. Return composite response
+    Ok(serde_json::json!({
+        "push": {
+            "snapshot_hash": push_result.snapshot_hash,
+            "manifest_entries": push_result.manifest_entries,
+            "blobs_uploaded": push_result.blobs_uploaded,
+            "blobs_skipped": push_result.blobs_skipped,
+        },
+        "remote": {
+            "snapshot_hash": snapshot_hash,
+            "result": remote_result,
+        },
+        "pull": {
+            "snapshot_hash": pull_result.snapshot_hash,
+            "cas_objects_fetched": pull_result.cas_objects_fetched,
+            "files_updated": pull_result.files_updated,
+            "files_deleted": pull_result.files_deleted,
+        },
+    }))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -56,8 +164,8 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.remote.execute"],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
-            handle(req, state).await
+            let req: Request = crate::handler_error::parse_request(params)?;
+            handle(req, state).await.map_err(Into::into)
         })
     },
 };

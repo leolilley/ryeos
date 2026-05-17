@@ -235,16 +235,17 @@ pub async fn execute_service_verified(
         let _ = state.threads.mark_running(&audit_thread_id);
     }
 
-    // 6. Inject caller identity into params for the scheduler.register handler.
-    //    Only scheduler_register needs caller auth — it's the only handler that
-    //    persists execution authority. All other handlers use deny_unknown_fields,
-    //    so injection must be targeted, not global.
+    // 6. Inject caller identity into params for service handlers.
+    //    All handlers opt in via `#[serde(default)]` fields. The
+    //    injection is global — handlers that don't declare these
+    //    fields use `#[serde(deny_unknown_fields)]` which rejects
+    //    them, but the service_invocation layer already injects
+    //    them there too (for route-sourced requests). For
+    //    executor-sourced requests (CLI/UDS), we inject here.
     let mut enriched_params = params.clone();
-    if endpoint == "scheduler.register" {
-        if let Value::Object(ref mut map) = enriched_params {
-            map.insert("_caller_fingerprint".to_string(), Value::String(ctx.principal_fingerprint.clone()));
-            map.insert("_caller_capabilities".to_string(), serde_json::json!(ctx.caller_scopes));
-        }
+    if let Value::Object(ref mut map) = enriched_params {
+        map.insert("_caller_fingerprint".to_string(), Value::String(ctx.principal_fingerprint.clone()));
+        map.insert("_caller_scopes".to_string(), serde_json::json!(ctx.caller_scopes));
     }
 
     // 7. Dispatch to handler

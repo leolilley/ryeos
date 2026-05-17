@@ -50,7 +50,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.objects/has"],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
+            let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await
         })
     },

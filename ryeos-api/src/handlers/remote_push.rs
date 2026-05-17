@@ -7,10 +7,12 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::remote::client::RemoteClient;
+use crate::remote::config;
 use crate::remote::push::push_project;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_app::ignore::IgnoreMatcher;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,12 +39,26 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         std::env::current_dir()?.join(&project_path)
     };
 
+    // Load remote's cached ignore rules (if configured)
+    let remotes = config::load_remotes(&state.config.system_space_dir)?;
+    let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
+    let remote_ignore = match remote_cfg.as_ref().and_then(|c| c.ingest_ignore.as_ref()) {
+        Some(ic) => Some(IgnoreMatcher::from_config(ic)?),
+        None => {
+            // Cache miss — fetch inline from remote
+            client.get_ingest_ignore().await.ok()
+                .map(|ic| IgnoreMatcher::from_config(&ic))
+                .transpose()?
+        }
+    };
+
     let result = push_project(
         &client,
         &state,
         &abs_project_path,
         project_path_str,
         &state.ignore_matcher,
+        remote_ignore.as_ref(),
     )
     .await?;
 
@@ -61,7 +77,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.remote.push"],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
+            let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await
         })
     },

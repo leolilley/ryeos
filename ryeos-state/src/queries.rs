@@ -239,6 +239,42 @@ pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<Threa
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// List threads with optional principal filtering.
+///
+/// When `filter_principal` is `Some(fp)`, only threads with
+/// `requested_by = fp` are returned. `None` returns all threads.
+pub fn list_threads_filtered(
+    db: &ProjectionDb,
+    limit: usize,
+    filter_principal: Option<&str>,
+) -> anyhow::Result<Vec<ThreadRow>> {
+    let sql = match filter_principal {
+        Some(_) => format!(
+            "SELECT {THREAD_COLUMNS} FROM threads WHERE requested_by = ? ORDER BY created_at LIMIT ?"
+        ),
+        None => format!(
+            "SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?"
+        ),
+    };
+    let mut stmt = db
+        .connection()
+        .prepare(&sql)
+        .context("prepare list_threads_filtered")?;
+    let rows = match filter_principal {
+        Some(fp) => {
+            let params: [&dyn rusqlite::types::ToSql; 2] = [&fp, &limit];
+            stmt.query_map(params, ThreadRow::from_row)
+                .context("query list_threads_filtered")?
+        }
+        None => {
+            let params: [&dyn rusqlite::types::ToSql; 1] = [&limit];
+            stmt.query_map(params, ThreadRow::from_row)
+                .context("query list_threads_filtered")?
+        }
+    };
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 const TERMINAL_STATUSES: [&str; 6] = [
     "completed",
     "failed",

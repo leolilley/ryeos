@@ -11,6 +11,8 @@ serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 base64 = "0.22"
+glob = "0.3"
+serde_yaml = "0.9"
 rusqlite = { version = "0.31", features = ["bundled"] }
 libc = "0.2"
 

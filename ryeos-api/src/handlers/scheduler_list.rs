@@ -1,4 +1,8 @@
-//! `scheduler.list` — list all registered schedules.
+//! `scheduler.list` — list registered schedules.
+//!
+//! Supports optional owner filtering: when `_caller_fingerprint` is
+//! present and the caller is not an admin, only schedules owned by
+//! the caller are returned.
 
 use std::sync::Arc;
 
@@ -9,6 +13,7 @@ use serde_json::Value;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use crate::handlers::ownership::is_admin;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,12 +22,25 @@ pub struct Request {
     pub enabled_only: bool,
     #[serde(default)]
     pub schedule_type: Option<String>,
+    /// Injected by service_invocation for caller-aware filtering.
+    #[serde(default)]
+    pub _caller_fingerprint: String,
+    /// Injected by service_invocation for caller-aware filtering.
+    #[serde(default)]
+    pub _caller_scopes: Vec<String>,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let specs = state.scheduler_db.list_specs(
+    let filter_requester = if !req._caller_fingerprint.is_empty() && !is_admin(&req._caller_scopes) {
+        Some(req._caller_fingerprint.as_str())
+    } else {
+        None
+    };
+
+    let specs = state.scheduler_db.list_specs_filtered(
         req.enabled_only,
         req.schedule_type.as_deref(),
+        filter_requester,
     )?;
 
     // Batch-load last fires to avoid N+1 queries
@@ -61,7 +79,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &[],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
+            let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await
         })
     },

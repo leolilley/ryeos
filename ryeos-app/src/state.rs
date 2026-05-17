@@ -85,6 +85,10 @@ pub struct AppState {
     /// at startup. Used by ingest_walk, walk_and_diff, and push-head
     /// validation.
     pub ignore_matcher: Arc<IgnoreMatcher>,
+    /// Vault X25519 public key fingerprint. `None` when using
+    /// `EmptyVault` or when the vault public key file doesn't exist.
+    /// Populated at startup from `<system>/.ai/node/vault/public_key.pem`.
+    pub vault_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

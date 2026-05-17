@@ -447,6 +447,7 @@ mod tests {
             scheduler_db: Arc::new(crate::scheduler::db::SchedulerDb::new_in_memory().unwrap()),
             scheduler_reload_tx: None,
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+            vault_fingerprint: None,
         };
 
         (tmpdir, state)

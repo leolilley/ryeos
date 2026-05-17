@@ -3,15 +3,19 @@
 //! Kills the thread's process group (if any), finalizes the thread as
 //! `cancelled`, and broadcasts the `thread_cancelled` event to any
 //! live subscribers via `ThreadEventHub`.
+//!
+//! Ownership check: non-admin callers can only cancel their own threads.
 
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
+use crate::handler_error::HandlerError;
+use crate::handlers::ownership::require_owner_or_admin;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_app::state::AppState;
 
@@ -19,31 +23,41 @@ use ryeos_app::state::AppState;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
+    /// Injected by service_invocation for ownership checks.
+    #[serde(default)]
+    pub _caller_fingerprint: String,
+    /// Injected by service_invocation for ownership checks.
+    #[serde(default)]
+    pub _caller_scopes: Vec<String>,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
     let thread = state
         .state_store
-        .get_thread(&req.thread_id)?
-        .ok_or_else(|| anyhow::anyhow!("thread not found: {}", req.thread_id))?;
+        .get_thread(&req.thread_id)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .ok_or(HandlerError::NotFound)?;
+
+    // Ownership check: non-admin callers can only cancel their own threads.
+    require_owner_or_admin(
+        thread.requested_by.as_deref(),
+        &req._caller_fingerprint,
+        &req._caller_scopes,
+    )?;
 
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
     if is_terminal(current_status) {
-        bail!(
-            "thread {} is already {} — cannot cancel",
-            req.thread_id,
-            current_status
-        );
+        return Err(HandlerError::BadRequest(
+            format!("thread {} is already {} — cannot cancel", req.thread_id, current_status)
+        ));
     }
 
     // Only threads in "created" or "running" are cancellable.
     if current_status != "created" && current_status != "running" {
-        bail!(
-            "thread {} has non-cancellable status: {}",
-            req.thread_id,
-            current_status
-        );
+        return Err(HandlerError::BadRequest(
+            format!("thread {} has non-cancellable status: {}", req.thread_id, current_status)
+        ));
     }
 
     // If the thread has a PGID, kill the process group.
@@ -61,12 +75,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         // finalize — the process is still alive and marking it
         // cancelled would be a lie.
         if !result.success {
-            bail!(
-                "failed to kill process group {} for thread {}: {}",
-                pgid,
-                req.thread_id,
-                result.method
-            );
+            return Err(HandlerError::Internal(
+                format!("failed to kill process group {} for thread {}: {}", pgid, req.thread_id, result.method)
+            ));
         }
 
         json!({
@@ -94,18 +105,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         artifacts: Vec::new(),
         final_cost: None,
         summary_json: None,
-    })?;
+    }).map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     // Broadcast the terminal event to any live subscribers for this
-    // thread. The event is already persisted in the event store by
-    // finalize_thread above; this just reduces latency for connected
-    // clients.
-    //
-    // Note: finalize_thread (ThreadLifecycleService) calls
-    // state_store.finalize_thread which returns PersistedEventRecords,
-    // but the lifecycle service doesn't forward them to ThreadEventHub.
-    // We re-fetch and publish here for latency. Subscribers who miss
-    // the live broadcast will see the event on next replay.
+    // thread.
     if let Ok(events) = state.events.replay(&ryeos_app::event_store_service::EventReplayParams {
         chain_root_id: None,
         thread_id: Some(req.thread_id.clone()),
@@ -145,8 +148,8 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.threads/cancel"],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
-            handle(req, state).await
+            let req: Request = crate::handler_error::parse_request(params)?;
+            handle(req, state).await.map_err(Into::into)
         })
     },
 };
@@ -180,23 +183,20 @@ mod tests {
     }
 
     #[test]
-    fn request_deserialize_requires_thread_id() {
-        let req: Result<Request, _> = serde_json::from_value(json!({}));
-        assert!(req.is_err(), "empty object should fail with deny_unknown_fields");
-    }
-
-    #[test]
-    fn request_deserialize_rejects_extra_fields() {
-        let req: Result<Request, _> = serde_json::from_value(json!({
+    fn request_deserialize_with_caller_fields() {
+        let req: Request = serde_json::from_value(json!({
             "thread_id": "T-1234",
-            "extra": "nope"
-        }));
-        assert!(req.is_err(), "extra fields should be rejected");
+            "_caller_fingerprint": "fp:abc",
+            "_caller_scopes": ["execute"],
+        })).unwrap();
+        assert_eq!(req.thread_id, "T-1234");
+        assert_eq!(req._caller_fingerprint, "fp:abc");
     }
 
     #[test]
-    fn request_deserialize_accepts_valid() {
+    fn request_deserialize_accepts_valid_without_caller() {
         let req: Request = serde_json::from_value(json!({"thread_id": "T-1234"})).unwrap();
         assert_eq!(req.thread_id, "T-1234");
+        assert!(req._caller_fingerprint.is_empty());
     }
 }

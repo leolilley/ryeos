@@ -155,3 +155,63 @@ impl NodeIdentity {
             .context("signature verification failed")
     }
 }
+
+/// Write a node-signed authorized-key TOML entry.
+///
+/// Used by bootstrap (local operator) and the authorize-key handler
+/// (remote delegation). There is exactly one TOML emitter.
+///
+/// The TOML is signed with the node's signing key. Only the node can
+/// create valid authorized keys — remote callers can only request that
+/// the node create one.
+pub fn write_authorized_key_toml(
+    auth_dir: &Path,
+    fingerprint: &str,
+    public_key_b64: &str,
+    scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    node_signing_key: &lillux::crypto::SigningKey,
+) -> Result<std::path::PathBuf> {
+    use std::fs;
+
+    // Build scope list as TOML array
+    let scopes_str = scopes
+        .iter()
+        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let body = format!(
+        r#"fingerprint = "{fp}"
+public_key = "ed25519:{key_b64}"
+scopes = [{scopes_str}]
+label = "{lbl}"
+granted_by = "{granted_by}"
+created_at = "{ca}"
+"#,
+        fp = fingerprint,
+        key_b64 = public_key_b64,
+        scopes_str = scopes_str,
+        lbl = label.replace('"', "\\\""),
+        granted_by = granted_by,
+        ca = created_at,
+    );
+
+    // Sign with the NODE key
+    let signed = lillux::signature::sign_content(&body, node_signing_key, "#", None);
+
+    // Ensure directory exists
+    fs::create_dir_all(auth_dir)?;
+
+    // Atomic write: .tmp → rename
+    let entry_path = auth_dir.join(format!("{fingerprint}.toml"));
+    let tmp = entry_path.with_extension("tmp");
+    fs::write(&tmp, signed.as_bytes())
+        .with_context(|| format!("failed to write authorized-key entry {}", entry_path.display()))?;
+    fs::rename(&tmp, &entry_path)
+        .with_context(|| format!("failed to rename to {}", entry_path.display()))?;
+
+    Ok(entry_path)
+}

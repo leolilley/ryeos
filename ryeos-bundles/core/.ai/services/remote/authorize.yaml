@@ -1,0 +1,12 @@
+# ryeos:signed:2026-05-17T07:19:44Z:d5965fc4bc2f06174987d08892800bbe3d19415939c20f9876f9210addb29944:tLfI0LCUpdMXivGSRKicTPMgJYiG5bSKp5xeXeizvWOLJwDTLbaPcguMfmnK2ZMiGVnxY92v84t/k+coHLdeCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "remote"
+name: "authorize"
+kind: service
+endpoint: remote.authorize
+required_caps: ["ryeos.execute.service.remote.execute"]
+schema:
+  remote: string?
+  public_key: string
+  label: string
+  scopes: string[]
+description: "Authorize a key on a remote node"

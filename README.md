@@ -104,33 +104,10 @@ Fully modular and extendable.
 
 ## Remote Execution
 
-Run tools and state graphs on a remote server without exposing your private signing key. The system uses content-addressed storage for sync — objects are synced by hash, execution happens in a temp-materialized `.ai/` directory, and results flow back as immutable CAS objects. The remote executor has its own Ed25519 identity and signs execution artifacts independently.
-
-```bash
-pip install ryeos-node          # server package (deployed on Modal)
-```
-
-Named remotes are configured in `remotes/remotes.yaml`:
-
-```yaml
-remotes:
-  default:
-    url: "https://ryeos-node--execute.modal.run"
-    key_env: "RYEOS_REMOTE_API_KEY"
-  gpu:
-    url: "https://gpu-worker--execute.modal.run"
-    key_env: "GPU_REMOTE_API_KEY"
-```
-
-Target a remote via the `target` parameter:
-
-```python
-ryeos_execute(item_id="tool:my/heavy-compute", target="remote:gpu")
-```
-
-State graph nodes can also specify per-node remotes for hybrid local/remote workflows.
-
-See the [Remote Execution docs](docs/internals/remote-execution.md) for the full architecture.
+Execute items on a remote ryEOS node with content-addressed sync, scoped
+key authorization, and a clean-base conflict policy. See the
+[Remote Execution v1 Operator Guide](docs/operations/remote-execution-v1.md)
+for prerequisites, workflows, and trust model.
 
 ## Documentation
 

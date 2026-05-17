@@ -78,32 +78,46 @@ pub fn compact_projects(
         return Ok(result);
     }
 
-    for entry in std::fs::read_dir(&projects_dir)
+    // Two-level walk: projects/<principal_key>/<project_hash>/head
+    for principal_entry in std::fs::read_dir(&projects_dir)
         .context("failed to read projects refs directory")?
     {
-        let entry = entry.context("failed to read project ref entry")?;
-        if !entry.file_type()?.is_dir() {
+        let principal_entry = principal_entry.context("failed to read principal dir entry")?;
+        if !principal_entry.file_type()?.is_dir() {
             continue;
         }
+        let principal_key = principal_entry.file_name().to_string_lossy().to_string();
 
-        let project_hash = entry.file_name().to_string_lossy().to_string();
-        let head_path = entry.path().join("head");
-        if !head_path.exists() {
-            continue;
-        }
-
-        result.projects_scanned += 1;
-
-        match compact_single_project(cas_root, refs_root, &project_hash, signer, policy, dry_run) {
-            Ok(project_result) => {
-                result.snapshots_removed += project_result.snapshots_removed;
-                result.snapshots_rewritten += project_result.snapshots_rewritten;
+        for project_entry in std::fs::read_dir(principal_entry.path())
+            .context("failed to read principal project dirs")?
+        {
+            let project_entry = project_entry.context("failed to read project dir entry")?;
+            if !project_entry.file_type()?.is_dir() {
+                continue;
             }
-            Err(e) => {
-                return Err(e.context(format!(
-                    "compaction failed for project {}",
-                    project_hash
-                )));
+
+            let project_hash = project_entry.file_name().to_string_lossy().to_string();
+            let head_path = project_entry.path().join("head");
+            if !head_path.exists() {
+                continue;
+            }
+
+            result.projects_scanned += 1;
+
+            match compact_single_project(
+                cas_root, refs_root, &principal_key, &project_hash,
+                signer, policy, dry_run,
+            ) {
+                Ok(project_result) => {
+                    result.snapshots_removed += project_result.snapshots_removed;
+                    result.snapshots_rewritten += project_result.snapshots_rewritten;
+                }
+                Err(e) => {
+                    return Err(e.context(format!(
+                        "compaction failed for principal/project {}/{}",
+                        principal_key, project_hash
+                    )));
+                }
             }
         }
     }
@@ -121,13 +135,16 @@ struct ProjectCompactionResult {
 fn compact_single_project(
     cas_root: &Path,
     refs_root: &Path,
+    principal_key: &str,
     project_hash: &str,
     signer: &dyn Signer,
     policy: &RetentionPolicy,
     dry_run: bool,
 ) -> Result<ProjectCompactionResult> {
-    let head_hash = refs::read_project_head_ref(refs_root, project_hash)?
-        .ok_or_else(|| anyhow::anyhow!("no project head for {}", project_hash))?;
+    let head_hash = refs::read_project_head_ref(refs_root, principal_key, project_hash)?
+        .ok_or_else(|| anyhow::anyhow!(
+            "no project head for principal/project {}/{}", principal_key, project_hash
+        ))?;
 
     // Step 1: Walk the full DAG and collect all snapshots with metadata.
     // walk_dag is strict: returns error on missing/corrupt objects.
@@ -251,7 +268,7 @@ fn compact_single_project(
     let new_head_hash = hash_remap.get(&head_hash).cloned().unwrap_or(head_hash.clone());
 
     if new_head_hash != head_hash && !dry_run {
-        refs::write_project_head_ref(refs_root, project_hash, &new_head_hash, signer)?;
+        refs::write_project_head_ref(refs_root, principal_key, project_hash, &new_head_hash, signer)?;
         tracing::info!(
             project_hash = %project_hash,
             old_head = %&head_hash[..16.min(head_hash.len())],
@@ -502,8 +519,14 @@ mod tests {
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 
-    fn write_project_head(refs_root: &Path, project_hash: &str, target_hash: &str, signer: &dyn Signer) {
-        refs::write_project_head_ref(refs_root, project_hash, target_hash, signer).unwrap();
+    fn write_project_head(
+        refs_root: &Path,
+        principal_key: &str,
+        project_hash: &str,
+        target_hash: &str,
+        signer: &dyn Signer,
+    ) {
+        refs::write_project_head_ref(refs_root, principal_key, project_hash, target_hash, signer).unwrap();
     }
 
     fn make_project_snapshot(hash: &str, source: &str, parents: &[&str]) -> serde_json::Value {
@@ -557,7 +580,7 @@ mod tests {
         write_object(&cas_root, &snap5_hash, &make_project_snapshot("snap5", "fold_back", &[&snap4_hash]));
 
         // HEAD points to snap5
-        write_project_head(&refs_root, "test-project", &snap5_hash, &signer);
+        write_project_head(&refs_root, "fp:test-principal", "test-project", &snap5_hash, &signer);
 
         let policy = RetentionPolicy {
             manual_pushes: 10,
@@ -589,7 +612,7 @@ mod tests {
         write_object(&cas_root, &push2_hash, &make_project_snapshot("push2", "push", &[&push1_hash]));
         write_object(&cas_root, &push3_hash, &make_project_snapshot("push3", "push", &[&push2_hash]));
 
-        write_project_head(&refs_root, "test-proj", &push3_hash, &signer);
+        write_project_head(&refs_root, "fp:test-principal", "test-proj", &push3_hash, &signer);
 
         let policy = RetentionPolicy {
             manual_pushes: 10,
@@ -617,7 +640,7 @@ mod tests {
             write_object(&cas_root, hash, &make_project_snapshot(&format!("auto{}", i + 1), "fold_back", &parents));
         }
 
-        write_project_head(&refs_root, "test-proj", &hashes[4], &signer);
+        write_project_head(&refs_root, "fp:test-principal", "test-proj", &hashes[4], &signer);
 
         let policy = RetentionPolicy {
             manual_pushes: 0,
@@ -702,7 +725,7 @@ mod tests {
 
         // HEAD = snap20 (last element)
         let head_hash = &hashes[count - 1];
-        write_project_head(&refs_root, "scale-proj", head_hash, &signer);
+        write_project_head(&refs_root, "fp:test-principal", "scale-proj", head_hash, &signer);
 
         // Keep HEAD + 4 auto = 5 total, remove 15
         let policy = RetentionPolicy {
@@ -740,7 +763,7 @@ mod tests {
         write_object(&cas_root, &s4, &make_project_snapshot("i4", "fold_back", &[&s3]));
         write_object(&cas_root, &s5, &make_project_snapshot("i5", "fold_back", &[&s4]));
 
-        write_project_head(&refs_root, "integrity-proj", &s5, &signer);
+        write_project_head(&refs_root, "fp:test-principal", "integrity-proj", &s5, &signer);
 
         // Keep only HEAD + 1 auto = 2 total. Should remove s1, s2, s3.
         // s4 should rewrite its parent from s3 → (resolved through removed to root).
@@ -805,7 +828,7 @@ mod tests {
         write_object(&cas_root, &head_hash,
             &make_project_snapshot_with_time("HEAD", "fold_back", &[&a_hash, &b_hash], "2026-04-23T00:00:00Z"));
 
-        write_project_head(&refs_root, "merge-proj", &head_hash, &signer);
+        write_project_head(&refs_root, "fp:test-principal", "merge-proj", &head_hash, &signer);
 
         // Keep HEAD + 2 auto snapshots.
         // By created_at (newest first): HEAD(23rd), A(22nd), B(22nd), C(21st), D(21st), E(20th)
@@ -823,7 +846,7 @@ mod tests {
 
         // Verify A and B now point to E (not C/D)
         // Read the actual rewritten objects from CAS
-        let new_head = refs::read_project_head_ref(&refs_root, "merge-proj").unwrap().unwrap();
+        let new_head = refs::read_project_head_ref(&refs_root, "fp:test-principal", "merge-proj").unwrap().unwrap();
         let head_obj: serde_json::Value = {
             let path = lillux::shard_path(&cas_root, "objects", &new_head, ".json");
             let content = std::fs::read_to_string(&path).unwrap();
@@ -889,7 +912,7 @@ mod tests {
         write_object(&cas_root, &head_hash,
             &make_project_snapshot_with_time("head", "fold_back", &[&mid_old_hash], "2026-04-22T00:00:00Z"));
 
-        write_project_head(&refs_root, "time-proj", &head_hash, &signer);
+        write_project_head(&refs_root, "fp:test-principal", "time-proj", &head_hash, &signer);
 
         // Keep HEAD + 1 auto. By created_at newest: mid_new(23rd), head(22nd), old_root(21st), mid_old(20th)
         // HEAD always kept. Then auto_snapshots=1: mid_new (newest non-HEAD).
@@ -930,7 +953,7 @@ mod tests {
             "source": "fold_back",
         }));
 
-        write_project_head(&refs_root, "orphan-proj", &head_hash, &signer);
+        write_project_head(&refs_root, "fp:test-principal", "orphan-proj", &head_hash, &signer);
 
         let policy = RetentionPolicy::default();
 

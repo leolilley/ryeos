@@ -207,15 +207,35 @@ pub fn verify_signed_ref(signed_ref: &SignedRef, verifying_keys: &TrustStore) ->
 /// Trust store — map of fingerprint → public key.
 pub type TrustStore = std::collections::HashMap<String, lillux::crypto::VerifyingKey>;
 
-/// Write a project head ref. The project_hash should be derived from the project path
-/// (similar to how chain_root_id identifies chains).
+/// Canonical principal storage key — raw fingerprint hex, no `fp:` prefix.
+///
+/// Used for HEAD ref paths and any other per-principal filesystem keys.
+/// Panics if `principal_id` doesn't start with `fp:` — every caller in
+/// the daemon receives identity from `RoutePrincipal.id` which always
+/// uses the `fp:` prefix.
+pub fn principal_storage_key(principal_id: &str) -> &str {
+    principal_id
+        .strip_prefix("fp:")
+        .expect("principal_id must be in fp:<hex> format")
+}
+
+/// Write a project head ref scoped to a principal.
+///
+/// The ref path is `projects/<principal_key>/<project_hash>/head`, so
+/// different principals can push the same project path without colliding.
+///
+/// The `principal_key` should be the raw fingerprint hex (output of
+/// [`principal_storage_key`]). The `project_hash` is derived from the
+/// project path. The `project_snapshot_hash` is the CAS hash of the
+/// `ProjectSnapshot` this HEAD points to.
 pub fn write_project_head_ref(
     refs_root: &Path,
+    principal_key: &str,
     project_hash: &str,
     project_snapshot_hash: &str,
     signer: &dyn Signer,
 ) -> anyhow::Result<()> {
-    let ref_path = format!("projects/{}", project_hash);
+    let ref_path = format!("projects/{}/{}", principal_key, project_hash);
     let signed_ref = SignedRef::new(
         ref_path.clone(),
         project_snapshot_hash.to_string(),
@@ -226,12 +246,18 @@ pub fn write_project_head_ref(
     write_signed_ref(&path, signed_ref, signer)
 }
 
-/// Read a project head ref. Returns the target hash (project snapshot hash).
+/// Read a principal-scoped project head ref. Returns the target hash
+/// (project snapshot hash), or `None` if no HEAD exists for this
+/// principal + project combination.
 pub fn read_project_head_ref(
     refs_root: &Path,
+    principal_key: &str,
     project_hash: &str,
 ) -> anyhow::Result<Option<String>> {
-    let head_path = refs_root.join(format!("projects/{}", project_hash)).join("head");
+    let head_path = refs_root
+        .join(format!("projects/{}", principal_key))
+        .join(project_hash)
+        .join("head");
     if !head_path.exists() {
         return Ok(None);
     }
@@ -239,26 +265,37 @@ pub fn read_project_head_ref(
     Ok(Some(signed_ref.target_hash))
 }
 
-/// Advance a project head ref (CAS-first, with conflict detection).
-/// The `current_hash` must match the current head, or it fails.
-/// This is the project equivalent of advancing a chain head.
+/// Advance a project head ref with compare-and-swap.
+///
+/// `expected_current_hash` must match the current HEAD target, or the
+/// operation fails with a conflict error. On success, writes a new signed
+/// ref pointing at `new_snapshot_hash`.
+///
+/// This is the project equivalent of advancing a chain head. Use it in
+/// the fold-back path to prevent lost updates when multiple executions
+/// race on the same project.
 pub fn advance_project_head_ref(
     refs_root: &Path,
+    principal_key: &str,
     project_hash: &str,
     new_snapshot_hash: &str,
+    expected_current_hash: &str,
     signer: &dyn Signer,
 ) -> anyhow::Result<()> {
-    let current = read_project_head_ref(refs_root, project_hash)?
-        .ok_or_else(|| anyhow!("no project head ref for project {}", project_hash))?;
+    let current = read_project_head_ref(refs_root, principal_key, project_hash)?
+        .ok_or_else(|| anyhow!(
+            "no project head ref for principal/project {}/{}",
+            principal_key, project_hash
+        ))?;
 
-    if current != new_snapshot_hash {
+    if current != expected_current_hash {
         anyhow::bail!(
-            "project head conflict for project {}: expected {}, got {}",
-            project_hash, current, new_snapshot_hash
+            "project head conflict for principal/project {}/{}: expected {}, got {}",
+            principal_key, project_hash, expected_current_hash, current
         );
     }
 
-    write_project_head_ref(refs_root, project_hash, new_snapshot_hash, signer)
+    write_project_head_ref(refs_root, principal_key, project_hash, new_snapshot_hash, signer)
 }
 
 #[cfg(test)]
@@ -363,6 +400,17 @@ mod tests {
         r.signature = "should_be_excluded".to_string();
         let unsigned = r.without_signature();
         assert!(!unsigned.as_object().unwrap().contains_key("signature"));
+    }
+
+    #[test]
+    #[should_panic(expected = "principal_id must be in fp:<hex> format")]
+    fn principal_storage_key_rejects_bare_hex() {
+        super::principal_storage_key("abc123");
+    }
+
+    #[test]
+    fn principal_storage_key_strips_prefix() {
+        assert_eq!(super::principal_storage_key("fp:abc123"), "abc123");
     }
 
     #[test]

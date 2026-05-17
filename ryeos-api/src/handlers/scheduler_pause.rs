@@ -1,4 +1,6 @@
 //! `scheduler.pause` — disable a schedule without removing it.
+//!
+//! Ownership check: non-admin callers can only pause their own schedules.
 
 use std::sync::Arc;
 
@@ -9,18 +11,34 @@ use serde_json::Value;
 use ryeos_app::node_config::writer;
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
+use crate::handler_error::HandlerError;
+use crate::handlers::ownership::require_owner_or_admin;
 use ryeos_app::state::AppState;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub schedule_id: String,
+    /// Injected by service_invocation for ownership checks.
+    #[serde(default)]
+    pub _caller_fingerprint: String,
+    /// Injected by service_invocation for ownership checks.
+    #[serde(default)]
+    pub _caller_scopes: Vec<String>,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)?;
-    let spec = state.scheduler_db.get_spec(&req.schedule_id)?
-        .ok_or_else(|| anyhow::anyhow!("schedule not found: {}", req.schedule_id))?;
+pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, HandlerError> {
+    ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
+        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+    let spec = state.scheduler_db.get_spec(&req.schedule_id)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .ok_or(HandlerError::NotFound)?;
+
+    require_owner_or_admin(
+        Some(&spec.requester_fingerprint),
+        &req._caller_fingerprint,
+        &req._caller_scopes,
+    )?;
 
     if !spec.enabled {
         return Ok(serde_json::json!({
@@ -36,11 +54,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .join(format!("{}.yaml", req.schedule_id));
 
     let content = std::fs::read_to_string(&yaml_path)
-        .with_context(|| format!("read schedule YAML {}", yaml_path.display()))?;
+        .with_context(|| format!("read schedule YAML {}", yaml_path.display()))
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     // Strip signature, parse, modify, re-serialize
     let body_str = lillux::signature::strip_signature_lines(&content);
-    let mut body: serde_json::Value = serde_yaml::from_str(&body_str)?;
+    let mut body: serde_json::Value = serde_yaml::from_str(&body_str)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
     body["enabled"] = Value::Bool(false);
 
     writer::write_signed_node_item(
@@ -49,12 +69,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &req.schedule_id,
         &body,
         &state.identity,
-    )?;
+    ).map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     // Update projection — preserve registered_at (immutable anchor)
     let mut rec = spec;
     rec.enabled = false;
-    state.scheduler_db.upsert_spec(&rec)?;
+    state.scheduler_db.upsert_spec(&rec)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     // Ping timer loop
     if let Some(ref tx) = state.scheduler_reload_tx {
@@ -74,8 +95,8 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.scheduler/pause"],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
-            handle(req, state).await
+            let req: Request = crate::handler_error::parse_request(params)?;
+            handle(req, state).await.map_err(Into::into)
         })
     },
 };

@@ -4,7 +4,6 @@
 //! for the remote API surface: CAS operations, push-head, execute,
 //! public-key discovery, etc.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -13,6 +12,7 @@ use serde_json::Value;
 
 use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
+use ryeos_state::ignore::IgnoreConfig;
 
 /// Typed client for a remote ryEOS node.
 pub struct RemoteClient {
@@ -65,7 +65,7 @@ impl RemoteClient {
                 .as_str()
                 .context("missing fingerprint in /public-key response")?
                 .to_string(),
-            vault_public_key: body["vault_public_key"].as_str().map(String::from),
+            vault_fingerprint: body["vault_fingerprint"].as_str().map(String::from),
         })
     }
 
@@ -84,6 +84,27 @@ impl RemoteClient {
         Ok(body)
     }
 
+    /// GET /ingest-ignore (no auth required).
+    ///
+    /// Returns the remote node's ingest ignore config as a typed struct.
+    pub async fn get_ingest_ignore(&self) -> Result<IgnoreConfig> {
+        let url = format!("{}/ingest-ignore", self.base_url);
+        let resp = self.http.get(&url)
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to {}", url))?;
+        let status = resp.status();
+        let body: Value = resp.json().await
+            .with_context(|| format!("failed to parse /ingest-ignore response from {}", url))?;
+        if !status.is_success() {
+            anyhow::bail!("GET {} returned {}: {}", url, status, body);
+        }
+        // Server returns the IgnoreConfig as JSON (with `patterns` field)
+        let config: IgnoreConfig = serde_json::from_value(body)
+            .context("failed to parse /ingest-ignore response as IgnoreConfig")?;
+        Ok(config)
+    }
+
     /// POST /objects/has (authenticated).
     pub async fn objects_has(&self, hashes: &[String]) -> Result<ObjectsHasResponse> {
         let body = serde_json::json!({ "hashes": hashes });
@@ -99,14 +120,22 @@ impl RemoteClient {
     }
 
     /// POST /objects/put (authenticated).
+    ///
+    /// Blobs are base64-encoded raw bytes. Objects must be wrapped in
+    /// `{ "value": ... }` per the server's `ObjectEntry` schema.
     pub async fn objects_put(
         &self,
         blobs: &[BlobUpload],
         objects: &[Value],
     ) -> Result<ObjectsPutResponse> {
+        // Server expects objects as [{ "value": {...} }, ...]
+        let wrapped_objects: Vec<Value> = objects
+            .iter()
+            .map(|obj| serde_json::json!({ "value": obj }))
+            .collect();
         let body = serde_json::json!({
             "blobs": blobs,
-            "objects": objects,
+            "objects": wrapped_objects,
         });
         let resp = self.signed_post("/objects/put", &body).await?;
         Ok(ObjectsPutResponse {
@@ -120,9 +149,23 @@ impl RemoteClient {
     }
 
     /// POST /objects/get (authenticated).
-    pub async fn objects_get(&self, hashes: &[String]) -> Result<Value> {
+    ///
+    /// Server returns `{ "entries": [{ "hash": "...", "kind": "blob"|"object"|"missing", ... }] }`.
+    pub async fn objects_get(&self, hashes: &[String]) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({ "hashes": hashes });
-        self.signed_post("/objects/get", &body).await
+        let resp = self.signed_post("/objects/get", &body).await?;
+        let entries = resp.get("entries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| {
+                let hash = entry.get("hash")?.as_str()?.to_string();
+                let kind = entry.get("kind")?.as_str()?.to_string();
+                Some(CasEntry { hash, kind, data: entry.get("data").and_then(|v| v.as_str()).map(String::from), value: entry.get("value").cloned() })
+            })
+            .collect();
+        Ok(ObjectsGetResponse { entries })
     }
 
     /// POST /push-head (authenticated).
@@ -155,7 +198,101 @@ impl RemoteClient {
         self.signed_post("/execute", &body).await
     }
 
+    /// POST /authorize-key (authenticated).
+    ///
+    /// Authorize a public key on the remote node with the given
+    /// capabilities. The remote validates scope restrictions and
+    /// creates a node-signed authorized-key TOML.
+    pub async fn authorize_key(
+        &self,
+        public_key: &str,
+        label: &str,
+        scopes: &[String],
+    ) -> Result<AuthorizeKeyResponse> {
+        let body = serde_json::json!({
+            "public_key": public_key,
+            "label": label,
+            "scopes": scopes,
+        });
+        let resp = self.signed_post("/authorize-key", &body).await?;
+        Ok(AuthorizeKeyResponse {
+            fingerprint: resp["fingerprint"]
+                .as_str()
+                .context("missing fingerprint in authorize-key response")?
+                .to_string(),
+            label: resp["label"]
+                .as_str()
+                .context("missing label in authorize-key response")?
+                .to_string(),
+            scopes: resp["scopes"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            granted_by: resp["granted_by"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            created_at: resp["created_at"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    /// POST /vault/set (authenticated).
+    pub async fn vault_set(&self, name: &str, value: &str) -> Result<Value> {
+        let body = serde_json::json!({ "name": name, "value": value });
+        self.signed_post("/vault/set", &body).await
+    }
+
+    /// GET /vault/list (authenticated).
+    pub async fn vault_list(&self) -> Result<Value> {
+        self.signed_get("/vault/list").await
+    }
+
+    /// POST /vault/delete (authenticated).
+    pub async fn vault_delete(&self, name: &str) -> Result<Value> {
+        let body = serde_json::json!({ "name": name });
+        self.signed_post("/vault/delete", &body).await
+    }
+
+    /// GET /threads (authenticated) — list own threads on remote.
+    pub async fn threads_list(&self, limit: usize) -> Result<Value> {
+        self.signed_get(&format!("/threads?limit={}", limit)).await
+    }
+
+    /// GET /threads/{id} (authenticated) — get thread detail on remote.
+    pub async fn threads_get(&self, thread_id: &str) -> Result<Value> {
+        self.signed_get(&format!("/threads/{}", thread_id)).await
+    }
+
     // ── Internal ──────────────────────────────────────────────────
+
+    async fn signed_get(&self, path: &str) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, path);
+        // Sign with the full path+query — canonicalize_path inside
+        // sign_request will sort query params to match server-side.
+        let headers = self.sign_request("GET", path, &[])?;
+
+        let resp = self.http.get(&url)
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature)
+            .send()
+            .await
+            .with_context(|| format!("GET {} failed", url))?;
+
+        let status = resp.status();
+        let resp_body: Value = resp.json().await
+            .with_context(|| format!("failed to parse response from GET {}", url))?;
+
+        if !status.is_success() {
+            anyhow::bail!("GET {} returned {}: {}", url, status, resp_body);
+        }
+
+        Ok(resp_body)
+    }
 
     async fn signed_post(&self, path: &str, body: &Value) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
@@ -238,21 +375,21 @@ struct SignedHeaders {
 }
 
 /// Sort query parameters alphabetically and normalise the path.
-/// Matches `ryeosd/src/auth.rs::canonical_path`.
+/// Matches `ryeosd/src/auth.rs::canonical_path` — uses a Vec to
+/// preserve repeated keys, matching server canonicalization exactly.
 fn canonicalize_path(path_and_query: &str) -> String {
     if let Some((path, query)) = path_and_query.split_once('?') {
-        let mut params: BTreeMap<String, String> = BTreeMap::new();
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                params.insert(k.to_string(), v.to_string());
-            } else if !pair.is_empty() {
-                params.insert(pair.to_string(), String::new());
-            }
-        }
+        let mut params: Vec<(&str, &str)> = query
+            .split('&')
+            .filter_map(|pair| pair.split_once('=').or_else(|| {
+                if pair.is_empty() { None } else { Some((pair, "")) }
+            }))
+            .collect();
+        params.sort();
         let sorted: Vec<String> = params
-            .into_iter()
+            .iter()
             .map(|(k, v)| {
-                if v.is_empty() { k } else { format!("{k}={v}") }
+                if v.is_empty() { k.to_string() } else { format!("{k}={v}") }
             })
             .collect();
         format!("{}?{}", path, sorted.join("&"))
@@ -267,7 +404,7 @@ fn canonicalize_path(path_and_query: &str) -> String {
 pub struct PublicKeyResponse {
     pub principal_id: String,
     pub fingerprint: String,
-    pub vault_public_key: Option<String>,
+    pub vault_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +417,52 @@ pub struct ObjectsHasResponse {
 pub struct ObjectsPutResponse {
     pub blob_hashes: Vec<String>,
     pub object_hashes: Vec<String>,
+}
+
+/// A single entry from the `objects/get` response.
+#[derive(Debug, Clone)]
+pub struct CasEntry {
+    pub hash: String,
+    /// "blob", "object", or "missing".
+    pub kind: String,
+    /// Base64-encoded data (present when kind == "blob").
+    pub data: Option<String>,
+    /// JSON value (present when kind == "object").
+    pub value: Option<Value>,
+}
+
+/// Response from `objects/get`.
+#[derive(Debug, Clone)]
+pub struct ObjectsGetResponse {
+    pub entries: Vec<CasEntry>,
+}
+
+impl ObjectsGetResponse {
+    /// Find an entry by hash, returning its value (for objects) or
+    /// decoded blob data.
+    pub fn find_object(&self, hash: &str) -> Option<Value> {
+        self.entries.iter()
+            .find(|e| e.hash == hash && e.kind == "object")
+            .and_then(|e| e.value.clone())
+    }
+
+    /// Find a blob entry by hash, returning decoded bytes.
+    pub fn find_blob(&self, hash: &str) -> Option<Vec<u8>> {
+        use base64::Engine;
+        self.entries.iter()
+            .find(|e| e.hash == hash && e.kind == "blob")
+            .and_then(|e| e.data.as_ref())
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuthorizeKeyResponse {
+    pub fingerprint: String,
+    pub label: String,
+    pub scopes: Vec<String>,
+    pub granted_by: String,
+    pub created_at: String,
 }
 
 /// A blob to upload, with base64-encoded data.

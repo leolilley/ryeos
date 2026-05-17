@@ -39,7 +39,8 @@ pub struct Request {
     pub caller_fingerprint: Option<String>,
     /// Injected by execute_service_verified from ExecutionContext.
     /// The caller's capabilities — the schedule runs with only these.
-    #[serde(default, rename = "_caller_capabilities")]
+    /// Accepts both `_caller_scopes` (canonical) and `_caller_capabilities` (legacy alias).
+    #[serde(default, alias = "_caller_capabilities", rename = "_caller_scopes")]
     pub caller_capabilities: Option<Vec<String>>,
 }
 
@@ -74,6 +75,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Check if schedule already exists (for preserving registered_at on update)
     let existing_spec = state.scheduler_db.get_spec(&req.schedule_id)?;
+
+    // Ownership check on update: the caller must be the existing
+    // requester (or admin). On create, no ownership check needed —
+    // the caller becomes the owner.
+    if let Some(ref existing) = existing_spec {
+        let caller_fp = req.caller_fingerprint.as_deref().unwrap_or("");
+        let caller_caps = req.caller_capabilities.as_deref().unwrap_or(&[]);
+        crate::handlers::ownership::require_owner_or_admin(
+            Some(&existing.requester_fingerprint),
+            caller_fp,
+            caller_caps,
+        ).map_err(|e| -> anyhow::Error { e.into() })?;
+    }
 
     // Disallow schedule_id reuse if fire history exists from a previous schedule.
     // Prevents old JSONL from corrupting new schedule on rebuild.
@@ -140,7 +154,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // The service executor injects these from ExecutionContext before
     // dispatching the handler. Fail-closed: if injection didn't happen,
     // error out rather than silently degrading to node identity.
-    let requester_fingerprint = req.caller_fingerprint.clone()
+    let caller_fingerprint = req.caller_fingerprint.clone()
         .ok_or_else(|| anyhow::anyhow!(
             "scheduler.register requires verified caller context \
              (executor must inject _caller_fingerprint)"
@@ -149,8 +163,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .filter(|caps| !caps.is_empty())
         .ok_or_else(|| anyhow::anyhow!(
             "scheduler.register requires verified caller context \
-             with non-empty _caller_capabilities"
+             with non-empty _caller_scopes"
         ))?;
+
+    // On UPDATE, preserve the existing requester_fingerprint — only the
+    // original owner (or admin) can update, but the owner identity stays
+    // the same. On CREATE, the caller becomes the owner.
+    let requester_fingerprint = if let Some(ref existing) = existing_spec {
+        existing.requester_fingerprint.clone()
+    } else {
+        caller_fingerprint
+    };
 
     if let Some(ref p) = req.project_root {
         body["project_root"] = Value::String(p.clone());
@@ -249,7 +272,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.scheduler/register"],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
+            let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await
         })
     },

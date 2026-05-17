@@ -30,6 +30,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "name": req.remote,
         "principal_id": pubkey.principal_id,
         "fingerprint": pubkey.fingerprint,
+        "vault_fingerprint": pubkey.vault_fingerprint,
     }))
 }
 
@@ -40,7 +41,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.remote.status"],
     handler: |params, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)?;
+            let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, state).await
         })
     },

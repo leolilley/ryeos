@@ -597,6 +597,22 @@ impl ThreadLifecycleService {
         }))
     }
 
+    /// List threads with optional principal filtering.
+    ///
+    /// When `filter_principal` is `Some(fp)`, only threads with
+    /// `requested_by = fp` are returned. `None` returns all threads
+    /// (admin callers).
+    pub fn list_threads_filtered(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+    ) -> Result<Value> {
+        Ok(json!({
+            "threads": self.state_store.list_threads_filtered(limit, filter_principal)?,
+            "next_cursor": null,
+        }))
+    }
+
     pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {
         self.state_store.list_thread_children(thread_id)
     }

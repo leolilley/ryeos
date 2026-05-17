@@ -186,31 +186,44 @@ impl StateDb {
         Ok(result)
     }
 
-    // ── Project head refs ──────────────────────────────────────────
+    // ── Project head refs (principal-scoped) ──────────────────────
 
-    /// Read a project head ref. Returns the project snapshot hash.
-    pub fn read_project_head(&self, project_hash: &str) -> anyhow::Result<Option<String>> {
-        crate::refs::read_project_head_ref(&self.refs_root, project_hash)
+    /// Read a principal-scoped project head ref. Returns the project
+    /// snapshot hash, or `None` if no HEAD exists.
+    pub fn read_project_head(
+        &self,
+        principal_key: &str,
+        project_hash: &str,
+    ) -> anyhow::Result<Option<String>> {
+        crate::refs::read_project_head_ref(&self.refs_root, principal_key, project_hash)
     }
 
-    /// Write a project head ref.
+    /// Write a principal-scoped project head ref.
     pub fn write_project_head_ref(
         &self,
+        principal_key: &str,
         project_hash: &str,
         project_snapshot_hash: &str,
         signer: &dyn Signer,
     ) -> anyhow::Result<()> {
-        crate::refs::write_project_head_ref(&self.refs_root, project_hash, project_snapshot_hash, signer)
+        crate::refs::write_project_head_ref(
+            &self.refs_root, principal_key, project_hash, project_snapshot_hash, signer,
+        )
     }
 
-    /// Advance a project head ref (with conflict detection).
+    /// Advance a principal-scoped project head ref (compare-and-swap).
     pub fn advance_project_head_ref(
         &self,
+        principal_key: &str,
         project_hash: &str,
         new_snapshot_hash: &str,
+        expected_current_hash: &str,
         signer: &dyn Signer,
     ) -> anyhow::Result<()> {
-        crate::refs::advance_project_head_ref(&self.refs_root, project_hash, new_snapshot_hash, signer)
+        crate::refs::advance_project_head_ref(
+            &self.refs_root, principal_key, project_hash,
+            new_snapshot_hash, expected_current_hash, signer,
+        )
     }
 
     // ── Query helpers ──────────────────────────────────────────────

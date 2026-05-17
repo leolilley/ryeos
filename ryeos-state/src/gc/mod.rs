@@ -340,7 +340,7 @@ mod tests {
         }
 
         // Set HEAD to snap5
-        refs::write_project_head_ref(&refs_root, "victim-proj", &hashes[4], &signer).unwrap();
+        refs::write_project_head_ref(&refs_root, "fp:test-principal", "victim-proj", &hashes[4], &signer).unwrap();
 
         // Count objects before GC
         let count_before = count_objects(&cas_root);

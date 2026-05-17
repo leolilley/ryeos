@@ -127,6 +127,7 @@ pub struct ThreadListItem {
     pub launch_mode: String,
     pub current_site_id: String,
     pub origin_site_id: String,
+    pub requested_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -873,6 +874,41 @@ impl StateStore {
                 launch_mode: row.launch_mode,
                 current_site_id: row.current_site_id,
                 origin_site_id: row.origin_site_id,
+                requested_by: row.requested_by,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            })
+            .collect())
+    }
+
+    /// List threads with optional principal filtering.
+    ///
+    /// When `filter_principal` is `Some(fp)`, only threads with
+    /// `requested_by = fp` are returned. `None` returns all threads
+    /// (used by admin callers).
+    pub fn list_threads_filtered(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+    ) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows = queries::list_threads_filtered(
+            g.state_db.projection(),
+            limit,
+            filter_principal,
+        )?;
+        Ok(thread_rows
+            .into_iter()
+            .map(|row| ThreadListItem {
+                thread_id: row.thread_id,
+                chain_root_id: row.chain_root_id,
+                kind: row.kind,
+                status: row.status,
+                item_ref: row.item_ref,
+                launch_mode: row.launch_mode,
+                current_site_id: row.current_site_id,
+                origin_site_id: row.origin_site_id,
+                requested_by: row.requested_by,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             })

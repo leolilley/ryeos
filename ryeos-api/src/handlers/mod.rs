@@ -12,6 +12,7 @@
 
 use crate::registry::ServiceDescriptor;
 
+pub mod authorize_key;
 pub mod bundle_install;
 pub mod bundle_list;
 pub mod bundle_remove;
@@ -20,18 +21,26 @@ pub mod events_chain_replay;
 pub mod events_replay;
 pub mod health_status;
 pub mod identity_public_key;
+pub mod ingest_ignore;
 pub mod maintenance_gc;
 pub mod node_sign;
 pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
+pub mod ownership;
 pub mod push_head;
 pub mod rebuild;
+pub mod remote_authorize;
 pub mod remote_configure;
 pub mod remote_execute;
 pub mod remote_list;
 pub mod remote_push;
 pub mod remote_status;
+pub mod remote_thread_status;
+pub mod remote_threads;
+pub mod remote_vault_delete;
+pub mod remote_vault_list;
+pub mod remote_vault_set;
 pub mod scheduler_deregister;
 pub mod scheduler_list;
 pub mod scheduler_pause;
@@ -44,6 +53,9 @@ pub mod threads_chain;
 pub mod threads_children;
 pub mod threads_get;
 pub mod threads_list;
+pub mod vault_delete;
+pub mod vault_list;
+pub mod vault_set;
 
 pub(crate) fn default_list_limit() -> usize { 50 }
 pub(crate) fn default_replay_limit() -> usize { 200 }
@@ -52,6 +64,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     system_status::DESCRIPTOR,
+    ingest_ignore::DESCRIPTOR,
     objects_has::DESCRIPTOR,
     objects_put::DESCRIPTOR,
     objects_get::DESCRIPTOR,
@@ -70,6 +83,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     maintenance_gc::DESCRIPTOR,
     rebuild::DESCRIPTOR,
     node_sign::DESCRIPTOR,
+    authorize_key::DESCRIPTOR,
     scheduler_register::DESCRIPTOR,
     scheduler_deregister::DESCRIPTOR,
     scheduler_list::DESCRIPTOR,
@@ -81,4 +95,13 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_status::DESCRIPTOR,
     remote_push::DESCRIPTOR,
     remote_execute::DESCRIPTOR,
+    remote_authorize::DESCRIPTOR,
+    remote_threads::DESCRIPTOR,
+    remote_thread_status::DESCRIPTOR,
+    remote_vault_set::DESCRIPTOR,
+    remote_vault_list::DESCRIPTOR,
+    remote_vault_delete::DESCRIPTOR,
+    vault_set::DESCRIPTOR,
+    vault_list::DESCRIPTOR,
+    vault_delete::DESCRIPTOR,
 ];

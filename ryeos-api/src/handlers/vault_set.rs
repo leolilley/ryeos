@@ -1,0 +1,61 @@
+//! `vault/set` — set a secret on the node's vault.
+//!
+//! Server-side sealing: the daemon re-encrypts the store after inserting
+//! the new key. TLS protects the plaintext in transit.
+
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use ryeos_executor::executor::ServiceAvailability;
+use crate::registry::ServiceDescriptor;
+use crate::handler_error::{HandlerError, HandlerResult};
+use ryeos_app::state::AppState;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub _caller_fingerprint: String,
+    #[serde(default)]
+    pub _caller_scopes: Vec<String>,
+}
+
+pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+    state
+        .vault
+        .set_secret(&req._caller_fingerprint, &req.name, &req.value)
+        .map_err(|e| {
+            // Vault validation errors (key name, blocked names) are user
+            // errors → 400. Anything else is 500.
+            let msg = format!("{e:#}");
+            if msg.starts_with("vault: key name") {
+                HandlerError::BadRequest(msg)
+            } else {
+                HandlerError::Internal(msg)
+            }
+        })?;
+
+    let vault_fingerprint = state.vault_fingerprint.clone()
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "name": req.name,
+        "vault_fingerprint": vault_fingerprint,
+    }))
+}
+
+pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:vault/set",
+    endpoint: "vault.set",
+    availability: ServiceAvailability::Both,
+    required_caps: &["ryeos.execute.service.vault/set"],
+    handler: |params, state| {
+        Box::pin(async move {
+            let req: Request = crate::handler_error::parse_request(params)?;
+            handle(req, state).await.map_err(Into::into)
+        })
+    },
+};

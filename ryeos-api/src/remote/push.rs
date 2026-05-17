@@ -21,6 +21,10 @@ use ryeos_app::state::AppState;
 #[derive(Debug)]
 pub struct PushResult {
     pub snapshot_hash: String,
+    pub manifest_hash: String,
+    /// The exact pushed manifest — needed by pull_results() for
+    /// conflict detection (can't recompute later; workspace may drift).
+    pub manifest: SourceManifest,
     pub manifest_entries: usize,
     pub blobs_uploaded: usize,
     pub blobs_skipped: usize,
@@ -28,27 +32,36 @@ pub struct PushResult {
 
 /// Push a project directory to a remote node.
 ///
-/// 1. Apply ingest ignore rules
+/// 1. Apply the remote's ingest ignore rules (or fall back to local rules)
 /// 2. Ingest locally into CAS
 /// 3. Build manifest + snapshot
 /// 4. Check which blobs the remote already has
 /// 5. Upload missing blobs + manifest + snapshot
 /// 6. Call push-head to write the HEAD ref
+///
+/// The `remote_ignore` matcher is the **primary** ignore policy: the
+/// manifest is built using the remote's rules so that the pushed content
+/// matches what the remote would accept during ingest. If no remote rules
+/// are available, falls back to local `ignore`.
 pub async fn push_project(
     client: &RemoteClient,
     state: &Arc<AppState>,
     project_path: &Path,
     project_path_for_ref: &str,
     ignore: &IgnoreMatcher,
+    remote_ignore: Option<&IgnoreMatcher>,
 ) -> Result<PushResult> {
     let system_space_dir = &state.config.system_space_dir;
 
-    // 1. Ingest project directory into local CAS
-    let local_cas_root = system_space_dir.join("state").join("objects");
+    // 1. Ingest project directory into local CAS using remote's ignore
+    //    rules (preferred) or local rules (fallback).
+    let local_cas_root = system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects");
     let local_cas = CasStore::new(local_cas_root.clone());
 
+    let effective_ignore: &IgnoreMatcher = remote_ignore.unwrap_or(ignore);
+
     let mut items: HashMap<String, String> = HashMap::new();
-    ingest_for_push(&local_cas, &local_cas_root, project_path, project_path, &mut items, ignore)?;
+    ingest_for_push(&local_cas, &local_cas_root, project_path, project_path, &mut items, effective_ignore)?;
 
     // 2. Build manifest
     let manifest = SourceManifest { item_source_hashes: items };
@@ -112,9 +125,12 @@ pub async fn push_project(
     // 7. Call push-head
     client.push_head(project_path_for_ref, &snapshot_hash).await?;
 
+    let manifest_entries = manifest.item_source_hashes.len();
     Ok(PushResult {
         snapshot_hash,
-        manifest_entries: manifest.item_source_hashes.len(),
+        manifest_hash,
+        manifest,
+        manifest_entries,
         blobs_uploaded,
         blobs_skipped,
     })
