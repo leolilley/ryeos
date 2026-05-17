@@ -170,9 +170,10 @@ impl ThreadLifecycleService {
         _events: Arc<EventStoreService>,
     ) -> anyhow::Result<Self> {
         let hostname = env::var("HOSTNAME")
+            .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
             .map_err(|_| anyhow::anyhow!(
-                "required environment variable HOSTNAME is not set. \
-                 Set it to this node's identity (e.g. hostname or unique site ID). \
+                "HOSTNAME env var not set and system hostname unavailable. \
+                 Set HOSTNAME to this node's identity (e.g. hostname or unique site ID). \
                  This is used to construct the site_id for thread isolation."
             ))?;
         if hostname.trim().is_empty() {

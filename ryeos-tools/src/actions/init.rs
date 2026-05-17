@@ -304,6 +304,25 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
+    // ── 8b. Default ingest ignore config ──
+    let ignore_dir = opts.system_space_dir.join("node").join("ingest");
+    let ignore_path = ignore_dir.join("ignore.yaml");
+    if !ignore_path.exists() {
+        fs::create_dir_all(&ignore_dir).with_context(|| {
+            format!("create ingest dir {}", ignore_dir.display())
+        })?;
+        let builtin = ryeos_app::ignore::builtin_patterns();
+        let patterns_yaml = builtin
+            .iter()
+            .map(|p| format!("  - {:?}", p))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("patterns:\n{}\n", patterns_yaml);
+        fs::write(&ignore_path, content).with_context(|| {
+            format!("write ignore config {}", ignore_path.display())
+        })?;
+    }
+
     // ── 9. Post-init trust verification ──
     let post_trust = TrustStore::load_three_tier(
         None,

@@ -33,6 +33,7 @@ lillux = { path = "../lillux" }
 
 ryeos-vault = { path = "../ryeos-vault" }
 ryeos-bundle = { path = "../ryeos-bundle" }
+ryeos-app = { path = "../ryeos-app" }
 
 [dev-dependencies]
 tempfile = "3"
