@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-17T21:57:14Z:2d4e15f42df34f39e4091ff3c140de165041975774e39044e156a4c5aba17cb0:DZ5w9xAuJCYUQOT3K9iy6Wm3xYLIG6gZweV3kKtjYYeYYE40Wzw0hce1nxkCs3Y8Fn2KazYnkRihrKwNh+gQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-17T21:59:53Z:2d4e15f42df34f39e4091ff3c140de165041975774e39044e156a4c5aba17cb0:DZ5w9xAuJCYUQOT3K9iy6Wm3xYLIG6gZweV3kKtjYYeYYE40Wzw0hce1nxkCs3Y8Fn2KazYnkRihrKwNh+gQAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, knowledge, composition, context]
 version: "1.0.0"
