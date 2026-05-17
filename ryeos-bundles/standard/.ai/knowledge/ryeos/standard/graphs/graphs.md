@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-17T12:20:01Z:71ed6b3e3db243f86c0f4580a0449c5722f672ef55af64360de97fb1f409721a:m3ntH6IxGEzVCznCKPmV+dAQ8DbQkIouPhVDV4tItYye3hGTJG6pZO7EKW0KxffaiEQXe6ROWSSOkl2lXthzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-17T21:27:51Z:71ed6b3e3db243f86c0f4580a0449c5722f672ef55af64360de97fb1f409721a:m3ntH6IxGEzVCznCKPmV+dAQ8DbQkIouPhVDV4tItYye3hGTJG6pZO7EKW0KxffaiEQXe6ROWSSOkl2lXthzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
