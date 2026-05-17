@@ -78,10 +78,8 @@ composed_value_contract:
 metadata:
   rules:
     name:
-      from: path
-      key: name
+      from: filename
       required: true
-      match: filename
     version:
       from: path
       key: version
@@ -89,10 +87,8 @@ metadata:
       from: path
       key: description
     category:
-      from: path
-      key: category
+      from: relative_dir
       required: true
-      match: path
     required_secrets:
       from: path_string_seq
       key: required_secrets
