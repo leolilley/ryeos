@@ -36,6 +36,11 @@ impl RemoteClient {
         }
     }
 
+    /// The base URL this client talks to.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Build a client from a named remote config + app state.
     pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
         let remotes = super::config::load_remotes(&state.config.system_space_dir)?;
@@ -65,7 +70,10 @@ impl RemoteClient {
                 .as_str()
                 .context("missing fingerprint in /public-key response")?
                 .to_string(),
-            vault_fingerprint: body["vault_fingerprint"].as_str().map(String::from),
+            vault_fingerprint: body["vault_fingerprint"]
+                .as_str()
+                .context("missing vault_fingerprint in /public-key response")?
+                .to_string(),
         })
     }
 
@@ -404,7 +412,7 @@ fn canonicalize_path(path_and_query: &str) -> String {
 pub struct PublicKeyResponse {
     pub principal_id: String,
     pub fingerprint: String,
-    pub vault_fingerprint: Option<String>,
+    pub vault_fingerprint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -517,6 +525,22 @@ mod tests {
         assert_eq!(
             canonicalize_path("/path?flag&other=val"),
             "/path?flag&other=val"
+        );
+    }
+
+    #[test]
+    fn signed_get_canonicalization_matches_server_repeated_keys() {
+        // The canonicalization for signing must match the server's
+        // auth.rs canonicalization. This test verifies that repeated
+        // keys (like hashes=abc&hashes=def) are preserved in order
+        // but sorted as pairs, and the full canonical string is
+        // deterministic.
+        let path_with_repeats = "/objects/get?hashes=def&hashes=abc&hashes=ghi";
+        let canonical = canonicalize_path(path_with_repeats);
+        // Sorted by key, then value:
+        assert_eq!(
+            canonical,
+            "/objects/get?hashes=abc&hashes=def&hashes=ghi"
         );
     }
 }

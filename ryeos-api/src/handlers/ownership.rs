@@ -114,4 +114,23 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, HandlerError::NotFound));
     }
+
+    #[test]
+    fn scheduler_non_owner_returns_not_found_not_forbidden() {
+        // Simulate the exact path scheduler_register takes: ownership
+        // check fails → HandlerError::NotFound (never 403).
+        let owner = "fp:original_owner";
+        let caller = "fp:attacker";
+        let caller_scopes = vec!["ryeos.execute.service.scheduler/register".to_string()];
+
+        let err = require_owner_or_admin(Some(owner), caller, &caller_scopes).unwrap_err();
+        match err {
+            HandlerError::NotFound => {} // correct — does not leak existence
+            HandlerError::Forbidden(msg) => panic!(
+                "ownership denial should be NotFound, got Forbidden({msg}) — \
+                 this would leak resource existence"
+            ),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
 }

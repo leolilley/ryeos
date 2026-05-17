@@ -21,13 +21,12 @@ pub struct RemoteConfig {
     /// Pinned principal_id of the remote node (from `/public-key`).
     pub principal_id: String,
     /// Remote node's vault X25519 public key fingerprint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault_fingerprint: Option<String>,
+    /// Required — populated during `remote configure`.
+    pub vault_fingerprint: String,
     /// Cached remote ingest-ignore config, populated during
-    /// `remote configure`. Used by `remote push` to match the
-    /// remote's ignore rules instead of the local ones.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingest_ignore: Option<ryeos_app::ignore::IgnoreConfig>,
+    /// `remote configure`. Required for push to use the correct
+    /// ignore rules. Re-run `remote configure` if stale.
+    pub ingest_ignore: ryeos_app::ignore::IgnoreConfig,
 }
 
 /// Full remotes file.
@@ -126,12 +125,32 @@ mod tests {
             name: "default".into(),
             url: "https://example.com".into(),
             principal_id: "fp:abc123".into(),
-            vault_fingerprint: None,
-            ingest_ignore: None,
+            vault_fingerprint: "sha256:def456".into(),
+            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![".git/".into(), "target/".into()] },
         });
         save_remotes(tmpdir.path(), &remotes).unwrap();
         let loaded = load_remotes(tmpdir.path()).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded["default"].url, "https://example.com");
+        assert_eq!(loaded["default"].vault_fingerprint, "sha256:def456");
+        assert_eq!(loaded["default"].ingest_ignore.patterns.len(), 2);
+    }
+
+    #[test]
+    fn config_without_required_fields_fails_to_parse() {
+        // A remotes.yaml missing vault_fingerprint or ingest_ignore
+        // should fail to parse — no tolerance for incomplete configs.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join(".ai/config/remotes/remotes.yaml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"
+remotes:
+  bare:
+    name: bare
+    url: https://example.com
+    principal_id: fp:abc
+"#).unwrap();
+        let result = load_remotes(tmpdir.path());
+        assert!(result.is_err(), "should fail on missing required fields, got {:?}", result);
     }
 }

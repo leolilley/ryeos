@@ -39,8 +39,7 @@ pub struct Request {
     pub caller_fingerprint: Option<String>,
     /// Injected by execute_service_verified from ExecutionContext.
     /// The caller's capabilities — the schedule runs with only these.
-    /// Accepts both `_caller_scopes` (canonical) and `_caller_capabilities` (legacy alias).
-    #[serde(default, alias = "_caller_capabilities", rename = "_caller_scopes")]
+    #[serde(default, rename = "_caller_scopes")]
     pub caller_capabilities: Option<Vec<String>>,
 }
 

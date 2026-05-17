@@ -32,36 +32,32 @@ pub struct PushResult {
 
 /// Push a project directory to a remote node.
 ///
-/// 1. Apply the remote's ingest ignore rules (or fall back to local rules)
+/// 1. Apply the remote's ingest ignore rules to build the manifest
 /// 2. Ingest locally into CAS
 /// 3. Build manifest + snapshot
 /// 4. Check which blobs the remote already has
 /// 5. Upload missing blobs + manifest + snapshot
 /// 6. Call push-head to write the HEAD ref
 ///
-/// The `remote_ignore` matcher is the **primary** ignore policy: the
+/// The `remote_ignore` matcher is the **only** ignore policy used: the
 /// manifest is built using the remote's rules so that the pushed content
-/// matches what the remote would accept during ingest. If no remote rules
-/// are available, falls back to local `ignore`.
+/// matches what the remote would accept during ingest. Callers must
+/// resolve ignore rules before calling this function.
 pub async fn push_project(
     client: &RemoteClient,
     state: &Arc<AppState>,
     project_path: &Path,
     project_path_for_ref: &str,
-    ignore: &IgnoreMatcher,
-    remote_ignore: Option<&IgnoreMatcher>,
+    remote_ignore: &IgnoreMatcher,
 ) -> Result<PushResult> {
     let system_space_dir = &state.config.system_space_dir;
 
-    // 1. Ingest project directory into local CAS using remote's ignore
-    //    rules (preferred) or local rules (fallback).
+    // 1. Ingest project directory into local CAS using remote's ignore rules.
     let local_cas_root = system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects");
     let local_cas = CasStore::new(local_cas_root.clone());
 
-    let effective_ignore: &IgnoreMatcher = remote_ignore.unwrap_or(ignore);
-
     let mut items: HashMap<String, String> = HashMap::new();
-    ingest_for_push(&local_cas, &local_cas_root, project_path, project_path, &mut items, effective_ignore)?;
+    ingest_for_push(&local_cas, &local_cas_root, project_path, project_path, &mut items, remote_ignore)?;
 
     // 2. Build manifest
     let manifest = SourceManifest { item_source_hashes: items };

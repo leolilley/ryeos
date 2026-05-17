@@ -27,15 +27,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let client = RemoteClient::new(&req.url, "", state.identity.clone());
     let pubkey = client.get_public_key().await?;
 
-    // Fetch the remote's ingest-ignore rules for local caching
-    let ingest_ignore = client.get_ingest_ignore().await.ok();
+    // Fetch the remote's ingest-ignore rules — required for push to work
+    // correctly. Fail hard if unavailable.
+    let ingest_ignore = client.get_ingest_ignore().await?;
 
     let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
+    let vault_fp = pubkey.vault_fingerprint.clone();
     remotes.insert(req.name.clone(), config::RemoteConfig {
         name: req.name.clone(),
         url: req.url.clone(),
         principal_id: pubkey.principal_id.clone(),
-        vault_fingerprint: pubkey.vault_fingerprint.clone(),
+        vault_fingerprint: pubkey.vault_fingerprint,
         ingest_ignore,
     });
     config::save_remotes(&state.config.system_space_dir, &remotes)?;
@@ -45,7 +47,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "url": req.url,
         "principal_id": pubkey.principal_id,
         "fingerprint": pubkey.fingerprint,
-        "vault_fingerprint": pubkey.vault_fingerprint,
+        "vault_fingerprint": vault_fp,
     }))
 }
 

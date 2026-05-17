@@ -132,15 +132,6 @@ fn compile_service_invoker_inner(
     }))
 }
 
-/// Backward-compatible alias — route code that calls `compile_service_invoker`
-/// still works, but prefer `compile_canonical_ref_invoker` for new code.
-pub fn compile_service_invoker(
-    source_ref: &str,
-    route_id: &str,
-) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-    compile_canonical_ref_invoker(source_ref, route_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,13 +261,4 @@ mod tests {
         assert!(msg.contains("no service descriptor found"), "got: {msg}");
     }
 
-    #[test]
-    fn backward_compat_alias_still_works() {
-        // compile_service_invoker is a thin wrapper now.
-        let invoker = compile_service_invoker("service:system/status", "r1").unwrap();
-        assert!(matches!(
-            invoker.contract().output,
-            crate::routes::invocation::RouteInvocationOutput::Json
-        ));
-    }
 }

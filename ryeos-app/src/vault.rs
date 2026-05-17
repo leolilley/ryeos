@@ -793,4 +793,51 @@ mod tests {
         assert_eq!(all.get("KEY"), Some(&"new".to_string()));
         assert_eq!(all.len(), 1, "should have exactly one key");
     }
+
+    // ── Remote vault E2E simulation ──
+    // Tests the vault handler contract (set → list → delete → list)
+    // against a real SealedEnvelopeVault. The vault_set / vault_list /
+    // vault_delete handlers delegate to these same trait methods.
+
+    #[test]
+    fn vault_handler_e2e_set_list_delete_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let vault = SealedEnvelopeVault::new(store_path, sk);
+
+        // Simulate vault_set("API_KEY", "sk-secret-123")
+        vault.set_secret("caller", "API_KEY", "sk-secret-123").unwrap();
+        // Simulate vault_set("DB_URL", "postgres://localhost/db")
+        vault.set_secret("caller", "DB_URL", "postgres://localhost/db").unwrap();
+
+        // Simulate vault_list
+        let mut keys = vault.list_keys("caller").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["API_KEY", "DB_URL"]);
+
+        // Simulate vault_set overwriting (handler returns vault_fingerprint)
+        vault.set_secret("caller", "API_KEY", "sk-new-key").unwrap();
+
+        // Verify overwrite
+        let all = vault.read_all("caller").unwrap();
+        assert_eq!(all.get("API_KEY"), Some(&"sk-new-key".to_string()));
+        assert_eq!(all.len(), 2);
+
+        // Simulate vault_delete
+        let deleted = vault.delete_secret("caller", "API_KEY").unwrap();
+        assert!(deleted);
+
+        // Verify deleted
+        let keys = vault.list_keys("caller").unwrap();
+        assert_eq!(keys, vec!["DB_URL"]);
+
+        // Simulate vault_delete with invalid name (handler returns 400)
+        let err = vault.delete_secret("caller", "bad-key").unwrap_err();
+        assert!(format!("{err:#}").contains("key name"));
+
+        // Simulate vault_set with blocked name (handler returns 400)
+        let err = vault.set_secret("caller", "PATH", "/evil").unwrap_err();
+        assert!(format!("{err:#}").contains("blocked"));
+    }
 }

@@ -376,18 +376,26 @@ fn apply_with_rollback(
 }
 
 /// Roll back applied writes and deletes by restoring from backup.
+///
+/// For files that had a backup (existed before apply), the backup is
+/// restored over the live path. For files that had **no** backup (new
+/// files created during apply), the live path is **removed** entirely.
 fn rollback_writes_and_deletes(
     applied_writes: &[String],
     applied_deletes: &[String],
     backup_dir: &Path,
     local_project_root: &Path,
 ) {
-    // Restore backed-up files for writes (overwrites the partial new content).
+    // Undo writes: restore backup if it exists, otherwise remove the
+    // newly-created file.
     for rel_path in applied_writes {
         let backup_path = backup_dir.join(rel_path);
         let live_path = local_project_root.join(rel_path);
         if backup_path.exists() {
             let _ = std::fs::copy(&backup_path, &live_path);
+        } else {
+            // This was a new file — remove it to restore pre-apply state.
+            let _ = std::fs::remove_file(&live_path);
         }
     }
     // Restore deleted files from backup.
@@ -688,5 +696,65 @@ mod tests {
     fn extract_snapshot_hash_missing() {
         let v = serde_json::json!({ "other": "data" });
         assert!(extract_snapshot_hash(&v).is_none());
+    }
+
+    // ── R4-1: Mid-swap rollback removes newly-created files ──
+
+    #[test]
+    fn rollback_removes_new_files_not_in_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let backup_dir = tmp.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        // Simulate: a.txt existed before (has backup), new.txt was
+        // newly created (no backup). Rollback should restore a.txt
+        // and DELETE new.txt.
+        std::fs::write(project_root.join("a.txt"), "new content").unwrap();
+        std::fs::write(backup_dir.join("a.txt"), "original content").unwrap();
+        std::fs::write(project_root.join("new.txt"), "brand new").unwrap();
+        // No backup for new.txt — it was created during apply.
+
+        rollback_writes_and_deletes(
+            &["a.txt".into(), "new.txt".into()],
+            &[],
+            &backup_dir,
+            project_root,
+        );
+
+        // a.txt restored from backup
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("a.txt")).unwrap(),
+            "original content"
+        );
+        // new.txt removed — it didn't exist before apply
+        assert!(
+            !project_root.join("new.txt").exists(),
+            "new.txt should have been removed by rollback"
+        );
+    }
+
+    #[test]
+    fn rollback_restores_deleted_files_from_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let backup_dir = tmp.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        // Simulate: b.txt was deleted during apply (file removed, backup exists)
+        std::fs::write(backup_dir.join("b.txt"), "resurrected").unwrap();
+        // b.txt does NOT exist in project_root (was deleted)
+
+        rollback_writes_and_deletes(
+            &[],
+            &["b.txt".into()],
+            &backup_dir,
+            project_root,
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("b.txt")).unwrap(),
+            "resurrected"
+        );
     }
 }

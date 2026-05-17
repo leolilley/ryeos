@@ -57,32 +57,38 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             .join(&project_path)
     };
 
-    // Load remote's cached ignore rules (if configured)
+    // Load remote's cached ignore rules (required — remote configure always
+    // populates them). Inline fetch on cache miss, persisting for future use.
     let remotes = config::load_remotes(&state.config.system_space_dir)
         .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
-    let remote_ignore = match remote_cfg.as_ref().and_then(|c| c.ingest_ignore.as_ref()) {
-        Some(ic) => Some(IgnoreMatcher::from_config(ic)
-            .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?),
+    let remote_ignore = match remote_cfg {
+        Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)
+            .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?,
         None => {
-            // Cache miss — fetch inline from remote. Fail closed: if the
-            // remote is unreachable or returns an error, abort the operation
-            // rather than silently falling back to local ignore rules.
+            // No config at all — fetch inline and persist.
             let fetched = client.get_ingest_ignore().await
                 .map_err(|e| HandlerError::Internal(format!(
-                    "no cached ingest-ignore rules for remote '{}' and inline fetch failed: {e:#} \
-                     — run `ryeos remote configure --name {}` first, or ensure the remote is reachable",
+                    "no remote config for '{}' and inline fetch failed: {e:#} \
+                     — run `ryeos remote configure --name {}` first",
                     req.remote, req.remote
                 )))?;
-            // Persist the fetched rules back to remotes.yaml for future pushes.
-            if let Ok(mut mutable_remotes) = config::load_remotes(&state.config.system_space_dir) {
-                if let Some(remote_entry) = mutable_remotes.get_mut(&req.remote) {
-                    remote_entry.ingest_ignore = Some(fetched.clone());
-                    let _ = config::save_remotes(&state.config.system_space_dir, &mutable_remotes);
-                }
-            }
-            Some(IgnoreMatcher::from_config(&fetched)
-                .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?)
+            let _ = (|| -> Result<(), HandlerError> {
+                let mut remotes = config::load_remotes(&state.config.system_space_dir)
+                    .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+                remotes.insert(req.remote.clone(), config::RemoteConfig {
+                    name: req.remote.clone(),
+                    url: client.base_url().to_string(),
+                    principal_id: String::new(),
+                    vault_fingerprint: String::new(),
+                    ingest_ignore: fetched.clone(),
+                });
+                config::save_remotes(&state.config.system_space_dir, &remotes)
+                    .map_err(|e| HandlerError::Internal(format!("save remotes: {e:#}")))?;
+                Ok(())
+            })();
+            IgnoreMatcher::from_config(&fetched)
+                .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?
         }
     };
 
@@ -92,8 +98,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         &state,
         &abs_project_path,
         &req.project_path,
-        &state.ignore_matcher,
-        remote_ignore.as_ref(),
+        &remote_ignore,
     )
     .await
     .map_err(|e| HandlerError::Internal(format!("push failed: {e:#}")))?;

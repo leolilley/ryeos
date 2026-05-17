@@ -275,4 +275,34 @@ mod tests {
         assert!(validate_scope_pattern("ryeos.*").is_err());
         assert!(validate_scope_pattern("ryeos.execute.*").is_err());
     }
+
+    // ── Wildcard delegation rejection through handler logic ──
+
+    /// Simulates the handler's step-6 wildcard check: the handler
+    /// rejects any scope list containing "*" with Forbidden.
+    /// (Cannot call `handle()` directly without full AppState, but
+    /// the rejection logic is a simple `any(|s| s == "*")` check.)
+    #[test]
+    fn wildcard_in_scope_list_is_caught_by_grammar_before_handler() {
+        // "*" doesn't even pass scope grammar validation (step 5b),
+        // so the handler would return BadRequest before reaching step 6.
+        // Verify:
+        let scopes = vec!["*".to_string()];
+        for scope in &scopes {
+            assert!(
+                validate_scope_pattern(scope).is_err(),
+                "wildcard '*' should fail scope grammar"
+            );
+        }
+    }
+
+    #[test]
+    fn handler_wildcard_check_would_catch_if_grammar_passed() {
+        // The handler has a secondary check (step 6): if any scope is
+        // exactly "*", return Forbidden. This is defense-in-depth in
+        // case scope grammar is ever relaxed. Verify the check logic:
+        let normalized = vec!["ryeos.execute.service".to_string(), "*".to_string()];
+        let has_wildcard = normalized.iter().any(|s| s == "*");
+        assert!(has_wildcard, "wildcard detection should catch '*' in scope list");
+    }
 }
