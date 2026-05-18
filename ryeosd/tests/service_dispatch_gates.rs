@@ -38,19 +38,28 @@ fn workspace_root() -> PathBuf {
 
 /// Build an engine-like fixture using the live bundle + trusted signers.
 /// Mirrors `engine_init::build_engine` but uses the test fixture trust store
-/// instead of the daemon's three-tier loader.
+/// instead of the daemon's three-tier loader. Loads both core and standard
+/// bundles so all services in the descriptor table can resolve.
 fn build_test_engine() -> ryeos_engine::engine::Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
 
     let workspace = workspace_root();
-    let kinds_dir = workspace.join("ryeos-bundles/core/.ai/node/engine/kinds");
-    let kinds =
-        KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust_store).expect("load kind registry");
+    let core_bundle = workspace.join("ryeos-bundles/core");
+    let std_bundle = workspace.join("ryeos-bundles/standard");
 
-    let bundle_root = workspace.join("ryeos-bundles/core");
+    // Kind schemas from both bundles (core has service/tool/parser/etc,
+    // standard has directive/graph/knowledge).
+    let kinds_dirs = vec![
+        core_bundle.join(".ai/node/engine/kinds"),
+        std_bundle.join(".ai/node/engine/kinds"),
+    ];
+    let kinds = KindRegistry::load_base(&kinds_dirs, &trust_store).expect("load kind registry");
+
+    // Parser tools from both bundles.
+    let bundle_roots: Vec<PathBuf> = vec![core_bundle.clone(), std_bundle];
     let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        std::slice::from_ref(&bundle_root),
+        &bundle_roots,
         &trust_store,
         &kinds,
     )
@@ -70,7 +79,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
         kinds,
         parser_dispatcher,
         None,
-        vec![bundle_root],
+        bundle_roots,
     )
     .with_trust_store(trust_store)
     .with_composers(composers)
@@ -310,18 +319,15 @@ fn gate_service_kind_in_bundle() {
     );
 }
 
-/// Gate 7: Service descriptor table has exactly 14 entries.
+/// Gate 7: Service descriptor table size regression guard.
 ///
-/// Was 17 prior to the service→tool conversion of `fetch`,
-/// `verify`, and `identity/public_key`. Each of those is now an
-/// external tool (`tool:ryeos/core/...`) invoked via `bin:ryos-core-tools`,
-/// not an in-process daemon handler.
+/// Update this count when adding or removing service handlers.
 #[test]
 fn gate_service_count_matches_expected() {
     let services = service_refs();
     assert_eq!(
         services.len(),
-        14,
-        "service descriptor table count drifted from expected 14"
+        46,
+        "service descriptor table count drifted from expected 46"
     );
 }
