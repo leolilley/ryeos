@@ -277,6 +277,10 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     let fixture =
         common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
             .expect("fast fixture populate");
+    common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
+        .expect("register core bundle");
+    common::fast_fixture::register_standard_bundle(&state_path, &fixture)
+        .expect("register standard bundle");
 
     install_runtime(
         user_space.path(),

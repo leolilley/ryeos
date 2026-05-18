@@ -467,8 +467,14 @@ impl DaemonHarness {
     /// [`fast_fixture::FastFixture`] keys so callers can sign their own
     /// items (directives, routes, providers, …) with
     /// `fixture.publisher`.
-    pub async fn start_fast() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
-        Self::start_fast_with(|_, _, _| Ok(()), |_| {}).await
+     pub async fn start_fast() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+        Self::start_fast_with(
+            |state_path, _user_space, fixture| {
+                fast_fixture::register_standard_bundle(state_path, fixture)
+            },
+            |_| {},
+        )
+        .await
     }
 
     /// Like [`start_fast`] but with two hooks:
@@ -477,6 +483,10 @@ impl DaemonHarness {
     ///   `(state_path, user_space, &FastFixture)` — sign and place
     ///   bundle/directive/route content with `fixture.publisher`.
     /// * `tweak`: mutates the `Command` (env, args, …) before spawn.
+    ///
+    /// Note: only the core bundle is registered. Call
+    /// `register_standard_bundle(state_path, fixture)` from your `plant`
+    /// closure if the test needs standard bundle services/runtimes.
     pub async fn start_fast_with<S, F>(
         plant: S,
         tweak: F,
@@ -497,7 +507,6 @@ impl DaemonHarness {
         // that need additional bundles call `register_standard_bundle` from
         // their `plant` hook.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
-        fast_fixture::register_standard_bundle(&state_path, &fixture)?;
         plant(&state_path, user_space.path(), &fixture)?;
 
         // Always authorize the user key so `post_execute` can sign requests.

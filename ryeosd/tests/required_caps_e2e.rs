@@ -26,13 +26,15 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
 
     let workspace = workspace_root();
-    let kinds_dir = workspace.join("ryeos-bundles/core/.ai/node/engine/kinds");
+    let core_kinds = workspace.join("ryeos-bundles/core/.ai/node/engine/kinds");
+    let std_kinds = workspace.join("ryeos-bundles/standard/.ai/node/engine/kinds");
     let kinds =
-        KindRegistry::load_base(std::slice::from_ref(&kinds_dir), &trust_store).expect("load kind registry");
+        KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store).expect("load kind registry");
 
-    let bundle_root = workspace.join("ryeos-bundles/core");
+    let core_root = workspace.join("ryeos-bundles/core");
+    let std_root = workspace.join("ryeos-bundles/standard");
     let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        std::slice::from_ref(&bundle_root),
+        &[core_root.clone(), std_root.clone()],
         &trust_store,
         &kinds,
     )
@@ -52,7 +54,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
         kinds,
         parser_dispatcher,
         None,
-        vec![bundle_root],
+        vec![core_root, std_root],
     )
     .with_trust_store(trust_store)
     .with_composers(composers)
