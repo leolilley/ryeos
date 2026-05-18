@@ -24,6 +24,7 @@ use std::path::Path;
 
 use base64::Engine;
 use common::DaemonHarness;
+use common::fast_fixture::register_standard_bundle;
 use lillux::crypto::Signer as _;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -228,7 +229,10 @@ async fn native_synth_request(
     extras: serde_json::Value,
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let (h, _fixture) = DaemonHarness::start_fast_with(
-        |state_path, user_space, _fixture| install_pin_runtime(state_path, user_space),
+        |state_path, user_space, fixture| {
+            register_standard_bundle(state_path, fixture)?;
+            install_pin_runtime(state_path, user_space)
+        },
         |_| {},
     )
     .await
