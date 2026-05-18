@@ -609,13 +609,21 @@ async fn resume_missing_secret_after_daemon_restart() {
         "parameters": {},
         "launch_mode": "detached",
     });
-    let resp = reqwest::Client::new()
+    let body_bytes = serde_json::to_vec(&body).expect("serialize body");
+    let user_key = h.user_key.as_ref().expect("fast fixture user key");
+    let node_key = h.node_key.as_ref().expect("fast fixture node key");
+    let signed_headers = common::build_signed_headers_for_bytes(
+        user_key, node_key, "POST", "/execute", &body_bytes,
+    );
+    let mut req = reqwest::Client::new()
         .post(format!("http://{}/execute", h.bind))
-        .json(&body)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .expect("/execute send failed");
+        .header("content-type", "application/json")
+        .body(body_bytes)
+        .timeout(Duration::from_secs(30));
+    for (k, v) in signed_headers {
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.expect("/execute send failed");
     let status = resp.status();
     let resp_body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
     assert_eq!(

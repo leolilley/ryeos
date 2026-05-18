@@ -302,7 +302,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     )
     .expect("plant dup-runtime-b");
 
-    let port = common::pick_free_port();
+    let port = common::next_port();
     let bind = format!("127.0.0.1:{port}");
     let uds_path = state_path.join("ryeosd.sock");
 

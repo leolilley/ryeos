@@ -48,7 +48,7 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::common::pick_free_port;
+use crate::common::next_port;
 
 /// One canned LLM response. The mock pops these FIFO.
 #[derive(Debug, Clone)]
@@ -117,7 +117,7 @@ impl MockProvider {
     /// Spawn a mock provider with the given canned responses (popped
     /// FIFO). Returns once the server is bound and listening.
     pub async fn start(canned: Vec<MockResponse>) -> Self {
-        let port = pick_free_port();
+        let port = next_port();
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let base_url = format!("http://127.0.0.1:{port}");
 

@@ -17,7 +17,7 @@
 //! - CLI propagates `project_path` in the `/execute` request body.
 //!
 //! Each test brings up its own daemon in a tempdir to avoid cross-test
-//! interference. TCP ports come from `pick_free_port()`.
+//! interference. TCP ports come from `next_port()` (per-process range).
 
 mod common;
 
@@ -371,7 +371,7 @@ async fn state_lock_prevents_concurrent_daemons() {
     common::populate_user_space(user_space.path());
     let state_path = state_dir_outer.path().join("state");
 
-    let port = common::pick_free_port();
+    let port = common::next_port();
     let bind: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let uds_path = state_path.join("ryeosd.sock");
 

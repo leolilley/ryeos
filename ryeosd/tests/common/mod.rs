@@ -10,9 +10,10 @@
 pub mod fast_fixture;
 pub mod mock_provider;
 
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -112,13 +113,24 @@ pub fn ensure_bundles_fresh() {
             return;
         }
         let root = workspace_root();
-        // Use the timestamp embedded in a signed bundle item as the
-        // "last publish" reference point. The signature envelope format
-        // is `# ryeos:signed:<RFC3339>:<digest>:<sig>:<fp>`, so the
-        // timestamp is content-derived — survives `git checkout`,
-        // `touch`, `rsync`, container rebuilds, etc., unlike file
-        // mtimes. Compare source crate mtimes against this reference;
-        // if any source is newer, the bundle is stale.
+
+        // Cross-process lock: under `cargo test --workspace`, multiple
+        // test binaries race to check/refresh bundles. Use an flock-style
+        // lock file under target/ so only one process refreshes at a time.
+        let lock_path = root.join("target").join(".ryeos-bundle-refresh.lock");
+        let _lock = std::fs::File::create(&lock_path)
+            .expect("create bundle refresh lock file");
+        // Block until we have exclusive access.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = _lock.as_raw_fd();
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            assert!(ret == 0, "flock on bundle refresh lock failed");
+        }
+
+        // Re-check staleness inside the lock — another process may have
+        // already refreshed while we waited.
         let representative = root.join(
             "ryeos-bundles/standard/.ai/runtimes/directive-runtime.yaml",
         );
@@ -143,6 +155,7 @@ pub fn ensure_bundles_fresh() {
             status.success(),
             "populate-bundles.sh failed (exit {status}); fix the build or set RYEOS_TEST_SKIP_BUNDLE_REFRESH=1",
         );
+        // Lock released when _lock is dropped at end of scope.
     });
 }
 
@@ -272,15 +285,38 @@ fn fixture_trusted_signer_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trusted_signers")
 }
 
-/// Pick an unused TCP port by binding `127.0.0.1:0`, reading the assigned
-/// port, then dropping the listener. There is a small race between this
-/// function returning and a child binding the same port, but for local
-/// integration tests it is acceptable.
-pub fn pick_free_port() -> u16 {
-    let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind 127.0.0.1:0");
-    let port = listener.local_addr().expect("local_addr").port();
+/// Allocate a port assigned by the OS.
+///
+/// Binds a transient `TcpListener` to `127.0.0.1:0`, reads the
+/// kernel-assigned port, and drops the listener so the caller can
+/// re-bind. There is a small TOCTOU window between drop and re-bind,
+/// but in practice this is far more reliable than the previous
+/// hash-bucketed range scheme — with 28+ test binaries running under
+/// nextest in parallel, hash collisions caused widespread
+/// `EADDRINUSE` failures across e2e tests (mock providers and
+/// daemons would race for the same port within the 256-port range
+/// shared between colliding binaries).
+pub fn next_port() -> u16 {
+    // SO_REUSEADDR is not set on the throwaway listener, so the
+    // kernel will not hand the same port to another concurrent
+    // `bind(0)` call while we hold the listener. Once we drop it,
+    // the TIME_WAIT-vs-bind race is the only remaining concern; the
+    // kernel rotates through the ephemeral range, so back-to-back
+    // probes within a process get distinct ports.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("next_port: bind ephemeral 127.0.0.1:0");
+    let port = listener
+        .local_addr()
+        .expect("next_port: local_addr")
+        .port();
     drop(listener);
     port
+}
+
+/// Legacy alias — same as `next_port()`. Migrate callers to `next_port()`.
+#[deprecated(note = "use next_port() instead")]
+pub fn pick_free_port() -> u16 {
+    next_port()
 }
 
 /// Configure a tempdir as a USER_SPACE: pre-populate
@@ -365,7 +401,7 @@ impl DaemonHarness {
 
         pre_init(&system_space_dir, user_space.path())?;
 
-        let port = pick_free_port();
+        let port = next_port();
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
@@ -514,7 +550,7 @@ impl DaemonHarness {
             &state_path, &fixture.user, &fixture.node,
         )?;
 
-        let port = pick_free_port();
+        let port = next_port();
         let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
@@ -692,6 +728,10 @@ impl DaemonHarness {
         &mut self,
         tweak: F,
     ) -> anyhow::Result<()> {
+        // Allocate a fresh port to avoid TOCTOU race on the released port.
+        let port = next_port();
+        self.bind = format!("127.0.0.1:{port}").parse().unwrap();
+
         let mut cmd = Command::new(ryeosd_binary());
         cmd.arg("--system-space-dir")
             .arg(&self.state_path)
@@ -799,7 +839,9 @@ impl DaemonHarness {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // 4. Re-spawn with the same configuration (no --init-if-missing).
+        // 4. Re-spawn with fresh port (no --init-if-missing).
+        let port = next_port();
+        self.bind = format!("127.0.0.1:{port}").parse().unwrap();
         let mut cmd = Command::new(ryeosd_binary());
         cmd.arg("--system-space-dir")
             .arg(&self.state_path)
@@ -1082,7 +1124,7 @@ pub async fn run_service_standalone_fresh(
 ///
 /// Signs with `user_key` using the daemon's principal_id (from `node_key`)
 /// as the audience. Returns a vec of (header_name, header_value) pairs.
-fn build_signed_headers_for_bytes(
+pub fn build_signed_headers_for_bytes(
     user_key: &SigningKey,
     node_key: &SigningKey,
     method: &str,
