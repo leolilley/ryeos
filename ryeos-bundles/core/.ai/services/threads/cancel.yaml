@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-18T00:50:00Z:caf39c133b837f3b2fc1c3d3e435d457c86059d68a903d1783b379ea68558916:F6CY6Y3laHmnV3aMnOs6FN8yagc4eAoEZ2NOPyPXTxtyEdhVLQRqCQr7kgnEI6JQlhQLW3I6thUCjxIjVI/JAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-18T02:20:59Z:caf39c133b837f3b2fc1c3d3e435d457c86059d68a903d1783b379ea68558916:F6CY6Y3laHmnV3aMnOs6FN8yagc4eAoEZ2NOPyPXTxtyEdhVLQRqCQr7kgnEI6JQlhQLW3I6thUCjxIjVI/JAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: threads.cancel
 required_caps: ["ryeos.execute.service.threads/cancel"]
