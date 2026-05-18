@@ -319,7 +319,34 @@ pub async fn execute_service_verified(
         }
     }
 
-    let value = dispatch_result?;
+    let value = dispatch_result.map_err(|e| {
+        // Extract typed HandlerError to preserve HTTP semantics.
+        // Without this, HandlerError::NotFound surfaces as 500 via
+        // the generic Internal(#[from] anyhow::Error) path.
+        if let Some(he) = e.downcast_ref::<ryeos_app::handler_error::HandlerError>() {
+            match he {
+                ryeos_app::handler_error::HandlerError::NotFound => {
+                    crate::dispatch_error::DispatchError::NotFound
+                }
+                ryeos_app::handler_error::HandlerError::Forbidden(msg) => {
+                    crate::dispatch_error::DispatchError::ServiceCapDenied {
+                        service_ref: service_ref.to_string(),
+                        required: msg.clone(),
+                        caller_scopes: ctx.caller_scopes.clone(),
+                    }
+                }
+                ryeos_app::handler_error::HandlerError::BadRequest(msg) => {
+                    crate::dispatch_error::DispatchError::OpInvalidInput {
+                        op: endpoint.clone(),
+                        reason: msg.clone(),
+                    }
+                }
+                _ => crate::dispatch_error::DispatchError::Internal(e),
+            }
+        } else {
+            crate::dispatch_error::DispatchError::Internal(e)
+        }
+    })?;
 
     Ok(ServiceExecutionResult {
         value,

@@ -47,7 +47,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             }))
             .map_err(|e| HandlerError::Internal(e.to_string()))
         }
-        None => Err(HandlerError::NotFound),
+        None => Ok(serde_json::Value::Null),
     }
 }
 

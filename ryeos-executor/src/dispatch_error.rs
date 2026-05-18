@@ -161,6 +161,10 @@ pub enum DispatchError {
     /// Mapped to 403 by the HTTP layer with body `{ "required_cap": "..." }`.
     #[error("missing required capability: {required}")]
     MissingCap { required: String },
+    /// The requested resource was not found, or the caller is not
+    /// authorised to know it exists. Maps to 404.
+    #[error("not found")]
+    NotFound,
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -179,6 +183,7 @@ impl DispatchError {
             Self::InsufficientCaps { .. }
             | Self::ServiceCapDenied { .. }
             | Self::MissingCap { .. } => StatusCode::FORBIDDEN,
+            Self::NotFound => StatusCode::NOT_FOUND,
             Self::NotRootExecutable { .. } | Self::StreamingNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
@@ -229,6 +234,7 @@ impl DispatchError {
             Self::ProjectSourcePushFirst(_) => "project_source_push_first",
             Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
             Self::MissingCap { .. } => "missing_cap",
+            Self::NotFound => "not_found",
             Self::UnknownOp { .. } => "unknown_op",
             Self::OpInvalidInput { .. } => "op_invalid_input",
             Self::OpFailed { .. } => "op_failed",
