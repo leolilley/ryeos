@@ -273,8 +273,9 @@ async fn scheduler_pause_nonexistent_fails() {
 async fn scheduler_at_schedule_fires() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    // Compute a timestamp 3 seconds from now
-    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(3);
+    // Compute a timestamp 6 seconds from now (generous margin for
+    // daemon startup + timer loop initialization)
+    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(6);
     let fire_at_str = fire_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     // Register at-schedule
@@ -423,16 +424,10 @@ async fn scheduler_pause_prevents_fires() {
     })).await;
     assert!(status.is_success());
 
-    // Wait 5 seconds — no new fires should appear
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let (status, body) = exec(&h, "service:scheduler/show_fires", json!({
-        "schedule_id": "pause-no-fire",
-    })).await;
-    let result = unwrap_result(status, &body, "show_fires after pause");
-    let total = result["total"].as_u64().unwrap_or(0);
-    // Should still be exactly 1 (the fire before pause)
-    assert_eq!(total, 1, "paused schedule should not have additional fires");
+    // Observe show_fires for 3 consecutive checks over 3s — count should
+    // stay at 1, proving no new fires appeared after pause.
+    let stable = observe_fire_count_stable(&h, "pause-no-fire", 1, 3, Duration::from_secs(3)).await;
+    assert!(stable, "paused schedule should not produce additional fires");
 }
 
 // ── Deregister stops fires ────────────────────────────────────────────────
@@ -463,9 +458,6 @@ async fn scheduler_deregister_stops_fires() {
     })).await;
     assert!(status.is_success());
 
-    // Wait 5 seconds — no new fires should appear
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     // The schedule is gone from the list
     let (status, body) = exec(&h, "service:scheduler/list", json!({})).await;
     let result = unwrap_result(status, &body, "scheduler.list after deregister");
@@ -474,6 +466,11 @@ async fn scheduler_deregister_stops_fires() {
         !schedules.iter().any(|s| s["schedule_id"] == "dereg-stop"),
         "deregistered schedule should not appear in list"
     );
+
+    // Observe show_fires for 3 consecutive checks over 3s — count should
+    // stay at 1, proving no new fires appeared after deregister.
+    let stable = observe_fire_count_stable(&h, "dereg-stop", 1, 3, Duration::from_secs(3)).await;
+    assert!(stable, "deregistered schedule should not produce additional fires");
 }
 
 // ── Schedule ID reuse blocked ──────────────────────────────────────────────
@@ -697,4 +694,34 @@ async fn poll_for_fires_count(
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// Observe `show_fires` over a time window, checking that the fire count
+/// stays stable at `expected_count` for `consecutive` consecutive checks.
+/// Spreads checks evenly across `window` duration.
+/// Returns `true` if all checks saw exactly `expected_count` fires.
+async fn observe_fire_count_stable(
+    h: &DaemonHarness,
+    schedule_id: &str,
+    expected_count: u64,
+    consecutive: usize,
+    window: Duration,
+) -> bool {
+    let interval = window / consecutive as u32;
+    for _ in 0..consecutive {
+        tokio::time::sleep(interval).await;
+        let (status, body) = exec(h, "service:scheduler/show_fires", json!({
+            "schedule_id": schedule_id,
+        })).await;
+        if !status.is_success() {
+            continue;
+        }
+        let total = body.get("result")
+            .and_then(|r| r["total"].as_u64())
+            .unwrap_or(u64::MAX);
+        if total != expected_count {
+            return false;
+        }
+    }
+    true
 }

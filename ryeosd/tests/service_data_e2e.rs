@@ -114,10 +114,9 @@ async fn service_bundle_list_returns_at_least_core() {
         .get("bundles")
         .and_then(|v| v.as_array())
         .expect("bundles array");
-    // A freshly spawned daemon may have zero registered bundles (nothing
-    // pre-installed via run-service). The handler must still return a valid
-    // bundles array; the install→list round-trip is proven in
-    // service_data_standalone_e2e.rs.
+    // start_fast() registers core + standard bundles, so the list should
+    // contain at least those two. The install→list round-trip is proven
+    // in service_data_standalone_e2e.rs.
     for entry in bundles {
         assert!(entry.get("name").and_then(|v| v.as_str()).is_some(), "bundle entry missing name: {entry}");
         assert!(entry.get("path").and_then(|v| v.as_str()).is_some(), "bundle entry missing path: {entry}");

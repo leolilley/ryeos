@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context as _;
 use base64::Engine;
 use lillux::crypto::{Signer as _, SigningKey};
 use tempfile::TempDir;
@@ -66,14 +67,14 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Path to the workspace core bundle (source for test copies).
-/// DO NOT pass this directly to the daemon as --system-space-dir —
-/// the daemon mutates that dir. Use [`copy_core_to_temp`] for the
-/// Returns the workspace's core bundle directory — used as a read-only
-/// daemon's system space dir.
+/// Returns the workspace's core bundle directory (`ryeos-bundles/core`).
 ///
-/// This IS safe to use for `RYEOS_SYSTEM_SPACE_DIR` (read-only bundle
-/// discovery) and as a source for `copy_dir_all`.
+/// **Read-only source for test copies** — do NOT pass this directly to
+/// the daemon as `--system-space-dir` (the daemon mutates that dir).
+/// Use [`copy_core_to_temp`] for an isolated writable copy.
+///
+/// This IS safe to pass for `RYEOS_SYSTEM_SPACE_DIR` (read-only bundle
+/// discovery) and as a source for `copy_dir_recursive`.
 pub fn workspace_core_dir() -> PathBuf {
     workspace_root().join("ryeos-bundles/core")
 }
@@ -339,13 +340,12 @@ impl DaemonHarness {
     /// the state and user-space tempdirs are chosen but **before** the
     /// daemon process is spawned. The hook receives
     /// `(state_path, user_space)` and may write files into either tree
-    /// (e.g. signed bundle registrations) so that the daemon's Phase 1
-    /// bootstrap and engine init pick them up.
+    /// (e.g. signed bundle registrations, audit records) so that the
+    /// daemon's Phase 1 bootstrap and engine init pick them up.
     ///
-    /// Used by `dispatch_pin.rs` to pre-register the `standard` bundle
-    /// so the daemon's `RuntimeRegistry` discovers
-    /// `runtime:directive-runtime` at startup — without that, the V5.3
-    /// runtime refs would not resolve in tests.
+    /// Note: this path uses `--init-if-missing` (slow init). For tests
+    /// that need deterministic keys and pre-registered bundles, prefer
+    /// [`start_fast`] or [`start_fast_with`].
     pub async fn start_with_pre_init<S, F>(
         pre_init: S,
         tweak: F,
@@ -911,6 +911,110 @@ impl Drop for DaemonHarness {
             drop(stderr);
         }
         let _ = self.child.start_kill();
+    }
+}
+
+/// Persistent standalone harness for multi-step `run-service` tests.
+///
+/// Holds tempdirs alive across multiple `run_service()` calls so that
+/// state (installed bundles, node identity, trust store) persists.
+/// The harness installs core under `.ai/bundles/core/` AND registers
+/// it via `.ai/node/bundles/core.yaml` so preflight's
+/// `discover_installed_bundle_roots` finds it.
+///
+/// Use this when a test needs to run several `ryeosd run-service`
+/// invocations against the same state (e.g. install → list → remove).
+pub struct StandaloneHarness {
+    /// Keeps the core-bundle temp copy alive for the harness lifetime.
+    _core_tmp: TempDir,
+    /// Persistent system space dir (the temp copy of core).
+    pub system_space_dir: PathBuf,
+    /// Persistent user space dir.
+    pub user_space: TempDir,
+    /// UDS path (unused for standalone but required by CLI).
+    uds_path: PathBuf,
+    /// Fixture keys for signing.
+    pub fixture: fast_fixture::FastFixture,
+}
+
+impl StandaloneHarness {
+    /// Create a fully initialized standalone harness:
+    /// - Fast-fixture state (node identity, vault, trust)
+    /// - Core bundle copied into `.ai/bundles/core/` (disk install)
+    /// - Core bundle registered in `.ai/node/bundles/core.yaml`
+    /// - Standard bundle registered (path points to workspace)
+    ///
+    /// After this, `run_service()` can invoke any OfflineOnly service
+    /// and preflight will find installed bundles for dependency discovery.
+    pub fn new_initialized() -> anyhow::Result<Self> {
+        let user_space = tempfile::tempdir()?;
+        let (core_tmp, system_space_dir) = copy_core_to_temp();
+        let fixture = fast_fixture::populate_initialized_state(
+            &system_space_dir, user_space.path(),
+        )?;
+        fast_fixture::register_core_bundle_at_state(
+            &system_space_dir, &fixture,
+        )?;
+        fast_fixture::register_standard_bundle(
+            &system_space_dir, &fixture,
+        )?;
+
+        // Install core under .ai/bundles/core/ so preflight's
+        // discover_installed_bundle_roots finds it. Copy from the
+        // workspace source (not system_space_dir itself — that would
+        // recurse into the .ai/bundles/ subtree we're creating).
+        let bundles_root = system_space_dir.join(".ai/bundles");
+        let core_install = bundles_root.join("core");
+        let core_src = workspace_core_dir();
+        copy_dir_recursive(&core_src, &core_install)
+            .with_context(|| format!("install core into {}", core_install.display()))?;
+
+        let uds_path = system_space_dir.join("ryeosd.sock");
+        Ok(Self {
+            _core_tmp: core_tmp,
+            system_space_dir,
+            user_space,
+            uds_path,
+            fixture,
+        })
+    }
+
+    /// Run `ryeosd run-service <service_ref> [--params <json>]` against
+    /// the persistent state. Returns the process output.
+    pub async fn run_service(
+        &self,
+        service_ref: &str,
+        params_json: Option<&str>,
+    ) -> anyhow::Result<std::process::Output> {
+        let mut cmd = tokio::process::Command::new(ryeosd_binary());
+        cmd.arg("--system-space-dir").arg(&self.system_space_dir)
+            .arg("--uds-path").arg(&self.uds_path)
+            .arg("run-service")
+            .arg(service_ref);
+        if let Some(p) = params_json {
+            cmd.arg("--params").arg(p);
+        }
+        cmd.env("HOSTNAME", "testhost")
+            .env("USER_SPACE", self.user_space.path())
+            .env("HOME", self.user_space.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn()?;
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        if let Some(mut s) = child.stdout.take() {
+            s.read_to_end(&mut stdout_buf).await?;
+        }
+        if let Some(mut s) = child.stderr.take() {
+            s.read_to_end(&mut stderr_buf).await?;
+        }
+        let status = child.wait().await?;
+        Ok(std::process::Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        })
     }
 }
 

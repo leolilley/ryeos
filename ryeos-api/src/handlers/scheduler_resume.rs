@@ -65,7 +65,9 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     if let Some(ref tx) = state.scheduler_reload_tx {
-        let _ = tx.try_send(ryeos_scheduler::ReloadSignal { schedule_id: Some(req.schedule_id.clone()) });
+        if let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal { schedule_id: Some(req.schedule_id.clone()) }) {
+            tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
+        }
     }
 
     Ok(serde_json::json!({
