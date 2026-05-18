@@ -30,7 +30,9 @@ async fn start_with_isolated_bundle(
         "service_data_e2e/{test_name}"
     ));
     DaemonHarness::start_fast_with(
-        |_, _, _| Ok(()),
+        |state, _, fixture| {
+            common::fast_fixture::register_standard_bundle(state, fixture)
+        },
         move |cmd| {
             cmd.env("RYEOS_SYSTEM_SPACE_DIR", &bundle);
         },

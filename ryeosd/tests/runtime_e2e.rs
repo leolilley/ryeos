@@ -206,7 +206,8 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // to tests; for now this test pins only that the dispatch loop
     // reaches the materialization step and surfaces a clean lookup
     // error rather than a silent fallthrough.
-    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
         install_kind_schema(user, "e2e_kind", &fixture.publisher)?;
         install_runtime(user, "e2e-direct-runtime", "e2e_kind", true, "v1", &fixture.publisher)
     };
@@ -382,30 +383,25 @@ async fn e2e_multi_default_conflict_aborts_startup() {
 // `runtime.execute`. Direct `runtime:*` calls DO require the cap, but
 // the gate must NOT broaden retroactively to indirect chains.
 //
-// We synthesize: a directive item that exists in user space + a synth
-// runtime that serves "directive". The directive resolves; the loop
-// follows its `@directive` alias (via the kind-schema or registry)
-// onto `runtime:e2e-directive-runtime`; `dispatch_managed_subprocess`
-// sees `request.original_root_kind == "directive"` and SKIPS the cap
-// check. The materialization step then fails (no binary on disk),
-// but the failure mode must NOT be a 403 — that would prove the
+// Uses the real standard bundle's directive runtime (no synth runtime).
+// The directive item is a minimal YAML that resolves successfully;
+// the dispatch loop follows the kind-schema delegation onto the real
+// `runtime:directive-runtime`. The materialization step either succeeds
+// (launches the directive runtime binary) or fails with a provider/runtime
+// error, but the failure mode must NOT be a 403 — that would prove the
 // cap broadened.
 //
 // Status assertion is permissive (anything except 403) because the
-// downstream materialization can fail in several legitimate ways
-// (manifest, host_triple, missing binary). The KEY assertion: NOT
-// 403. A 403 would mean the gate fired on the indirect path.
+// downstream execution can fail in several legitimate ways (no provider
+// configured, runtime error). The KEY assertion: NOT 403.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_directive_via_registry_does_not_require_runtime_execute() {
-    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        // Synth runtime serves "directive". With only a single runtime
-        // serving the kind, `RuntimeRegistry::lookup_for("directive")`
-        // returns it regardless of `default`.
-        install_runtime(user, "e2e-directive-runtime", "directive", true, "v1", &fixture.publisher)?;
+    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
         // Synth directive item — minimal valid YAML so engine
         // resolution succeeds and the dispatch loop reaches the
-        // `@directive` alias / registry hop.
+        // kind-schema delegation → runtime:directive-runtime hop.
         let dir = user.join(".ai/directives/e2e_b1");
         std::fs::create_dir_all(&dir)?;
         let body = r#"---
@@ -423,7 +419,7 @@ inputs: {}
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with synth directive + runtime");
+        .expect("start daemon with standard bundle + synth directive");
 
     let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
@@ -449,18 +445,14 @@ inputs: {}
 
 // ── 5b. P1.5 — paired B1 e2e: direct vs indirect on a malformed runtime ─
 //
-// The pre-V5.4 B1 e2e (`e2e_directive_via_registry_does_not_require_runtime_execute`)
-// asserted only `status != 403`. That assertion is structurally weak
-// because the daemon's auth surface is off in the test harness, so
-// caller_scopes default to `["*"]` and the runtime.execute cap is
-// auto-satisfied — the test cannot tell "B1 was reached and skipped"
-// from "B1 fired but `*` made it pass".
+// This is a **dispatcher mechanics** test, not a real directive/graph
+// behavior test. It uses a fully synthetic kind ("p15_kind") to avoid
+// colliding with the standard bundle's real directive runtime.
 //
-// This pair fixes that ambiguity by feeding a deliberately malformed
-// `binary_ref: badshape`. The dispatcher's order is:
+// The dispatcher's order is:
 //
 //   1. resolve_dispatch_hop attaches VerifiedRuntime         (succeeds)
-    //   2. dispatch_managed_subprocess: B1 cap gate (gated on
+//   2. dispatch_managed_subprocess: B1 cap gate (gated on
 //      original_root_kind == "runtime")                       (skipped on indirect)
 //   3. check_dispatch_capabilities                            (succeeds)
 //   4. strip_binary_ref_prefix("badshape")                    (FAILS with
@@ -474,26 +466,29 @@ inputs: {}
 // The "direct must 403 without cap" half of the pair lives in
 // dispatch.rs's unit tests (`enforce_caps_*` — covers the
 // gate-fires-when-cap-missing contract) because the e2e harness has
-// no facility to install a Principal with limited scopes. When the
-// daemon gains an auth-on test harness (post-P2.x), this comment
-// should be replaced by the live e2e variant.
+// no facility to install a Principal with limited scopes.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_directive_via_registry_reaches_strip_binary_ref_prefix() {
-    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        // Synth runtime serves "directive" with a deliberately
-        // malformed binary_ref. P1.5: the dispatcher must walk past
-        // B1's cap-gate site and hit strip_binary_ref_prefix.
+    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        // Synthetic kind + runtime with deliberately malformed binary_ref.
+        // P1.5: the dispatcher must walk past B1's cap-gate site and
+        // hit strip_binary_ref_prefix.
+        install_kind_schema(user, "p15_kind", &fixture.publisher)?;
         install_runtime_with_binary_ref(
             user,
-            "p15-bad-directive-runtime",
-            "directive",
+            "p15-bad-runtime",
+            "p15_kind",
             true,
             "v1",
             "badshape",
             &fixture.publisher,
         )?;
-        let dir = user.join(".ai/directives/p15");
+        // Synth item under the synthetic kind's directory so the
+        // dispatch resolves it as kind "p15_kind", delegates to
+        // runtime_registry, and finds the synth runtime with bad binary_ref.
+        let dir = user.join(".ai/p15_kind_items/p15");
         std::fs::create_dir_all(&dir)?;
         let body = r#"---
 name: flow
@@ -515,7 +510,7 @@ inputs: {}
     let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
         .post_execute(
-            "directive:p15/flow",
+            "p15_kind:p15/flow",
             project.path().to_str().unwrap(),
             serde_json::json!({}),
         )
@@ -558,18 +553,14 @@ inputs: {}
 // `item_ref`. P1.1 introduced `RootSubject` so the audit captures the
 // caller-typed subject's identity, not the executor's.
 //
-// This test pins that contract end-to-end: synth a directive served
-// by a synth runtime whose well-shaped `binary_ref` points to a
-// non-existent binary. The dispatcher walks
-//   directive:p16/flow
-//     → registry hop → runtime:p16-directive-runtime
-//     → strip_binary_ref_prefix succeeds (well-formed shape)
-//     → build_and_launch step 1 creates the thread DB row
-//     → step 7 resolve_native_executor_path FAILS (no binary)
+// This test pins that contract end-to-end using the real standard
+// bundle's directive runtime. A synth directive item in user space
+// dispatches through the real runtime. The dispatch either succeeds
+// or fails at runtime execution (no LLM provider configured), but
+// either way the thread row must record the SUBJECT's identity.
 //
-// The thread row therefore persists at status="created" with the
-// SUBJECT's `kind` and `item_ref`. We open `projection.sqlite3`
-// directly and assert.
+// We open `projection.sqlite3` directly and assert the thread row
+// has the directive's kind/thread_profile/item_ref, not the runtime's.
 //
 // If the root/runtime split regresses, this test will see
 // `kind == "runtime_run"` and `item_ref` starting with `runtime:` —
@@ -577,19 +568,11 @@ inputs: {}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
-    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        // Well-formed binary_ref pointing at a nonexistent binary.
-        // Dispatch progresses through strip_binary_ref_prefix and into
-        // build_and_launch, which creates the thread DB row before
-        // failing at native-executor materialization.
-        install_runtime(
-            user,
-            "p16-directive-runtime",
-            "directive",
-            true,
-            "v1",
-            &fixture.publisher,
-        )?;
+    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        // Synth directive item — minimal valid YAML so engine
+        // resolution succeeds and the dispatch loop reaches the
+        // real directive runtime via the registry hop.
         let dir = user.join(".ai/directives/p16");
         std::fs::create_dir_all(&dir)?;
         let body = r#"---
@@ -620,13 +603,10 @@ inputs: {}
         .await
         .expect("post /execute");
 
-    // We expect a downstream failure (no binary in manifest) — could
-    // be 502 (RuntimeMaterializationFailed) or 500. The KEY is that
-    // dispatch reached build_and_launch's thread-create step.
-    assert!(
-        !status.is_success(),
-        "expected dispatch to fail at materialization; got {status}: {body}"
-    );
+    // The dispatch may succeed (real runtime binary exists) or fail
+    // (no LLM provider configured). The KEY assertion is the thread
+    // row identity below — regardless of dispatch outcome.
+    let _ = (status, body);
 
     // Open the projection DB and find the thread row created for
     // this directive invocation. ProjectionDb writes happen on the
@@ -699,8 +679,9 @@ inputs: {}
 // ── 5d. P4.B2 — graph indirect: subject identity wins audit ────────────
 //
 // Mirror of `e2e_indirect_directive_audit_records_subject_not_runtime`
-// for the graph kind. Pins that an indirect dispatch chain
-//   graph:p4/flow → registry → runtime:p4-graph-runtime
+// for the graph kind. Uses the real standard bundle's graph runtime.
+// Pins that an indirect dispatch chain
+//   graph:p4/flow → registry → runtime:graph-runtime
 // records the SUBJECT's identity (`graph_run` thread_profile +
 // `graph:p4/flow` item_ref), not the runtime's. If the V5.5 P4 B2
 // subject/runtime split regresses for graphs specifically, this test
@@ -709,13 +690,8 @@ inputs: {}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_graph_records_graph_thread_profile() {
-    let plant = |_: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        // Synth runtime serving "graph" with a well-formed binary_ref
-        // pointing at a non-existent binary. Dispatch progresses into
-        // build_and_launch and creates the thread DB row before
-        // failing at native-executor materialization — the row's
-        // subject identity is what we assert.
-        install_runtime(user, "p4-graph-runtime", "graph", true, "v1", &fixture.publisher)?;
+    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
         let dir = user.join(".ai/graphs/p4");
         std::fs::create_dir_all(&dir)?;
         let body = r#"category: "p4"
@@ -747,13 +723,10 @@ config:
         .await
         .expect("post /execute");
 
-    // Dispatch is expected to fail at materialization (no binary for
-    // p4-graph-runtime). The KEY assertion is that the dispatch loop
-    // reached build_and_launch's thread-create step.
-    assert!(
-        !status.is_success(),
-        "expected dispatch to fail at materialization; got {status}: {body}"
-    );
+    // The dispatch may succeed or fail (real runtime binary exists but
+    // no LLM provider configured). The KEY assertion is the thread
+    // row identity below — regardless of dispatch outcome.
+    let _ = (status, body);
 
     let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
     for _ in 0..20 {
@@ -824,8 +797,8 @@ config:
 #[test]
 fn grep_gate_no_kind_name_branching_in_dispatch_code() {
     let workspace = common::workspace_root();
-    let execute_mode = workspace.join("ryeosd/src/routes/response_modes/execute_mode.rs");
-    let dispatch_rs = workspace.join("ryeosd/src/dispatch.rs");
+    let execute_mode = workspace.join("ryeos-api/src/routes/response_modes/execute_mode.rs");
+    let dispatch_rs = workspace.join("ryeos-executor/src/dispatch.rs");
 
     // Walk the file directly so we can:
     //   (a) reliably skip lines inside `#[cfg(test)]` modules — test
