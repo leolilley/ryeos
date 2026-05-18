@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-17T21:44:35Z:c605e824c9e5bb45f520886040bd2c9416843c1dcec40e161d64fb9d720a71a5:/6Ss4tNRqZo44o1Pz6WkXlCBXsfsSSH32VGyeV3l6MEgepfInjF2YmDvaNLPPM16EPx5gOhbV0rfmn5vaTbRCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-18T00:50:00Z:92cd0b17ef545c80c58e74316b0acc1f05ec159b4f0db7ece51252735df34110:vCje6CTPgC9JoOwM1/twZYffD4shR9i7Vgd8/cjrIbMbgFbGO671v3s7B/KZxv3kW0WaK604dgMzRz/V+7lKAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
 kind: service
-endpoint: authorize_key.set
+endpoint: identity.authorize-key
 required_caps: ["ryeos.execute.service.authorize-key"]
 schema:
   public_key: string

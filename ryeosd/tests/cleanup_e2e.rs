@@ -59,7 +59,7 @@ async fn standalone_run_service_system_status() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_daemon_up_uses_execute() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let ryos = ryos_binary();
 
     let out = tokio::process::Command::new(&ryos)
@@ -185,7 +185,7 @@ async fn daemon_only_service_errors_via_run_service() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_execute_defaults_project_path_to_dot() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let ryos = ryos_binary();
 
     // The CLI sends raw tokens (`["status"]`) to the daemon's /execute
@@ -295,7 +295,7 @@ async fn init_only_does_not_mutate_system_space() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uds_namespace_rejects_service_methods() {
-    let h = DaemonHarness::start().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
@@ -364,7 +364,7 @@ async fn uds_namespace_rejects_service_methods() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn state_lock_prevents_concurrent_daemons() {
-    let h1 = DaemonHarness::start().await.expect("start first daemon");
+    let (h1, _fixture) = DaemonHarness::start_fast().await.expect("start first daemon");
 
     let state_dir_outer = tempfile::tempdir().expect("state tempdir");
     let user_space = tempfile::tempdir().expect("user tempdir");

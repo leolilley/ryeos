@@ -196,6 +196,18 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     lillux::vault::write_public_key(&vault_dir.join("public_key.pem"), &vault.public_key())
         .context("write vault public key")?;
 
+    // ── Ingest ignore config (mirrors ryeos init step 8b) ──
+    let ignore_dir = state_path.join("node").join("ingest");
+    fs::create_dir_all(&ignore_dir).with_context(|| format!("create {}", ignore_dir.display()))?;
+    let builtin = ryeos_app::ignore::builtin_patterns();
+    let patterns_yaml = builtin
+        .iter()
+        .map(|p| format!("  - {:?}", p))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(ignore_dir.join("ignore.yaml"), format!("patterns:\n{}\n", patterns_yaml))
+        .context("write ignore config")?;
+
     // ── Self-signed trust docs (publisher + node + user) ──
     let trust_dir = user_space.join(AI_DIR).join("config").join("keys").join("trusted");
     for sk in [&publisher, &node, &user] {

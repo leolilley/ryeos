@@ -182,7 +182,7 @@ fn materialize_files(
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/bundle-install",
-    endpoint: "remote.bundle_install",
+    endpoint: "remote.bundle-install",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle/install"],
     handler: |params, _ctx, state| {

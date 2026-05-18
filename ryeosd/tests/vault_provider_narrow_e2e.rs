@@ -47,11 +47,17 @@ fn plant_provider_config(
     let dir = user_space.join(ryeos_engine::AI_DIR).join("config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let auth_block = match env_var {
-        Some(ev) => format!("  env_var: \"{ev}\"\n"),
+        Some(ev) => format!("  env_var: \"{ev}\"\n  header_name: \"Authorization\"\n"),
         None => "  env_var: null\n".to_string(),
     };
     let body = format!(
         r#"base_url: "{mock_base_url}"
+family: chat_completions
+body_template:
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
 auth:
 {auth_block}headers: {{}}
 pricing:

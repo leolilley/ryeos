@@ -2106,14 +2106,32 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             .join("ryeos-bundles/standard")
     }
 
+    /// Dev publisher public key trust entry — the standard bundle's configs
+    /// are signed with this key, so tests that load real bundle configs need
+    /// it in the trust store.  This is public key material (not a secret).
+    const DEV_PUBLISHER_TRUST_TOML: &str = r#"
+public_key = "ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk="
+fingerprint = "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
+owner = "ryeos-dev"
+"#;
+
     /// Build a VerifiedLoader rooted at the bundled standard, with an
     /// empty temp project root so project-overlay attacks can't interfere.
+    /// Seeds the trust store with the dev publisher key.
     fn loader_for_bundle() -> VerifiedLoader {
-        let empty_project = std::env::temp_dir().join("ryeos-golden-wire-empty-project");
-        let _ = std::fs::create_dir_all(&empty_project);
+        let user_root = tempfile::tempdir().expect("create temp user root");
+        let trust_dir = user_root.path().join(".ai/config/keys/trusted");
+        let _ = std::fs::create_dir_all(&trust_dir);
+        std::fs::write(
+            trust_dir.join("dev-publisher.toml"),
+            DEV_PUBLISHER_TRUST_TOML,
+        )
+        .expect("write trust entry");
+
+        let project_root = tempfile::tempdir().expect("create temp project root");
         VerifiedLoader::new(
-            empty_project,
-            None,
+            project_root.path().to_path_buf(),
+            Some(user_root.path().to_path_buf()),
             vec![bundle_root()],
         )
     }

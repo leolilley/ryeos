@@ -27,7 +27,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/thread-status",
-    endpoint: "remote.thread_status",
+    endpoint: "remote.thread-status",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote.execute"],
     handler: |params, _ctx, state| {

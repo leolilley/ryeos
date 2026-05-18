@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-17T21:44:35Z:337c9288cef1308e2e00eb14291812295a64ac64a49ed0bb5039230ffc1a661a:jfRmMIseiLp2CbCoMeUAks4hRQKfkLsklLJRyIhAvvk3BjD5pzNWiqxyvQUq8sb26JE2MWrVYFX9bB6KUelDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-18T00:50:00Z:3f24e2eab6756301876587b6b6b9179e06ccb4b366614f6b276eefb3e9b015d1:x6SESz7II0FDafGd1nwwQ030QZ4xjQfVSfHC3HL72/GG+Dap9AX3BavgS0X9PO2oeLeoFlV3B95HEagn2G1ZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
 kind: service
-endpoint: remote.vault_delete
+endpoint: remote.vault-delete
 required_caps: ["ryeos.execute.service.remote.execute"]
 schema:
   remote: string?

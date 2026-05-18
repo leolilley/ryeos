@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-17T21:44:35Z:8bfc56f46c94365191a041c930f047cfc32e1e5a7077795881f9ef71406e114d:IKte392coJZEsXp4RSvIIAwrAgkIAqE5rYiWybIB7/2FNx0gTWIqkWTDSUi0Sst5cE8a9McGzxCqJK4lT2uQDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-18T00:50:00Z:8bfc56f46c94365191a041c930f047cfc32e1e5a7077795881f9ef71406e114d:IKte392coJZEsXp4RSvIIAwrAgkIAqE5rYiWybIB7/2FNx0gTWIqkWTDSUi0Sst5cE8a9McGzxCqJK4lT2uQDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.get
 required_caps: ["ryeos.execute.service.objects/get"]

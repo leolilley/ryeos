@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-17T21:44:35Z:3d67897af67449666ba30877df4087a5f6b9f5a8d6066b289bc9f7ad6e21acc6:at4a/2Cf/4vk49Y4IbBkuFqMWlR1GaLDujrbnyrQw5vhcMcJX3hd4Kq961VKAxlLBgUHkitL92WJB93+IZipDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-18T00:50:00Z:32f983be03421a88d526164abf7ee1a9879385efb8aa1de9eece4ce21a82e3de:+gzAEAmfZWiKBKVlghMCqdsTzf08EIR6MqcLya+aVYSRAhoBmn6K5QIGCMEoN8z9voX/FNms/FbqcIc4CQxZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
 kind: service
-endpoint: remote.bundle_install
+endpoint: remote.bundle-install
 required_caps: ["ryeos.execute.service.bundle/install"]
 schema:
   remote: string?

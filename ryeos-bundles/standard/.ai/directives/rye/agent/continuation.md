@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-17T21:59:53Z:0bf6e6cf86c668f023acdb777b86af4932e20753ec85b237e8b34d8b7f06120c:5ZZjbVYaFRf+LomU6HYBnj2LedAWxobseKTUuqP2anpgFW2BfQsc0vHMSdPKB7T2RcxRRN2KAhfZ8iH3m9HdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-18T00:38:58Z:0bf6e6cf86c668f023acdb777b86af4932e20753ec85b237e8b34d8b7f06120c:5ZZjbVYaFRf+LomU6HYBnj2LedAWxobseKTUuqP2anpgFW2BfQsc0vHMSdPKB7T2RcxRRN2KAhfZ8iH3m9HdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Generate the continuation prompt for a handed-off or resumed thread."
 version: "1.0.0"

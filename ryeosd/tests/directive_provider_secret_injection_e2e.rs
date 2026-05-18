@@ -57,14 +57,21 @@ fn plant_mock_provider_with_auth(
     let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let mut auth_lines = format!("  env_var: \"{env_var}\"\n");
-    if let Some(h) = header_name {
-        auth_lines.push_str(&format!("  header_name: \"{h}\"\n"));
-    }
+    auth_lines.push_str(&format!(
+        "  header_name: \"{}\"\n",
+        header_name.unwrap_or("Authorization")
+    ));
     if let Some(p) = prefix {
         auth_lines.push_str(&format!("  prefix: \"{p}\"\n"));
     }
     let body = format!(
         r#"base_url: "{mock_base_url}"
+family: chat_completions
+body_template:
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
 auth:
 {auth_lines}headers: {{}}
 pricing:

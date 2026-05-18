@@ -112,7 +112,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:system/push-head",
-    endpoint: "push_head",
+    endpoint: "system.push-head",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.push-head"],
     handler: |params, ctx, state| {

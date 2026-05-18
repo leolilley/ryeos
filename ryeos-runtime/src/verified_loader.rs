@@ -170,7 +170,13 @@ impl TrustStore {
                     .trim_matches('"');
                 owner = val.to_string();
             }
-            if let Some(val) = trimmed.strip_prefix("pem") {
+            // Accept both `pem` and `public_key` as field names for the
+            // inline ed25519 key.  `PUBLISHER_TRUST.toml` files use
+            // `public_key`; the daemon's self-trust bootstrap uses `pem`.
+            let maybe_key = trimmed
+                .strip_prefix("pem")
+                .or_else(|| trimmed.strip_prefix("public_key"));
+            if let Some(val) = maybe_key {
                 let val = val
                     .trim_start_matches(['=', ' '])
                     .trim()

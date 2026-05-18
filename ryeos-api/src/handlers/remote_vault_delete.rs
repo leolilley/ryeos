@@ -27,7 +27,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/vault-delete",
-    endpoint: "remote.vault_delete",
+    endpoint: "remote.vault-delete",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote.execute"],
     handler: |params, _ctx, state| {

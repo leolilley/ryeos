@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-17T21:44:35Z:dfb50f79eb165760bbc87d1cae961f3b860640e9f5b8500f4dda90a11f57b968:mB5DE3+BPh0ViHHL9VKGN3rthXsgjE16pbBxeHuk7GdOBqyjz/HpvxLoQF1RgJNacGDgOM8uXf5pk2WRyLDZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-18T00:49:59Z:82493613936e64e7b1d10790752cfe90269e91c44162965e6a7cd7cc438ee735:PKBxlf0XNIwQmvGOuSNJGMyVgAk+CfLe/BsLfpq0jgL3hnjN2TUCOt6Z3AH2XljXzDwzX8TeLTJ8TodTxwmXAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
 kind: service
-endpoint: push_head
+endpoint: system.push-head
 required_caps: ["ryeos.execute.service.push-head"]
 schema:
   project_path: string

@@ -156,7 +156,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:identity/authorize-key",
-    endpoint: "authorize_key.set",
+    endpoint: "identity.authorize-key",
     availability: ServiceAvailability::Both,
     required_caps: &["ryeos.execute.service.authorize-key"],
     handler: |params, ctx, state| {

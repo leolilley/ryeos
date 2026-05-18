@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-17T21:44:35Z:c0e4515edc49048a79fcc2f6c0193f966b745a2caa13c4a90ba6194ddcca228a:DdgwH3DqgfARQkA/uIq7zTma0AuS9VatACWxoUPJZAsJPOrdqCQjAzrgDnL/ZKydAz3QHBcWpF9mX1swzbS2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-18T00:50:00Z:950194caf5d4fed8883f9762753fdb9e3de150b9b4e293d51cc65414b9742e09:r5Yba2DZoj30X8dK8o6DbyudPR0L5pH0aAFSr7uywI3cgIJBWQTj0eTwLMXrUbQ6eN7hyOsEUb3cHzfMsfB+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
 kind: service
-endpoint: remote.vault_list
+endpoint: remote.vault-list
 required_caps: ["ryeos.execute.service.remote.execute"]
 schema:
   remote: string?

@@ -26,6 +26,12 @@ fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningK
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"
+family: chat_completions
+body_template:
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
 auth: {{}}
 headers: {{}}
 pricing:

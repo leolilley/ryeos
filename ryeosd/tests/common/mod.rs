@@ -497,6 +497,7 @@ impl DaemonHarness {
         // that need additional bundles call `register_standard_bundle` from
         // their `plant` hook.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
+        fast_fixture::register_standard_bundle(&state_path, &fixture)?;
         plant(&state_path, user_space.path(), &fixture)?;
 
         // Always authorize the user key so `post_execute` can sign requests.
@@ -909,20 +910,20 @@ impl Drop for DaemonHarness {
 ///
 /// The tempdirs are returned so callers can keep them alive for follow-up
 /// inspection or for a subsequent harness.
-pub async fn run_service_standalone(
+ pub async fn run_service_standalone(
     state_dir: TempDir,
     user_space: TempDir,
     service_ref: &str,
     params_json: Option<&str>,
 ) -> anyhow::Result<(std::process::Output, TempDir, TempDir)> {
-    populate_user_space(user_space.path());
-
-    // Copy core bundle to temp so daemon init doesn't mutate workspace.
-    let (core_tmp, core_path) = copy_core_to_temp();
+    // Use the fast fixture to set up a fully initialized state with bundles.
+    let (core_tmp, state_path) = copy_core_to_temp();
+    let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
+    fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
+    fast_fixture::register_standard_bundle(&state_path, &fixture)?;
 
     let mut cmd = Command::new(ryeosd_binary());
-    cmd.arg("--init-if-missing")
-        .arg("--system-space-dir").arg(&core_path)
+    cmd.arg("--system-space-dir").arg(&state_path)
         .arg("--uds-path").arg(state_dir.path().join("ryeosd.sock"))
         .arg("run-service")
         .arg(service_ref);
@@ -946,6 +947,7 @@ pub async fn run_service_standalone(
     }
     let status = child.wait().await?;
     // core_tmp cleaned up here — child has exited so files are closed.
+    let _ = core_tmp;
     Ok((
         std::process::Output { status, stdout: stdout_buf, stderr: stderr_buf },
         state_dir,
