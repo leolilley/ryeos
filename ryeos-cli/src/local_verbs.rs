@@ -15,11 +15,15 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
 use clap::Parser;
 use lillux::crypto::{DecodePrivateKey, SigningKey};
 
 use ryeos_engine::roots;
+use ryeos_tools::actions::authorize::{
+    run_authorize_client as run_authorize_key, AuthorizeClientParams,
+};
 use ryeos_tools::actions::init::{run_init, InitOptions};
 use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 use ryeos_tools::actions::trust::{run_pin, run_pin_from, PinFromOptions, PinOptions};
@@ -42,6 +46,10 @@ pub fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
     match argv[0].as_str() {
         "init" => {
             run_init_verb(&argv[1..]).map_err(map_local_err)?;
+            Ok(true)
+        }
+        "authorize-key" => {
+            run_authorize_key_verb(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
         "publish" => {
@@ -130,6 +138,98 @@ fn run_init_verb(argv: &[String]) -> Result<()> {
     };
     let report = run_init(&opts).context("ryeos init failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+// ── ryeos authorize-key ──────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos authorize-key",
+    about = "Authorize an Ed25519 public key to call the daemon's authenticated endpoints",
+    no_binary_name = true
+)]
+struct AuthorizeKeyArgs {
+    /// Client public key in "ed25519:<base64>" format.
+    #[arg(long)]
+    public_key: String,
+
+    /// Human-readable label for the authorized key.
+    #[arg(long, default_value = "cli-authorized")]
+    label: String,
+
+    /// Comma-separated capabilities in canonical form
+    /// `ryeos.<verb>.<kind>.<subject>`. Example:
+    /// `--scopes ryeos.execute.service.remote.admin,ryeos.execute.service.bundle.install`.
+    /// Short-form scopes like `bundle.install` are rejected because the
+    /// authorizer does not auto-prefix. Use `--allow-wildcard` for `*`.
+    #[arg(long)]
+    scopes: String,
+
+    /// Allow wildcard scope "*". Only use for operator bootstrap.
+    #[arg(long)]
+    allow_wildcard: bool,
+
+    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    system_space_dir: Option<PathBuf>,
+}
+
+fn run_authorize_key_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<AuthorizeKeyArgs>(argv)?;
+    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
+
+    let pk_b64 = args
+        .public_key
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| anyhow!("public_key must be in 'ed25519:<base64>' format"))?;
+
+    let pk_bytes = base64::engine::general_purpose::STANDARD
+        .decode(pk_b64)
+        .with_context(|| "invalid base64 in public_key")?;
+
+    let verifying_key = lillux::crypto::VerifyingKey::from_bytes(
+        pk_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("public key must be 32 bytes (ed25519)"))?,
+    )
+    .map_err(|e| anyhow::anyhow!("invalid ed25519 public key: {e}"))?;
+
+    let scopes: Vec<String> = args
+        .scopes
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if scopes.is_empty() {
+        bail!("--scopes must not be empty");
+    }
+
+    // Validate each scope is in canonical form. `*` is grammar-valid;
+    // the writer enforces the wildcard policy via `--allow-wildcard`.
+    for scope in &scopes {
+        ryeos_runtime::authorizer::validate_scope_pattern(scope)
+            .map_err(|e| anyhow!("invalid scope: {e}"))?;
+    }
+
+    let result = run_authorize_key(AuthorizeClientParams {
+        system_space_dir,
+        public_key: verifying_key,
+        scopes,
+        label: args.label,
+        allow_wildcard: args.allow_wildcard,
+    })
+    .context("ryeos authorize-key failed")?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "fingerprint": result.fingerprint,
+            "path": result.path.to_string_lossy(),
+        }))?
+    );
     Ok(())
 }
 

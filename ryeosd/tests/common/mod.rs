@@ -29,6 +29,37 @@ pub fn ryeosd_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ryeosd"))
 }
 
+/// Monotonic per-process counter used to give each spawned daemon a
+/// unique stderr log file name without relying on a port number that
+/// isn't known until after bind.
+fn next_harness_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
+/// Read the actual bound `SocketAddr` from a daemon.json file.
+///
+/// The daemon writes its real listen address (including any
+/// kernel-assigned ephemeral port when the caller passed `:0`) into
+/// `daemon.json` after binding. Test harnesses must call this AFTER
+/// the daemon.json-existence wait so they connect to the correct port.
+pub fn read_actual_bind(daemon_json_path: &Path) -> anyhow::Result<SocketAddr> {
+    let body = std::fs::read_to_string(daemon_json_path)
+        .with_context(|| format!("read daemon.json at {}", daemon_json_path.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .with_context(|| format!("parse daemon.json at {}", daemon_json_path.display()))?;
+    let s = v
+        .get("bind")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow::anyhow!(
+            "daemon.json at {} missing 'bind' field",
+            daemon_json_path.display()
+        ))?;
+    s.parse()
+        .with_context(|| format!("parse 'bind' value '{s}' from daemon.json"))
+}
+
 /// Path to the built `ryeos` CLI binary, which lives in the same `target/<profile>/`
 /// directory as `ryeosd`. We build it on demand if it's not present, since
 /// Cargo only auto-builds bins from the same package as the integration test.
@@ -285,40 +316,6 @@ fn fixture_trusted_signer_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trusted_signers")
 }
 
-/// Allocate a port assigned by the OS.
-///
-/// Binds a transient `TcpListener` to `127.0.0.1:0`, reads the
-/// kernel-assigned port, and drops the listener so the caller can
-/// re-bind. There is a small TOCTOU window between drop and re-bind,
-/// but in practice this is far more reliable than the previous
-/// hash-bucketed range scheme — with 28+ test binaries running under
-/// nextest in parallel, hash collisions caused widespread
-/// `EADDRINUSE` failures across e2e tests (mock providers and
-/// daemons would race for the same port within the 256-port range
-/// shared between colliding binaries).
-pub fn next_port() -> u16 {
-    // SO_REUSEADDR is not set on the throwaway listener, so the
-    // kernel will not hand the same port to another concurrent
-    // `bind(0)` call while we hold the listener. Once we drop it,
-    // the TIME_WAIT-vs-bind race is the only remaining concern; the
-    // kernel rotates through the ephemeral range, so back-to-back
-    // probes within a process get distinct ports.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("next_port: bind ephemeral 127.0.0.1:0");
-    let port = listener
-        .local_addr()
-        .expect("next_port: local_addr")
-        .port();
-    drop(listener);
-    port
-}
-
-/// Legacy alias — same as `next_port()`. Migrate callers to `next_port()`.
-#[deprecated(note = "use next_port() instead")]
-pub fn pick_free_port() -> u16 {
-    next_port()
-}
-
 /// Configure a tempdir as a USER_SPACE: pre-populate
 /// `<user>/.ai/config/keys/trusted/` with the fixture trusted signers
 /// so the core bundle's items verify under the daemon's trust store.
@@ -379,8 +376,9 @@ impl DaemonHarness {
     /// (e.g. signed bundle registrations, audit records) so that the
     /// daemon's Phase 1 bootstrap and engine init pick them up.
     ///
-    /// Note: this path uses `--init-if-missing` (slow init). For tests
-    /// that need deterministic keys and pre-registered bundles, prefer
+    /// Note: this path relies on auto-init (the daemon runs bootstrap
+    /// idempotently when key artefacts are missing). For tests that need
+    /// deterministic keys and pre-registered bundles, prefer
     /// [`start_fast`] or [`start_fast_with`].
     pub async fn start_with_pre_init<S, F>(
         pre_init: S,
@@ -401,21 +399,23 @@ impl DaemonHarness {
 
         pre_init(&system_space_dir, user_space.path())?;
 
-        let port = next_port();
-        let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        // Bind `:0` and let the kernel assign an ephemeral port. The
+        // daemon writes the real address back to daemon.json — no
+        // port-pick TOCTOU race across concurrent test binaries.
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
 
         let mut cmd = Command::new(ryeosd_binary());
-        cmd.arg("--init-if-missing")
-            .arg("--system-space-dir").arg(&system_space_dir)
+        cmd.arg("--system-space-dir").arg(&system_space_dir)
             .arg("--bind").arg(bind.to_string())
             .arg("--uds-path").arg(&uds_path)
             .env("HOSTNAME", "testhost")
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
             // When RYEOSD_TEST_STDERR_DIR is set, mirror daemon stderr
-            // to a stable on-disk file (named per-port) so test
+            // to a stable on-disk file (named per-harness-id) so test
             // failures can dump diagnostics post-mortem. Otherwise
             // pipe so drain_stderr_nonblocking can read it directly.
             .stdout(Stdio::null())
@@ -423,7 +423,7 @@ impl DaemonHarness {
                 std::env::var_os("RYEOSD_TEST_STDERR_DIR")
                     .and_then(|d| {
                         let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{port}.stderr.log"));
+                            .join(format!("daemon-{harness_id}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
                     .unwrap_or_else(Stdio::piped)
@@ -449,7 +449,7 @@ impl DaemonHarness {
                 let mut buf = String::new();
                 if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
                     let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{port}.stderr.log"));
+                        .join(format!("daemon-{harness_id}.stderr.log"));
                     buf = std::fs::read_to_string(&path).unwrap_or_default();
                 }
                 if let Some(mut stderr) = child.stderr.take() {
@@ -464,9 +464,12 @@ impl DaemonHarness {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
+        // Read the actual bound address — required when we passed :0.
+        let actual_bind = read_actual_bind(&daemon_json)?;
+
         // Best-effort: also wait for the HTTP listener to actually accept.
         let client = reqwest::Client::new();
-        let url = format!("http://{bind}/health");
+        let url = format!("http://{actual_bind}/health");
         let connect_deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if client.get(&url).timeout(Duration::from_millis(200)).send().await.is_ok() {
@@ -483,7 +486,7 @@ impl DaemonHarness {
             _core_bundle_tmp: core_bundle_tmp,
             state_path: system_space_dir.to_path_buf(),
             user_space,
-            bind,
+            bind: actual_bind,
             uds_path,
             child,
             stderr_buf: None,
@@ -495,7 +498,7 @@ impl DaemonHarness {
     /// Spawn a fresh daemon using the fast fixture: state and user-space
     /// are pre-populated with deterministic keys, vault keypair, and
     /// self-signed trust docs (mirrors `bootstrap::init` byte-equivalent
-    /// state). Daemon launches WITHOUT `--init-if-missing` since
+    /// state). Daemon launches WITHOUT `` since
     /// initialization is already complete — any drift surfaces as a
     /// loud failure rather than silent re-init.
     ///
@@ -550,13 +553,15 @@ impl DaemonHarness {
             &state_path, &fixture.user, &fixture.node,
         )?;
 
-        let port = next_port();
-        let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        // Bind `:0` and read the real address from daemon.json (no
+        // cross-process port-pick race).
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
 
         let mut cmd = Command::new(ryeosd_binary());
-        // NOTE: NO --init-if-missing. The fast fixture is the init.
+        // NOTE: NO . The fast fixture is the init.
         cmd.arg("--system-space-dir").arg(&state_path)
             .arg("--bind").arg(bind.to_string())
             .arg("--uds-path").arg(&uds_path)
@@ -568,7 +573,7 @@ impl DaemonHarness {
                 std::env::var_os("RYEOSD_TEST_STDERR_DIR")
                     .and_then(|d| {
                         let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{port}.stderr.log"));
+                            .join(format!("daemon-{harness_id}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
                     .unwrap_or_else(Stdio::piped)
@@ -591,7 +596,7 @@ impl DaemonHarness {
                 let mut buf = String::new();
                 if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
                     let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{port}.stderr.log"));
+                        .join(format!("daemon-{harness_id}.stderr.log"));
                     buf = std::fs::read_to_string(&path).unwrap_or_default();
                 }
                 if let Some(mut stderr) = child.stderr.take() {
@@ -606,8 +611,10 @@ impl DaemonHarness {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
+        let actual_bind = read_actual_bind(&daemon_json)?;
+
         let client = reqwest::Client::new();
-        let url = format!("http://{bind}/health");
+        let url = format!("http://{actual_bind}/health");
         let connect_deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if client.get(&url).timeout(Duration::from_millis(200)).send().await.is_ok() {
@@ -624,7 +631,7 @@ impl DaemonHarness {
             _core_bundle_tmp: core_bundle_tmp,
             state_path,
             user_space,
-            bind,
+            bind: actual_bind,
             uds_path,
             child,
             stderr_buf: None,
@@ -723,20 +730,25 @@ impl DaemonHarness {
     /// Must be called after [`kill_daemon`]. The reconciler runs
     /// automatically at startup and picks up any orphaned threads.
     ///
-    /// **No `--init-if-missing`** is passed — state is already initialized.
+    /// **No ``** is passed — state is already initialized.
     pub async fn respawn_with<F: FnOnce(&mut Command)>(
         &mut self,
         tweak: F,
     ) -> anyhow::Result<()> {
-        // Allocate a fresh port to avoid TOCTOU race on the released port.
-        let port = next_port();
-        self.bind = format!("127.0.0.1:{port}").parse().unwrap();
+        // Bind `:0` and read the new actual address back from daemon.json.
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let harness_id = next_harness_id();
+
+        // Remove the old daemon.json so we can detect when the new
+        // daemon writes its own (with the new bind address).
+        let daemon_json = self.state_path.join("daemon.json");
+        let _ = std::fs::remove_file(&daemon_json);
 
         let mut cmd = Command::new(ryeosd_binary());
         cmd.arg("--system-space-dir")
             .arg(&self.state_path)
             .arg("--bind")
-            .arg(self.bind.to_string())
+            .arg(bind.to_string())
             .arg("--uds-path")
             .arg(&self.uds_path)
             .env("HOSTNAME", "testhost")
@@ -747,7 +759,7 @@ impl DaemonHarness {
                 std::env::var_os("RYEOSD_TEST_STDERR_DIR")
                     .and_then(|d| {
                         let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{}.stderr.log", self.bind.port()));
+                            .join(format!("daemon-{harness_id}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
                     .unwrap_or_else(Stdio::piped),
@@ -757,6 +769,21 @@ impl DaemonHarness {
         tweak(&mut cmd);
 
         self.child = cmd.spawn()?;
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if daemon_json.exists() {
+                break;
+            }
+            if Instant::now() > deadline {
+                anyhow::bail!(
+                    "respawned daemon.json never appeared at {}",
+                    daemon_json.display()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.bind = read_actual_bind(&daemon_json)?;
 
         let client = reqwest::Client::new();
         let url = format!("http://{}/health", self.bind);
@@ -775,7 +802,7 @@ impl DaemonHarness {
                 let mut buf = String::new();
                 if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
                     let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{}.stderr.log", self.bind.port()));
+                        .join(format!("daemon-{harness_id}.stderr.log"));
                     buf = std::fs::read_to_string(&path).unwrap_or_default();
                 }
                 anyhow::bail!(
@@ -796,7 +823,7 @@ impl DaemonHarness {
     /// After restart, the reconciler runs automatically and picks up
     /// any orphaned threads from the previous daemon run.
     ///
-    /// **No `--init-if-missing`** is passed — the state directory is
+    /// **No ``** is passed — the state directory is
     /// already initialized from the original spawn.
     ///
     /// For tests that need to kill orphaned subprocesses between
@@ -839,14 +866,16 @@ impl DaemonHarness {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // 4. Re-spawn with fresh port (no --init-if-missing).
-        let port = next_port();
-        self.bind = format!("127.0.0.1:{port}").parse().unwrap();
+        // 4. Re-spawn with `:0`; read actual bind from daemon.json.
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let harness_id = next_harness_id();
+        let daemon_json = self.state_path.join("daemon.json");
+        let _ = std::fs::remove_file(&daemon_json);
         let mut cmd = Command::new(ryeosd_binary());
         cmd.arg("--system-space-dir")
             .arg(&self.state_path)
             .arg("--bind")
-            .arg(self.bind.to_string())
+            .arg(bind.to_string())
             .arg("--uds-path")
             .arg(&self.uds_path)
             .env("HOSTNAME", "testhost")
@@ -857,7 +886,7 @@ impl DaemonHarness {
                 std::env::var_os("RYEOSD_TEST_STDERR_DIR")
                     .and_then(|d| {
                         let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{}.stderr.log", self.bind.port()));
+                            .join(format!("daemon-{harness_id}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
                     .unwrap_or_else(Stdio::piped),
@@ -867,6 +896,23 @@ impl DaemonHarness {
         tweak(&mut cmd);
 
         self.child = cmd.spawn()?;
+
+        // Wait for the restarted daemon to publish daemon.json with
+        // its newly-bound address.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if daemon_json.exists() {
+                break;
+            }
+            if Instant::now() > deadline {
+                anyhow::bail!(
+                    "restarted daemon.json never appeared at {}",
+                    daemon_json.display()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.bind = read_actual_bind(&daemon_json)?;
 
         // 5. Wait for the daemon to be responsive (deadline is generous
         //    because the reconciler runs before the HTTP listener binds).

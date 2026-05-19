@@ -82,7 +82,14 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
             }
         })?;
 
-        let parameters = crate::arg_bind::bind_tail(&cli.rest[2..])?;
+        // Scan tail for --input <path> (mutually exclusive with flag-style binding)
+        let tail = &cli.rest[2..];
+        let parameters = if let Some(input_val) = crate::arg_bind::parse_input_arg(tail)? {
+            input_val
+        } else {
+            crate::arg_bind::bind_tail(tail)?
+        };
+
         let body = serde_json::json!({
             "item_ref": item_ref,
             "project_path": body_project_path,

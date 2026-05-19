@@ -271,7 +271,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     let user_space = tempfile::tempdir().expect("user space");
     let (_core_tmp, state_path) = common::copy_core_to_temp();
 
-    // Pre-populate via fast fixture (no --init-if-missing on the daemon
+    // Pre-populate via fast fixture (no  on the daemon
     // command below). populate_initialized_state writes the deterministic
     // node identity, vault keypair, user identity, and trust docs, plus
     // imports the system-bundle signer trust.
@@ -302,8 +302,8 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     )
     .expect("plant dup-runtime-b");
 
-    let port = common::next_port();
-    let bind = format!("127.0.0.1:{port}");
+    // Test expects daemon to fail-fast before binding; `:0` is fine.
+    let bind = "127.0.0.1:0".to_string();
     let uds_path = state_path.join("ryeosd.sock");
 
     let mut cmd = Command::new(common::ryeosd_binary());

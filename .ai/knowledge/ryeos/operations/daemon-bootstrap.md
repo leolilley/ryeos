@@ -24,9 +24,9 @@ Config resolution happens in `Config::load()` (`ryeosd/src/config.rs`). The daem
 
 If both CLI `--bind` and config file `bind` disagree, the daemon refuses to start unless `--force` is passed.
 
-## Phase 1: Init (if needed)
+## Phase 1: Auto-init (if needed)
 
-If `--init-if-missing` is passed and keys are absent, `bootstrap::init()` creates:
+If key artefacts are absent, `bootstrap::init()` runs idempotently and creates:
 
 1. **Directory layout**: `<state_dir>/.ai/node/{auth,vault}/`, `<state_dir>/.ai/state/{objects,refs}/`
 2. **Default config**: `<state_dir>/.ai/node/config.yaml`

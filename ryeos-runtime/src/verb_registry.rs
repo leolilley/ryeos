@@ -207,7 +207,7 @@ mod tests {
     fn validate_cap_known_verb() {
         let reg = test_registry();
         assert!(reg.validate_cap_verb("ryeos.sign.directive.*").is_ok());
-        assert!(reg.validate_cap_verb("ryeos.execute.service.bundle/install").is_ok());
+        assert!(reg.validate_cap_verb("ryeos.execute.service.bundle.install").is_ok());
     }
 
     #[test]

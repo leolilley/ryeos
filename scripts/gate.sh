@@ -16,20 +16,30 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CARGO="${CARGO:-/home/leo/.local/share/cargo/bin/cargo}"
+CARGO="${CARGO:-cargo}"
+
+# Default publisher signing key + owner — used by populate-bundles.sh.
+# Override with KEY=... OWNER=... if you have a different setup.
+KEY="${KEY:-$ROOT/.dev-keys/PUBLISHER_DEV.pem}"
+OWNER="${OWNER:-ryeos-dev}"
 
 skip_tests=0
 nextest_args=()
 for arg in "$@"; do
     case "$arg" in
         --no-tests) skip_tests=1 ;;
-        --no-bundle) ;;  # accepted for back-compat, no-op (drift check removed)
         *) nextest_args+=("$arg") ;;
     esac
 done
 
+if [[ ! -s "$KEY" ]]; then
+    echo "gate: signing key not found at $KEY" >&2
+    echo "gate: set KEY=/path/to/PUBLISHER.pem (or create $KEY)" >&2
+    exit 2
+fi
+
 echo "gate: populating bundles (build + install + rebuild-manifest)"
-"$ROOT/scripts/populate-bundles.sh"
+"$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER"
 
 if [[ "$skip_tests" == "1" ]]; then
     exit 0

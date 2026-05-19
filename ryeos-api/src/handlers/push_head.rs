@@ -114,7 +114,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:system/push-head",
     endpoint: "system.push-head",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.push-head"],
+    required_caps: &["ryeos.execute.service.push_head"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)?;

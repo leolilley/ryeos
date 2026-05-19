@@ -5,13 +5,22 @@
 //!
 //! ## Rules
 //!
-//! - `--key=value` → `{ "key": "value" }`
-//! - `--key value` → `{ "key": "value" }` (next token consumed as value)
+//! - `--key=value` → `{ "key": "value" }`  (hyphens normalised to underscores)
+//! - `--key value` → `{ "key": "value" }`  (next token consumed as value)
 //! - `--key` (alone or before `--next`) → `{ "key": true }`
 //! - `--key -1` → `{ "key": "-1" }` (single-dash values are values, not flags)
+//! - `--foo-bar val` → `{ "foo_bar": "val" }` (hyphens in keys → underscores)
 //! - Positional tokens → `{ "_args": [...] }`
 //! - Repeated keys: last one wins
 //! - Empty input → `{}`
+
+/// Normalise a flag key: strip the `--` prefix (already done by caller)
+/// and replace hyphens with underscores so `--public-key` becomes `public_key`.
+/// This matches the snake_case field names used by handlers with
+/// `#[serde(deny_unknown_fields)]`.
+fn normalise_key(key: &str) -> String {
+    key.replace('-', "_")
+}
 
 /// Bind raw argv tokens into a flat JSON parameters object.
 ///
@@ -34,14 +43,14 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
             if key.contains('=') {
                 // --key=value
                 let (k, v) = key.split_once('=').unwrap();
-                params.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                params.insert(normalise_key(k), serde_json::Value::String(v.to_string()));
             } else if i + 1 < argv.len() && !argv[i + 1].starts_with("--") {
                 // --key value (value may start with single dash, e.g. "-1")
                 i += 1;
-                params.insert(key.to_string(), serde_json::Value::String(argv[i].clone()));
+                params.insert(normalise_key(key), serde_json::Value::String(argv[i].clone()));
             } else {
                 // --key (bare flag)
-                params.insert(key.to_string(), serde_json::Value::Bool(true));
+                params.insert(normalise_key(key), serde_json::Value::Bool(true));
             }
         } else {
             positional.push(serde_json::Value::String(token.clone()));
@@ -156,5 +165,42 @@ mod tests {
         let args = result["_args"].as_array().unwrap();
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], "positional");
+    }
+
+    // ── Hyphen-to-underscore normalisation ──
+
+    #[test]
+    fn hyphenated_key_normalised_to_underscore() {
+        let result = bind_argv(&["--public-key".into(), "abc123".into()]);
+        assert_eq!(result["public_key"], "abc123");
+        assert!(result.get("public-key").is_none());
+    }
+
+    #[test]
+    fn hyphenated_equals_key_normalised() {
+        let result = bind_argv(&["--some-key=value".into()]);
+        assert_eq!(result["some_key"], "value");
+        assert!(result.get("some-key").is_none());
+    }
+
+    #[test]
+    fn hyphenated_bare_flag_normalised() {
+        let result = bind_argv(&["--dry-run".into()]);
+        assert_eq!(result["dry_run"], true);
+        assert!(result.get("dry-run").is_none());
+    }
+
+    #[test]
+    fn mixed_hyphenated_and_plain_keys() {
+        let result = bind_argv(&[
+            "--public-key".into(),
+            "ed25519:abc".into(),
+            "--label".into(),
+            "test-key".into(),
+            "--dry-run".into(),
+        ]);
+        assert_eq!(result["public_key"], "ed25519:abc");
+        assert_eq!(result["label"], "test-key");
+        assert_eq!(result["dry_run"], true);
     }
 }

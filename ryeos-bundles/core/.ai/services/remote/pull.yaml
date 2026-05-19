@@ -1,7 +1,7 @@
-# ryeos:signed:2026-05-18T02:20:59Z:d821add7da0cb6130d4983d7a7ccb380ffba5780ab740f745e91f9b5f7e463c2:NzobaEchcA9KSYmOueYPOZjih+OL/sNiDWb3iFP7uUUraYxrnZReFkhNoRPq3H8U7hx5iyzO/6Xxl/b3LXI4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T01:36:21Z:96814f7a70a8bb2ded71b950d6d9fc491d97a69d587c2232183f5f38777b0dae:VhNrNvV4HM3iP71fyNUS7NXuR3VG2Vopy5zzF5TC/9JTufv43vHx9gJkQ9HzdoJE9jAt6s34cCnvObPJB/9QAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.pull
-required_caps: ["ryeos.execute.service.objects/get"]
+required_caps: ["ryeos.execute.service.objects.get"]
 schema:
   remote: string?
   hashes: string[]

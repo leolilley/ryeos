@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
 
     // Initialize tracing with file sink (writes ndjson to <system_space_dir>/.ai/state/trace-events.ndjson).
     // Must come after config load so system_space_dir is known.
-    // The init_if_missing / init_only paths below may create .ai/state/ if it doesn't exist yet,
+    // The init_only path below may create .ai/state/ if it doesn't exist yet,
     // but for_daemon_with_file_sink already creates .ai/state/ on its own.
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(&config.system_space_dir));
 
@@ -48,38 +48,31 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Init-if-missing convenience: applies to BOTH daemon-start and the
-    // standalone `run-service` subcommand. Done before subcommand dispatch
-    // so standalone callers don't need a separate init step.
+    // Auto-init: always run bootstrap when any key artefact is missing.
+    // `bootstrap::init` is idempotent — when files exist it's a verify
+    // pass; when they don't it creates them.
     //
-    // We check for both node identity and vault key files rather than
-    // `system_space_dir.exists()` because the tracing subscriber pre-creates
-    // `<system_space_dir>/.ai/state/` before this code runs, which would
-    // otherwise defeat the predicate. Either key missing triggers a
-    // (load-or-create-per-key idempotent) init; this matters when a
-    // test or operator has pre-placed one key but not the other.
+    // We check for node identity, vault key, and public-identity.json
+    // rather than `system_space_dir.exists()` because the tracing
+    // subscriber pre-creates `<system_space_dir>/.ai/state/` before
+    // this code runs, which would otherwise defeat the predicate.
     let vault_secret_path = config
         .system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("vault")
         .join("private_key.pem");
-    // `bootstrap::init` is idempotent — when files exist it's a verify
-    // pass; when they don't it creates them. The previous narrow
-    // condition (only run when node/vault keys are missing) skipped the
-    // step that writes public-identity.json after `ryeos init` already
-    // created the keys, leaving the daemon without a published audience.
     let public_identity_path = config
         .system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("identity")
         .join("public-identity.json");
-    if cli.init_if_missing
-        && (!config.node_signing_key_path.exists()
-            || !vault_secret_path.exists()
-            || !public_identity_path.exists())
+    if !config.node_signing_key_path.exists()
+        || !vault_secret_path.exists()
+        || !public_identity_path.exists()
     {
+        tracing::info!("one or more key artefacts missing — running bootstrap init");
         bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;
     }
 
@@ -386,18 +379,25 @@ async fn main() -> Result<()> {
     let tcp_listener = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.bind))?;
+    // Read back the actual bound address. When the caller passes
+    // `:0` the kernel assigns an ephemeral port — discover and
+    // advertise it via daemon.json so clients connect to the real
+    // port, not the literal `0`.
+    let actual_bind = tcp_listener
+        .local_addr()
+        .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
     let uds_listener = UnixListener::bind(&config.uds_path)
         .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
 
     std::env::set_var("RYEOSD_SOCKET_PATH", &config.uds_path);
-    std::env::set_var("RYEOSD_URL", format!("http://{}", config.bind));
+    std::env::set_var("RYEOSD_URL", format!("http://{}", actual_bind));
 
     // Write daemon.json so tools can discover the daemon.
     // This is the discovery contract — fail if we can't write it.
     let daemon_info = serde_json::json!({
         "pid": std::process::id(),
         "socket": config.uds_path.display().to_string(),
-        "bind": config.bind.to_string(),
+        "bind": actual_bind.to_string(),
         "started_at": lillux::time::iso8601_now(),
     });
     let daemon_json_path = config.system_space_dir.join("daemon.json");

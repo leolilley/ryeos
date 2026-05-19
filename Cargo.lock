@@ -2297,6 +2297,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
+ "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
  "ryeos-vault",

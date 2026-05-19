@@ -12,7 +12,7 @@ use common::DaemonHarness;
 async fn fast_fixture_boots_daemon_without_real_init() {
     let (h, fixture) = DaemonHarness::start_fast()
         .await
-        .expect("daemon must boot from fast fixture without --init-if-missing");
+        .expect("daemon must boot from fast fixture without ");
 
     // /health must respond.
     let url = format!("http://{}/health", h.bind);

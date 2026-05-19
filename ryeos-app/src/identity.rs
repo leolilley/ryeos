@@ -156,6 +156,30 @@ impl NodeIdentity {
     }
 }
 
+/// Policy governing whether the wildcard scope `"*"` is permitted in
+/// an authorized-key TOML write.
+///
+/// Wildcard delegation is dangerous: a `["*"]` entry authorizes any
+/// call regardless of subject. Only two paths legitimately need it:
+///
+/// 1. Operator bootstrap — the node's own operator key gets `["*"]`
+///    so the operator can administer everything on their own node.
+/// 2. The local `ryeos authorize-key --allow-wildcard` CLI, when the
+///    operator explicitly opts in.
+///
+/// Every other path must use [`WildcardPolicy::Reject`]. The
+/// `AllowBootstrap` variant exists in the public API but is meant to
+/// be constructed only by those two callsites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WildcardPolicy {
+    /// Reject any scope equal to `"*"`. The normal path for all
+    /// delegated authorize-key writes.
+    Reject,
+    /// Permit `"*"`. Use only during operator bootstrap or when the
+    /// local CLI is invoked with `--allow-wildcard`.
+    AllowBootstrap,
+}
+
 /// Write a node-signed authorized-key TOML entry.
 ///
 /// Used by bootstrap (local operator) and the authorize-key handler
@@ -164,6 +188,11 @@ impl NodeIdentity {
 /// The TOML is signed with the node's signing key. Only the node can
 /// create valid authorized keys — remote callers can only request that
 /// the node create one.
+///
+/// ## Wildcard policy
+///
+/// `wildcard` controls whether `"*"` is accepted in `scopes`. See
+/// [`WildcardPolicy`] for when each variant is appropriate.
 pub fn write_authorized_key_toml(
     auth_dir: &Path,
     fingerprint: &str,
@@ -173,8 +202,18 @@ pub fn write_authorized_key_toml(
     granted_by: &str,
     created_at: &str,
     node_signing_key: &lillux::crypto::SigningKey,
+    wildcard: WildcardPolicy,
 ) -> Result<std::path::PathBuf> {
     use std::fs;
+
+    // Reject wildcard delegation unless the policy permits it.
+    if wildcard == WildcardPolicy::Reject && scopes.iter().any(|s| s == "*") {
+        bail!(
+            "wildcard scope '*' rejected. \
+             Wildcard delegation is only permitted during operator bootstrap. \
+             Specify explicit scopes instead."
+        );
+    }
 
     // Build scope list as TOML array
     let scopes_str = scopes
@@ -214,4 +253,120 @@ created_at = "{ca}"
         .with_context(|| format!("failed to rename to {}", entry_path.display()))?;
 
     Ok(entry_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::crypto::SigningKey;
+    use rand::rngs::OsRng;
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::generate(&mut OsRng)
+    }
+
+    #[test]
+    fn wildcard_rejected_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let vk = key.verifying_key();
+        let fp = lillux::sha256_hex(vk.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        let result = write_authorized_key_toml(
+            dir.path(),
+            &fp,
+            &key_b64,
+            &["*".to_string()],
+            "test",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &key,
+            WildcardPolicy::Reject,
+        );
+        let err = result.expect_err("wildcard should be rejected");
+        assert!(err.to_string().contains("wildcard scope"));
+    }
+
+    #[test]
+    fn wildcard_allowed_with_bootstrap_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let vk = key.verifying_key();
+        let fp = lillux::sha256_hex(vk.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        let result = write_authorized_key_toml(
+            dir.path(),
+            &fp,
+            &key_b64,
+            &["*".to_string()],
+            "test",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &key,
+            WildcardPolicy::AllowBootstrap,
+        );
+        assert!(result.is_ok(), "wildcard should be allowed under AllowBootstrap");
+    }
+
+    #[test]
+    fn canonical_scopes_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let vk = key.verifying_key();
+        let fp = lillux::sha256_hex(vk.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        let result = write_authorized_key_toml(
+            dir.path(),
+            &fp,
+            &key_b64,
+            &[
+                "ryeos.execute.service.remote.admin".to_string(),
+                "ryeos.execute.service.bundle.install".to_string(),
+            ],
+            "test",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &key,
+            WildcardPolicy::Reject,
+        );
+        assert!(result.is_ok(), "canonical scopes should be accepted");
+    }
+
+    #[test]
+    fn round_trip_toml_is_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let vk = key.verifying_key();
+        let fp = lillux::sha256_hex(vk.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        let path = write_authorized_key_toml(
+            dir.path(),
+            &fp,
+            &key_b64,
+            &["ryeos.execute.service.remote.admin".to_string()],
+            "test-label",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &key,
+            WildcardPolicy::Reject,
+        )
+        .unwrap();
+
+        // Read back the file and verify the content
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Skip signature line, find the body
+        let body: String = content
+            .lines()
+            .filter(|l| !l.starts_with("# ryeos:signed:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains(&format!("fingerprint = \"{fp}\"")));
+        assert!(body.contains("ryeos.execute.service.remote.admin"));
+        assert!(body.contains("test-label"));
+        assert!(body.contains("test-granter"));
+    }
 }

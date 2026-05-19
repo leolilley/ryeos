@@ -48,7 +48,6 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::common::next_port;
 
 /// One canned LLM response. The mock pops these FIFO.
 #[derive(Debug, Clone)]
@@ -116,11 +115,10 @@ pub struct MockProvider {
 impl MockProvider {
     /// Spawn a mock provider with the given canned responses (popped
     /// FIFO). Returns once the server is bound and listening.
+    ///
+    /// Binds `127.0.0.1:0` directly and reads back the kernel-assigned
+    /// port — no `next_port()` TOCTOU window between port-pick and bind.
     pub async fn start(canned: Vec<MockResponse>) -> Self {
-        let port = next_port();
-        let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let base_url = format!("http://127.0.0.1:{port}");
-
         let state = Arc::new(Mutex::new(MockState {
             queue: canned,
             captured_headers: Vec::new(),
@@ -130,9 +128,15 @@ impl MockProvider {
             .route("/chat/completions", post(handle_chat_completions))
             .with_state(state.clone());
 
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = tokio::net::TcpListener::bind(bind)
             .await
-            .expect("mock provider bind 127.0.0.1");
+            .expect("mock provider bind 127.0.0.1:0");
+        let actual_port = listener
+            .local_addr()
+            .expect("mock provider local_addr")
+            .port();
+        let base_url = format!("http://127.0.0.1:{actual_port}");
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 

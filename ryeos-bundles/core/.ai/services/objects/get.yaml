@@ -1,7 +1,7 @@
-# ryeos:signed:2026-05-18T02:20:59Z:8bfc56f46c94365191a041c930f047cfc32e1e5a7077795881f9ef71406e114d:IKte392coJZEsXp4RSvIIAwrAgkIAqE5rYiWybIB7/2FNx0gTWIqkWTDSUi0Sst5cE8a9McGzxCqJK4lT2uQDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T01:36:21Z:3e44478f910140e34868d39a0ef2a1bbab8c5912c2d401601f74697ccb39adba:qpJTAeryBoFaa4cP0Wx5mfRcMbMUME5S70YShqJpXEu+pDiXM/tvkUIUGB6OB8UP0edN/4CR8ZKHbNxACTsPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.get
-required_caps: ["ryeos.execute.service.objects/get"]
+required_caps: ["ryeos.execute.service.objects.get"]
 schema:
   hash: string
 description: "Retrieve a CAS object by hash"

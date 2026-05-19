@@ -140,6 +140,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         &ctx.fingerprint,
         &now,
         state.identity.signing_key(),
+        ryeos_app::identity::WildcardPolicy::Reject,
     )
     .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
@@ -158,7 +159,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:identity/authorize-key",
     endpoint: "identity.authorize-key",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.authorize-key"],
+    required_caps: &["ryeos.execute.service.authorize_key"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
@@ -201,106 +202,44 @@ mod tests {
     }
 
     // ── Scope grammar tests ──
+    //
+    // Grammar lives in `ryeos_runtime::authorizer::validate_scope_pattern`.
+    // Canonical form is `ryeos.<verb>.<kind>.<subject>`; short-form
+    // scopes are rejected because the matcher does not auto-prefix.
 
     #[test]
-    fn valid_scope() {
-        assert!(validate_scope_pattern("ryeos.execute.service.vault/set").is_ok());
+    fn valid_canonical_scope() {
+        assert!(validate_scope_pattern("ryeos.execute.service.vault.set").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.bundle.install").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.remote.admin").is_ok());
     }
 
     #[test]
-    fn valid_scope_simple() {
-        assert!(validate_scope_pattern("execute").is_ok());
+    fn reject_short_form_scope() {
+        // Short forms like `bundle.install` would never satisfy any
+        // handler's `ryeos.execute.service.*` requirement.
+        assert!(validate_scope_pattern("bundle.install").is_err());
+        assert!(validate_scope_pattern("remote.admin").is_err());
+        assert!(validate_scope_pattern("execute").is_err());
     }
 
-    #[test]
-    fn reject_leading_dot() {
-        assert!(validate_scope_pattern(".execute").is_err());
-    }
+    // ── Wildcard delegation: handler rejects "*", grammar permits it ──
 
     #[test]
-    fn reject_trailing_dot() {
-        assert!(validate_scope_pattern("execute.").is_err());
-    }
-
-    #[test]
-    fn reject_consecutive_dots() {
-        assert!(validate_scope_pattern("ryeos..execute").is_err());
-    }
-
-    #[test]
-    fn reject_uppercase() {
-        assert!(validate_scope_pattern("ryeos.Execute").is_err());
-    }
-
-    #[test]
-    fn reject_unicode() {
-        assert!(validate_scope_pattern("ryeos.éxecute").is_err());
-    }
-
-    #[test]
-    fn reject_spaces() {
-        assert!(validate_scope_pattern("ryeos exec").is_err());
-    }
-
-    // ── Wildcard delegation rejection ──
-
-    #[test]
-    fn reject_wildcard_scope() {
-        // The handler rejects "*" at step 6, but validate_scope_pattern
-        // also rejects it because '*' doesn't match [a-z0-9\-_/].
-        // Test both paths:
-        assert!(validate_scope_pattern("*").is_err());
-    }
-
-    #[test]
-    fn reject_wildcard_in_scope_list() {
-        // Parse a request with wildcard — struct is valid, but the
-        // handler would reject at step 6. Test the scope grammar rejects.
-        let req = serde_json::from_value::<Request>(serde_json::json!({
-            "public_key": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "label": "test",
-            "scopes": ["*"],
-        }))
-        .unwrap();
-        // Scope grammar rejects "*"
-        for scope in &req.scopes {
-            assert!(validate_scope_pattern(scope).is_err(), "scope '{}' should be rejected", scope);
-        }
-    }
-
-    #[test]
-    fn reject_glob_pattern_scope() {
-        assert!(validate_scope_pattern("ryeos.*").is_err());
-        assert!(validate_scope_pattern("ryeos.execute.*").is_err());
-    }
-
-    // ── Wildcard delegation rejection through handler logic ──
-
-    /// Simulates the handler's step-6 wildcard check: the handler
-    /// rejects any scope list containing "*" with Forbidden.
-    /// (Cannot call `handle()` directly without full AppState, but
-    /// the rejection logic is a simple `any(|s| s == "*")` check.)
-    #[test]
-    fn wildcard_in_scope_list_is_caught_by_grammar_before_handler() {
-        // "*" doesn't even pass scope grammar validation (step 5b),
-        // so the handler would return BadRequest before reaching step 6.
-        // Verify:
-        let scopes = vec!["*".to_string()];
-        for scope in &scopes {
-            assert!(
-                validate_scope_pattern(scope).is_err(),
-                "wildcard '*' should fail scope grammar"
-            );
-        }
-    }
-
-    #[test]
-    fn handler_wildcard_check_would_catch_if_grammar_passed() {
-        // The handler has a secondary check (step 6): if any scope is
-        // exactly "*", return Forbidden. This is defense-in-depth in
-        // case scope grammar is ever relaxed. Verify the check logic:
-        let normalized = vec!["ryeos.execute.service".to_string(), "*".to_string()];
+    fn wildcard_passes_grammar_but_handler_rejects_it() {
+        // Grammar layer accepts "*" — wildcard policy lives elsewhere.
+        assert!(validate_scope_pattern("*").is_ok());
+        // The handler's step-6 check rejects any list containing "*".
+        let normalized = vec!["ryeos.execute.service.bundle.install".to_string(), "*".to_string()];
         let has_wildcard = normalized.iter().any(|s| s == "*");
-        assert!(has_wildcard, "wildcard detection should catch '*' in scope list");
+        assert!(has_wildcard, "handler must catch '*' in scope list");
+    }
+
+    #[test]
+    fn accept_prefix_wildcards() {
+        // Prefix wildcards are valid grammar (and useful for delegation).
+        assert!(validate_scope_pattern("ryeos.*").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.*").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.*").is_ok());
     }
 }

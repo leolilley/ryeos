@@ -95,9 +95,9 @@ enum Cmd {
         #[arg(long)]
         public_key: Option<String>,
 
-        /// Comma-separated scopes to grant (default: "*").
-        #[arg(long, default_value = "*")]
-        scopes: String,
+        /// Comma-separated scopes to grant (required).
+        #[arg(long)]
+        scopes: Option<String>,
 
         /// Human-readable label for the authorized key.
         #[arg(long, default_value = "cli-authorized")]
@@ -257,7 +257,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             public_key,
             scopes,
             label,
-        } => run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json),
+        } => {
+            let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
+                "--scopes required, comma-separated, in canonical form. \
+                 Example: --scopes ryeos.execute.service.remote.admin,ryeos.execute.service.bundle.install"
+            ))?;
+            run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json)
+        }
         Cmd::Vault { cmd } => run_vault(cmd),
     }
 }
@@ -406,7 +412,7 @@ fn run_authorize_client(
             .to_string();
         let sc = val["scopes"]
             .as_str()
-            .unwrap_or("*")
+            .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
             .to_string();
         let lb = val["label"]
             .as_str()
@@ -431,13 +437,29 @@ fn run_authorize_client(
     )
     .map_err(|e| anyhow::anyhow!("invalid ed25519 public key: {e}"))?;
 
-    let scopes: Vec<String> = scopes_str.split(',').map(|s| s.trim().to_string()).collect();
+    let scopes: Vec<String> = scopes_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if scopes.is_empty() {
+        anyhow::bail!("--scopes must not be empty");
+    }
+
+    // Validate each scope is in canonical form. core-tools is not the
+    // bootstrap path, so wildcard '*' is rejected at the writer below.
+    for scope in &scopes {
+        ryeos_runtime::authorizer::validate_scope_pattern(scope)
+            .map_err(|e| anyhow::anyhow!("invalid scope: {e}"))?;
+    }
 
     let result = run(AuthorizeClientParams {
         system_space_dir,
         public_key: verifying_key,
         scopes,
         label,
+        allow_wildcard: false, // core-tools is not the bootstrap path
     })?;
 
     println!("{}", serde_json::to_string_pretty(&serde_json::json!({

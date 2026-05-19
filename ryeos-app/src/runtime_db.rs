@@ -206,7 +206,7 @@ impl RuntimeDb {
                              persisted={}; expected={}; payload_len={}. \
                              Refusing to operate on stale schema. \
                              Recovery: mv <db_file> <db_file>.foreign.$(date +%s); \
-                             then restart with --init-if-missing.",
+                             then restart the daemon (auto-init will recreate missing state).",
                             m.schema_version,
                             LAUNCH_METADATA_SCHEMA_VERSION,
                             s.len(),
@@ -222,7 +222,7 @@ impl RuntimeDb {
                         "failed to decode launch_metadata for thread {thread_id}: {err:#} \
                          (payload_len={}). Corrupt or foreign row. \
                          Recovery: mv <db_file> <db_file>.foreign.$(date +%s); \
-                         then restart with --init-if-missing.",
+                         then restart the daemon (auto-init will recreate missing state).",
                         s.len(),
                     );
                 }

@@ -19,10 +19,10 @@ Manage installed bundles.
 
 | Service                | Endpoint              | Caps Required                          |
 |------------------------|-----------------------|----------------------------------------|
-| `bundle/install`       | `bundle.install`      | `ryeos.execute.service.bundle/install` |
-| `bundle/export`        | `bundle.export`       | `ryeos.execute.service.bundle/export`  |
+| `bundle/install`       | `bundle.install`      | `ryeos.execute.service.bundle.install` |
+| `bundle/export`        | `bundle.export`       | `ryeos.execute.service.bundle.export`  |
 | `bundle/list`          | `bundle.list`         | none                                   |
-| `bundle/remove`        | `bundle.remove`       | `ryeos.execute.service.bundle/remove`  |
+| `bundle/remove`        | `bundle.remove`       | `ryeos.execute.service.bundle.remove`  |
 
 Bundle install and remove are **offline-only** (daemon must be stopped).
 Bundle export is **daemon-only** — walks the bundle tree and ingests
@@ -51,11 +51,11 @@ CRUD operations for scheduled executions.
 
 | Service                | Endpoint              | Caps Required                                    |
 |------------------------|-----------------------|--------------------------------------------------|
-| `scheduler/register`   | `scheduler.register`  | `ryeos.execute.service.scheduler/register`       |
+| `scheduler/register`   | `scheduler.register`  | `ryeos.execute.service.scheduler.register`       |
 | `scheduler/list`       | `scheduler.list`      | `ryeos.execute.service.scheduler/list`           |
-| `scheduler/deregister` | `scheduler.deregister`| `ryeos.execute.service.scheduler/deregister`     |
-| `scheduler/pause`      | `scheduler.pause`     | `ryeos.execute.service.scheduler/pause`          |
-| `scheduler/resume`     | `scheduler.resume`    | `ryeos.execute.service.scheduler/resume`         |
+| `scheduler/deregister` | `scheduler.deregister`| `ryeos.execute.service.scheduler.deregister`     |
+| `scheduler/pause`      | `scheduler.pause`     | `ryeos.execute.service.scheduler.pause`          |
+| `scheduler/resume`     | `scheduler.resume`    | `ryeos.execute.service.scheduler.resume`         |
 | `scheduler/show_fires` | `scheduler.show_fires`| `ryeos.execute.service.scheduler/show_fires`     |
 
 ### Core Services
@@ -64,32 +64,32 @@ CRUD operations for scheduled executions.
 |------------------------|-----------------------|----------------------------------------|
 | `fetch`                | `fetch`               | `ryeos.execute.service.fetch`          |
 | `verify`               | `verify`              | `ryeos.execute.service.verify`         |
-| `node-sign`            | `node-sign`           | `ryeos.execute.service.node-sign`      |
+| `node-sign`            | `node-sign`           | `ryeos.execute.service.node_sign`      |
 | `rebuild`              | `rebuild`             | `ryeos.execute.service.rebuild`        |
-| `maintenance/gc`       | `maintenance.gc`      | `ryeos.execute.service.maintenance/gc` |
+| `maintenance/gc`       | `maintenance.gc`      | `ryeos.execute.service.maintenance.gc` |
 | `health/status`        | `health.status`       | none                                   |
 | `identity/public_key`  | `identity.public_key` | none                                   |
 | `system/status`        | `system.status`       | none                                   |
 | `ingest/ignore`        | `ingest.ignore`       | none                                   |
-| `commands/submit`      | `commands.submit`     | `ryeos.execute.service.commands/submit`|
+| `commands/submit`      | `commands.submit`     | `ryeos.execute.service.commands.submit`|
 
 ### Object Services
 CAS object operations.
 
 | Service                | Endpoint              | Caps Required                          |
 |------------------------|-----------------------|----------------------------------------|
-| `objects/has`          | `objects.has`         | `ryeos.execute.service.objects/has`    |
-| `objects/put`          | `objects.put`         | `ryeos.execute.service.objects/put`    |
-| `objects/get`          | `objects.get`         | `ryeos.execute.service.objects/get`    |
+| `objects/has`          | `objects.has`         | `ryeos.execute.service.objects.has`    |
+| `objects/put`          | `objects.put`         | `ryeos.execute.service.objects.put`    |
+| `objects/get`          | `objects.get`         | `ryeos.execute.service.objects.get`    |
 
 ### Vault Services
 Sealed secret operations scoped to the caller's fingerprint.
 
 | Service                | Endpoint              | Caps Required                          |
 |------------------------|-----------------------|----------------------------------------|
-| `vault/set`            | `vault.set`           | `ryeos.execute.service.vault/set`      |
-| `vault/list`           | `vault.list`          | `ryeos.execute.service.vault/list`     |
-| `vault/delete`         | `vault.delete`        | `ryeos.execute.service.vault/delete`   |
+| `vault/set`            | `vault.set`           | `ryeos.execute.service.vault.set`      |
+| `vault/list`           | `vault.list`          | `ryeos.execute.service.vault.list`     |
+| `vault/delete`         | `vault.delete`        | `ryeos.execute.service.vault.delete`   |
 
 ### Remote Services
 Cross-node operations. All are **daemon-only**.
@@ -97,18 +97,18 @@ Cross-node operations. All are **daemon-only**.
 | Service                | Endpoint              | Caps Required                          |
 |------------------------|-----------------------|----------------------------------------|
 | `remote/configure`     | `remote.configure`    | `ryeos.execute.service.remote.configure`|
-| `remote/list`          | `remote.list`         | `ryeos.execute.service.remote/list`    |
-| `remote/status`        | `remote.status`       | `ryeos.execute.service.remote/status`  |
-| `remote/push`          | `remote.push`         | `ryeos.execute.service.remote/push`    |
-| `remote/pull`          | `remote.pull`         | `ryeos.execute.service.objects/get`    |
-| `remote/execute`       | `remote.execute`      | `ryeos.execute.service.remote.execute` |
-| `remote/authorize`     | `remote.authorize`    | `ryeos.execute.service.authorize-key`  |
-| `remote/threads`       | `remote.threads`      | `ryeos.execute.service.remote/threads` |
-| `remote/thread-status` | `remote.thread_status`| `ryeos.execute.service.remote/thread-status`|
-| `remote/bundle-install`| `remote.bundle_install`| `ryeos.execute.service.bundle/install`|
-| `remote/vault-set`     | `remote.vault_set`    | `ryeos.execute.service.vault/set`      |
-| `remote/vault-list`    | `remote.vault_list`   | `ryeos.execute.service.vault/list`     |
-| `remote/vault-delete`  | `remote.vault_delete` | `ryeos.execute.service.vault/delete`   |
+| `remote/list`          | `remote.list`         | `ryeos.execute.service.remote.list`    |
+| `remote/status`        | `remote.status`       | `ryeos.execute.service.remote.status`  |
+| `remote/push`          | `remote.push`         | `ryeos.execute.service.remote.push`    |
+| `remote/pull`          | `remote.pull`         | `ryeos.execute.service.objects.get`    |
+| `remote/execute`       | `remote.execute`      | `ryeos.execute.service.remote.admin` |
+| `remote/authorize`     | `remote.authorize`    | `ryeos.execute.service.authorize_key`  |
+| `remote/threads`       | `remote.threads`      | `ryeos.execute.service.remote.threads` |
+| `remote/thread-status` | `remote.thread_status`| `ryeos.execute.service.remote.thread-status`|
+| `remote/bundle-install`| `remote.bundle_install`| `ryeos.execute.service.bundle.install`|
+| `remote/vault-set`     | `remote.vault_set`    | `ryeos.execute.service.vault.set`      |
+| `remote/vault-list`    | `remote.vault_list`   | `ryeos.execute.service.vault.list`     |
+| `remote/vault-delete`  | `remote.vault_delete` | `ryeos.execute.service.vault.delete`   |
 
 `remote/pull` fetches CAS objects by hash from a remote node. Fail-closed:
 aborts if any requested hash is missing.
@@ -121,7 +121,7 @@ runs preflight before registering.
 
 | Service                | Endpoint              | Caps Required                          |
 |------------------------|-----------------------|----------------------------------------|
-| `authorize-key`        | `authorize_key.set`   | `ryeos.execute.service.authorize-key`  |
+| `authorize-key`        | `authorize_key.set`   | `ryeos.execute.service.authorize_key`  |
 
 ## Service vs Tool
 

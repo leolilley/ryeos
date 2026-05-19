@@ -135,7 +135,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:threads/cancel",
     endpoint: "threads.cancel",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.threads/cancel"],
+    required_caps: &["ryeos.execute.service.threads.cancel"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn descriptor_has_required_caps() {
-        assert_eq!(DESCRIPTOR.required_caps, &["ryeos.execute.service.threads/cancel"]);
+        assert_eq!(DESCRIPTOR.required_caps, &["ryeos.execute.service.threads.cancel"]);
     }
 
     #[test]

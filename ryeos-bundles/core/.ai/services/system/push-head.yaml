@@ -1,8 +1,8 @@
-# ryeos:signed:2026-05-18T02:20:59Z:82493613936e64e7b1d10790752cfe90269e91c44162965e6a7cd7cc438ee735:PKBxlf0XNIwQmvGOuSNJGMyVgAk+CfLe/BsLfpq0jgL3hnjN2TUCOt6Z3AH2XljXzDwzX8TeLTJ8TodTxwmXAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T01:36:20Z:66d98da98cf2523e66b6da8fbb4680b4875d3db12fed20035ad29510322eff19:ue+CHAMTYG+z0WLHlgRpSzMYGOilKCS+r4F9Owk4J/Rh65luJVmHIIEY7sHVhpMktBTjod33JXeIZhb5rm9nAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: system.push-head
-required_caps: ["ryeos.execute.service.push-head"]
+required_caps: ["ryeos.execute.service.push_head"]
 schema:
   project_path: string
   snapshot_hash: string

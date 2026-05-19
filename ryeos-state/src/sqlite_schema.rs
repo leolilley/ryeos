@@ -24,7 +24,7 @@
 //! 2. Identify the offending file from the error message.
 //! 3. Archive by renaming:
 //!    `mv <db_file> <db_file>.foreign.$(date +%s)`
-//! 4. Restart with `--init-if-missing`.
+//! 4. Restart the daemon (auto-init will recreate missing state).
 
 use std::path::Path;
 
@@ -91,7 +91,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             "database application_id is {app_id}, expected {}; \
              this file ({}) was not created by this daemon. \
              Recovery: mv <file> <file>.foreign.$(date +%s); \
-             then restart with --init-if-missing.",
+             then restart the daemon (auto-init will recreate missing state).",
             spec.application_id,
             path_display,
         );
@@ -129,7 +129,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 "unexpected user table '{actual}' in database ({}); \
                  this file was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart with --init-if-missing.",
+                 then restart the daemon (auto-init will recreate missing state).",
                 path_display,
             );
         }
@@ -159,7 +159,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 "table '{}' has {} columns, expected {}; \
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart with --init-if-missing.",
+                 then restart the daemon (auto-init will recreate missing state).",
                 table.name,
                 col_rows.len(),
                 expected_cols.len(),
@@ -174,7 +174,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 "table '{}' column {}: name '{}' != expected '{}'; \
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart with --init-if-missing.",
+                 then restart the daemon (auto-init will recreate missing state).",
                     table.name, i, actual_name, expected.name,
                     path_display,
                 );
@@ -185,7 +185,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                     "table '{}' column '{}': type '{}' != expected '{}'; \
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart with --init-if-missing.",
+                     then restart the daemon (auto-init will recreate missing state).",
                     table.name, actual_name, actual_type, expected.col_type,
                     path_display,
                 );
@@ -195,7 +195,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                     "table '{}' column '{}': pk={} != expected={}; \
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart with --init-if-missing.",
+                     then restart the daemon (auto-init will recreate missing state).",
                     table.name, actual_name, *pk_flag > 0, expected.pk,
                     path_display,
                 );
@@ -208,7 +208,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                     "table '{}' column '{}': notnull={} != expected={}; \
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart with --init-if-missing.",
+                     then restart the daemon (auto-init will recreate missing state).",
                     table.name, actual_name, *notnull_flag != 0, expected.not_null,
                     path_display,
                 );
@@ -250,7 +250,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 "index '{}' is on table '{}' but expected table '{}'; \
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart with --init-if-missing.",
+                 then restart the daemon (auto-init will recreate missing state).",
                 idx.name, matching.1, idx.table, path_display,
             );
         }
@@ -282,7 +282,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                         "index '{}' on table '{}': unique={} != expected={}; \
                          this file ({}) was not created by this daemon. \
                          Recovery: mv <file> <file>.foreign.$(date +%s); \
-                         then restart with --init-if-missing.",
+                         then restart the daemon (auto-init will recreate missing state).",
                         idx.name, idx.table, unique_flag, idx.unique, path_display,
                     );
                 }
@@ -305,7 +305,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 "index '{}' on table '{}': expected columns {:?}, got {:?}; \
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart with --init-if-missing.",
+                 then restart the daemon (auto-init will recreate missing state).",
                 idx.name, idx.table, idx.columns, index_info_rows, path_display,
             );
         }
@@ -315,7 +315,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                     "index '{}' on table '{}': column[{}] is '{}' but expected '{}'; \
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart with --init-if-missing.",
+                     then restart the daemon (auto-init will recreate missing state).",
                     idx.name, idx.table, i, actual_col, idx.columns[i], path_display,
                 );
             }
@@ -331,7 +331,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 "unexpected user index '{actual_name}' on table '{actual_table}'; \
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart with --init-if-missing.",
+                 then restart the daemon (auto-init will recreate missing state).",
                 path_display,
             );
         }
@@ -360,7 +360,7 @@ pub fn init_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) 
             "init_owned called on a non-empty database ({} user tables); \
              use assert_owned first if the file may already exist. \
              Recovery: mv {path_display} {path_display}.foreign.$(date +%s); \
-             then restart with --init-if-missing.",
+             then restart the daemon (auto-init will recreate missing state).",
             table_count,
         );
     }
@@ -407,13 +407,13 @@ pub fn is_empty_or_owned(conn: &Connection, expected_app_id: i32) -> Result<bool
         bail!(
             "database has no application_id stamp but contains {table_count} user tables; \
              foreign schema detected. Recovery: mv <file> <file>.foreign.$(date +%s); \
-             then restart with --init-if-missing."
+             then restart the daemon (auto-init will recreate missing state)."
         );
     }
     bail!(
         "database application_id is {app_id}, expected {expected_app_id}; \
          this file was not created by this daemon. \
          Recovery: mv <file> <file>.foreign.$(date +%s); \
-         then restart with --init-if-missing."
+         then restart the daemon (auto-init will recreate missing state)."
     );
 }

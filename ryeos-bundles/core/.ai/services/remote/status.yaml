@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-18T02:20:59Z:add3bf7076bb521c25642de5ccc0129462045997068a4f0ba6b4e48bc7e7f2cc:lvu08VERJAWMSqBGocyHIl5xvc7WUTPZfMauQtqCj6eWEp5aDD9KJ8WnybSBERKFJSMgNPHzQY0nahpq0TtkAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T01:36:21Z:add3bf7076bb521c25642de5ccc0129462045997068a4f0ba6b4e48bc7e7f2cc:lvu08VERJAWMSqBGocyHIl5xvc7WUTPZfMauQtqCj6eWEp5aDD9KJ8WnybSBERKFJSMgNPHzQY0nahpq0TtkAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.status
 required_caps: ["ryeos.execute.service.remote.status"]

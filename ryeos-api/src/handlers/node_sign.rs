@@ -413,7 +413,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:node-sign",
     endpoint: "node-sign",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.node-sign"],
+    required_caps: &["ryeos.execute.service.node_sign"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)

@@ -408,4 +408,74 @@ mod tests {
             "error message should mention 'fingerprint', got: {msg}"
         );
     }
+
+    /// Round-trip: write via canonical writer → load via auth loader → verify.
+    #[test]
+    fn canonical_writer_auth_loader_round_trip() {
+        let client_key = SigningKey::from_bytes(&[42u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[99u8; 32]);
+
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+
+        let client_vk = client_key.verifying_key();
+        let client_fp = lillux::signature::compute_fingerprint(&client_vk);
+        let client_key_b64 = base64::engine::general_purpose::STANDARD
+            .encode(client_vk.as_bytes());
+
+        // Write via canonical writer using REAL handler-required caps
+        // (long-form `ryeos.execute.service.<subject>`). Short-form
+        // scopes like "remote.admin" would load fine but never
+        // authorize a real handler — see authorizer.rs.
+        let scopes = vec![
+            "ryeos.execute.service.remote.admin".to_string(),
+            "ryeos.execute.service.bundle.install".to_string(),
+        ];
+        let _path = ryeos_app::identity::write_authorized_key_toml(
+            &auth_dir,
+            &client_fp,
+            &client_key_b64,
+            &scopes,
+            "test-round-trip",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &node_signer,
+            ryeos_app::identity::WildcardPolicy::Reject,
+        )
+        .unwrap();
+
+        // Load via auth loader
+        let loaded = load_authorized_key(&client_fp, &auth_dir, &node_identity)
+            .expect("auth loader should accept canonical writer output");
+
+        // Verify contents
+        assert_eq!(
+            lillux::signature::compute_fingerprint(&loaded.public_key),
+            client_fp,
+            "loaded public key fingerprint must match"
+        );
+        assert_eq!(loaded.scopes, scopes, "loaded scopes must match");
+        assert_eq!(loaded.owner, "test-round-trip");
+
+        // Defense in depth: loaded scopes must actually satisfy a real
+        // handler's required cap when fed to the authorizer.
+        let registry = std::sync::Arc::new(
+            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+            ])
+            .unwrap(),
+        );
+        let authorizer = ryeos_runtime::authorizer::Authorizer::new(registry);
+        let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(
+            "ryeos.execute.service.bundle.install",
+        );
+        authorizer
+            .authorize(&loaded.scopes, &policy)
+            .expect("real handler cap must be satisfied by loaded scopes");
+    }
 }

@@ -259,7 +259,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:scheduler/register",
     endpoint: "scheduler.register",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.scheduler/register"],
+    required_caps: &["ryeos.execute.service.scheduler.register"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

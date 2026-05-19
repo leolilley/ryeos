@@ -35,10 +35,9 @@ ryeos init \
   "${TRUST_ARGS[@]}"
 
 echo "[entrypoint] init complete, starting daemon"
-# `--init-if-missing` lets the daemon's own bootstrap fill in artifacts
-# `ryeos init` doesn't produce (e.g. public-identity.json, vault keypair).
-# Idempotent — no-op when already written.
+# Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce
+# (e.g. public-identity.json, vault keypair). Idempotent — no-op when
+# already written.
 exec ryeosd \
-  --init-if-missing \
   --system-space-dir /data/core \
   --bind "[::]:${PORT:-8000}"

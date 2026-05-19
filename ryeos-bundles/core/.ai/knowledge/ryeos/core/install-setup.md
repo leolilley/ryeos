@@ -1,11 +1,11 @@
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
-version: "1.0.0"
+version: "2.0.0"
 description: >
   How to install and set up ryEOS — from package to running daemon.
-  Covers init, bundle discovery, trust pinning, and the full directory
-  layout after setup.
+  Covers init, bundle discovery, trust pinning, identity model,
+  and the full directory layout after setup.
 ---
 
 # Installation and Setup
@@ -25,6 +25,24 @@ ryeosd
 # 4. Verify it's running
 ryeos status
 ```
+
+The daemon auto-initializes missing key artefacts on startup. You do
+not need a separate init flag — `ryeosd` runs `bootstrap::init`
+idempotently whenever the node key, vault key, or public-identity.json
+is absent.
+
+## First-Boot Authentication
+
+`ryeos init` creates a node-signed authorized-key TOML for the local
+operator's user key with scopes `["*"]`. This is what lets the CLI
+authenticate to the daemon over HTTP.
+
+If the daemon auto-initializes (because `ryeos init` was not run
+manually), the same bootstrap step runs automatically. Either way, the
+local CLI gets full access on first boot.
+
+To authorize additional callers (e.g. for remote nodes), see
+[`ryeos authorize-key`](#authorizing-callers).
 
 ## What `ryeos init` Does
 
@@ -111,6 +129,38 @@ ryeos init --source ryeos-bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.tom
 cargo test
 ```
 
+## Authorizing Callers
+
+Use `ryeos authorize-key` to grant an Ed25519 public key access to the
+daemon's authenticated endpoints. This is a **local verb** — it writes
+directly to disk and does not require the daemon to be running.
+
+```bash
+# Grant full access
+ryeos authorize-key \
+  --public-key "ed25519:<base64_pubkey>" \
+  --label "ci-pipeline" \
+  --scopes "*"
+
+# Grant scoped access for remote execution
+ryeos authorize-key \
+  --public-key "ed25519:<base64_pubkey>" \
+  --label "remote-caller" \
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push_head"
+```
+
+Scopes are comma-separated. Use `"*"` for full access (local operator).
+Remote callers must enumerate specific capabilities — wildcard delegation
+is forbidden for non-local keys.
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `RYEOS_SYSTEM_SPACE_DIR` | Override the system space directory (parent of `.ai/`) | XDG data dir `/ryeos` |
+| `RYEOSD_SOCKET_PATH` | Set by daemon at startup for UDS discovery | (daemon writes) |
+| `RYEOSD_URL` | Set by daemon at startup for HTTP discovery | (daemon writes) |
+
 ## Directory Layout After Init
 
 ```
@@ -172,13 +222,18 @@ ryeos init --source ryeos-bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.tom
 
 When `ryeosd` starts:
 
-1. **Verify initialized** — checks system space exists, at least one
+1. **Auto-init** — if any key artefact is missing, runs idempotent
+   bootstrap to create it
+2. **Verify initialized** — checks system space exists, at least one
    bundle registration present, keys exist
-2. **Phase 1** — reads bundle registrations, discovers effective roots
-3. **Build engine** — loads kind schemas, parsers, handlers from all
+3. **Phase 1** — reads bundle registrations, discovers effective roots
+4. **Build engine** — loads kind schemas, parsers, handlers from all
    registered bundles
-4. **Phase 2** — full node-config scan across all sections
-5. **Bind** — starts HTTP listener (default `127.0.0.1:9420`)
+5. **Phase 2** — full node-config scan across all sections
+6. **Bind** — starts HTTP listener (default `127.0.0.1:9420`)
 
 The daemon does NOT install or modify bundles — it only reads what
 `ryeos init` wrote.
+
+For the identity model and trust layers, see
+[Identity Model](../identity-model.md).

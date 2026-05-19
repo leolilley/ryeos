@@ -110,7 +110,8 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     let node_identity = if options.force && node_key_path.exists() {
         // γ: refuse --force if signed node-config items exist — rotating
         // the node key would make them unverifiable. The operator must
-        // use `ryeos daemon rotate-key` instead, which re-signs first.
+        // manually re-sign items before rotating, or use --force only on
+        // fresh installs.
         let signed_items = find_signed_node_config_items(&config.system_space_dir)?;
         if !signed_items.is_empty() {
             let lines: Vec<String> = signed_items
@@ -120,9 +121,9 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
             bail!(
                 "refusing --force: existing signed node-config items would become \
                  unverifiable after node-key regeneration:\n\n{}\n\n\
-                 run `ryeos daemon rotate-key` to safely rotate the node key \
-                 (re-signs all existing items + transition trust store). \
-                 `--force` is only safe on a fresh install.",
+                 To rotate safely: manually re-sign the listed items with the new key \
+                 (using ryeos-core-tools sign), then retry --force. \
+                 `--force` is only safe on a fresh install or when no signed items exist.",
                 lines.join("\n")
             );
         }
@@ -330,6 +331,7 @@ fn write_user_authorized(
         fp,
         &now,
         node_signing_key,
+        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
     )?;
 
     tracing::info!(
@@ -704,7 +706,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("refusing --force"), "got: {msg}");
         assert!(msg.contains("test.yaml"), "got: {msg}");
-        assert!(msg.contains("rotate-key"), "got: {msg}");
+        assert!(msg.contains("re-sign the listed items"), "got: {msg}");
     }
 
     #[test]

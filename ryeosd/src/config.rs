@@ -38,10 +38,6 @@ pub struct Cli {
     #[arg(long)]
     pub authorized_keys_dir: Option<PathBuf>,
 
-    /// Run init with defaults before starting if not initialized
-    #[arg(long)]
-    pub init_if_missing: bool,
-
     /// Run bootstrap init only, then exit (no server)
     #[arg(long)]
     pub init_only: bool,

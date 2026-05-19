@@ -22,6 +22,7 @@ impl CliDispatchError {
     pub fn exit_code(&self) -> i32 {
         match self {
             CliDispatchError::Transport(t) => t.exit_code(),
+            CliDispatchError::Config(_) => EX_CONFIG,
         }
     }
 }

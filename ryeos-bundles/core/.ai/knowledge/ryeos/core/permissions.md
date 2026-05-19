@@ -20,7 +20,7 @@ Capabilities are dot-namespaced strings with optional glob wildcards:
 ```
 ryeos.execute.tool.ryeos.file-system.*
 ryeos.execute.service.fetch
-ryeos.execute.service.bundle/install
+ryeos.execute.service.bundle.install
 runtime.execute
 bundle.read
 net.call
@@ -73,8 +73,8 @@ Tools and services declare their own capability requirements:
 # tool: ryeos/core/fetch
 required_caps: ["bundle.read"]
 
-# service: bundle/install
-required_caps: ["ryeos.execute.service.bundle/install"]
+# service: bundle.install
+required_caps: ["ryeos.execute.service.bundle.install"]
 ```
 
 When the directive calls the tool, the daemon checks:

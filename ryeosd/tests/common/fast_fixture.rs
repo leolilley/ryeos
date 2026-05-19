@@ -1,6 +1,6 @@
 //! Fast, deterministic fixture for ryeosd integration tests.
 //!
-//! Drop-in replacement for the daemon's real `--init-if-missing` path
+//! Drop-in replacement for the daemon's real `` path
 //! using fixed keys + a fixed signing timestamp so the produced state
 //! is **byte-stable across runs of the fixture**.
 //!
@@ -120,7 +120,7 @@ impl FastFixture {
 /// Pre-populate `state_path` + `user_space` with everything
 /// `bootstrap::init` would produce, using deterministic keys.
 ///
-/// After this returns the daemon can boot WITHOUT `--init-if-missing`:
+/// After this returns the daemon can boot WITHOUT ``:
 /// node identity, vault keypair, layout dirs, user signing key, and
 /// self-signed trust docs are all in place.
 ///

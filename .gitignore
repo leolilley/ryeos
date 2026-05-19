@@ -144,3 +144,6 @@ ryeos-bundles/*/.ai/objects/
 ryeos-bundles/*/.ai/refs/
 ryeos-bundles/*/.ai/bin/*/
 ryeos-bundles/*/PUBLISHER_TRUST.toml
+
+# Local daemon state from dev/test runs
+.local/

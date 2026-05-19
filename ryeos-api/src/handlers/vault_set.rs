@@ -52,7 +52,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:vault/set",
     endpoint: "vault.set",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.vault/set"],
+    required_caps: &["ryeos.execute.service.vault.set"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

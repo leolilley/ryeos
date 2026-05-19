@@ -27,6 +27,7 @@ toml = "0.8"
 # Engine + state
 ryeos-engine = { path = "../ryeos-engine" }
 ryeos-state = { path = "../ryeos-state" }
+ryeos-runtime = { path = "../ryeos-runtime" }
 
 # Required for verify
 lillux = { path = "../lillux" }

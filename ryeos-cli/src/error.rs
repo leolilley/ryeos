@@ -53,6 +53,9 @@ pub enum CliTransportError {
 pub enum CliDispatchError {
     #[error(transparent)]
     Transport(#[from] CliTransportError),
+
+    #[error(transparent)]
+    Config(#[from] CliConfigError),
 }
 
 // ---------------------------------------------------------------------------
