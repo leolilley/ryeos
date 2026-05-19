@@ -73,16 +73,18 @@ the user CLI key. This means:
 
  3. **(Optional) Narrower scopes for specific operations**:
 
-   | Operation | Required scopes |
-   |-----------|----------------|
-   | `remote exec` (full pipeline) | `objects.has`, `objects.put`, `objects.get`, `push_head`, `authorize_key` |
-   | `remote push` | `objects.has`, `objects.put`, `push_head` |
-   | `remote pull` | `objects.get` |
-   | `remote vault-set/list/delete` | `remote.admin` |
-   | `remote threads/thread-status` | `remote.admin` |
-   | `remote bundle-install` | `bundle.install`, `bundle.export`, `objects.get` |
+   | Operation | Required scopes (canonical) |
+   |-----------|-----------------------------|
+   | `remote execute` (full pipeline) | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.objects.get`, `ryeos.execute.service.push_head`, `ryeos.execute.service.authorize_key` |
+   | `remote push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push_head` |
+   | `remote pull` | `ryeos.execute.service.objects.get` |
+   | `remote vault-set/list/delete` | `ryeos.execute.service.vault.set`, `ryeos.execute.service.vault.list`, `ryeos.execute.service.vault.delete` |
+   | `remote threads/thread-status` | (authenticated; threads are per-principal isolated) |
+   | `remote bundle-install` | `ryeos.execute.service.bundle.export`, `ryeos.execute.service.objects.get` |
 
-   (All scope names are prefixed with `ryeos.execute.service.`.)
+   Short-form scopes like `bundle.install` will never authorize a
+   handler — the matcher does not auto-prefix and the daemon's
+   auth loader refuses to load TOMLs that contain them.
 
 ### On the caller node
 
@@ -117,10 +119,10 @@ ryeos authorize-key \
 # ── Back on the CALLER node ──
 
 # 4. Execute on the remote
-ryeos remote exec tool:my/heavy-compute --remote prod
+ryeos remote execute --remote prod --item-ref tool:my/heavy-compute
 ```
 
-The synchronous `remote exec` command:
+The synchronous `remote execute` command:
 
 1. **Push** — ingests the local project, uploads missing CAS objects
    to the remote, advances the remote's HEAD ref.
