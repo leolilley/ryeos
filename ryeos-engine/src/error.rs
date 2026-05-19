@@ -354,6 +354,14 @@ pub enum EngineError {
     #[error("handler `{handler}` returned malformed response: {detail}")]
     HandlerProtocolViolation { handler: String, detail: String },
 
+    #[error("handler binary missing: `{binary_ref}` for handler `{handler}` — {reason}. {remediation}")]
+    HandlerBinaryMissing {
+        handler: String,
+        binary_ref: String,
+        reason: String,
+        remediation: String,
+    },
+
     #[error("handler error: {0}")]
     Handler(Box<crate::handlers::HandlerError>),
 

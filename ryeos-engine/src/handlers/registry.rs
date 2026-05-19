@@ -11,16 +11,64 @@ use crate::resolution::TrustClass;
 use crate::trust::TrustStore;
 use crate::AI_DIR;
 
-/// A handler descriptor that has been loaded, verified, and had its
-/// binary resolved.
+/// A handler descriptor that has been loaded, signature-verified, and
+/// validated. Binary resolution is **optional** — user-tier handler
+/// descriptors referencing binaries not installed on this node are
+/// registered as [`VerifiedHandler::Unresolved`] with a warn-level
+/// log. Invoking an unresolved handler returns a structured error at
+/// runtime rather than failing engine build.
 #[derive(Debug, Clone)]
-pub struct VerifiedHandler {
-    pub canonical_ref: String,
-    pub descriptor: HandlerDescriptor,
-    pub trust_class: TrustClass,
-    pub bundle_root: PathBuf,
-    pub descriptor_path: PathBuf,
-    pub resolved_binary_path: PathBuf,
+pub enum VerifiedHandler {
+    /// Binary resolved successfully — handler is ready to invoke.
+    Resolved {
+        canonical_ref: String,
+        descriptor: HandlerDescriptor,
+        trust_class: TrustClass,
+        bundle_root: PathBuf,
+        descriptor_path: PathBuf,
+        resolved_binary_path: PathBuf,
+    },
+    /// Binary not found on this node. Registered but not invocable.
+    /// This is expected for user-tier handler descriptors pushed from
+    /// a remote that doesn't have the corresponding bundle installed.
+    Unresolved {
+        canonical_ref: String,
+        descriptor: HandlerDescriptor,
+        trust_class: TrustClass,
+        bundle_root: PathBuf,
+        descriptor_path: PathBuf,
+        reason: String,
+    },
+}
+
+impl VerifiedHandler {
+    pub fn canonical_ref(&self) -> &str {
+        match self {
+            Self::Resolved { canonical_ref, .. } => canonical_ref,
+            Self::Unresolved { canonical_ref, .. } => canonical_ref,
+        }
+    }
+
+    pub fn descriptor(&self) -> &HandlerDescriptor {
+        match self {
+            Self::Resolved { descriptor, .. } => descriptor,
+            Self::Unresolved { descriptor, .. } => descriptor,
+        }
+    }
+
+    pub fn trust_class(&self) -> TrustClass {
+        match self {
+            Self::Resolved { trust_class, .. } => *trust_class,
+            Self::Unresolved { trust_class, .. } => *trust_class,
+        }
+    }
+
+    pub fn descriptor_path(&self) -> &Path {
+        match self {
+            Self::Resolved { descriptor_path, .. } => descriptor_path,
+            Self::Unresolved { descriptor_path, .. } => descriptor_path,
+        }
+    }
 }
 
 /// Registry of handler descriptors loaded from base roots (system +
@@ -104,18 +152,19 @@ impl HandlerRegistry {
                 let verified = load_and_verify_handler(path, root, *root_trust, trust_store)?;
 
                 // Check for duplicates across roots.
-                if let Some(existing) = entries.get(&verified.canonical_ref) {
+                let cref = verified.canonical_ref().to_owned();
+                if let Some(existing) = entries.get(&cref) {
                     return Err(HandlerError::DuplicateRef {
-                        canonical_ref: verified.canonical_ref.clone(),
-                        paths: vec![existing.descriptor_path.clone(), path.clone()],
+                        canonical_ref: cref,
+                        paths: vec![existing.descriptor_path().to_owned(), path.clone()],
                     });
                 }
 
                 fingerprint_parts.push(format!(
                     "{}|{}",
-                    verified.canonical_ref, verified.descriptor.abi_version
+                    verified.canonical_ref(), verified.descriptor().abi_version
                 ));
-                entries.insert(verified.canonical_ref.clone(), verified);
+                entries.insert(verified.canonical_ref().to_owned(), verified);
             }
         }
 
@@ -163,10 +212,10 @@ impl HandlerRegistry {
             .ok_or_else(|| HandlerError::NotRegistered {
                 canonical_ref: canonical_ref.to_owned(),
             })?;
-        if handler.descriptor.serves != expected {
+        if handler.descriptor().serves != expected {
             return Err(HandlerError::ServesMismatch {
                 canonical_ref: canonical_ref.to_owned(),
-                actual: handler.descriptor.serves,
+                actual: handler.descriptor().serves,
                 expected,
             });
         }
@@ -269,29 +318,44 @@ fn load_and_verify_handler(
     // Validate invariants.
     validate_handler_descriptor(yaml_path, &descriptor)?;
 
-    // Resolve binary.
+    // Derive canonical ref from category + name.
+    let canonical_ref = format!("handler:{}/{}", descriptor.category, descriptor.name);
+
+    // Resolve binary — on failure, register as Unresolved with a warn.
     let resolved = resolve_bundle_binary_ref(
         &descriptor.binary_ref,
         bundle_root,
         |fp| trust_store.get(fp).is_some(),
         trust_class,
-    )
-    .map_err(|e| HandlerError::BinaryResolution {
-        name: descriptor.name.clone(),
-        detail: format!("{e}"),
-    })?;
+    );
 
-    // Derive canonical ref from category + name.
-    let canonical_ref = format!("handler:{}/{}", descriptor.category, descriptor.name);
-
-    Ok(VerifiedHandler {
-        canonical_ref,
-        descriptor,
-        trust_class,
-        bundle_root: bundle_root.to_owned(),
-        descriptor_path: yaml_path.to_owned(),
-        resolved_binary_path: resolved.absolute_path,
-    })
+    match resolved {
+        Ok(res) => Ok(VerifiedHandler::Resolved {
+            canonical_ref,
+            descriptor,
+            trust_class,
+            bundle_root: bundle_root.to_owned(),
+            descriptor_path: yaml_path.to_owned(),
+            resolved_binary_path: res.absolute_path,
+        }),
+        Err(e) => {
+            let reason = format!("{e}");
+            tracing::warn!(
+                handler = %canonical_ref,
+                reason = %reason,
+                "user-tier handler references unresolvable binary; \
+                 will hard-error if invoked"
+            );
+            Ok(VerifiedHandler::Unresolved {
+                canonical_ref,
+                descriptor,
+                trust_class,
+                bundle_root: bundle_root.to_owned(),
+                descriptor_path: yaml_path.to_owned(),
+                reason,
+            })
+        }
+    }
 }
 
 /// Validate all invariants on a handler descriptor.
@@ -376,5 +440,57 @@ mod tests {
             HandlerError::NotRegistered { .. } => {}
             other => panic!("wrong error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn verified_handler_resolved_accessors() {
+        let handler = VerifiedHandler::Resolved {
+            canonical_ref: "handler:test/my_handler".to_owned(),
+            descriptor: HandlerDescriptor {
+                kind: "handler".to_owned(),
+                name: "my_handler".to_owned(),
+                category: "test".to_owned(),
+                abi_version: "0.1.0".to_owned(),
+                binary_ref: "bin/x86_64-unknown-linux-gnu/my_handler".to_owned(),
+                serves: HandlerServes::Parser,
+                required_caps: vec![],
+                description: String::new(),
+            },
+            trust_class: TrustClass::TrustedSystem,
+            bundle_root: PathBuf::from("/tmp/bundle"),
+            descriptor_path: PathBuf::from("/tmp/bundle/.ai/handlers/test/my_handler.yaml"),
+            resolved_binary_path: PathBuf::from("/tmp/bundle/.ai/bin/x86_64-unknown-linux-gnu/my_handler"),
+        };
+
+        assert_eq!(handler.canonical_ref(), "handler:test/my_handler");
+        assert_eq!(handler.descriptor().name, "my_handler");
+        assert_eq!(handler.trust_class(), TrustClass::TrustedSystem);
+        assert!(handler.descriptor_path().ends_with("my_handler.yaml"));
+    }
+
+    #[test]
+    fn verified_handler_unresolved_accessors() {
+        let handler = VerifiedHandler::Unresolved {
+            canonical_ref: "handler:test/missing".to_owned(),
+            descriptor: HandlerDescriptor {
+                kind: "handler".to_owned(),
+                name: "missing".to_owned(),
+                category: "test".to_owned(),
+                abi_version: "0.1.0".to_owned(),
+                binary_ref: "bin/x86_64-unknown-linux-gnu/missing".to_owned(),
+                serves: HandlerServes::Composer,
+                required_caps: vec![],
+                description: String::new(),
+            },
+            trust_class: TrustClass::TrustedUser,
+            bundle_root: PathBuf::from("/tmp/bundle"),
+            descriptor_path: PathBuf::from("/tmp/bundle/.ai/handlers/test/missing.yaml"),
+            reason: "binary not found".to_owned(),
+        };
+
+        assert_eq!(handler.canonical_ref(), "handler:test/missing");
+        assert_eq!(handler.descriptor().name, "missing");
+        assert_eq!(handler.trust_class(), TrustClass::TrustedUser);
+        assert!(handler.descriptor_path().ends_with("missing.yaml"));
     }
 }

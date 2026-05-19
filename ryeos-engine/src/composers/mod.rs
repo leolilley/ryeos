@@ -190,7 +190,7 @@ impl ComposerRegistry {
     pub fn handler_ref_for(&self, kind: &str) -> Option<(&str, &Value)> {
         self.composers
             .get(kind)
-            .map(|b| (b.handler.canonical_ref.as_str(), &b.config))
+            .map(|b| (b.handler.canonical_ref(), &b.config))
     }
 
     /// Run the composer for `kind`. Spawns the handler subprocess
@@ -254,7 +254,7 @@ impl ComposerRegistry {
                 step: ResolutionStepName::PipelineInit,
                 reason: format!(
                     "composer handler `{}` returned unexpected response: {other:?}",
-                    bound.handler.canonical_ref
+                    bound.handler.canonical_ref()
                 ),
             }),
         }
