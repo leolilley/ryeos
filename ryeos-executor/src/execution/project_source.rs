@@ -230,15 +230,24 @@ pub fn resolve_project_context(
             //    NEVER fall through to the remote operator's user space).
             let (user_root, user_temp_dir, trust_overlay) =
                 if let Some(user_mh) = snapshot.user_manifest_hash.as_ref() {
+                    // The push side writes user-manifest paths
+                    // relative to `<user_root>/.ai/` (no `.ai/`
+                    // prefix), so materialise into a `.ai/`
+                    // subdirectory of the temp dir. That way the
+                    // outer temp dir BECOMES the `user_root` passed
+                    // to the engine — containing `.ai/directives/…`
+                    // etc., mirroring the operator's own user space
+                    // layout.
                     let user_exec_dir = state
                         .config
                         .system_space_dir
                         .join("executions")
                         .join(format!("{}-user", checkout_id));
+                    let user_ai_dir = user_exec_dir.join(ryeos_engine::AI_DIR);
                     crate::execution::checkout_project(
                         &cas_root,
                         user_mh,
-                        &user_exec_dir,
+                        &user_ai_dir,
                         Some(&materialization_cache),
                     )
                     .map_err(|e| {
@@ -248,14 +257,13 @@ pub fn resolve_project_context(
                     })?;
 
                     // Extract trust pins from the materialised user
-                    // space into an in-memory overlay. This intentionally
-                    // does NOT use a side channel; the trust dir is part
-                    // of the user manifest, and `load_from_dir` parses
-                    // it. The result is then unioned into the per-request
-                    // engine's trust store via `trust_overlay` — never
-                    // written back to the remote's persistent trust dir.
-                    let trust_dir = user_exec_dir
-                        .join(ryeos_engine::AI_DIR)
+                    // space into an in-memory overlay. The trust dir
+                    // is part of the user manifest, and
+                    // `load_from_dir` parses it. The result is
+                    // unioned into the per-request engine's trust
+                    // store via `trust_overlay` — never written back
+                    // to the remote's persistent trust dir.
+                    let trust_dir = user_ai_dir
                         .join("config")
                         .join("keys")
                         .join("trusted");

@@ -68,14 +68,21 @@ pub async fn push_project(
     let mut items: HashMap<String, String> = HashMap::new();
     ingest_for_push(&local_cas, &local_cas_root, project_path, project_path, &mut items, remote_ignore)?;
 
-    // 2. Build manifest
+    // 2. Build project manifest
     let manifest = SourceManifest { item_source_hashes: items };
     let manifest_hash = local_cas.store_object(&manifest.to_value())?;
+
+    // 2b. Build user-space manifest (separate from project manifest).
+    //     Walks the operator's `~/.ryeos/.ai/` allow-list dirs and
+    //     hashes each file. The remote materialises this into a
+    //     per-request engine overlay so user-tier items resolve
+    //     against the caller's user space, never the remote's.
+    let user_manifest_hash = ingest_user_space_for_push(&local_cas)?;
 
     // 3. Build snapshot
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
+        user_manifest_hash: user_manifest_hash.clone(),
         parent_hashes: Vec::new(),
         created_at: lillux::time::iso8601_now(),
         source: "push".to_string(),
@@ -92,6 +99,27 @@ pub async fn push_project(
                 all_hashes.push(blob_hash.to_string());
             }
         }
+    }
+    // Include user manifest objects + their backing blobs so the
+    // remote can materialise the per-request user root.
+    if let Some(ref umh) = user_manifest_hash {
+        if let Ok(Some(user_manifest_obj)) = local_cas.get_object(umh) {
+            if let Ok(user_manifest) =
+                ryeos_state::objects::SourceManifest::from_value(&user_manifest_obj)
+            {
+                for (_rel_path, obj_hash) in &user_manifest.item_source_hashes {
+                    all_hashes.push(obj_hash.clone());
+                    if let Ok(Some(item_obj)) = local_cas.get_object(obj_hash) {
+                        if let Some(blob_hash) =
+                            item_obj.get("content_blob_hash").and_then(|v| v.as_str())
+                        {
+                            all_hashes.push(blob_hash.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        all_hashes.push(umh.clone());
     }
     all_hashes.push(manifest_hash.clone());
     all_hashes.push(snapshot_hash.clone());
@@ -213,6 +241,99 @@ fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<(
         );
     }
 
+    Ok(())
+}
+
+/// Walk the operator's user space (`~/.ryeos/.ai/`) along the
+/// [`USER_SPACE_SYNC_DIRS`](ryeos_state::user_sync::USER_SPACE_SYNC_DIRS)
+/// + trust-pin allow-list, hash each file, and build a user-space
+/// `SourceManifest`. Returns `Ok(None)` if the user space doesn't
+/// exist (operator hasn't run `ryeos init`).
+///
+/// All paths in the returned manifest are RELATIVE to `<user_root>/.ai/`
+/// so the remote can materialise into a sibling temp dir and feed it
+/// to the per-request engine overlay without any path rewriting.
+///
+/// Items + trust pins share the same manifest. The remote splits them
+/// using [`ryeos_state::user_sync::is_trust_pin_path`] when building
+/// the request-scoped trust overlay — trust pins are NEVER written to
+/// the remote's persistent trust dir.
+fn ingest_user_space_for_push(cas: &CasStore) -> Result<Option<String>> {
+    let user_root = match ryeos_engine::roots::user_root() {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    let user_ai = user_root.join(ryeos_engine::AI_DIR);
+    if !user_ai.is_dir() {
+        return Ok(None);
+    }
+
+    let mut items: HashMap<String, String> = HashMap::new();
+
+    // Walk each allow-listed sync dir.
+    for dir in ryeos_state::user_sync::USER_SPACE_SYNC_DIRS
+        .iter()
+        .copied()
+        .chain(std::iter::once(ryeos_state::user_sync::USER_TRUST_SYNC_DIR))
+    {
+        let abs = user_ai.join(dir);
+        if !abs.is_dir() {
+            continue;
+        }
+        ingest_user_dir_for_push(cas, &user_ai, &abs, &mut items)?;
+    }
+
+    if items.is_empty() {
+        // Nothing to push under the user allow-list — return None
+        // rather than an empty manifest so the snapshot's
+        // user_manifest_hash stays None.
+        return Ok(None);
+    }
+
+    let manifest = SourceManifest { item_source_hashes: items };
+    let manifest_hash = cas.store_object(&manifest.to_value())?;
+    Ok(Some(manifest_hash))
+}
+
+/// Recursive helper for [`ingest_user_space_for_push`]. Walks `dir`,
+/// hashes every regular file, and inserts an `ItemSource` keyed by
+/// the path relative to `user_ai` (so the remote can materialise into
+/// `<temp>/.ai/<rel>` and have everything line up).
+fn ingest_user_dir_for_push(
+    cas: &CasStore,
+    user_ai: &Path,
+    dir: &Path,
+    items: &mut HashMap<String, String>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            ingest_user_dir_for_push(cas, user_ai, &path, items)?;
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(user_ai)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let bytes = std::fs::read(&path)?;
+            let blob_hash = cas.store_blob(&bytes)?;
+            let integrity = sha256_hex(&bytes);
+            let item_source = ryeos_state::objects::ItemSource {
+                item_ref: rel.clone(),
+                content_blob_hash: blob_hash,
+                integrity,
+                signature_info: None,
+                mode: None,
+            };
+            let obj_hash = cas.store_object(&item_source.to_value())?;
+            items.insert(rel, obj_hash);
+        }
+    }
     Ok(())
 }
 
