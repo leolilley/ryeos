@@ -52,38 +52,12 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use ryeos_engine::engine::Engine;
 
-/// RAII guard for a materialised temp directory. Drops the directory
-/// recursively when the guard is dropped. Identical contract to the
-/// guard in `ryeos_executor::execution::project_source::TempDirGuard`
-/// but kept here to avoid a cross-crate dependency on the executor's
-/// internals.
-#[derive(Debug)]
-pub struct TempDirGuard(Option<std::path::PathBuf>);
-
-impl TempDirGuard {
-    pub fn new(path: std::path::PathBuf) -> Self {
-        Self(Some(path))
-    }
-
-    /// Consume the guard without removing the directory. Use when a
-    /// long-running detached owner has taken over lifecycle.
-    pub fn disarm(mut self) -> Option<std::path::PathBuf> {
-        self.0.take()
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        if let Some(p) = self.0.take() {
-            let _ = std::fs::remove_dir_all(p);
-        }
-    }
-}
+use crate::temp_dir_guard::TempDirGuard;
 
 /// A single cached engine + the user overlay temp dir it depends on.
 ///
@@ -97,19 +71,55 @@ impl Drop for TempDirGuard {
 struct CachedEntry {
     engine: Arc<Engine>,
     last_touched: Instant,
-    _user_temp: Option<TempDirGuard>,
+    _user_temp: Option<Arc<TempDirGuard>>,
 }
+
+/// Per in-flight build. Concurrent misses for the same key wait on the
+/// Condvar; the first builder wins and broadcasts.
+struct PendingBuild {
+    done: Condvar,
+    result: Mutex<Option<Result<Arc<Engine>, BuildWaitError>>>,
+}
+
+/// Slot state: either a ready cache entry or an in-flight build.
+enum CacheSlot {
+    Ready(CachedEntry),
+    Building(Arc<PendingBuild>),
+}
+
+impl Clone for CacheSlot {
+    fn clone(&self) -> Self {
+        match self {
+            CacheSlot::Ready(_) => panic!("CacheSlot::Ready should not be cloned"),
+            CacheSlot::Building(pb) => CacheSlot::Building(Arc::clone(pb)),
+        }
+    }
+}
+
+/// Error returned to waiters when the in-flight build fails.
+#[derive(Debug, Clone)]
+pub struct BuildWaitError {
+    pub message: String,
+}
+
+impl std::fmt::Display for BuildWaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cache build failed: {}", self.message)
+    }
+}
+
+impl std::error::Error for BuildWaitError {}
 
 /// Per-snapshot engine cache.
 ///
-/// Cheap to clone — the inner state is behind an `Arc<Mutex<…>>`.
+/// Cheap to clone — the inner state is behind an `Arc`.
 #[derive(Clone)]
 pub struct EngineCache {
     inner: Arc<EngineCacheInner>,
 }
 
 struct EngineCacheInner {
-    entries: Mutex<HashMap<CacheKey, CachedEntry>>,
+    slots: Mutex<HashMap<CacheKey, CacheSlot>>,
     /// Bumped on every `bundle.install` / `bundle.uninstall`. Mixed
     /// into the cache key so a bundle change invalidates all entries
     /// built against the previous system root set without an explicit
@@ -154,7 +164,7 @@ impl EngineCache {
     pub fn new(config: EngineCacheConfig) -> Self {
         Self {
             inner: Arc::new(EngineCacheInner {
-                entries: Mutex::new(HashMap::new()),
+                slots: Mutex::new(HashMap::new()),
                 system_install_generation: AtomicU64::new(0),
                 capacity: config.capacity,
                 idle_threshold: config.idle_threshold,
@@ -180,11 +190,13 @@ impl EngineCache {
     }
 
     /// Look up a cached engine. Updates `last_touched` on hit so LRU
-    /// ordering reflects recency.
+    /// ordering reflects recency. Returns `None` for misses and
+    /// `Building` slots (callers should use `get_or_insert_with`
+    /// instead).
     pub fn get(&self, key: &CacheKey) -> Option<Arc<Engine>> {
-        let mut entries = self.inner.entries.lock().unwrap();
-        self.sweep_idle_locked(&mut entries);
-        if let Some(entry) = entries.get_mut(key) {
+        let mut slots = self.inner.slots.lock().unwrap();
+        self.sweep_idle_locked(&mut slots);
+        if let Some(CacheSlot::Ready(entry)) = slots.get_mut(key) {
             entry.last_touched = Instant::now();
             Some(entry.engine.clone())
         } else {
@@ -192,69 +204,185 @@ impl EngineCache {
         }
     }
 
-    /// Insert a freshly built engine into the cache. Evicts the
-    /// least-recently-used entry that is NOT currently in use by a
-    /// running request (checked via `Arc::strong_count <= 1`). If
-    /// every entry is in use, the cache temporarily exceeds capacity
-    /// rather than evicting a live engine.
+    /// Single-flight cache lookup + build. Returns the cached engine
+    /// if one exists for `key`, or calls `build_fn` exactly once to
+    /// produce one. Concurrent callers for the same key block on the
+    /// first builder's Condvar.
+    ///
+    /// `build_fn` returns `Ok((engine, user_temp_guard))` on success.
+    /// On error, the slot is removed so a future caller can retry.
+    pub fn get_or_insert_with<F, E>(
+        &self,
+        key: CacheKey,
+        build_fn: F,
+    ) -> Result<Arc<Engine>, E>
+    where
+        F: FnOnce() -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), E>,
+        E: From<BuildWaitError>,
+    {
+        let mut slots = self.inner.slots.lock().unwrap();
+        self.sweep_idle_locked(&mut slots);
+
+        // Fast path: Ready hit.
+        if let Some(CacheSlot::Ready(entry)) = slots.get_mut(&key) {
+            entry.last_touched = Instant::now();
+            return Ok(entry.engine.clone());
+        }
+
+        // Check for an in-flight build.
+        if let Some(CacheSlot::Building(pending)) = slots.get(&key).cloned() {
+            // Wait path: drop the lock, wait on the Condvar.
+            drop(slots);
+            return Self::wait_for_build(&pending);
+        }
+
+        // Build path: insert a Building slot, release the lock, run
+        // build_fn, then transition to Ready.
+        let pending = Arc::new(PendingBuild {
+            done: Condvar::new(),
+            result: Mutex::new(None),
+        });
+        slots.insert(key.clone(), CacheSlot::Building(pending.clone()));
+        drop(slots);
+
+        // Run the build outside the lock.
+        let build_result = build_fn();
+
+        let mut slots = self.inner.slots.lock().unwrap();
+
+        // Transition Building → Ready.
+        let (engine, user_temp) = build_result.map_err(|user_err| {
+            // Remove slot so retry works.
+            slots.remove(&key);
+            // Signal waiters with a generic error (we can't clone E).
+            {
+                let mut r = pending.result.lock().unwrap();
+                *r = Some(Err(BuildWaitError {
+                    message: "build failed".into(),
+                }));
+            }
+            pending.done.notify_all();
+            user_err
+        })?;
+
+        // Run eviction before inserting.
+        self.evict_for_capacity_locked(&mut slots);
+        slots.insert(
+            key,
+            CacheSlot::Ready(CachedEntry {
+                engine: engine.clone(),
+                last_touched: Instant::now(),
+                _user_temp: user_temp,
+            }),
+        );
+        // Signal waiters.
+        {
+            let mut r = pending.result.lock().unwrap();
+            *r = Some(Ok(engine.clone()));
+        }
+        pending.done.notify_all();
+        Ok(engine)
+    }
+
+    /// Wait for an in-flight build to complete and return its result.
+    fn wait_for_build<E>(pending: &Arc<PendingBuild>) -> Result<Arc<Engine>, E>
+    where
+        E: From<BuildWaitError>,
+    {
+        let mut result = pending.result.lock().unwrap();
+        while result.is_none() {
+            result = pending.done.wait(result).unwrap();
+        }
+        // Clone the result so multiple waiters can all read it.
+        match result.as_ref().unwrap() {
+            Ok(engine) => Ok(engine.clone()),
+            Err(e) => Err(E::from(BuildWaitError { message: e.message.clone() })),
+        }
+    }
+
+    /// Insert a freshly built engine into the cache. Retained for
+    /// direct callers (tests, etc). New code should use
+    /// `get_or_insert_with`.
     pub fn insert(
         &self,
         key: CacheKey,
         engine: Arc<Engine>,
-        user_temp: Option<TempDirGuard>,
+        user_temp: Option<Arc<TempDirGuard>>,
     ) {
-        let mut entries = self.inner.entries.lock().unwrap();
-        self.sweep_idle_locked(&mut entries);
-        // Evict LRU entries that are not held by any running request.
-        while entries.len() >= self.inner.capacity {
-            let candidate = entries
-                .iter()
-                .filter(|(_, e)| Arc::strong_count(&e.engine) <= 1)
-                .min_by_key(|(_, e)| e.last_touched)
-                .map(|(k, _)| k.clone());
-            match candidate {
-                Some(k) => {
-                    entries.remove(&k);
-                }
-                None => break, // all in use; tolerate over-capacity
-            }
-        }
-        entries.insert(
+        let mut slots = self.inner.slots.lock().unwrap();
+        self.sweep_idle_locked(&mut slots);
+        self.evict_for_capacity_locked(&mut slots);
+        slots.insert(
             key,
-            CachedEntry {
+            CacheSlot::Ready(CachedEntry {
                 engine,
                 last_touched: Instant::now(),
                 _user_temp: user_temp,
-            },
+            }),
         );
     }
 
-    /// Number of cached entries. Test/diagnostic helper.
+    /// Number of cached Ready entries. Test/diagnostic helper.
     pub fn len(&self) -> usize {
-        self.inner.entries.lock().unwrap().len()
+        self.inner
+            .slots
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| matches!(s, CacheSlot::Ready(_)))
+            .count()
     }
 
-    /// True if cache is empty.
+    /// True if cache has no Ready entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Drop every entry. The temp dirs are removed by `Drop`.
     pub fn clear(&self) {
-        self.inner.entries.lock().unwrap().clear();
+        self.inner.slots.lock().unwrap().clear();
     }
 
     /// Internal: evict any entry older than `idle_threshold` that is
-    /// not currently held by a running request.
-    fn sweep_idle_locked(&self, entries: &mut HashMap<CacheKey, CachedEntry>) {
+    /// not currently held by a running request. Only touches Ready slots.
+    fn sweep_idle_locked(&self, slots: &mut HashMap<CacheKey, CacheSlot>) {
         let cutoff = Instant::now() - self.inner.idle_threshold;
-        let stale: Vec<CacheKey> = entries
+        let stale: Vec<CacheKey> = slots
             .iter()
-            .filter(|(_, e)| e.last_touched < cutoff && Arc::strong_count(&e.engine) <= 1)
-            .map(|(k, _)| k.clone())
+            .filter_map(|(k, s)| match s {
+                CacheSlot::Ready(e)
+                    if e.last_touched < cutoff && Arc::strong_count(&e.engine) <= 1 =>
+                {
+                    Some(k.clone())
+                }
+                _ => None,
+            })
             .collect();
         for k in stale {
-            entries.remove(&k);
+            slots.remove(&k);
+        }
+    }
+
+    /// Evict LRU Ready entries that are not held by any running
+    /// request until below capacity.
+    fn evict_for_capacity_locked(&self, slots: &mut HashMap<CacheKey, CacheSlot>) {
+        while slots.len() >= self.inner.capacity {
+            let candidate = slots
+                .iter()
+                .filter_map(|(k, s)| match s {
+                    CacheSlot::Ready(e) if Arc::strong_count(&e.engine) <= 1 => {
+                        Some((k.clone(), e.last_touched))
+                    }
+                    _ => None,
+                })
+                .min_by_key(|(_, t)| *t)
+                .map(|(k, _)| k);
+            match candidate {
+                Some(k) => {
+                    slots.remove(&k);
+                }
+                None => break,
+            }
         }
     }
 }
@@ -480,7 +608,7 @@ mod tests {
         cache.insert(
             key1,
             eng1,
-            Some(TempDirGuard::new(user_path.clone())),
+            Some(Arc::new(TempDirGuard::new(user_path.clone()))),
         );
 
         // User dir must still exist while the cache holds the entry.
@@ -525,5 +653,123 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    // ── Step B: single-flight tests ────────────────────────────────
+
+    #[test]
+    fn get_or_insert_with_builds_on_miss() {
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 4,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("snap-build");
+        let eng = minimal_engine();
+        let eng_clone = eng.clone();
+        let result = cache.get_or_insert_with::<_, BuildWaitError>(
+            key.clone(),
+            || Ok((eng_clone, None)),
+        ).unwrap();
+        assert!(Arc::ptr_eq(&result, &eng));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn get_or_insert_with_returns_cached_on_hit() {
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 4,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("snap-hit");
+        let eng = minimal_engine();
+        cache.insert(key.clone(), eng.clone(), None);
+
+        let called = std::sync::atomic::AtomicBool::new(false);
+        let result = cache.get_or_insert_with::<_, BuildWaitError>(
+            key,
+            || {
+                called.store(true, Ordering::SeqCst);
+                Ok((minimal_engine(), None))
+            },
+        ).unwrap();
+        assert!(Arc::ptr_eq(&result, &eng), "must return cached, not rebuild");
+        assert!(!called.load(Ordering::SeqCst), "build_fn must not be called on hit");
+    }
+
+    #[test]
+    fn concurrent_same_key_misses_serialize_on_build() {
+        // Invariant: only one build_fn call per key; all callers get
+        // the same Arc.
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 4,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("concurrent-build");
+        let build_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let eng = minimal_engine();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let cache = cache.clone();
+                let key = key.clone();
+                let eng = eng.clone();
+                let barrier = barrier.clone();
+                let build_count = build_count.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let result = cache
+                        .get_or_insert_with::<_, BuildWaitError>(key.clone(), || {
+                            build_count.fetch_add(1, Ordering::SeqCst);
+                            // Simulate slow build.
+                            std::thread::sleep(Duration::from_millis(50));
+                            Ok((eng.clone(), None))
+                        })
+                        .unwrap();
+                    result
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let build_calls = build_count.load(Ordering::SeqCst);
+        assert_eq!(build_calls, 1, "build_fn must be called exactly once, got {build_calls}");
+        for r in &results {
+            assert!(Arc::ptr_eq(r, &eng), "all callers must get the same Arc");
+        }
+    }
+
+    #[test]
+    fn build_failure_releases_slot_for_retry() {
+        // Invariant: a failed build does not poison the slot; a second
+        // call rebuilds successfully.
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 4,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("retry-slot");
+        let attempt = std::sync::atomic::AtomicUsize::new(0);
+
+        // First call fails.
+        let err = cache.get_or_insert_with::<_, BuildWaitError>(
+            key.clone(),
+            || {
+                attempt.fetch_add(1, Ordering::SeqCst);
+                Err(BuildWaitError { message: "intentional".into() })
+            },
+        );
+        assert!(err.is_err());
+
+        // Second call succeeds.
+        let eng = minimal_engine();
+        let result = cache.get_or_insert_with::<_, BuildWaitError>(
+            key.clone(),
+            || {
+                attempt.fetch_add(1, Ordering::SeqCst);
+                Ok((eng.clone(), None))
+            },
+        ).unwrap();
+        assert_eq!(attempt.load(Ordering::SeqCst), 2);
+        assert!(Arc::ptr_eq(&result, &eng));
     }
 }

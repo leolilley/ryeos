@@ -278,16 +278,35 @@ pub(crate) fn ingest_user_space_for_push(
     let mut items: HashMap<String, String> = HashMap::new();
 
     // Walk each allow-listed sync dir.
+    //
+    // NOTE(remediation): `symlink_metadata` is used instead of
+    // `is_dir()` so symlinked allowlist roots themselves are caught.
+    // A symlinked `~/.ryeos/.ai/directories` pointing outside the user
+    // root would bypass the per-entry symlink skip inside
+    // `ingest_user_dir_for_push`. This does NOT protect against
+    // TOCTOU races (adversarial concurrent symlink swaps); for that,
+    // `openat(O_NOFOLLOW)` style walks would be needed, which is a
+    // larger change unjustified for this attack surface (the operator
+    // runs against their own user space).
     for dir in ryeos_state::user_sync::USER_SPACE_SYNC_DIRS
         .iter()
         .copied()
         .chain(std::iter::once(ryeos_state::user_sync::USER_TRUST_SYNC_DIR))
     {
         let abs = user_ai.join(dir);
-        if !abs.is_dir() {
-            continue;
+        match std::fs::symlink_metadata(&abs) {
+            Ok(md) if md.file_type().is_symlink() => {
+                tracing::warn!(
+                    path = %abs.display(),
+                    "skipping symlinked allowlist root in user-space ingest"
+                );
+                continue;
+            }
+            Ok(md) if md.is_dir() => {
+                ingest_user_dir_for_push(cas, &user_ai, &abs, &mut items)?;
+            }
+            _ => continue,
         }
-        ingest_user_dir_for_push(cas, &user_ai, &abs, &mut items)?;
     }
 
     if items.is_empty() {
@@ -667,6 +686,70 @@ mod ingest_symlink_tests {
         assert!(
             !items.keys().any(|k| k.contains("leaked.txt") || k.contains("leaky-dir")),
             "symlinked directory must be skipped, got keys: {:?}",
+            items.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ingest_user_space_skips_symlinked_allowlist_root() {
+        // Invariant: a symlinked allowlist root directory (e.g.
+        // directives → /somewhere) is detected by symlink_metadata
+        // and skipped, preventing the walk from following it.
+        #[cfg(not(unix))]
+        {
+            return;
+        }
+
+        let cas_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path().to_path_buf());
+
+        // Create a synthetic user .ai directory.
+        let user_ai = TempDir::new().unwrap().path().join(".ai");
+        std::fs::create_dir_all(&user_ai).unwrap();
+
+        // Create an outside directory with files that should NOT be ingested.
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("exfil.md"), "stolen").unwrap();
+
+        // Symlink the directives root to the outside dir.
+        std::os::unix::fs::symlink(outside.path(), user_ai.join("directives")).unwrap();
+
+        // Also create a REAL tools dir with a file to prove the real
+        // root is still walked.
+        let tools_dir = user_ai.join("tools");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::write(tools_dir.join("my-tool.yaml"), "tool: content").unwrap();
+
+        // Walk the user_ai dir using the same allowlist-loop logic.
+        let mut items = HashMap::new();
+        for dir in ryeos_state::user_sync::USER_SPACE_SYNC_DIRS
+            .iter()
+            .copied()
+            .chain(std::iter::once(ryeos_state::user_sync::USER_TRUST_SYNC_DIR))
+        {
+            let abs = user_ai.join(dir);
+            match std::fs::symlink_metadata(&abs) {
+                Ok(md) if md.file_type().is_symlink() => {
+                    continue;
+                }
+                Ok(md) if md.is_dir() => {
+                    ingest_user_dir_for_push(&cas, &user_ai, &abs, &mut items).unwrap();
+                }
+                _ => continue,
+            }
+        }
+
+        // The symlinked directives root must be skipped.
+        assert!(
+            !items.keys().any(|k| k.contains("exfil")),
+            "symlinked allowlist root must be skipped, got keys: {:?}",
+            items.keys().collect::<Vec<_>>()
+        );
+
+        // The real tools dir must be walked.
+        assert!(
+            items.keys().any(|k| k.contains("my-tool.yaml")),
+            "real allowlist root must be walked, got keys: {:?}",
             items.keys().collect::<Vec<_>>()
         );
     }

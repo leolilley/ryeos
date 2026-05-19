@@ -248,6 +248,14 @@ pub fn validate_boot(
                                 detail: format!("malformed response: {detail}"),
                             });
                         }
+                        Err(EngineError::HandlerBinaryMissing { handler, reason, .. }) => {
+                            tracing::warn!(
+                                handler = %handler,
+                                reason = %reason,
+                                "skipping boot-time subprocess validation for unresolved handler; \
+                                 invocation will hard-error if the handler is ever called"
+                            );
+                        }
                         Err(other) => {
                             issues.push(BootIssue::HandlerUnusable {
                                 parser_ref: parser_ref.clone(),
@@ -348,6 +356,14 @@ pub fn validate_boot(
                     handler_id: schema.composer.clone(),
                     detail: format!("malformed response: {detail}"),
                 });
+            }
+            Err(EngineError::HandlerBinaryMissing { handler, reason, .. }) => {
+                tracing::warn!(
+                    handler = %handler,
+                    reason = %reason,
+                    "skipping boot-time subprocess validation for unresolved composer handler; \
+                     invocation will hard-error if the handler is ever called"
+                );
             }
             Err(other) => {
                 issues.push(BootIssue::ComposerHandlerUnusable {

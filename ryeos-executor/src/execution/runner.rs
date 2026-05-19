@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -30,6 +31,7 @@ use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::launch_metadata::ResumeContext;
 use ryeos_app::state_store::ThreadDetail;
+use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{
     self, ResolvedExecutionRequest, ThreadAttachProcessParams, ThreadFinalizeParams,
 };
@@ -72,7 +74,9 @@ pub struct ExecutionParams {
     pub parameters: Value,
     /// Pre-checked-out CAS temp dir (from ResolvedProjectContext).
     /// When set, the runner should reuse this instead of doing a second checkout.
-    pub temp_dir: Option<PathBuf>,
+    /// Held as `Arc<TempDirGuard>` for shared ownership — the dir is
+    /// cleaned up when the last Arc holder drops.
+    pub temp_dir: Option<Arc<TempDirGuard>>,
     /// Caller-supplied thread id. When `Some(id)`, the new thread row
     /// uses that id (so an external subscriber registered against `id`
     /// receives every lifecycle event from `thread_started` onward).
@@ -106,7 +110,7 @@ pub struct ExecutionParams {
 struct ExecutionGuard {
     state: AppState,
     thread_id: Option<String>,
-    temp_dir: Option<PathBuf>,
+    temp_dir: Option<Arc<TempDirGuard>>,
     thread_finalized: bool,
     callback_token: Option<String>,
     thread_auth_token: Option<String>,
@@ -129,9 +133,10 @@ impl ExecutionGuard {
         self.thread_id = Some(thread_id.to_string());
     }
 
-    /// Mark temp dir for cleanup.
-    fn track_temp_dir(&mut self, dir: PathBuf) {
-        self.temp_dir = Some(dir);
+    /// Mark temp dir for cleanup. The Arc is cloned; the dir is removed
+    /// when the last Arc holder drops.
+    fn track_temp_dir(&mut self, guard: Arc<TempDirGuard>) {
+        self.temp_dir = Some(guard);
     }
 
     /// Track a callback token for revocation on cleanup.
@@ -207,15 +212,14 @@ impl ExecutionGuard {
         }
     }
 
-    /// Perform all cleanup: remove temp dir.
+    /// Perform all cleanup: drop the temp dir Arc (removes dir when
+    /// last holder drops) and revoke tokens.
     fn cleanup(&mut self) {
         self.revoke_callback_token();
         self.revoke_thread_auth_token();
-        if let Some(ref d) = self.temp_dir {
-            if d.exists() {
-                let _ = std::fs::remove_dir_all(d);
-            }
-        }
+        // Drop the Arc<TempDirGuard>. If this is the last holder,
+        // the directory is removed by the TempDirGuard Drop impl.
+        self.temp_dir = None;
     }
 
     /// Consume into parts for moving into tokio::spawn.
@@ -240,7 +244,7 @@ impl ExecutionGuard {
 /// so the guard's copy would be redundant.
 struct ExecutionGuardParts {
     state: AppState,
-    temp_dir: Option<PathBuf>,
+    temp_dir: Option<Arc<TempDirGuard>>,
     callback_token: Option<String>,
     thread_auth_token: Option<String>,
 }
@@ -260,13 +264,16 @@ fn prepare_cas_context(
     state: &AppState,
     project_path: Option<&std::path::Path>,
     snapshot_hash: &Option<String>,
-    pre_checkout_dir: &Option<PathBuf>,
+    pre_checkout_dir: &Option<Arc<TempDirGuard>>,
     thread_id: &str,
     guard: &mut ExecutionGuard,
 ) -> Result<(PathBuf, Option<String>, Option<String>)> {
     // If we have a pre-checked-out dir from ResolvedProjectContext,
     // reuse it instead of doing a second checkout.
-    if let (Some(snap_hash), Some(checkout_dir)) = (snapshot_hash, pre_checkout_dir) {
+    if let (Some(snap_hash), Some(checkout_guard)) = (snapshot_hash, pre_checkout_dir) {
+        let checkout_dir = checkout_guard.path().ok_or_else(|| {
+            anyhow::anyhow!("pre-checked-out temp dir was already disarmed")
+        })?;
         let cas_root = state.state_store.cas_root()?;
         let cas = lillux::cas::CasStore::new(cas_root);
         let snap_obj = cas
@@ -274,9 +281,9 @@ fn prepare_cas_context(
             .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
         let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
         let manifest_hash = snapshot.project_manifest_hash.clone();
-        guard.track_temp_dir(checkout_dir.clone());
+        guard.track_temp_dir(checkout_guard.clone());
         tracing::trace!(thread_id = %thread_id, effective_path = %checkout_dir.display(), "CAS context prepared");
-        return Ok((checkout_dir.clone(), Some(manifest_hash), Some(snap_hash.clone())));
+        return Ok((checkout_dir, Some(manifest_hash), Some(snap_hash.clone())));
     }
 
     if let Some(snap_hash) = snapshot_hash {
@@ -326,7 +333,7 @@ fn checkout_from_snapshot(
     );
     crate::execution::checkout_project(&cas_root, &manifest_hash, &exec_dir, Some(&cache))?;
 
-    guard.track_temp_dir(exec_dir.clone());
+    guard.track_temp_dir(Arc::new(TempDirGuard::new(exec_dir.clone())));
     Ok((exec_dir, Some(manifest_hash), Some(snap_hash.to_string())))
 }
 
@@ -825,6 +832,7 @@ pub async fn run_inline(
     };
 
     // Post-execution fold-back
+    let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
     post_execution_foldback(
         PostExecutionFoldbackParams {
             state: &state,
@@ -833,7 +841,7 @@ pub async fn run_inline(
             pre_manifest_hash: &pre_manifest_hash,
             base_snapshot_hash: &base_snapshot_hash,
             project_path: params.project_path.as_deref(),
-            execution_dir: guard.temp_dir.as_deref(),
+            execution_dir: guard_exec_dir.as_deref(),
             completion: &completion,
         },
     );
@@ -1032,7 +1040,7 @@ async fn dispatch_detached_bg_task(
     bg_pre_manifest_hash: Option<String>,
     mut bg_base_snapshot_hash: Option<String>,
     bg_project_path: Option<PathBuf>,
-    bg_temp_dir: Option<PathBuf>,
+    mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_state_root: PathBuf,
     is_resume: bool,
     prior_status_for_mark_running: Option<String>,
@@ -1091,7 +1099,7 @@ async fn dispatch_detached_bg_task(
                 "engine error during spawn"
             );
             fail_thread_static(&bg_state, &bg_thread_id, "engine_error");
-            cleanup_temp_dir(bg_temp_dir.as_deref());
+            drop(bg_temp_dir.take());
             return;
         }
         Err(join_err) => {
@@ -1101,7 +1109,7 @@ async fn dispatch_detached_bg_task(
                 "task panic during spawn"
             );
             fail_thread_static(&bg_state, &bg_thread_id, "task_panic");
-            cleanup_temp_dir(bg_temp_dir.as_deref());
+            drop(bg_temp_dir.take());
             return;
         }
     };
@@ -1129,7 +1137,7 @@ async fn dispatch_detached_bg_task(
             );
             let _ = ryeos_app::process::hard_kill_process_group(spawned.pgid);
             fail_thread_static(&bg_state, &bg_thread_id, "snapshot_pin_failed");
-            cleanup_temp_dir(bg_temp_dir.as_deref());
+            drop(bg_temp_dir.take());
             return;
         }
     }
@@ -1150,7 +1158,7 @@ async fn dispatch_detached_bg_task(
             "{}: child killed and thread finalized",
             attach_outcome_code,
         );
-        cleanup_temp_dir(bg_temp_dir.as_deref());
+        drop(bg_temp_dir.take());
         return;
     }
 
@@ -1168,6 +1176,8 @@ async fn dispatch_detached_bg_task(
     }
 
     let wait_result = task::spawn_blocking(move || spawned.wait()).await;
+    // Extract the execution dir path while the Arc is still alive.
+    let bg_exec_dir_path = bg_temp_dir.as_ref().and_then(|g| g.path());
     match wait_result {
         Ok(completion) => {
             post_execution_foldback(
@@ -1178,7 +1188,7 @@ async fn dispatch_detached_bg_task(
                     pre_manifest_hash: &bg_pre_manifest_hash,
                     base_snapshot_hash: &bg_base_snapshot_hash,
                     project_path: bg_project_path.as_deref(),
-                    execution_dir: bg_temp_dir.as_deref(),
+                    execution_dir: bg_exec_dir_path.as_deref(),
                     completion: &completion,
                 },
             );
@@ -1201,15 +1211,9 @@ async fn dispatch_detached_bg_task(
         }
     }
 
-    cleanup_temp_dir(bg_temp_dir.as_deref());
-}
-
-fn cleanup_temp_dir(temp_dir: Option<&std::path::Path>) {
-    if let Some(d) = temp_dir {
-        if d.exists() {
-            let _ = std::fs::remove_dir_all(d);
-        }
-    }
+    // Drop the Arc<TempDirGuard>. If this is the last holder, the
+    // directory is removed by the TempDirGuard Drop impl.
+    drop(bg_temp_dir);
 }
 
 /// Fail a thread without a guard (for use inside detached tasks).

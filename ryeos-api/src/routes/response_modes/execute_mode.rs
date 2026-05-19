@@ -23,9 +23,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::route_error::{RouteConfigError, RouteDispatchError};
-use ryeos_executor::execution::project_source::{self, ProjectSource, TempDirGuard};
+use ryeos_executor::execution::project_source::{self, ProjectSource};
 use crate::routes::compile::{CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
+use ryeos_app::temp_dir_guard::TempDirGuard;
 
 // ── Request shape ─────────────────────────────────────────────────────────
 
@@ -300,7 +301,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
         // Resolve project execution context.
         let checkout_id = format!("pre-{}-{:08x}", lillux::time::timestamp_millis(), rand::random::<u32>());
-        let mut project_ctx = match project_source::resolve_project_context(
+        let project_ctx = match project_source::resolve_project_context(
             &state,
             &project_source,
             &project_path,
@@ -324,7 +325,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         };
 
-        let temp_dir_guard = TempDirGuard::new(project_ctx.temp_dir.take());
+        // Hold the Arc<TempDirGuard> through dispatch so failures
+        // before runner ownership still clean up via Drop.
+        let temp_dir_guard: Option<Arc<TempDirGuard>> = project_ctx.temp_dir.clone();
 
         // Build plan context.
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
@@ -382,7 +385,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             project_path: &project_ctx.effective_path,
             original_project_path: project_ctx.original_path.clone(),
             snapshot_hash: project_ctx.snapshot_hash.clone(),
-            temp_dir: temp_dir_guard.disarm(),
+            temp_dir: temp_dir_guard,
             original_root_kind: root_canonical.kind.as_str(),
             pre_minted_thread_id: None,
             operation: request.operation.clone(),

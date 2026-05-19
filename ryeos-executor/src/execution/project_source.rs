@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use ryeos_app::state::AppState;
+use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
 
@@ -38,35 +39,6 @@ pub enum ProjectSourceError {
 impl From<anyhow::Error> for ProjectSourceError {
     fn from(err: anyhow::Error) -> Self {
         Self::Other(err.to_string())
-    }
-}
-
-/// RAII cleanup for the optional checkout-derived tempdir produced by
-/// [`resolve_project_context`]. Created when `temp_dir` is `Some`
-/// (i.e. for `pushed_head` / snapshot project sources), it removes the
-/// directory when it goes out of scope. Idempotent — [`Self::disarm`]
-/// consumes the guard without removing the directory if you need to
-/// hand the path to a long-running detached owner.
-pub struct TempDirGuard(Option<PathBuf>);
-
-impl TempDirGuard {
-    pub fn new(path: Option<PathBuf>) -> Self {
-        Self(path)
-    }
-
-    /// Disarm the guard (consume without cleanup). Returns the path so
-    /// callers can hand it to a runner / detached thread that takes
-    /// over lifecycle ownership.
-    pub fn disarm(mut self) -> Option<PathBuf> {
-        self.0.take()
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        if let Some(p) = self.0.take() {
-            let _ = std::fs::remove_dir_all(p);
-        }
     }
 }
 
@@ -106,11 +78,13 @@ pub struct ResolvedProjectContext {
     pub source: ProjectSource,
     /// CAS snapshot hash (set for PushedHead).
     pub snapshot_hash: Option<String>,
-    /// Temp directory to clean up (CAS checkout dir for PushedHead).
-    /// **Request-owned**: the runner's `ExecutionGuard` removes this
-    /// when the request completes. Each `pushed_head` request gets its
-    /// own checkout — never shared across threads.
-    pub temp_dir: Option<PathBuf>,
+    /// Temp directory guard for cleanup (CAS checkout dir for PushedHead).
+    /// **Request-owned**: wrapped in `Arc<TempDirGuard>` so it can be
+    /// shared between the request runner (cleanup) and the engine cache
+    /// (user overlay). The project checkout guard is cloned into the
+    /// runner's `ExecutionGuard`; the directory is removed when the
+    /// last Arc holder drops.
+    pub temp_dir: Option<Arc<TempDirGuard>>,
     /// Materialised user-space root for `PushedHead` requests (diagnostic
     /// only). The actual temp dir is owned by the cache entry.
     /// `None` for `LiveFs` and for cache-hit requests (the overlay is
@@ -281,7 +255,23 @@ pub fn resolve_project_context(
                         (None, None)
                     };
 
-                let bundle_roots = state.engine.system_roots.clone();
+                // Re-read live bundle roots from disk on each rebuild.
+                // This is the same directory the bundle install handler
+                // copies into, so a freshly installed bundle appears here
+                // immediately. Only runs on cache miss (generation bump
+                // invalidates the key), so the disk-scan cost is bounded.
+                let bundles_dir = state.config.system_space_dir.join(".ai").join("bundles");
+                let mut bundle_roots: Vec<PathBuf> = vec![state.config.system_space_dir.clone()];
+                if bundles_dir.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                bundle_roots.push(path);
+                            }
+                        }
+                    }
+                }
                 let built = ryeos_app::engine_init::build_engine_for_roots(
                     &state.config,
                     &bundle_roots,
@@ -302,7 +292,7 @@ pub fn resolve_project_context(
                 state.engine_cache.insert(
                     cache_key,
                     arc.clone(),
-                    user_root.map(|p| ryeos_app::engine_cache::TempDirGuard::new(p)),
+                    user_root.map(|p| Arc::new(TempDirGuard::new(p))),
                 );
                 arc
             };
@@ -312,9 +302,10 @@ pub fn resolve_project_context(
                 original_path,
                 source: source.clone(),
                 snapshot_hash: Some(snap_hash),
-                // Request-owned: the runner's ExecutionGuard cleans this
-                // up when the request completes.
-                temp_dir: Some(exec_dir),
+                // Request-owned: wrapped in Arc<TempDirGuard> so the
+                // runner and cache can both hold references. The project
+                // checkout is cleaned up when the last Arc drops.
+                temp_dir: Some(Arc::new(TempDirGuard::new(exec_dir))),
                 user_root: None,
                 // Cache-owned: the user overlay temp dir lives as long as
                 // the cache entry. The request does not clean this up.

@@ -1,12 +1,13 @@
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.0.0"
+version: "3.1.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
   Covers the per-request engine overlay, user-space sync, hybrid binary
-  resolution, and symmetric pull-back.
+  resolution, symmetric pull-back, single-flight cache builds, and
+  live system roots.
 ---
 
 # Remote Operations
@@ -274,21 +275,29 @@ content rather than the remote operator's own user space.
    directory, cleaned up when the request completes). The user overlay
    temp dir is **shared** across concurrent requests on the same
    snapshot and lives as long as the cache entry.
-4. All resolution, trust verification, and kind/schema lookups use
-   this per-request engine — never the daemon's own startup engine.
+4. All resolution paths in the executor (dispatch, launch, runner,
+   direct runtime) use the per-request engine for `pushed_head`
+   requests. Callbacks from running subprocesses currently use the
+   daemon engine; threading the per-request engine through callbacks
+   is a separate workstream (`callback-engine-borrowed-workspace`).
 
 ### Cache invalidation
 
 - `bundle.install` and `bundle.remove` bump the
-  `system_install_generation` counter, causing all subsequent
-  `pushed_head` requests to build a fresh engine that includes the
-  new bundle set.
-- The cache uses LRU eviction with a **strong-count guard**: entries
-  whose engine `Arc` is still held by a running request are never
-  evicted, even if that means temporarily exceeding capacity.
+  `system_install_generation` counter AND update the bundle registry
+  on disk. Subsequent per-request engine rebuilds read the **live
+  bundle registry** (re-scanning `<system_space_dir>/.ai/bundles/`),
+  so the new bundle set takes effect on the next `pushed_head`
+  request without a daemon restart.
+- Existing cached engines continue using the old bundle set (via
+  `Arc`'d engine) until evicted.
+- The cache uses single-flight builds: concurrent misses on the same
+  key serialise on one build, not race on insert.
+- LRU eviction with a **strong-count guard**: entries whose engine
+  `Arc` is still held by a running request are never evicted, even
+  if that means temporarily exceeding capacity.
 - Idle entries past the configured threshold (default: 30 minutes) are
-  evicted on the next `get()` or `insert()` call, subject to the same
-  strong-count guard.
+  evicted on the next access, subject to the same strong-count guard.
 
 ### Isolation guarantee
 
@@ -373,8 +382,9 @@ When a pushed user-tier handler descriptor references a binary that is
 not installed on the remote node, the engine build **warns** but does
 not fail — the handler is registered in `Unresolved` state.
 
-At invocation time, if an `Unresolved` handler is called, the daemon
-returns a structured error:
+Boot-time subprocess validation for `Unresolved` handlers is **skipped
+with a warning**. Only actual **invocation** of an `Unresolved` handler
+returns `EngineError::HandlerBinaryMissing` with structured remediation:
 
 ```
 handler binary missing: 'bin/x86_64-unknown-linux-gnu/my_tool'
@@ -383,9 +393,13 @@ binary 'bin/...' not installed on this node — install the bundle
 containing it or push it as a project-tier item.
 ```
 
+Other boot issues (schema mismatch, signature mismatch, untrusted
+publisher) still cause boot to fail. Only `HandlerBinaryMissing` is
+downgraded.
+
 This allows pushed snapshots that reference tools the remote doesn't
-have to build successfully, while still producing a clear error if
-the operator actually tries to invoke one.
+have to build successfully and pass boot validation, while still
+producing a clear error if the operator actually tries to invoke one.
 
 ## Configuration
 

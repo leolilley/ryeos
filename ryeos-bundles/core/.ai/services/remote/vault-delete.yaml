@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-19T01:36:21Z:ef96ba0bf94de8efd35dd7566a667f6d7b7499543023123687d52af0b54a9f1b:ovbmNvAG6Fs2cfvMQQgJ3bRkTfp+n0PpYoV9w37XvU5mgkf/xYRR5BGRLE+u4vRuA55ol1WudfKIoiVS68HcAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T23:56:55Z:ef96ba0bf94de8efd35dd7566a667f6d7b7499543023123687d52af0b54a9f1b:ovbmNvAG6Fs2cfvMQQgJ3bRkTfp+n0PpYoV9w37XvU5mgkf/xYRR5BGRLE+u4vRuA55ol1WudfKIoiVS68HcAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: remote.vault-delete

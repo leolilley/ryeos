@@ -45,6 +45,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -55,6 +56,7 @@ use ryeos_engine::kind_registry::{
     TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
+use ryeos_app::temp_dir_guard::TempDirGuard;
 
 use crate::dispatch_error::DispatchError;
 use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
@@ -106,9 +108,10 @@ pub struct DispatchRequest<'a> {
     /// resume metadata can pin the snapshot).
     pub snapshot_hash: Option<String>,
     /// Optional pre-checked-out tempdir; ownership is transferred
-    /// into the runner's `ExecutionGuard` for cleanup. The HTTP layer
-    /// disarms its `TempDirGuard` before constructing this request.
-    pub temp_dir: Option<PathBuf>,
+    /// into the runner's `ExecutionGuard` for cleanup. Held as
+    /// `Arc<TempDirGuard>` so pre-run dispatch failures still clean
+    /// up via Drop when the Arc goes out of scope.
+    pub temp_dir: Option<Arc<TempDirGuard>>,
     /// **B1**: kind parsed from the user-supplied root `item_ref`.
     /// `dispatch_native_runtime` gates `runtime.execute` enforcement
     /// on this being `"runtime"` so indirect alias chains are not
@@ -1257,7 +1260,7 @@ async fn dispatch_managed_subprocess(
     let verified_runtime = match role {
         SubprocessRole::RuntimeTarget { verified_runtime } => Some(verified_runtime.as_ref().clone()),
         SubprocessRole::Regular => {
-            state
+            ctx
                 .engine
                 .runtimes
                 .lookup_by_ref(canonical_ref)
@@ -1718,12 +1721,12 @@ pub async fn dispatch(
     // item_ref. Only direct `runtime:*` invocation triggers the
     // runtime.execute cap gate. Alias chains do NOT inherit the role.
     let role = if request.original_root_kind == ROOT_KIND_RUNTIME {
-        let verified = state
+        let verified = ctx
             .engine
             .runtimes
             .lookup_by_ref(&current_ref)
             .ok_or_else(|| {
-                let mut available: Vec<String> = state
+                let mut available: Vec<String> = ctx
                     .engine
                     .runtimes
                     .all()

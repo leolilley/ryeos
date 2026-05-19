@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-19T01:36:20Z:36f3d989e4a44a26da6e43c2bc7ae1232fb5c09eac4901b912bb9397892da60e:GuH/Fr2AxDGtBrk4kVLwiTQnGFdUNQp6HSDnZKIrK5beqs2FL647ZUnAyv/RK8TYsQT8phjHi0uxr6UmbDfrBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T23:56:55Z:36f3d989e4a44a26da6e43c2bc7ae1232fb5c09eac4901b912bb9397892da60e:GuH/Fr2AxDGtBrk4kVLwiTQnGFdUNQp6HSDnZKIrK5beqs2FL647ZUnAyv/RK8TYsQT8phjHi0uxr6UmbDfrBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.push
 required_caps: ["ryeos.execute.service.remote.push"]
