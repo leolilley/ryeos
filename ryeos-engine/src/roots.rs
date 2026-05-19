@@ -2,19 +2,36 @@
 //!
 //! Three-tier root model:
 //!
-//!   * `user_root()`    → user space (parent of `<user>/.ai/`)
+//!   * `user_root()`    → user space (parent of `<user>/.ai/`,
+//!                        canonically `~/.ryeos/`)
 //!   * `state_root()`   → daemon state (parent of `<state>/.ai/`)
 //!   * `system_roots()` → ordered list of system bundle roots
 //!     (parents of each `<system>/.ai/`, e.g. core + standard)
 //!
+//! Every Rye-aware space is identified by the presence of a `.ai/`
+//! sub-directory. The *parent* of that `.ai/` is the space root. Each
+//! space must have a dedicated container directory as its root —
+//! never a general-purpose location like `$HOME` itself — so that
+//! workspace walks (ingest, sign, push) are bounded.
+//!
+//! User space lives at `~/.ryeos/`, parallel to system space at
+//! `~/.local/share/ryeos/` (XDG data dir / ryeos). Originally
+//! `user_root()` returned `$HOME`, which made `$HOME == user_root`
+//! and caused ingest walkers to recurse the entire home directory.
+//! The container is now explicit.
+//!
 //! All callers needing roots — daemon bootstrap, CLI verbs,
-//! `ryos-core-tools`, engine subprocess executors — go through this
+//! `ryeos-core-tools`, engine subprocess executors — go through this
 //! module. Never call `directories::BaseDirs` or read
 //! `USER_SPACE`/`RYEOS_SYSTEM_SPACE_DIR` ad-hoc.
 
 use std::path::PathBuf;
 
 use crate::AI_DIR;
+
+/// Name of the operator's container directory under `$HOME`.
+/// User space is always `<home>/<USER_ROOT_DIR>/.ai/`.
+pub const USER_ROOT_DIR: &str = ".ryeos";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RootError {
@@ -25,17 +42,23 @@ pub enum RootError {
 
 /// Resolve the user-space root.
 ///
-/// Precedence: `USER_SPACE` env > `BaseDirs::home_dir()` > **error**.
+/// Precedence: `USER_SPACE` env > `<home>/.ryeos` > **error**.
+///
+/// The user-space root is a *dedicated container directory*, not
+/// `$HOME` itself. Returning `$HOME` here was a real bug — workspace
+/// walks (ingest, sign, push) would recurse the entire home directory
+/// because `$HOME == user_root` made every personal file look like a
+/// user-tier item.
 ///
 /// Never falls back to a placeholder. Silent fallback to
-/// `/tmp/missing-home` was a real bug — trust docs were silently
-/// written to the wrong place.
+/// `/tmp/missing-home` was a separate real bug — trust docs were
+/// silently written to the wrong place.
 pub fn user_root() -> Result<PathBuf, RootError> {
     if let Some(p) = std::env::var_os("USER_SPACE") {
         return Ok(PathBuf::from(p));
     }
     if let Some(dirs) = directories::BaseDirs::new() {
-        return Ok(dirs.home_dir().to_path_buf());
+        return Ok(dirs.home_dir().join(USER_ROOT_DIR));
     }
     Err(RootError::UserRootUnresolvable)
 }
@@ -103,6 +126,36 @@ mod tests {
         let r = user_root().expect("user_root with USER_SPACE set");
         assert_eq!(r, PathBuf::from("/tmp/test-user-space-roots"));
         std::env::remove_var("USER_SPACE");
+    }
+
+    #[test]
+    fn user_root_default_is_home_slash_dot_ryeos_not_home_itself() {
+        // The whole point of the user-space redesign: when USER_SPACE
+        // is unset, the resolved root MUST be a dedicated container
+        // under $HOME, never $HOME itself. If it ever equals $HOME
+        // again, ingest walkers will recurse the entire home dir
+        // (the original bug). Pin the invariant.
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var_os("USER_SPACE");
+        std::env::remove_var("USER_SPACE");
+        let resolved = user_root();
+        if let Ok(p) = resolved {
+            if let Some(dirs) = directories::BaseDirs::new() {
+                assert_ne!(
+                    p,
+                    dirs.home_dir(),
+                    "user_root must be a dedicated container, not $HOME itself"
+                );
+                assert_eq!(
+                    p,
+                    dirs.home_dir().join(USER_ROOT_DIR),
+                    "default user_root must be <home>/{USER_ROOT_DIR}"
+                );
+            }
+        }
+        if let Some(v) = saved {
+            std::env::set_var("USER_SPACE", v);
+        }
     }
 
     #[test]

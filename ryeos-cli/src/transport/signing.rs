@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use lillux::crypto::{load_signing_key, SigningKey, fingerprint as compute_fp};
+use ryeos_engine::roots;
 use ryeos_engine::AI_DIR;
 
 use crate::error::CliTransportError;
@@ -16,23 +17,32 @@ pub struct Signer {
 impl Signer {
     /// Resolve the signing key:
     ///   1. RYEOS_CLI_KEY_PATH env var (explicit override)
-    ///   2. ~/<AI_DIR>/config/keys/signing/private_key.pem
-    ///      (the operator's persistent identity, created by daemon bootstrap)
+    ///   2. `<user_root>/<AI_DIR>/config/keys/signing/private_key.pem`
+    ///      where `<user_root>` is `roots::user_root()` (canonically
+    ///      `~/.ryeos/`). This is the operator's persistent identity,
+    ///      created by `ryeos init`.
     ///   3. Fail
     ///
     /// This is the USER key — the operator's identity for authenticating to
     /// daemons. The node key is the daemon's own identity; the CLI must NOT
     /// silently fall back to it.
+    ///
+    /// User-root resolution is delegated to `roots::user_root()` (single
+    /// source of truth — no ad-hoc `BaseDirs::home_dir()` reads here).
     pub fn resolve(_system_space_dir: &Path) -> Result<Self, CliTransportError> {
         if let Ok(p) = std::env::var("RYEOS_CLI_KEY_PATH") {
             let pb = PathBuf::from(&p);
             return Self::load_from(&pb);
         }
-        let display_path = format!("~/{AI_DIR}/config/keys/signing/private_key.pem");
-        let user_key = dirs::home_dir()
-            .ok_or_else(|| CliTransportError::SigningKeyMissing {
-                path: PathBuf::from(&display_path),
-            })?
+        let user_root = roots::user_root().map_err(|_| {
+            CliTransportError::SigningKeyMissing {
+                path: PathBuf::from(format!(
+                    "<user_root>/{AI_DIR}/config/keys/signing/private_key.pem \
+                     (set USER_SPACE or ensure $HOME is discoverable)"
+                )),
+            }
+        })?;
+        let user_key = user_root
             .join(AI_DIR)
             .join("config")
             .join("keys")

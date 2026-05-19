@@ -212,7 +212,11 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| env::temp_dir().join(format!("ryeosd-{}", current_uid())));
 
-        let home = base_dirs.home_dir();
+        // User-space root: canonical `<home>/.ryeos/`. Resolved via
+        // `ryeos_engine::roots::user_root()` so the daemon and CLI agree
+        // on a single resolver. Honours `USER_SPACE` env override.
+        let user_root = ryeos_engine::roots::user_root()
+            .context("could not resolve user root for default user_signing_key_path")?;
 
         Ok(Self {
             bind,
@@ -224,7 +228,7 @@ impl Config {
                 .join("node")
                 .join("identity")
                 .join("private_key.pem"),
-            user_signing_key_path: home
+            user_signing_key_path: user_root
                 .join(".ai")
                 .join("config")
                 .join("keys")
