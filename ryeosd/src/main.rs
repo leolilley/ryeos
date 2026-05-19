@@ -285,6 +285,7 @@ async fn main() -> Result<()> {
                 deprecated: r.deprecated.unwrap_or(false),
                 replacement_tokens: r.replacement_tokens.clone(),
                 removed_in: r.removed_in.clone(),
+                positional_field: r.positional_field.clone(),
             })
             .collect::<Vec<_>>(),
     ).context("failed to build alias registry from node-config records")?);
@@ -675,6 +676,7 @@ async fn run_service_standalone(
                 deprecated: r.deprecated.unwrap_or(false),
                 replacement_tokens: r.replacement_tokens.clone(),
                 removed_in: r.removed_in.clone(),
+                positional_field: r.positional_field.clone(),
             })
             .collect::<Vec<_>>(),
     ).context("failed to build alias registry from node-config records")?);

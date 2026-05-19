@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-19T01:36:22Z:d6ce9a1105eee5d0d8b344245a1881d9415aa5c5042c54d5cf84ad527511fb6a:MBMtkK2QeQzdG1h8OnfyUfPWejYCCagrUAPiiM0jwyZoJCWI+vmn4WvKfYBuWL2J09px581Vlm/MuJaG8NxCCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T08:53:30Z:600fffd6ef7550306d8912c2f9adf78349804b7d75e6a537b817926cab38fe51:aBC5YDAdXD6+CQ4rJVwEYpnxu345yLqJGwRiiUDsvbV3ZtyJZn453xDySGkMJ1mG9Myuc5yPE5C3bdvOaWs9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "aliases"
 section: aliases
 tokens: ["remote", "configure"]
 verb: remote-configure
 description: "Add or update a remote node configuration"
+positional_field: remote

@@ -35,6 +35,13 @@ pub struct AliasRecord {
     /// If deprecated, the version in which this alias will be removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_in: Option<String>,
+    /// If present, declares that a lone positional argument in the
+    /// tail (e.g. the `<item_ref>` in `ryeos execute <item_ref>`)
+    /// should be bound to this field name in the parameters object
+    /// rather than collected into `_args`. The handler that backs the
+    /// verb must accept this field name. See `arg_binder::bind_argv_with_positional_field`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub positional_field: Option<String>,
     /// Path to the YAML file that declared this record. Set by loader.
     #[serde(skip)]
     pub source_file: PathBuf,

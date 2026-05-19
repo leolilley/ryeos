@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-19T02:41:28Z:7a04cf1d5027334613e2af9bd7e57bd7541e4ae8c4de5ad21c796e4b67323860:1AEvmkxw+YTUrJ7NPVE38ZSMwxdH/92DoFYLUAG7h5dPD/XPKbYD+tVR9tTxRun15/OdOTn4zenXHTjsM3RFAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T08:53:30Z:43881ac27d806be934540689ce711ca0f229a84a21785dd3f7426fc4a234afa1:RFg4hLx4KQIBDk+Xsh7kqZzn9mYeZc1+l3lrHwtnMYwx9YR3e8/n++fpx96facah9NkIBjArWd/rk/0cnpflBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "aliases"
 section: aliases
 tokens: ["remote", "execute"]
 verb: remote-execute
 description: "Execute an item on a remote node"
+positional_field: item_ref

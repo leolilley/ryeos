@@ -23,6 +23,12 @@ pub struct AliasDef {
     pub replacement_tokens: Option<Vec<String>>,
     /// If deprecated, the version in which this alias will be removed.
     pub removed_in: Option<String>,
+    /// If present, a lone positional argument in the tail is bound to
+    /// this field instead of landing in `_args`. E.g. `item_ref` for
+    /// `ryeos execute <item_ref>` or `remote` for
+    /// `ryeos remote configure <remote_name>`. See
+    /// [`crate::arg_binder::bind_argv_with_positional_field`].
+    pub positional_field: Option<String>,
 }
 
 /// Registry of aliases (routing convenience).
@@ -169,6 +175,7 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
+                positional_field: None,
             },
             AliasDef {
                 tokens: vec!["s".into()],
@@ -176,6 +183,7 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
+                positional_field: None,
             },
             AliasDef {
                 tokens: vec!["fetch".into()],
@@ -183,6 +191,7 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
+                positional_field: None,
             },
             AliasDef {
                 tokens: vec!["f".into()],
@@ -190,6 +199,7 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
+                positional_field: None,
             },
             AliasDef {
                 tokens: vec!["bundle".into(), "install".into()],
@@ -197,6 +207,7 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
+                positional_field: None,
             },
             AliasDef {
                 tokens: vec!["sig".into()],
@@ -204,6 +215,7 @@ mod tests {
                 deprecated: true,
                 replacement_tokens: Some(vec!["sign".into()]),
                 removed_in: Some("0.4.0".into()),
+                positional_field: None,
             },
         ]
     }
@@ -320,6 +332,7 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
+                positional_field: None,
             },
             AliasDef {
                 tokens: vec!["sign".into()],
@@ -327,6 +340,7 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
+                positional_field: None,
             },
         ]);
         assert!(result.is_err());
