@@ -1,12 +1,12 @@
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "2.0.0"
+version: "3.0.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
-  Revised to accurately document the node-key identity model and the
-  actual CLI bootstrap flow.
+  Covers the per-request engine overlay, user-space sync, hybrid binary
+  resolution, and symmetric pull-back.
 ---
 
 # Remote Operations
@@ -254,6 +254,138 @@ ryeos execute service:identity/authorize-key --input params.json
 echo '{"public_key":"ed25519:abc","label":"test","scopes":["cap1","cap2"]}' | \
   ryeos execute service:identity/authorize-key --input -
 ```
+
+## Per-Request Engine Overlay
+
+When `remote execute` pushes a snapshot, the remote daemon builds a
+**per-request engine** that resolves items against the caller's pushed
+content rather than the remote operator's own user space.
+
+### How it works
+
+1. The caller pushes a **project manifest** (project files) and
+   optionally a **user manifest** (user-space items from `~/.ryeos/.ai/`).
+2. The remote daemon checks the **engine cache** keyed by
+   `(system_install_generation, snapshot_hash)`. On a miss, it:
+   - Materialises the user overlay into a temp directory.
+   - Loads any pushed trust pins into an in-memory overlay.
+   - Builds a fresh `Engine` against system roots + the user overlay.
+3. The project checkout is **per-request** (each request gets its own
+   directory, cleaned up when the request completes). The user overlay
+   temp dir is **shared** across concurrent requests on the same
+   snapshot and lives as long as the cache entry.
+4. All resolution, trust verification, and kind/schema lookups use
+   this per-request engine — never the daemon's own startup engine.
+
+### Cache invalidation
+
+- `bundle.install` and `bundle.remove` bump the
+  `system_install_generation` counter, causing all subsequent
+  `pushed_head` requests to build a fresh engine that includes the
+  new bundle set.
+- The cache uses LRU eviction with a **strong-count guard**: entries
+  whose engine `Arc` is still held by a running request are never
+  evicted, even if that means temporarily exceeding capacity.
+- Idle entries past the configured threshold (default: 30 minutes) are
+  evicted on the next `get()` or `insert()` call, subject to the same
+  strong-count guard.
+
+### Isolation guarantee
+
+A `pushed_head` request NEVER resolves against the remote operator's
+user space. If the pushed snapshot has no user manifest, user-tier
+resolution returns "not found" rather than falling through to the
+operator's `~/.ryeos/.ai/`.
+
+## User-Space Sync
+
+### New user root: `~/.ryeos/`
+
+The user-space root is `~/.ryeos/` (was `~/.ai/`). All user-tier items
+(directives, tools, knowledge, trust pins) live under
+`~/.ryeos/.ai/`.
+
+### Allow-list for user-space push
+
+Only these subdirectories under `~/.ryeos/.ai/` are ingested during a
+remote push:
+
+| Directory | Contents |
+|---|---|
+| `directives/` | User-authored directive YAMLs |
+| `tools/` | User-authored tool YAMLs + binaries |
+| `knowledge/` | User knowledge entries |
+| `config/` | User config items (including `config/keys/trusted/`) |
+
+All other content under `~/.ryeos/` is ignored by the push pipeline.
+
+### Symlink protection
+
+User-space ingest **skips all symlinks** — a symlink at
+`~/.ryeos/.ai/directives/exfil.md` pointing at `~/.ssh/id_rsa` will
+NOT be followed, read, hashed, or uploaded. Project-space ingest
+does not have this restriction (operators own their project data).
+
+### `--no-project` mode
+
+When the caller passes `--no-project`, only user-space content is
+pushed. The snapshot's `project_manifest_hash` is set to a sentinel
+empty manifest. User-space sync still happens normally.
+
+### Trust-pin overlay semantics
+
+Pushed trust pins (from the user manifest's `config/keys/trusted/`
+section) are loaded into an in-memory overlay and unioned with the
+remote's persistent trust store for **that request only**. They are
+never written to the remote's persistent trust directory.
+
+## Symmetric Pull-Back
+
+After remote execution, the pull phase applies changes to **both** the
+local project and the local user space:
+
+- **Project pull-back**: diffs the pre-push manifest against the
+  remote's result snapshot, applies updated/deleted files to the
+  local project directory.
+- **User pull-back**: diffs the pre-push user manifest against the
+  result's user manifest, applies updated/deleted files to the
+  local `~/.ryeos/.ai/`.
+
+The JSON response from `remote execute` includes both:
+
+```json
+{
+  "pull": {
+    "files_updated": 3,
+    "files_deleted": 1,
+    "user_files_updated": 2,
+    "user_files_deleted": 0
+  }
+}
+```
+
+On a fresh node where `~/.ryeos/.ai/` does not exist, the pull-back
+creates it automatically.
+
+## Hybrid Binary Resolution
+
+When a pushed user-tier handler descriptor references a binary that is
+not installed on the remote node, the engine build **warns** but does
+not fail — the handler is registered in `Unresolved` state.
+
+At invocation time, if an `Unresolved` handler is called, the daemon
+returns a structured error:
+
+```
+handler binary missing: 'bin/x86_64-unknown-linux-gnu/my_tool'
+for handler 'handler:my/custom-tool' — binary not found in any bundle.
+binary 'bin/...' not installed on this node — install the bundle
+containing it or push it as a project-tier item.
+```
+
+This allows pushed snapshots that reference tools the remote doesn't
+have to build successfully, while still producing a clear error if
+the operator actually tries to invoke one.
 
 ## Configuration
 
