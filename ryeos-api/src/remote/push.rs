@@ -52,6 +52,15 @@ pub async fn push_project(
 ) -> Result<PushResult> {
     let system_space_dir = &state.config.system_space_dir;
 
+    // Fail-fast guards: prevent the common footgun of running
+    // `ryeos remote execute` from $HOME or some other catch-all
+    // directory and silently ingest-walking thousands of unrelated
+    // files. The push step recursively walks `project_path`; if
+    // that's `$HOME` or contains the daemon's system space, the
+    // walk takes minutes-to-hours and never produces a meaningful
+    // snapshot. Detect both cases up front.
+    refuse_walking_root(project_path, system_space_dir)?;
+
     // 1. Ingest project directory into local CAS using remote's ignore rules.
     let local_cas_root = system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects");
     let local_cas = CasStore::new(local_cas_root.clone());
@@ -132,6 +141,55 @@ pub async fn push_project(
     })
 }
 
+/// Reject project paths that would walk the entire home directory
+/// or contain the daemon's own system space.
+///
+/// Returns an error describing why and how to fix it. The error
+/// message names the offending path so the operator can copy-paste a
+/// corrected `-p` flag.
+fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<()> {
+    // Canonicalise both so symlinks and `.` aren't false negatives.
+    // If canonicalisation fails (e.g. path doesn't exist), skip the
+    // check — the upstream walk will fail with its own clearer error.
+    let proj = match project_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+    let sys = system_space_dir
+        .canonicalize()
+        .unwrap_or_else(|_| system_space_dir.to_path_buf());
+
+    // $HOME comparison via env var to avoid a new dependency. The
+    // env var is stable on every platform ryeos targets (Linux,
+    // macOS). If $HOME is unset we just skip this check.
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        let home = home.canonicalize().unwrap_or(home);
+        if proj == home {
+            anyhow::bail!(
+                "refusing to push {} — that's your home directory. \
+                 `remote execute` recursively ingests the project; \
+                 running it from $HOME would walk every file you own. \
+                 Re-run from inside a project directory, or pass \
+                 `-p <project-dir>` explicitly.",
+                proj.display(),
+            );
+        }
+    }
+
+    if proj == sys || proj.starts_with(&sys) || sys.starts_with(&proj) {
+        anyhow::bail!(
+            "refusing to push {} — that path overlaps the daemon's \
+             system space ({}). Pushing the daemon's own state to a \
+             remote would corrupt both nodes. Re-run from a project \
+             directory outside the daemon state tree.",
+            proj.display(),
+            sys.display(),
+        );
+    }
+
+    Ok(())
+}
+
 /// Walk a project directory and ingest files for push.
 fn ingest_for_push(
     cas: &CasStore,
@@ -184,4 +242,87 @@ fn ingest_for_push(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod refuse_walking_root_tests {
+    use super::refuse_walking_root;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ordinary_project_dir_outside_home_passes() {
+        // A tempdir under /tmp is neither $HOME nor inside the daemon
+        // system space — must pass.
+        let proj = TempDir::new().unwrap();
+        let sys = TempDir::new().unwrap();
+        refuse_walking_root(proj.path(), sys.path()).expect("ordinary dir must pass");
+    }
+
+    #[test]
+    fn project_path_equal_to_home_is_refused() {
+        let proj = TempDir::new().unwrap();
+        let sys = TempDir::new().unwrap();
+        // Spoof $HOME to point at the project dir; the function
+        // must catch that and refuse with a clear $HOME message.
+        let old_home = std::env::var_os("HOME");
+        // SAFETY: tests in this module are not parallel within the
+        // crate by default; the HOME env mutation is restored on
+        // return. (cargo nextest runs tests in separate processes,
+        // so cross-test interference is also bounded.)
+        unsafe {
+            std::env::set_var("HOME", proj.path());
+        }
+        let result = refuse_walking_root(proj.path(), sys.path());
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let err = result.expect_err("home dir must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("home directory"),
+            "error must mention 'home directory', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn project_path_inside_system_space_is_refused() {
+        let sys = TempDir::new().unwrap();
+        let inside = sys.path().join("inner");
+        std::fs::create_dir_all(&inside).unwrap();
+        let err = refuse_walking_root(&inside, sys.path())
+            .expect_err("paths inside system space must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("system space"),
+            "error must mention system space, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn project_path_containing_system_space_is_refused() {
+        // The inverse: project is the parent that contains the
+        // system_space_dir. Walking it would still hit the daemon
+        // state.
+        let proj = TempDir::new().unwrap();
+        let sys = proj.path().join("daemon-state");
+        std::fs::create_dir_all(&sys).unwrap();
+        let err = refuse_walking_root(proj.path(), &sys)
+            .expect_err("paths containing system space must be refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("system space"), "got: {msg}");
+    }
+
+    #[test]
+    fn nonexistent_path_does_not_short_circuit() {
+        // Canonicalisation fails for nonexistent paths; the guard
+        // must skip rather than spuriously refuse — the downstream
+        // walk will produce a clearer "not found" error.
+        let sys = TempDir::new().unwrap();
+        let missing = std::path::Path::new("/this/does/not/exist/anywhere");
+        refuse_walking_root(missing, sys.path())
+            .expect("missing path must pass the guard (fail elsewhere)");
+    }
 }
