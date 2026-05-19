@@ -11,7 +11,9 @@
 //! - `--key -1` → `{ "key": "-1" }` (single-dash values are values, not flags)
 //! - `--foo-bar val` → `{ "foo_bar": "val" }` (hyphens in keys → underscores)
 //! - Positional tokens → `{ "_args": [...] }`
-//! - Repeated keys: last one wins
+//! - Repeated keys: accumulate into array (`--scopes a --scopes b` → `["a","b"]`).
+//!   Single occurrence remains scalar; handlers wanting `Vec<T>` should
+//!   deserialize via [`crate::scalar_or_vec`] to accept both forms.
 //! - Empty input → `{}`
 
 /// Normalise a flag key: strip the `--` prefix (already done by caller)
@@ -40,18 +42,19 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
                 i += 1;
                 continue;
             }
-            if key.contains('=') {
+            let (k, v) = if key.contains('=') {
                 // --key=value
                 let (k, v) = key.split_once('=').unwrap();
-                params.insert(normalise_key(k), serde_json::Value::String(v.to_string()));
+                (normalise_key(k), serde_json::Value::String(v.to_string()))
             } else if i + 1 < argv.len() && !argv[i + 1].starts_with("--") {
                 // --key value (value may start with single dash, e.g. "-1")
                 i += 1;
-                params.insert(normalise_key(key), serde_json::Value::String(argv[i].clone()));
+                (normalise_key(key), serde_json::Value::String(argv[i].clone()))
             } else {
                 // --key (bare flag)
-                params.insert(normalise_key(key), serde_json::Value::Bool(true));
-            }
+                (normalise_key(key), serde_json::Value::Bool(true))
+            };
+            insert_or_accumulate(&mut params, k, v);
         } else {
             positional.push(serde_json::Value::String(token.clone()));
         }
@@ -63,6 +66,31 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
     }
 
     serde_json::Value::Object(params)
+}
+
+/// Insert a key/value into the params map; on repeat, accumulate into
+/// an array. The first repeat promotes the existing scalar to a
+/// one-element array, then appends the new value. Subsequent repeats
+/// just append. Booleans (bare flags) are treated as scalars and
+/// follow the same promotion path.
+fn insert_or_accumulate(
+    params: &mut serde_json::Map<String, serde_json::Value>,
+    key: String,
+    value: serde_json::Value,
+) {
+    use serde_json::Value;
+    match params.remove(&key) {
+        None => {
+            params.insert(key, value);
+        }
+        Some(Value::Array(mut arr)) => {
+            arr.push(value);
+            params.insert(key, Value::Array(arr));
+        }
+        Some(existing) => {
+            params.insert(key, Value::Array(vec![existing, value]));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,14 +154,57 @@ mod tests {
     }
 
     #[test]
-    fn repeated_flag_last_wins() {
+    fn repeated_flag_promotes_to_array() {
+        // Two occurrences → array.
         let result = bind_argv(&[
             "--name".into(),
             "alice".into(),
             "--name".into(),
             "bob".into(),
         ]);
-        assert_eq!(result["name"], "bob");
+        let names = result["name"].as_array().unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], "alice");
+        assert_eq!(names[1], "bob");
+    }
+
+    #[test]
+    fn repeated_flag_three_times_accumulates() {
+        // Three occurrences → 3-element array (no nesting).
+        let result = bind_argv(&[
+            "--scope".into(),
+            "a".into(),
+            "--scope".into(),
+            "b".into(),
+            "--scope".into(),
+            "c".into(),
+        ]);
+        let scopes = result["scope"].as_array().unwrap();
+        assert_eq!(scopes.len(), 3);
+        assert_eq!(scopes[0], "a");
+        assert_eq!(scopes[1], "b");
+        assert_eq!(scopes[2], "c");
+    }
+
+    #[test]
+    fn single_flag_stays_scalar() {
+        let result = bind_argv(&["--name".into(), "alice".into()]);
+        assert_eq!(result["name"], "alice");
+        assert!(!result["name"].is_array());
+    }
+
+    #[test]
+    fn repeated_mixed_scalar_and_equals_form() {
+        // Combining `--key=a` then `--key b` accumulates.
+        let result = bind_argv(&[
+            "--key=a".into(),
+            "--key".into(),
+            "b".into(),
+        ]);
+        let arr = result["key"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], "a");
+        assert_eq!(arr[1], "b");
     }
 
     #[test]

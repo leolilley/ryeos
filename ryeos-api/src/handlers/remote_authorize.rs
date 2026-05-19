@@ -20,7 +20,10 @@ pub struct Request {
     pub public_key: String,
     /// Human-readable label.
     pub label: String,
-    /// Capabilities to grant.
+    /// Capabilities to grant. Accepts a single string or an array
+    /// (see `scalar_or_vec`); the CLI's heuristic binder emits a
+    /// scalar for a single `--scopes <X>` invocation.
+    #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
     pub scopes: Vec<String>,
 }
 

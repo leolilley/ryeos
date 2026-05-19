@@ -15,6 +15,7 @@ use ryeos_app::state::AppState;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
     pub hashes: Vec<String>,
 }
 

@@ -74,6 +74,8 @@ impl NodeConfigSection for AliasSection {
             bail!("alias '{}' has empty tokens list", name);
         }
 
+        // Empty / dash-prefixed token checks apply to every token —
+        // they would break tokeniser dispatch anywhere in the path.
         for token in &record.tokens {
             if token.is_empty() {
                 bail!("alias '{}' has empty token in tokens list", name);
@@ -81,14 +83,25 @@ impl NodeConfigSection for AliasSection {
             if token.starts_with('-') {
                 bail!("alias '{}' has dash-prefixed token '{}'", name, token);
             }
-            if token == "help" {
-                bail!("alias '{}' uses reserved token 'help'", name);
+        }
+        // The local-only reservations (`help`, `init`, `execute`)
+        // only collide as the FIRST token — that's where the CLI
+        // dispatcher short-circuits before talking to the daemon.
+        // `remote execute` (where `execute` is a sub-token) is
+        // unambiguous because the dispatcher looks at `cli.rest[0]`.
+        if let Some(first) = record.tokens.first() {
+            if first == "help" {
+                bail!("alias '{}' uses reserved first token 'help'", name);
             }
-            if token == "init" {
-                bail!("alias '{}' uses reserved token 'init' (local-only)", name);
+            if first == "init" {
+                bail!("alias '{}' uses reserved first token 'init' (local-only)", name);
             }
-            if token == "execute" {
-                bail!("alias '{}' uses reserved token 'execute' (local escape hatch, uses item_ref directly)", name);
+            if first == "execute" {
+                bail!(
+                    "alias '{}' uses reserved first token 'execute' \
+                     (local escape hatch, uses item_ref directly)",
+                    name
+                );
             }
         }
 
@@ -213,33 +226,57 @@ mod tests {
     }
 
     #[test]
-    fn reserved_token_init_rejected() {
+    fn reserved_first_token_init_rejected() {
         let section = AliasSection;
         let mut body = valid_body();
         body["tokens"] = serde_json::json!(["init"]);
         let result = section.parse("init-alias", &body);
         assert!(result.is_err());
-        assert!(format!("{:#}", result.unwrap_err()).contains("reserved token 'init'"));
+        assert!(format!("{:#}", result.unwrap_err()).contains("reserved first token 'init'"));
     }
 
     #[test]
-    fn reserved_token_help_rejected() {
+    fn reserved_first_token_help_rejected() {
         let section = AliasSection;
         let mut body = valid_body();
         body["tokens"] = serde_json::json!(["help"]);
         let result = section.parse("help-alias", &body);
         assert!(result.is_err());
-        assert!(format!("{:#}", result.unwrap_err()).contains("reserved token 'help'"));
+        assert!(format!("{:#}", result.unwrap_err()).contains("reserved first token 'help'"));
     }
 
     #[test]
-    fn reserved_token_execute_rejected() {
+    fn reserved_first_token_execute_rejected() {
         let section = AliasSection;
         let mut body = valid_body();
         body["tokens"] = serde_json::json!(["execute"]);
         let result = section.parse("execute-alias", &body);
         assert!(result.is_err());
-        assert!(format!("{:#}", result.unwrap_err()).contains("reserved token 'execute'"));
+        assert!(format!("{:#}", result.unwrap_err()).contains("reserved first token 'execute'"));
+    }
+
+    /// Regression: reserved tokens are only collisions as the FIRST
+    /// token. `["remote", "execute"]` is fine because the CLI
+    /// dispatcher's local escape hatch only fires when `cli.rest[0]`
+    /// is `"execute"`.
+    #[test]
+    fn reserved_token_as_subtoken_accepted() {
+        let section = AliasSection;
+        let mut body = valid_body();
+        body["tokens"] = serde_json::json!(["remote", "execute"]);
+        section
+            .parse("remote-execute", &body)
+            .expect("'execute' as a sub-token must be accepted");
+
+        body["tokens"] = serde_json::json!(["foo", "help"]);
+        section
+            .parse("foo-help", &body)
+            .expect("'help' as a sub-token must be accepted");
+
+        body["tokens"] = serde_json::json!(["something", "init"]);
+        section
+            .parse("something-init", &body)
+            .expect("'init' as a sub-token must be accepted");
     }
 
     #[test]

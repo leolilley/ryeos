@@ -26,6 +26,10 @@ pub struct Request {
     /// Human-readable label for the authorized key.
     pub label: String,
     /// Capabilities to grant. Must be a subset of caller's scopes.
+    /// Accepts either a single string (`"a"`) or an array (`["a","b"]`)
+    /// so the CLI's heuristic binder produces a valid request even
+    /// when only one scope is given.
+    #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
     pub scopes: Vec<String>,
 }
 

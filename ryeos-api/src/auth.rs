@@ -210,6 +210,27 @@ fn load_authorized_key(
     }
 
     let scopes = parse_toml_string_array(body, "scopes");
+
+    // Loud rejection of short-form / malformed scopes. A TOML on
+    // disk with `scopes = ["bundle.install"]` would otherwise
+    // authenticate fine but silently authorize nothing (the
+    // matcher does not auto-prefix) — that "inert auth" is the
+    // worst kind of failure: the request looks signed and
+    // accepted but every operation 403s with a misleading
+    // capability message. Reject the file outright so the
+    // operator sees the problem at first call.
+    for scope in &scopes {
+        if let Err(msg) = ryeos_runtime::authorizer::validate_scope_pattern(scope) {
+            bail!(
+                "authorized-key file {} contains an invalid scope: {}. \
+                 Refusing to load — re-issue the key with canonical scopes \
+                 (`ryeos.<verb>.<kind>.<subject>`).",
+                key_file.display(),
+                msg
+            );
+        }
+    }
+
     let owner = values
         .get("label")
         .cloned()
@@ -477,5 +498,90 @@ mod tests {
         authorizer
             .authorize(&loaded.scopes, &policy)
             .expect("real handler cap must be satisfied by loaded scopes");
+    }
+
+    /// Regression: a legitimately node-signed TOML that uses
+    /// short-form scopes (`bundle.install` instead of
+    /// `ryeos.execute.service.bundle.install`) must be REJECTED at
+    /// load time, not silently loaded with useless scopes.
+    ///
+    /// Without this guard the request authenticates, then every
+    /// handler 403s with a misleading "missing capability" message —
+    /// the operator never sees that their TOML is broken.
+    #[test]
+    fn load_authorized_key_rejects_short_form_scopes() {
+        let subject = SigningKey::from_bytes(&[7u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[8u8; 32]);
+
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+
+        let vk = subject.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        // Hand-craft a TOML with short-form scopes that bypass the
+        // canonical writer (which would reject them at write time).
+        let body = format!(
+            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"bundle.install\", \"remote.admin\"]\nlabel = \"legacy-short-form\"\n"
+        );
+        let signed = lillux::signature::sign_content_at(
+            &body,
+            &node_signer,
+            "#",
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+        let file_path = auth_dir.join(format!("{fp}.toml"));
+        std::fs::write(&file_path, signed).unwrap();
+
+        // Loader must REFUSE to load this file — not load with empty
+        // or short-form scopes and silently fail every authorization.
+        let err = load_authorized_key(&fp, &auth_dir, &node_identity)
+            .expect_err("short-form scope must be rejected at load");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("canonical") || msg.contains("ryeos."),
+            "rejection message must mention canonical form, got: {msg}"
+        );
+        assert!(
+            msg.contains("bundle.install") || msg.contains("not canonical"),
+            "rejection message must point at the offending scope, got: {msg}"
+        );
+    }
+
+    /// Canonical-form scopes load fine (positive control for the
+    /// short-form regression above).
+    #[test]
+    fn load_authorized_key_accepts_canonical_scopes() {
+        let subject = SigningKey::from_bytes(&[9u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[10u8; 32]);
+
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+
+        let vk = subject.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        let body = format!(
+            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault.list\"]\nlabel = \"ok\"\n"
+        );
+        let signed = lillux::signature::sign_content_at(
+            &body,
+            &node_signer,
+            "#",
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+        std::fs::write(auth_dir.join(format!("{fp}.toml")), signed).unwrap();
+
+        let loaded = load_authorized_key(&fp, &auth_dir, &node_identity)
+            .expect("canonical scopes must load");
+        assert_eq!(loaded.scopes, vec!["ryeos.execute.service.vault.list".to_string()]);
     }
 }

@@ -23,7 +23,8 @@ pub struct Request {
     /// Remote config name.
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// SHA-256 hex hashes to fetch.
+    /// SHA-256 hex hashes to fetch. Accepts a single string or array.
+    #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
     pub hashes: Vec<String>,
     /// Optional local directory to materialize objects into.
     /// When unset, objects are stored in the local CAS only.

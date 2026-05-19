@@ -21,6 +21,7 @@ pub mod op_wire;
 pub mod paths;
 pub mod progress;
 pub mod resolver;
+pub mod scalar_or_vec;
 pub mod transcript;
 pub mod verb_registry;
 pub mod verified_loader;
