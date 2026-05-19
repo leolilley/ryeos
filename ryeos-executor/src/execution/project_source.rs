@@ -107,33 +107,31 @@ pub struct ResolvedProjectContext {
     /// CAS snapshot hash (set for PushedHead).
     pub snapshot_hash: Option<String>,
     /// Temp directory to clean up (CAS checkout dir for PushedHead).
+    /// **Request-owned**: the runner's `ExecutionGuard` removes this
+    /// when the request completes. Each `pushed_head` request gets its
+    /// own checkout — never shared across threads.
     pub temp_dir: Option<PathBuf>,
-    /// Materialised user-space root for `PushedHead` requests with a
-    /// `user_manifest_hash`. `None` for `LiveFs` (the daemon's own
-    /// user space is used via the global engine) and for `PushedHead`
-    /// requests with no user manifest (strict-or-empty: no user-tier
-    /// items at all — never silently fall through to the remote
-    /// operator's user space).
+    /// Materialised user-space root for `PushedHead` requests (diagnostic
+    /// only). The actual temp dir is owned by the cache entry.
+    /// `None` for `LiveFs` and for cache-hit requests (the overlay is
+    /// already baked into the cached engine).
     pub user_root: Option<PathBuf>,
-    /// Temp directory to clean up (user-space CAS checkout dir for
-    /// `PushedHead`). Lifetime is tied to the cache entry: while the
-    /// per-request engine sits in `AppState.engine_cache`, this temp
-    /// dir is retained so concurrent threads sharing the snapshot
-    /// reuse the materialisation. Cleaned up when the cache entry is
-    /// evicted.
+    /// Always `None` now — the user overlay temp dir is owned by the
+    /// engine cache entry, not the request. Kept as a field for API
+    /// compatibility but never populated.
     pub user_temp_dir: Option<PathBuf>,
-    /// Caller's pinned trust pubkeys, materialised in-memory from the
-    /// pushed user manifest's `config/keys/trusted/` sub-section.
-    /// Unioned with the remote's persistent trust store inside
-    /// [`Engine`] for THIS request only — never written to the
-    /// remote's persistent trust dir.
+    /// Always `None` now — trust overlay is baked into the cached engine
+    /// at build time. Kept as a field for API compatibility.
     pub trust_overlay: Option<TrustStore>,
-    /// The engine to use for this request. For `LiveFs`, this is
-    /// `state.engine` (the daemon's startup engine). For `PushedHead`,
+    /// The **authoritative** engine for this request. For `LiveFs`, this
+    /// is `state.engine` (the daemon's startup engine). For `PushedHead`,
     /// this is a per-snapshot overlay engine built from the daemon's
-    /// system roots + the caller's materialised user root + the
-    /// trust overlay. Cached in `AppState.engine_cache` keyed by
-    /// `(system_install_generation, snapshot_hash)`.
+    /// system roots + the caller's materialised user root + trust pins.
+    ///
+    /// **No executor code should reach for `state.engine` after context
+    /// resolution.** All resolution, trust verification, and kind/schema
+    /// lookups MUST go through this field (or the `engine` on the
+    /// `ExecutionContext` / `ExecutionParams` that it flows into).
     pub request_engine: Arc<Engine>,
 }
 
@@ -205,7 +203,7 @@ pub fn resolve_project_context(
             let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
                 .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
 
-            // 1. Materialise project content (existing behaviour).
+            // ── 1. Always materialise the project checkout (request-owned) ──
             let manifest_hash = &snapshot.project_manifest_hash;
             let exec_dir = state
                 .config
@@ -223,82 +221,66 @@ pub fn resolve_project_context(
             )
             .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
 
-            // 2. Materialise user content. If the snapshot carries
-            //    `user_manifest_hash`, check it out into a sibling
-            //    temp dir. Otherwise leave user_root = None
-            //    (strict-or-empty: no user-tier resolution at all —
-            //    NEVER fall through to the remote operator's user space).
-            let (user_root, user_temp_dir, trust_overlay) =
-                if let Some(user_mh) = snapshot.user_manifest_hash.as_ref() {
-                    // The push side writes user-manifest paths
-                    // relative to `<user_root>/.ai/` (no `.ai/`
-                    // prefix), so materialise into a `.ai/`
-                    // subdirectory of the temp dir. That way the
-                    // outer temp dir BECOMES the `user_root` passed
-                    // to the engine — containing `.ai/directives/…`
-                    // etc., mirroring the operator's own user space
-                    // layout.
-                    let user_exec_dir = state
-                        .config
-                        .system_space_dir
-                        .join("executions")
-                        .join(format!("{}-user", checkout_id));
-                    let user_ai_dir = user_exec_dir.join(ryeos_engine::AI_DIR);
-                    crate::execution::checkout_project(
-                        &cas_root,
-                        user_mh,
-                        &user_ai_dir,
-                        Some(&materialization_cache),
-                    )
-                    .map_err(|e| {
-                        ProjectSourceError::CheckoutFailed(format!(
-                            "user-manifest checkout failed: {e}"
-                        ))
-                    })?;
-
-                    // Extract trust pins from the materialised user
-                    // space into an in-memory overlay. The trust dir
-                    // is part of the user manifest, and
-                    // `load_from_dir` parses it. The result is
-                    // unioned into the per-request engine's trust
-                    // store via `trust_overlay` — never written back
-                    // to the remote's persistent trust dir.
-                    let trust_dir = user_ai_dir
-                        .join("config")
-                        .join("keys")
-                        .join("trusted");
-                    let overlay = if trust_dir.is_dir() {
-                        match TrustStore::load_from_dir(&trust_dir) {
-                            Ok(store) if !store.is_empty() => Some(store),
-                            Ok(_) => None,
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "pushed user-space trust pins failed to load — \
-                                     proceeding with persistent trust store only"
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    (Some(user_exec_dir.clone()), Some(user_exec_dir), overlay)
-                } else {
-                    (None, None, None)
-                };
-
-            // 3. Build (or reuse from cache) the per-request engine.
-            //    Cache key mixes the system-install generation so a
-            //    bundle install/uninstall invalidates cleanly.
+            // ── 2. Check cache for a previously-built engine ──
             let cache_key = ryeos_app::engine_cache::CacheKey {
                 system_install_generation: state.engine_cache.system_install_generation(),
                 snapshot_hash: snap_hash.clone(),
             };
+
             let request_engine = if let Some(eng) = state.engine_cache.get(&cache_key) {
+                // Cache hit: reuse engine + skip ALL user materialisation.
+                // The cached engine was built against the user overlay from
+                // the first request on this snapshot; the user temp dir lives
+                // as long as the cache entry.
                 eng
             } else {
+                // Cache miss: materialise user overlay, build engine, insert.
+                let (user_root, trust_overlay) =
+                    if let Some(user_mh) = snapshot.user_manifest_hash.as_ref() {
+                        let user_exec_dir = state
+                            .config
+                            .system_space_dir
+                            .join("executions")
+                            .join(format!("{}-user", checkout_id));
+                        let user_ai_dir = user_exec_dir.join(ryeos_engine::AI_DIR);
+                        crate::execution::checkout_project(
+                            &cas_root,
+                            user_mh,
+                            &user_ai_dir,
+                            Some(&materialization_cache),
+                        )
+                        .map_err(|e| {
+                            ProjectSourceError::CheckoutFailed(format!(
+                                "user-manifest checkout failed: {e}"
+                            ))
+                        })?;
+
+                        let trust_dir = user_ai_dir
+                            .join("config")
+                            .join("keys")
+                            .join("trusted");
+                        let overlay = if trust_dir.is_dir() {
+                            match TrustStore::load_from_dir(&trust_dir) {
+                                Ok(store) if !store.is_empty() => Some(store),
+                                Ok(_) => None,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "pushed user-space trust pins failed to load — \
+                                         proceeding with persistent trust store only"
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                        (Some(user_exec_dir), overlay)
+                    } else {
+                        (None, None)
+                    };
+
                 let bundle_roots = state.engine.system_roots.clone();
                 let built = ryeos_app::engine_init::build_engine_for_roots(
                     &state.config,
@@ -313,17 +295,14 @@ pub fn resolve_project_context(
                     ))
                 })?;
                 let arc = Arc::new(built);
-                // Note: we hand the temp dirs to the cache via
-                // TempDirGuards so eviction triggers cleanup. The
-                // ResolvedProjectContext keeps its own PathBuf copies
-                // (not guards) — the cache owns lifecycle.
+
+                // Hand the user overlay temp dir to the cache. The
+                // project checkout is NOT cached — each request owns
+                // its own exec_dir.
                 state.engine_cache.insert(
                     cache_key,
                     arc.clone(),
-                    Some(ryeos_app::engine_cache::TempDirGuard::new(exec_dir.clone())),
-                    user_temp_dir
-                        .as_ref()
-                        .map(|p| ryeos_app::engine_cache::TempDirGuard::new(p.clone())),
+                    user_root.map(|p| ryeos_app::engine_cache::TempDirGuard::new(p)),
                 );
                 arc
             };
@@ -332,15 +311,15 @@ pub fn resolve_project_context(
                 effective_path: exec_dir.clone(),
                 original_path,
                 source: source.clone(),
-                snapshot_hash: Some(snap_hash.clone()),
-                // Lifecycle of project + user temp dirs is owned by the
-                // engine cache entry. Don't double-clean — leave these
-                // None so the existing TempDirGuard in execute_mode
-                // (which calls `temp_dir.take()`) is a no-op.
-                temp_dir: None,
-                user_root,
+                snapshot_hash: Some(snap_hash),
+                // Request-owned: the runner's ExecutionGuard cleans this
+                // up when the request completes.
+                temp_dir: Some(exec_dir),
+                user_root: None,
+                // Cache-owned: the user overlay temp dir lives as long as
+                // the cache entry. The request does not clean this up.
                 user_temp_dir: None,
-                trust_overlay,
+                trust_overlay: None,
                 request_engine,
             }
         }
