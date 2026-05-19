@@ -252,11 +252,9 @@ async fn native_synth_request(
 
 // ── 1. service: + validate_only=true ───────────────────────────────────
 //
-// PIN: today the `service:` branch ignores `validate_only` entirely and
-// returns the standard service envelope as if it weren't set. Task 0a
-// (which migrates services to schema-driven dispatch) must preserve this
-// shape for the no-op case OR explicitly change the contract; either way
-// this assertion will catch the drift.
+// validate_only on a service now short-circuits before handler invocation
+// and returns schema metadata. This prevents `ryeos help <verb>` from
+// crashing when the handler has required fields.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_service_validate_only() {
@@ -275,39 +273,26 @@ async fn pin_service_validate_only() {
         reqwest::StatusCode::OK,
         "expected 200, got {status}: {body}"
     );
-    let thread = body.get("thread").expect("thread present");
+    // validate_only returns schema info, not a thread envelope
     assert_eq!(
-        thread.get("kind").and_then(|v| v.as_str()),
-        Some("service_run"),
-        "service envelope kind: {body}"
+        body.get("validated").and_then(|v| v.as_bool()),
+        Some(true),
+        "validated flag: {body}"
     );
     assert_eq!(
-        thread.get("status").and_then(|v| v.as_str()),
-        Some("completed"),
-        "service ran to completion despite validate_only=true: {body}"
-    );
-    assert_eq!(
-        thread.get("item_ref").and_then(|v| v.as_str()),
+        body.get("item_ref").and_then(|v| v.as_str()),
         Some("service:bundle/list"),
         "item_ref echo: {body}"
     );
-    assert!(
-        thread
-            .get("thread_id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s.starts_with("svc-")),
-        "thread_id has svc- prefix: {body}"
-    );
     assert_eq!(
-        thread.get("trust_class").and_then(|v| v.as_str()),
-        Some("Trusted"),
-        "core bundle service is Trusted: {body}"
+        body.get("kind").and_then(|v| v.as_str()),
+        Some("service"),
+        "kind is service: {body}"
     );
     assert!(
-        thread.get("effective_caps").and_then(|v| v.as_array()).is_some(),
-        "effective_caps array: {body}"
+        body.get("trust_class").is_some(),
+        "trust_class present: {body}"
     );
-    assert!(body.get("result").is_some(), "result key present: {body}");
 }
 
 // ── 2. native runtime + launch_mode=detached → 400 ─────────────────────
@@ -560,4 +545,105 @@ async fn pin_tool_over_tcp_succeeds() {
             "tool envelope must include `{required}`: {body}"
         );
     }
+}
+
+// ── §3: help validate-only short-circuit ───────────────────────────────
+
+/// validate_only on a service with required fields returns schema, not an
+/// error. Before the fix, `ryeos help remote configure` would 500 with
+/// "missing field 'name'" because the handler body deserialized the empty
+/// params. Now validate_only short-circuits before handler invocation.
+#[tokio::test(flavor = "multi_thread")]
+async fn help_for_verb_with_required_fields_prints_schema_not_error() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (status, body) = post_execute_with_extras(
+        &h,
+        "service:identity/authorize-key",
+        ".",
+        serde_json::json!({}),
+        serde_json::json!({"validate_only": true}),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "expected 200, got {status}: {body}"
+    );
+    // Must NOT contain a "thread" key — that means the handler ran.
+    assert!(
+        body.get("thread").is_none(),
+        "validate_only must not invoke handler: {body}"
+    );
+    assert_eq!(
+        body.get("validated").and_then(|v| v.as_bool()),
+        Some(true),
+        "validated flag: {body}"
+    );
+    // Schema info must be present
+    assert!(
+        body.get("schema").is_some(),
+        "schema field present: {body}"
+    );
+}
+
+/// validate_only on a service with no required fields also returns schema
+/// (not the handler's normal output).
+#[tokio::test(flavor = "multi_thread")]
+async fn help_for_verb_with_no_required_fields_prints_schema() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (status, body) = post_execute_with_extras(
+        &h,
+        "service:bundle/list",
+        ".",
+        serde_json::json!({}),
+        serde_json::json!({"validate_only": true}),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "expected 200, got {status}: {body}"
+    );
+    assert!(
+        body.get("thread").is_none(),
+        "validate_only must not invoke handler: {body}"
+    );
+    assert_eq!(
+        body.get("validated").and_then(|v| v.as_bool()),
+        Some(true),
+        "validated flag: {body}"
+    );
+}
+
+/// validate_only never reaches the handler body. Even if params are
+/// nonsensical, the response should be a schema doc, not a 500.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_only_never_invokes_handler_body() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (status, body) = post_execute_with_extras(
+        &h,
+        "service:identity/authorize-key",
+        ".",
+        // Nonsensical params that would cause the handler to fail
+        serde_json::json!({"garbage": true, "not_a_field": "bad"}),
+        serde_json::json!({"validate_only": true}),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "expected 200 even with bad params, got {status}: {body}"
+    );
+    assert!(
+        body.get("thread").is_none(),
+        "handler must not have run: {body}"
+    );
+    assert_eq!(
+        body.get("validated").and_then(|v| v.as_bool()),
+        Some(true),
+        "validated flag: {body}"
+    );
 }

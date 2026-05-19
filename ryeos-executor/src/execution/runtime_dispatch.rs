@@ -30,7 +30,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: DispatchActionParams =
         serde_json::from_value(params.clone()).context("invalid runtime.dispatch_action params")?;
 
-    let project_path = crate::execution::project_source::normalize_project_path(&params.project_path);
+    // Use the raw project_path as-is. The token was minted with the raw
+    // PathBuf at runner.rs's launch site (no normalization); we must
+    // compare against the same form here or PathBuf equality will fail.
+    let project_path = std::path::PathBuf::from(&params.project_path);
 
     let cap = state.callback_tokens.validate(
         &params.callback_token,
@@ -127,8 +130,7 @@ async fn handle_execute(
         );
     }
 
-    let project_path =
-        crate::execution::project_source::normalize_project_path(&params.project_path);
+    let project_path = std::path::PathBuf::from(&params.project_path);
 
     let caller_principal_id = thread_auth.acting_principal.clone();
     let caller_scopes = thread_auth.caller_scopes.clone();

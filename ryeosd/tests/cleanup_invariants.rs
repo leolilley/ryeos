@@ -585,17 +585,29 @@ fn gate_17_trust_store_loads() {
     );
 }
 
-// ── Gate 18: Project path defaults to "." ────────────────────────────
+// ── Gate 18: remote execute default project_path triggers auto-discovery ──
+//
+// Previously this gate pinned a `"."` default. That was wrong: defaulting
+// to cwd silently ingested whatever directory the daemon happened to be
+// in. The new behaviour: an empty/missing project_path triggers the
+// client-side auto-discovery walk (.ai/ > .ryeos-project > .git). If no
+// marker is found, `remote execute` hard-errors instead of ingesting an
+// arbitrary directory.
+//
+// This gate verifies that the Request struct's default is empty (so the
+// handler takes the auto-discovery path), NOT `"."`.
 
 #[test]
-fn gate_18_project_path_defaults_to_dot() {
-    let default_project_path = Path::new(".");
-    assert!(
-        default_project_path.as_os_str() == ".",
-        "default project path should be '.'"
-    );
-    assert!(
-        default_project_path.exists() || default_project_path.as_os_str() == ".",
-        "'.' should be the conventional default for project context"
+fn gate_18_project_path_default_is_empty_not_dot() {
+    // The default_project_path fn returns String::new() so the handler
+    // can distinguish "not given" from an explicit value.
+    let req: ryeos_api::handlers::remote_execute::Request =
+        serde_json::from_value(serde_json::json!({
+            "item_ref": "directive:some/test",
+        }))
+        .expect("Request with only item_ref must parse");
+    assert_eq!(
+        req.project_path, "",
+        "default project_path must be empty (triggers auto-discovery), not '.'"
     );
 }

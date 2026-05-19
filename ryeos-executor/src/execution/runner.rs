@@ -447,6 +447,7 @@ fn pin_localpath_snapshot_if_needed(
     state: &AppState,
     launch_metadata: &mut ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     pre_manifest_hash: &Option<String>,
+    pre_user_manifest_hash: &Option<String>,
     base_snapshot_hash: &Option<String>,
 ) -> Result<Option<String>> {
     if launch_metadata.native_resume.is_none() {
@@ -461,9 +462,12 @@ fn pin_localpath_snapshot_if_needed(
     };
     let cas_root = state.state_store.cas_root()?;
     let cas = lillux::cas::CasStore::new(cas_root);
+    // §2.8.4: preserve the pre-execution user_manifest_hash so result
+    // snapshots derived from this pin carry user-space lineage. When
+    // user-space sync is inactive, this is None (no change in behaviour).
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash,
-        user_manifest_hash: None,
+        user_manifest_hash: pre_user_manifest_hash.clone(),
         parent_hashes: Vec::new(),
         created_at: lillux::time::iso8601_now(),
         source: "native_resume_pin".to_string(),
@@ -763,10 +767,12 @@ pub async fn run_inline(
     };
 
     // Pin LocalPath native_resume to a snapshot before attach.
+    // pre_user_manifest_hash is None until §2 user-space sync lands.
     match pin_localpath_snapshot_if_needed(
         &state,
         &mut spawned.launch_metadata,
         &pre_manifest_hash,
+        &None,
         &base_snapshot_hash,
     ) {
         Ok(Some(snap)) => {
@@ -1090,10 +1096,12 @@ async fn dispatch_detached_bg_task(
     };
 
     // Pin LocalPath native_resume to a snapshot before attach.
+    // pre_user_manifest_hash is None until §2 user-space sync lands.
     match pin_localpath_snapshot_if_needed(
         &bg_state,
         &mut spawned.launch_metadata,
         &bg_pre_manifest_hash,
+        &None,
         &bg_base_snapshot_hash,
     ) {
         Ok(Some(snap)) => {

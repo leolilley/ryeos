@@ -31,13 +31,29 @@ fn default_remote() -> String {
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let client = RemoteClient::from_named_remote(&state, &req.remote)?;
 
-    let project_path_str = req.project_path.as_deref().unwrap_or(".");
-    let project_path = PathBuf::from(project_path_str);
+    // §0a: canonicalize project_path the same way remote_execute does,
+    // so push HEAD ref keys agree with what execute later reads.
+    let raw_path = req.project_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!(
+            "remote_push requires --project-path. Pass `-p <path>` explicitly; \
+             defaulting to cwd was removed because the daemon's cwd is \
+             irrelevant to the caller."
+        ))?;
+    let project_path = PathBuf::from(raw_path);
     let abs_project_path = if project_path.is_absolute() {
         project_path
     } else {
         std::env::current_dir()?.join(&project_path)
     };
+    let canonical_abs = abs_project_path.canonicalize()
+        .map_err(|e| anyhow::anyhow!(
+            "cannot canonicalize project_path '{}': {}. Ensure the path \
+             exists and is accessible.",
+            abs_project_path.display(), e
+        ))?;
+    let project_path_for_ref = canonical_abs.to_string_lossy().to_string();
+    let abs_project_path = canonical_abs;
 
     // Load remote's cached ignore rules (required — remote configure always
     // populates them). Inline fetch on cache miss, persisting for future use.
@@ -50,7 +66,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             let fetched = client.get_ingest_ignore().await
                 .map_err(|e| anyhow::anyhow!(
                     "no remote config for '{}' and inline fetch failed: {e:#} \
-                     — run `ryeos remote configure --name {}` first",
+                     — run `ryeos remote configure --remote {}` first",
                     req.remote, req.remote
                 ))?;
             let _ = (|| -> Result<()> {
@@ -72,7 +88,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &client,
         &state,
         &abs_project_path,
-        project_path_str,
+        &project_path_for_ref,
         &remote_ignore,
     )
     .await?;

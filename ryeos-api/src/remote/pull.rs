@@ -6,7 +6,7 @@
 //! the local workspace with a clean-base conflict policy.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -34,6 +34,11 @@ pub enum PullResultsError {
     LocalConflict(String),
     #[error("invalid remote snapshot: {0}")]
     InvalidRemoteSnapshot(String),
+    /// Result snapshot returned by the remote does not descend from the
+    /// snapshot we pushed (§2.8.3). Defends against a misconfigured or
+    /// hostile remote handing us an unrelated snapshot to apply.
+    #[error("result snapshot {result} is not a descendant of pushed snapshot {pushed}")]
+    UnrelatedSnapshot { pushed: String, result: String },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -43,12 +48,16 @@ pub enum PullResultsError {
 /// # Arguments
 /// * `client` — RemoteClient connected to the remote node
 /// * `system_space_dir` — Local system space dir (contains `.ai/state/objects` CAS)
+/// * `pushed_snapshot_hash` — The snapshot we pushed (lineage anchor). The
+///   result snapshot must equal this OR list it in `parent_hashes` (direct
+///   parent only, per resolved design decision).
 /// * `remote_snapshot_hash` — The snapshot hash from the remote execution result
 /// * `local_project_root` — The local project directory to apply changes to
 /// * `base_manifest` — The exact manifest that was pushed (from PushResult.manifest)
 pub async fn pull_results(
     client: &RemoteClient,
     system_space_dir: &Path,
+    pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
     local_project_root: &Path,
     base_manifest: &SourceManifest,
@@ -65,6 +74,9 @@ pub async fn pull_results(
         .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
             format!("snapshot {} not found in objects_get response", remote_snapshot_hash)
         ))?;
+
+    // 1a. Lineage check (§2.8.3).
+    verify_snapshot_lineage(&snapshot_val, pushed_snapshot_hash, remote_snapshot_hash)?;
 
     let manifest_hash = snapshot_val.get("project_manifest_hash")
         .and_then(|v| v.as_str())
@@ -194,7 +206,7 @@ fn apply_manifest_diff(
     for path in &all_paths {
         let base_hash = base_manifest.item_source_hashes.get(path);
         let remote_hash = remote_manifest.item_source_hashes.get(path);
-        let local_path = local_project_root.join(path);
+        let local_path = safe_join(local_project_root, path)?;
 
         // If the path was in the base, verify local hasn't drifted
         if let Some(base_h) = base_hash {
@@ -326,7 +338,7 @@ fn apply_with_rollback(
         match change {
             PlannedChange::Write { rel_path, .. } => {
                 let staged_path = staging_dir.join(rel_path);
-                let live_path = local_project_root.join(rel_path);
+                let live_path = safe_join(local_project_root, rel_path)?;
                 if let Some(parent) = live_path.parent() {
                     if let Err(e) = std::fs::create_dir_all(parent) {
                         rollback_writes_and_deletes(
@@ -356,7 +368,7 @@ fn apply_with_rollback(
                 *files_updated += 1;
             }
             PlannedChange::Delete { rel_path } => {
-                let live_path = local_project_root.join(rel_path);
+                let live_path = safe_join(local_project_root, rel_path)?;
                 if let Err(e) = std::fs::remove_file(&live_path) {
                     rollback_writes_and_deletes(
                         &applied_writes, &applied_deletes,
@@ -414,6 +426,140 @@ fn rollback_writes_and_deletes(
 /// Read a local file, returning None if it doesn't exist.
 fn read_local_file(path: &Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
+}
+
+/// Verify that a result snapshot is a valid descendant of the pushed
+/// snapshot (§2.8.3 lineage check).
+///
+/// Accepts:
+/// - `result == pushed` (no-op execution case)
+/// - `pushed ∈ result.parent_hashes` (direct parent only — no recursive walk)
+///
+/// Rejects everything else with `UnrelatedSnapshot`.
+///
+/// Direct-parent-only is the resolved design decision: tighter contract,
+/// no risk of accepting deep-history junk, no recursive object fetches.
+fn verify_snapshot_lineage(
+    result_snapshot: &Value,
+    pushed_snapshot_hash: &str,
+    result_snapshot_hash: &str,
+) -> Result<(), PullResultsError> {
+    if result_snapshot_hash == pushed_snapshot_hash {
+        return Ok(());
+    }
+    let parents_match = result_snapshot
+        .get("parent_hashes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .any(|p| p.as_str() == Some(pushed_snapshot_hash))
+        })
+        .unwrap_or(false);
+    if parents_match {
+        Ok(())
+    } else {
+        Err(PullResultsError::UnrelatedSnapshot {
+            pushed: pushed_snapshot_hash.to_string(),
+            result: result_snapshot_hash.to_string(),
+        })
+    }
+}
+
+/// Safely join a base directory with a relative path from a remote manifest.
+///
+/// Rejects:
+/// - Absolute paths
+/// - Paths containing `..` components
+/// - Paths containing NUL bytes
+/// - Paths that, after lexical normalization, escape the base directory
+/// - Any **intermediate path component that resolves to a symlink** in the
+///   live workspace (§2.8.2 / item 5). Without this, a hostile remote could
+///   trick us into writing through a symlink already present locally
+///   (e.g. `src/` pre-symlinked to `/etc/`).
+///
+/// Uses Component matching for lexical safety AND per-component
+/// `symlink_metadata` to catch symlink-via-workspace escapes. Does NOT
+/// call `canonicalize` (which would *follow* symlinks rather than
+/// detect them).
+fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PullResultsError> {
+    if rel.is_empty() {
+        return Ok(base.to_path_buf());
+    }
+    // Reject absolute paths
+    if rel.starts_with('/') {
+        return Err(PullResultsError::Other(anyhow::anyhow!(
+            "rejecting absolute path '{}' from remote manifest",
+            rel
+        )));
+    }
+    // Reject NUL bytes
+    if rel.contains('\0') {
+        return Err(PullResultsError::Other(anyhow::anyhow!(
+            "rejecting path with NUL byte from remote manifest: '{}'",
+            rel.replace('\0', "\\0")
+        )));
+    }
+    // Lexical normalization and escape check via Component matching
+    let mut normalized = PathBuf::new();
+    for component in std::path::Path::new(rel).components() {
+        match component {
+            std::path::Component::CurDir => {} // skip
+            std::path::Component::ParentDir => {
+                // Walking above base — reject
+                if !normalized.pop() {
+                    return Err(PullResultsError::Other(anyhow::anyhow!(
+                        "rejecting path '{}' from remote manifest: escapes base directory (.. traversal)",
+                        rel
+                    )));
+                }
+            }
+            std::path::Component::Normal(seg) => {
+                normalized.push(seg);
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(PullResultsError::Other(anyhow::anyhow!(
+                    "rejecting path '{}' from remote manifest: unexpected component type",
+                    rel
+                )));
+            }
+        }
+    }
+
+    // Symlink-escape guard: walk each intermediate component (NOT the
+    // final filename) under base and refuse if any is a symlink.
+    // The final file may legitimately not exist yet (new file) or be a
+    // regular file we plan to overwrite; intermediate dirs must not be
+    // symlinks because writes would land outside `base`.
+    let mut walker = base.to_path_buf();
+    let components: Vec<_> = normalized.components().collect();
+    let last_idx = components.len().saturating_sub(1);
+    for (i, comp) in components.iter().enumerate() {
+        if let std::path::Component::Normal(seg) = comp {
+            walker.push(seg);
+            // Skip the final component — checking it as a symlink is a
+            // separate concern (overwriting an existing file is fine).
+            if i == last_idx {
+                break;
+            }
+            // Use symlink_metadata so we see the link itself, not its target.
+            match std::fs::symlink_metadata(&walker) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(PullResultsError::Other(anyhow::anyhow!(
+                        "rejecting path '{}' from remote manifest: \
+                         intermediate component '{}' is a symlink in the \
+                         local workspace; refusing to write through it",
+                        rel,
+                        walker.display()
+                    )));
+                }
+                // Doesn't exist yet → fine, we'll mkdir it
+                Err(_) => {}
+                Ok(_) => {}
+            }
+        }
+    }
+
+    Ok(base.join(&normalized))
 }
 
 /// Fetch file content for an item source hash from local CAS.
@@ -502,6 +648,7 @@ fn parse_manifest(val: &Value) -> Result<SourceManifest, PullResultsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use lillux::cas::CasStore;
 
     /// Helper: create a CAS with a single blob and its corresponding item
@@ -756,5 +903,159 @@ mod tests {
             std::fs::read_to_string(project_root.join("b.txt")).unwrap(),
             "resurrected"
         );
+    }
+
+    // ── §2.8.2: safe_join path normalization tests ──
+
+    #[test]
+    fn safe_join_accepts_normal_relative_path() {
+        let base = Path::new("/project");
+        let result = safe_join(base, "src/lib.rs").unwrap();
+        assert_eq!(result, PathBuf::from("/project/src/lib.rs"));
+    }
+
+    #[test]
+    fn safe_join_accepts_nested_path() {
+        let base = Path::new("/project");
+        let result = safe_join(base, "a/b/c.txt").unwrap();
+        assert_eq!(result, PathBuf::from("/project/a/b/c.txt"));
+    }
+
+    #[test]
+    fn safe_join_strips_dot_components() {
+        let base = Path::new("/project");
+        let result = safe_join(base, "./src/./lib.rs").unwrap();
+        assert_eq!(result, PathBuf::from("/project/src/lib.rs"));
+    }
+
+    #[test]
+    fn safe_join_rejects_absolute_path() {
+        let base = Path::new("/project");
+        let result = safe_join(base, "/etc/passwd");
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("absolute"));
+    }
+
+    #[test]
+    fn safe_join_rejects_dotdot_traversal() {
+        let base = Path::new("/project");
+        let result = safe_join(base, "../../../etc/passwd");
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("..") || msg.contains("escapes"));
+    }
+
+    #[test]
+    fn safe_join_rejects_nul_byte() {
+        let base = Path::new("/project");
+        let result = safe_join(base, "foo\0bar");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn safe_join_accepts_path_with_internal_dotdot_that_stays_within() {
+        let base = Path::new("/project");
+        // a/../b stays within base → allowed
+        let result = safe_join(base, "a/../b.txt").unwrap();
+        assert_eq!(result, PathBuf::from("/project/b.txt"));
+    }
+
+    // ── §2.8.3: snapshot lineage check tests ──
+
+    #[test]
+    fn lineage_accepts_identical_snapshot() {
+        // No-op execution: result hash == pushed hash
+        let snap = serde_json::json!({
+            "project_manifest_hash": "manifest_x",
+            "parent_hashes": [],
+        });
+        verify_snapshot_lineage(&snap, "abc", "abc").expect("identical hash must accept");
+    }
+
+    #[test]
+    fn lineage_accepts_direct_parent() {
+        // result.parent_hashes contains pushed hash
+        let snap = serde_json::json!({
+            "project_manifest_hash": "manifest_y",
+            "parent_hashes": ["pushed_xxx", "other_yyy"],
+        });
+        verify_snapshot_lineage(&snap, "pushed_xxx", "result_zzz")
+            .expect("direct parent must accept");
+    }
+
+    #[test]
+    fn lineage_rejects_unrelated_snapshot() {
+        // Different hash, pushed NOT in parents
+        let snap = serde_json::json!({
+            "project_manifest_hash": "manifest_z",
+            "parent_hashes": ["unrelated_aaa"],
+        });
+        let err = verify_snapshot_lineage(&snap, "pushed_xxx", "result_zzz")
+            .expect_err("unrelated snapshot must reject");
+        match err {
+            PullResultsError::UnrelatedSnapshot { pushed, result } => {
+                assert_eq!(pushed, "pushed_xxx");
+                assert_eq!(result, "result_zzz");
+            }
+            other => panic!("expected UnrelatedSnapshot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lineage_rejects_missing_parent_hashes() {
+        // Different hash, no parent_hashes field at all
+        let snap = serde_json::json!({
+            "project_manifest_hash": "manifest_z",
+        });
+        let err = verify_snapshot_lineage(&snap, "pushed_xxx", "result_zzz")
+            .expect_err("missing parents on different hash must reject");
+        assert!(matches!(err, PullResultsError::UnrelatedSnapshot { .. }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_join_rejects_symlinked_intermediate_dir() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let outside = tempfile::tempdir().unwrap();
+
+        // Create a pre-existing symlink inside the workspace pointing outside.
+        // A naive safe_join would lexically validate "src/file.txt" and then
+        // write through the symlink into `outside`.
+        symlink(outside.path(), project.join("src")).unwrap();
+
+        let err = safe_join(project, "src/file.txt")
+            .expect_err("intermediate symlink must be rejected");
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("symlink"), "expected symlink rejection, got: {msg}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_join_accepts_normal_directory_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        std::fs::create_dir_all(project.join("a").join("b")).unwrap();
+
+        // Real dirs, no symlinks → should pass
+        let result = safe_join(project, "a/b/c.txt").unwrap();
+        assert_eq!(result, project.join("a").join("b").join("c.txt"));
+    }
+
+    #[test]
+    fn lineage_rejects_grandparent_not_direct_parent() {
+        // Direct-parent-only: even if pushed appears deeper in lineage,
+        // we can't observe that without recursive fetches. Reject.
+        let snap = serde_json::json!({
+            "project_manifest_hash": "manifest_z",
+            "parent_hashes": ["intermediate_iii"],
+        });
+        // pushed_xxx is NOT in parent_hashes (would be parent's parent in
+        // a real chain) — we have no way to verify, so reject.
+        let err = verify_snapshot_lineage(&snap, "pushed_xxx", "result_zzz")
+            .expect_err("non-direct-parent must reject");
+        assert!(matches!(err, PullResultsError::UnrelatedSnapshot { .. }));
     }
 }

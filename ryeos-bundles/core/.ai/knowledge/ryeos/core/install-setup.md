@@ -146,7 +146,7 @@ ryeos authorize-key \
 ryeos authorize-key \
   --public-key "ed25519:<base64_pubkey>" \
   --label "remote-caller" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push_head"
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
 ```
 
 Scopes are comma-separated. Use `"*"` for full access (local operator).

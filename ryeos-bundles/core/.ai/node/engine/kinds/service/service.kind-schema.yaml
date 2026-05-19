@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-19T01:36:21Z:cb0a1f0b70f111c494aba560963e3684d7524381ed75863b364aed05d234b38e:wwRyzSygNfE6ftJLyTCwKVDIySW5sNKbDoLiUZ5VvCRG14yiFmrc06Tbnuh1C14RkufW3Q1Bo8HmRpglP8lzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-19T08:03:03Z:67be607b9a530b04409d85ed6aa608325c3a480bd9984613b513d10a18b78616:LRCQ7rHCxfcJANY4ANB/CYQJ5N37EsA5YA+1U9SSy0TVJH4a3QUsQeqZx2Yao7GFbGi+0snTN9MMLfH94MpjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -39,3 +39,6 @@ metadata:
     description:
       from: path
       key: description
+    schema:
+      from: path
+      key: schema

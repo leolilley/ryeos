@@ -263,8 +263,15 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
         let site_id = state.threads.site_id();
         let project_source = request.project_source.clone().unwrap_or_default();
+        // §0a: For PushedHead, the client MUST send a canonical path so
+        // push and execute hash the same string. resolve_project_context
+        // re-runs canonical_project_ref defensively, but we still need
+        // a PathBuf here to feed it.
+        //
+        // For LiveFs, project_path is optional — falls back to daemon cwd
+        // (legacy direct-execute behaviour; out of scope for §0a).
         let project_path = match &request.project_path {
-            Some(p) => project_source::normalize_project_path(p),
+            Some(p) => std::path::PathBuf::from(p),
             None => {
                 if matches!(project_source, ProjectSource::PushedHead) {
                     return Ok((

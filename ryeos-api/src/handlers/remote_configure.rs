@@ -15,7 +15,7 @@ use ryeos_app::state::AppState;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     /// Name for the remote.
-    pub name: String,
+    pub remote: String,
     /// URL of the remote node (HTTPS required except for loopback).
     pub url: String,
 }
@@ -33,8 +33,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
     let vault_fp = pubkey.vault_fingerprint.clone();
-    remotes.insert(req.name.clone(), config::RemoteConfig {
-        name: req.name.clone(),
+    remotes.insert(req.remote.clone(), config::RemoteConfig {
+        name: req.remote.clone(),
         url: req.url.clone(),
         principal_id: pubkey.principal_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
@@ -43,7 +43,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     config::save_remotes(&state.config.system_space_dir, &remotes)?;
 
     Ok(serde_json::json!({
-        "configured": req.name,
+        "configured": req.remote,
         "url": req.url,
         "principal_id": pubkey.principal_id,
         "fingerprint": pubkey.fingerprint,

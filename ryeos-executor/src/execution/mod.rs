@@ -203,9 +203,19 @@ pub fn advance_after_foldback(
 ) -> Result<String> {
     let cas = CasStore::new(cas_root.to_path_buf());
     let now = lillux::time::iso8601_now();
+
+    // Preserve user_manifest_hash from the current snapshot.
+    // When user-space sync is active (§2), the fold-back result must
+    // carry the same user manifest hash so pull-back sees changes.
+    let user_manifest_hash = cas.get_object(current_snapshot_hash)?
+        .ok_or_else(|| anyhow::anyhow!("current snapshot {} not found in CAS", current_snapshot_hash))?
+        .get("user_manifest_hash")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: new_manifest_hash.to_string(),
-        user_manifest_hash: None,
+        user_manifest_hash,
         parent_hashes: vec![current_snapshot_hash.to_string()],
         created_at: now,
         source: "fold-back".to_string(),

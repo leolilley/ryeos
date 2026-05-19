@@ -63,20 +63,20 @@ the user CLI key. This means:
    ryeos authorize-key \
      --public-key "ed25519:<caller_node_pubkey_b64>" \
      --label "dev-machine" \
-     --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push_head,ryeos.execute.service.authorize_key"
-   ```
+      --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head,ryeos.execute.service.authorize.key"
+```
 
-   The scopes listed above are the minimum required for the `remote
-   exec` push → execute → pull pipeline. The remote's
-   `objects.has`, `objects.put`, `objects.get`, and `push_head`
-   endpoints each check their own capability.
+    The scopes listed above are the minimum required for the `remote
+    execute` push → execute → pull pipeline. The remote's
+    `objects.has`, `objects.put`, `objects.get`, and `push.head`
+    endpoints each check their own capability.
 
  3. **(Optional) Narrower scopes for specific operations**:
 
    | Operation | Required scopes (canonical) |
    |-----------|-----------------------------|
-   | `remote execute` (full pipeline) | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.objects.get`, `ryeos.execute.service.push_head`, `ryeos.execute.service.authorize_key` |
-   | `remote push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push_head` |
+   | `remote execute` (full pipeline) | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.objects.get`, `ryeos.execute.service.push.head`, `ryeos.execute.service.authorize.key` |
+   | `remote push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push.head` |
    | `remote pull` | `ryeos.execute.service.objects.get` |
    | `remote vault-set/list/delete` | `ryeos.execute.service.vault.set`, `ryeos.execute.service.vault.list`, `ryeos.execute.service.vault.delete` |
    | `remote threads/thread-status` | (authenticated; threads are per-principal isolated) |
@@ -91,7 +91,7 @@ the user CLI key. This means:
 1. **Configure the remote**:
 
    ```bash
-   ryeos remote configure --name production --url https://ryeos.example.com
+   ryeos remote configure --remote production --url https://ryeos.example.com
    ```
 
    This discovers the remote's public key, vault fingerprint, and
@@ -106,7 +106,7 @@ the user CLI key. This means:
 ryeos identity public-key
 
 # 2. Configure the remote
-ryeos remote configure --name prod --url https://ryeos.example.com
+ryeos remote configure --remote prod --url https://ryeos.example.com
 
 # ── On the REMOTE node ──
 
@@ -114,7 +114,7 @@ ryeos remote configure --name prod --url https://ryeos.example.com
 ryeos authorize-key \
   --public-key "ed25519:<caller_node_pubkey_b64>" \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push_head,ryeos.execute.service.authorize_key"
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head,ryeos.execute.service.authorize.key"
 
 # ── Back on the CALLER node ──
 

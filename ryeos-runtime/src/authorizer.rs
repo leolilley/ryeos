@@ -797,10 +797,16 @@ mod tests {
 
 /// Validate a scope string is in canonical form for authorization grants.
 ///
-/// Canonical capability format is `ryeos.<verb>.<kind>.<subject>` where
-/// each component is lowercase ASCII alphanumerics, hyphens,
-/// underscores, or forward slashes. The subject component may itself
-/// be dot-separated (e.g. `bundle.install`).
+/// Canonical capability format is `ryeos.<verb>.<kind>.<subject>` where:
+/// - The verb and kind components are lowercase ASCII alphanumerics or
+///   hyphens (kebab-case). Underscores are **rejected** in these
+///   positions because canonical caps use dot-separation for sub-paths
+///   (e.g. `push.head`, not `push_head`).
+/// - The subject component may contain alphanumerics, hyphens,
+///   underscores, forward slashes, and dots. Subjects often encode
+///   item refs (e.g. tool names) which can legitimately contain
+///   underscores, and may themselves be dot-separated for hierarchy
+///   (e.g. `bundle.install`).
 ///
 /// Wildcard forms (all valid):
 /// - `ryeos.*` — any rye cap
@@ -875,6 +881,29 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
             }
         }
     }
+    // Verb and kind tokens must not contain underscores.
+    // Canonical caps use dot-separated path elements: verb tokens are
+    // kebab-case or single words, kind tokens likewise. An underscore
+    // in these positions indicates a legacy or misspelled scope.
+    // Subject tokens (parts[3..]) may contain dots for their own
+    // hierarchy (e.g. "bundle.install") — those are NOT checked.
+    if parts.len() >= 2 && parts[1].contains('_') {
+        return Err(format!(
+            "scope '{}' has an underscore in the verb token '{}': \
+             verb tokens must be kebab-case or single words, not \
+             underscore-separated. Did you mean to use a dot? \
+             (e.g. 'ryeos.execute.service.push.head', not \
+             'ryeos.execute.service.push_head')",
+            scope, parts[1]
+        ));
+    }
+    if parts.len() >= 3 && parts[2].contains('_') {
+        return Err(format!(
+            "scope '{}' has an underscore in the kind token '{}': \
+             kind tokens must be dot-separated, not underscore-separated",
+            scope, parts[2]
+        ));
+    }
     Ok(())
 }
 
@@ -929,5 +958,39 @@ mod validate_scope_pattern_tests {
             err.contains("ryeos.") && err.contains("auto-prefix"),
             "error should explain why short form is rejected, got: {err}"
         );
+    }
+
+    #[test]
+    fn rejects_underscore_in_verb_token() {
+        let err = validate_scope_pattern("ryeos.some_verb.service.x").unwrap_err();
+        assert!(
+            err.contains("underscore") && err.contains("verb token"),
+            "error should mention underscore in verb token, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_underscore_in_kind_token() {
+        let err = validate_scope_pattern("ryeos.execute.some_kind.x").unwrap_err();
+        assert!(
+            err.contains("underscore") && err.contains("kind token"),
+            "error should mention underscore in kind token, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_underscore_in_subject() {
+        // Subject tokens may contain underscores (e.g. in tool/directive names)
+        assert!(validate_scope_pattern("ryeos.execute.service.some_thing").is_ok());
+    }
+
+    #[test]
+    fn accepts_canonical_authorize_key_scope() {
+        assert!(validate_scope_pattern("ryeos.execute.service.authorize.key").is_ok());
+    }
+
+    #[test]
+    fn accepts_canonical_push_head_scope() {
+        assert!(validate_scope_pattern("ryeos.execute.service.push.head").is_ok());
     }
 }

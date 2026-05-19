@@ -68,6 +68,11 @@ async fn cli_daemon_up_uses_execute() {
         .env("RYEOS_SYSTEM_SPACE_DIR", &h.state_path)
         .env("RYEOSD_BIN", ryeosd_binary())
         .env("HOME", h.user_space.path())
+        // The fast fixture writes the user signing key at
+        // <user_space>/.ai/config/keys/signing/. Without USER_SPACE
+        // set, user_root() resolves to <HOME>/.ryeos which would miss
+        // the fixture-planted key (post user-space redesign commit 2a9b0080).
+        .env("USER_SPACE", h.user_space.path())
         .output()
         .await
         .expect("spawn ryos");
@@ -198,6 +203,9 @@ async fn cli_execute_defaults_project_path_to_dot() {
         .arg("status") // alias → service:system/status, no --project-path
         .env("RYEOS_SYSTEM_SPACE_DIR", &h.state_path)
         .env("HOME", h.user_space.path())
+        // See cli_daemon_up_uses_execute for the USER_SPACE rationale —
+        // CLI needs it to find the fast-fixture-planted signing key.
+        .env("USER_SPACE", h.user_space.path())
         .output()
         .await
         .expect("spawn ryos");

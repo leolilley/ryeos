@@ -159,6 +159,17 @@ fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<(
         .canonicalize()
         .unwrap_or_else(|_| system_space_dir.to_path_buf());
 
+    // Reject filesystem root
+    if proj.parent().is_none() {
+        anyhow::bail!(
+            "refusing to push filesystem root '/'. \
+             `remote execute` recursively ingests the project; \
+             walking '/' would ingest the entire filesystem. \
+             Re-run from inside a project directory, or pass \
+             `-p <project-dir>` explicitly.",
+        );
+    }
+
     // $HOME comparison via env var to avoid a new dependency. The
     // env var is stable on every platform ryeos targets (Linux,
     // macOS). If $HOME is unset we just skip this check.
@@ -172,6 +183,21 @@ fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<(
                  Re-run from inside a project directory, or pass \
                  `-p <project-dir>` explicitly.",
                 proj.display(),
+            );
+        }
+    }
+
+    // Reject the ryeos user root (~/.ryeos/)
+    if let Ok(user_root) = ryeos_engine::roots::user_root() {
+        let user_root_canon = user_root.canonicalize().unwrap_or(user_root);
+        if proj == user_root_canon || proj.starts_with(&user_root_canon) {
+            anyhow::bail!(
+                "refusing to push {} — that path is inside the ryeos \
+                 user root ({}). The user root contains node identity \
+                 and signing keys that must not be pushed to remotes. \
+                 Re-run from inside a project directory.",
+                proj.display(),
+                user_root_canon.display(),
             );
         }
     }
@@ -249,6 +275,13 @@ mod refuse_walking_root_tests {
     use super::refuse_walking_root;
     use tempfile::TempDir;
 
+    /// Tests in this module mutate `$HOME` to spoof what `user_root()`
+    /// resolves to. Cargo runs tests in the same process concurrently
+    /// by default, so all HOME-mutating tests must take this lock to
+    /// serialize. The lock is held across the set / refuse_walking_root /
+    /// restore sequence in each test.
+    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn ordinary_project_dir_outside_home_passes() {
         // A tempdir under /tmp is neither $HOME nor inside the daemon
@@ -264,11 +297,10 @@ mod refuse_walking_root_tests {
         let sys = TempDir::new().unwrap();
         // Spoof $HOME to point at the project dir; the function
         // must catch that and refuse with a clear $HOME message.
+        // SAFETY: serialised via HOME_ENV_LOCK to prevent concurrent
+        // HOME-mutating tests in this module from racing.
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old_home = std::env::var_os("HOME");
-        // SAFETY: tests in this module are not parallel within the
-        // crate by default; the HOME env mutation is restored on
-        // return. (cargo nextest runs tests in separate processes,
-        // so cross-test interference is also bounded.)
         unsafe {
             std::env::set_var("HOME", proj.path());
         }
@@ -324,5 +356,84 @@ mod refuse_walking_root_tests {
         let missing = std::path::Path::new("/this/does/not/exist/anywhere");
         refuse_walking_root(missing, sys.path())
             .expect("missing path must pass the guard (fail elsewhere)");
+    }
+
+    // ── Item 9: missing refuse_walking_root coverage ──
+
+    #[test]
+    fn filesystem_root_is_refused() {
+        // Walking '/' would ingest the entire filesystem. Must hard error.
+        let sys = TempDir::new().unwrap();
+        let err = refuse_walking_root(std::path::Path::new("/"), sys.path())
+            .expect_err("filesystem root must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("filesystem root") || msg.contains("'/'"),
+            "error must mention filesystem root, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn user_ryeos_root_is_refused() {
+        // ~/.ryeos/ contains node identity + signing keys; must never
+        // be pushed to a remote. Spoof HOME so user_root() resolves
+        // inside our tempdir.
+        let fake_home = TempDir::new().unwrap();
+        let user_ryeos = fake_home.path().join(".ryeos");
+        std::fs::create_dir_all(&user_ryeos).unwrap();
+        let sys = TempDir::new().unwrap();
+
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", fake_home.path());
+        }
+        let result = refuse_walking_root(&user_ryeos, sys.path());
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        // First: $HOME containment kicks in (proj is inside HOME).
+        // That's also correct: $HOME guard catches it. Either error
+        // message is acceptable; we just need a refusal.
+        let err = result.expect_err("~/.ryeos/ must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("home directory") || msg.contains("user root") || msg.contains(".ryeos"),
+            "must refuse with home/user-root reason, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn nested_under_user_ryeos_is_refused() {
+        // A nested dir like ~/.ryeos/.ai/state/ must also be refused —
+        // it's still under the user root and contains node state
+        // (the real state lives at <user_root>/.ai/state/, not directly
+        // under <user_root>/state/).
+        let fake_home = TempDir::new().unwrap();
+        let inner = fake_home.path().join(".ryeos").join(".ai").join("state");
+        std::fs::create_dir_all(&inner).unwrap();
+        let sys = TempDir::new().unwrap();
+
+        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", fake_home.path());
+        }
+        let result = refuse_walking_root(&inner, sys.path());
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let err = result.expect_err("dirs under ~/.ryeos/ must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("home directory") || msg.contains("user root") || msg.contains(".ryeos"),
+            "must refuse, got: {msg}"
+        );
     }
 }

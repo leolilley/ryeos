@@ -102,7 +102,7 @@ Cross-node operations. All are **daemon-only**.
 | `remote/push`          | `remote.push`         | `ryeos.execute.service.remote.push`    |
 | `remote/pull`          | `remote.pull`         | `ryeos.execute.service.objects.get`    |
 | `remote/execute`       | `remote.execute`      | `ryeos.execute.service.remote.admin` |
-| `remote/authorize`     | `remote.authorize`    | `ryeos.execute.service.authorize_key`  |
+| `remote/authorize`     | `remote.authorize`    | `ryeos.execute.service.authorize.key`  |
 | `remote/threads`       | `remote.threads`      | `ryeos.execute.service.remote.threads` |
 | `remote/thread-status` | `remote.thread_status`| `ryeos.execute.service.remote.thread-status`|
 | `remote/bundle-install`| `remote.bundle_install`| `ryeos.execute.service.bundle.install`|
@@ -121,7 +121,7 @@ runs preflight before registering.
 
 | Service                | Endpoint              | Caps Required                          |
 |------------------------|-----------------------|----------------------------------------|
-| `authorize-key`        | `authorize_key.set`   | `ryeos.execute.service.authorize_key`  |
+| `authorize-key`        | `authorize_key.set`   | `ryeos.execute.service.authorize.key`  |
 
 ## Service vs Tool
 

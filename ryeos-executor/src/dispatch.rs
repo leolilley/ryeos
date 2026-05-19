@@ -1029,6 +1029,33 @@ pub async fn dispatch_service(
                 item_ref,
                 Some("service"),
             )?;
+
+            // validate_only: return schema info without invoking the handler.
+            // This is the codepath triggered by `ryeos help <verb>` — the
+            // handler body must NEVER be reached because it will fail on
+            // required fields that the help request doesn't supply.
+            if request.validate_only {
+                let description = verified.resolved.metadata.description.clone();
+                let input_schema = verified.resolved.metadata.extra.get("schema").cloned();
+                let endpoint = verified.resolved.metadata.extra.get("endpoint")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let required_caps = ryeos_app::service_registry::extract_required_caps(
+                    &verified.resolved.metadata.extra,
+                );
+
+                return Ok(json!({
+                    "validated": true,
+                    "item_ref": item_ref,
+                    "kind": canonical.kind,
+                    "executor_ref": endpoint.unwrap_or_default(),
+                    "trust_class": format!("{:?}", verified.trust_class),
+                    "description": description,
+                    "schema": input_schema,
+                    "required_caps": required_caps,
+                }));
+            }
+
             let result: ServiceExecutionResult =
                 service_executor::execute_service_verified(
                     verified,

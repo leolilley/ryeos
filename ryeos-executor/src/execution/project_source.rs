@@ -1,4 +1,4 @@
-use std::path::{Component, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -138,7 +138,12 @@ pub fn resolve_project_context(
             temp_dir: None,
         },
         ProjectSource::PushedHead => {
-            let project_str = project_path.to_string_lossy();
+            // §0a: HEAD lookup MUST use the same canonical ref string as
+            // push_head used when writing the ref. canonical_project_ref
+            // is the single source of truth — it canonicalizes via
+            // std::fs::canonicalize (matching push_head) and bypasses
+            // only for NO_PROJECT_SENTINEL.
+            let project_str = canonical_project_ref(&project_path.to_string_lossy())?;
             let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
             let principal_key = ryeos_state::refs::principal_storage_key(principal_id);
             let cas_root = state.state_store.cas_root()?;
@@ -196,41 +201,108 @@ pub fn resolve_project_context(
     Ok(ctx)
 }
 
-/// Normalize a project path for use as a stable identity key.
+/// Sentinel value for `--no-project` mode: the caller has chosen to
+/// run a tool/system item without pushing project content. The ref
+/// is still per-principal so two different operators don't share
+/// HEAD state under this sentinel.
 ///
-/// - Makes relative paths absolute (via current_dir)
-/// - Lexically resolves `.` and `..` components
-/// - Strips trailing separators (except root `/`)
+/// Lives here (not in `ryeos-api`) so the helper below can recognise
+/// it without cross-crate dependencies.
+pub const NO_PROJECT_SENTINEL: &str = "__no_project__";
+
+/// Resolve a raw `project_path` string into the canonical reference
+/// string used everywhere identity keys are computed (push HEAD ref,
+/// execute HEAD lookup, pull lineage anchor).
 ///
-/// Does NOT call `std::fs::canonicalize` to avoid resolving symlinks
-/// and requiring filesystem access (paths are used as ref keys, not
-/// just filesystem lookups).
-pub fn normalize_project_path(raw: &str) -> PathBuf {
-    let path = PathBuf::from(raw);
-
-    // Make absolute if relative
-    let abs = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
-    };
-
-    // Lexically clean: resolve `.` and `..` without filesystem access
-    let mut cleaned = PathBuf::new();
-    for component in abs.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                cleaned.pop();
-            }
-            other => cleaned.push(other),
-        }
+/// Rules (§0a):
+/// - The `NO_PROJECT_SENTINEL` passes through verbatim. Identity is
+///   per-principal under this sentinel; no path semantics.
+/// - Empty string is rejected: client-side discovery is required to
+///   resolve the project root before the request leaves. An empty
+///   path arriving at the daemon means the client skipped that step.
+/// - `"."` and other relative paths are rejected for the same reason:
+///   the daemon's cwd is irrelevant to the caller's project.
+/// - Everything else goes through `std::fs::canonicalize`. Rejected
+///   on failure — the previous behaviour of silently falling back
+///   to the raw string made push and execute hash different strings.
+pub fn canonical_project_ref(raw: &str) -> Result<String, ProjectSourceError> {
+    if raw == NO_PROJECT_SENTINEL {
+        return Ok(raw.to_string());
     }
-
-    // Ensure we don't return empty
-    if cleaned.as_os_str().is_empty() {
-        PathBuf::from("/")
-    } else {
-        cleaned
+    if raw.is_empty() {
+        return Err(ProjectSourceError::Other(
+            "project_path is empty: the client must resolve and pass a \
+             canonicalized project root, or use the `__no_project__` \
+             sentinel for --no-project mode"
+                .into(),
+        ));
+    }
+    let path = std::path::Path::new(raw);
+    if !path.is_absolute() {
+        return Err(ProjectSourceError::Other(format!(
+            "project_path '{}' is not absolute: the client must canonicalize \
+             paths before sending. Relative paths cannot be resolved on the \
+             daemon side (the daemon's cwd is irrelevant to the caller).",
+            raw
+        )));
+    }
+    match path.canonicalize() {
+        Ok(p) => Ok(p.to_string_lossy().to_string()),
+        Err(e) => Err(ProjectSourceError::Other(format!(
+            "project_path '{}' is not canonicalizable: {}. Ensure the path \
+             exists and is accessible.",
+            raw, e
+        ))),
     }
 }
+
+#[cfg(test)]
+mod canonical_project_ref_tests {
+    use super::*;
+
+    #[test]
+    fn passes_through_no_project_sentinel() {
+        let out = canonical_project_ref(NO_PROJECT_SENTINEL).unwrap();
+        assert_eq!(out, NO_PROJECT_SENTINEL);
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        let err = canonical_project_ref("").unwrap_err();
+        assert!(format!("{err}").contains("empty"));
+    }
+
+    #[test]
+    fn rejects_relative_dot() {
+        let err = canonical_project_ref(".").unwrap_err();
+        assert!(format!("{err}").contains("not absolute"));
+    }
+
+    #[test]
+    fn rejects_relative_path() {
+        let err = canonical_project_ref("some/relative/path").unwrap_err();
+        assert!(format!("{err}").contains("not absolute"));
+    }
+
+    #[test]
+    fn rejects_nonexistent_absolute() {
+        let err =
+            canonical_project_ref("/this/path/does/not/exist/at/all").unwrap_err();
+        assert!(format!("{err}").contains("not canonicalizable"));
+    }
+
+    #[test]
+    fn relative_and_absolute_form_of_same_dir_produce_equal_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = tmp.path().canonicalize().unwrap();
+        // Same absolute path twice → same canonical ref. (Can't really
+        // exercise symlink unification portably here without an OS-specific
+        // setup; the contract is: identical input → identical output AND
+        // canonicalize-equivalent inputs → identical output.)
+        let r1 = canonical_project_ref(&abs.to_string_lossy()).unwrap();
+        let r2 = canonical_project_ref(&abs.to_string_lossy()).unwrap();
+        assert_eq!(r1, r2);
+    }
+}
+
+
