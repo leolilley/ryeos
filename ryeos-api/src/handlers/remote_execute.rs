@@ -153,8 +153,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             .map_err(|e| HandlerError::Internal(format!("push failed: {e:#}")))?
         }
         None => {
-            // --no-project mode: skip project push entirely.
-            // For now, we still need a valid snapshot. Create an empty one.
+            // --no-project mode: skip project ingest, but STILL push
+            // user space. The whole point of --no-project is "run a
+            // user-tier item (or pure tool) against my user space on
+            // a remote node" — without the user manifest the remote
+            // would resolve against its own user space, not mine.
             let local_cas_root = state.config.system_space_dir
                 .join(ryeos_engine::AI_DIR)
                 .join("state").join("objects");
@@ -166,15 +169,57 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             let manifest_hash = local_cas.store_object(&empty_manifest.to_value())
                 .map_err(|e| HandlerError::Internal(format!("store empty manifest: {e:#}")))?;
 
+            let (user_manifest_hash, user_manifest) =
+                crate::remote::push::ingest_user_space_for_push(&local_cas)
+                    .map_err(|e| HandlerError::Internal(format!("ingest user space: {e:#}")))?;
+
             let snapshot = ryeos_state::objects::ProjectSnapshot {
                 project_manifest_hash: manifest_hash.clone(),
-                user_manifest_hash: None,
+                user_manifest_hash: user_manifest_hash.clone(),
                 parent_hashes: Vec::new(),
                 created_at: lillux::time::iso8601_now(),
                 source: "push-no-project".to_string(),
             };
             let snapshot_hash = local_cas.store_object(&snapshot.to_value())
                 .map_err(|e| HandlerError::Internal(format!("store snapshot: {e:#}")))?;
+
+            // Upload user manifest + items + blobs so the remote can
+            // materialise the per-request engine overlay.
+            let mut all_hashes: Vec<String> =
+                vec![manifest_hash.clone(), snapshot_hash.clone()];
+            if let (Some(ref umh), Some(ref um)) = (&user_manifest_hash, &user_manifest) {
+                all_hashes.push(umh.clone());
+                for (_rel, obj_hash) in &um.item_source_hashes {
+                    all_hashes.push(obj_hash.clone());
+                    if let Ok(Some(item_obj)) = local_cas.get_object(obj_hash) {
+                        if let Some(blob_hash) =
+                            item_obj.get("content_blob_hash").and_then(|v| v.as_str())
+                        {
+                            all_hashes.push(blob_hash.to_string());
+                        }
+                    }
+                }
+            }
+            all_hashes.sort();
+            all_hashes.dedup();
+
+            let has_resp = client.objects_has(&all_hashes).await
+                .map_err(|e| HandlerError::Internal(format!("objects_has: {e:#}")))?;
+            let mut blobs = Vec::new();
+            let mut objects = Vec::new();
+            for hash in &has_resp.missing {
+                if let Ok(Some(data)) = local_cas.get_blob(hash) {
+                    use base64::Engine as _;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                    blobs.push(crate::remote::client::BlobUpload { data: encoded });
+                } else if let Ok(Some(value)) = local_cas.get_object(hash) {
+                    objects.push(value);
+                }
+            }
+            if !blobs.is_empty() || !objects.is_empty() {
+                client.objects_put(&blobs, &objects).await
+                    .map_err(|e| HandlerError::Internal(format!("objects_put: {e:#}")))?;
+            }
 
             client.push_head(&project_path_for_ref, &snapshot_hash).await
                 .map_err(|e| HandlerError::Internal(format!("push_head failed: {e:#}")))?;
@@ -184,8 +229,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                 manifest_hash,
                 manifest: empty_manifest,
                 manifest_entries: 0,
-                blobs_uploaded: 0,
+                blobs_uploaded: blobs.len() + objects.len(),
                 blobs_skipped: 0,
+                user_manifest_hash,
+                user_manifest,
             }
         }
     };
@@ -218,6 +265,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                 &snapshot_hash,
                 proj_path,
                 &push_result.manifest,
+                push_result.user_manifest.as_ref(),
             )
             .await
             {
@@ -254,13 +302,18 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             }
         }
         None => {
-            // --no-project mode: no local workspace to apply changes to.
-            // Return empty pull stats.
+            // --no-project mode: no local project workspace to apply
+            // changes to. The per-request engine overlay still drives
+            // execution against the pushed user space. A dedicated
+            // user-only pull entrypoint is future work; today,
+            // operators who need user pull-back should pass --project.
             pull::PullResult {
                 snapshot_hash: snapshot_hash.clone(),
                 cas_objects_fetched: 0,
                 files_updated: 0,
                 files_deleted: 0,
+                user_files_updated: 0,
+                user_files_deleted: 0,
             }
         }
     };

@@ -462,9 +462,9 @@ fn pin_localpath_snapshot_if_needed(
     };
     let cas_root = state.state_store.cas_root()?;
     let cas = lillux::cas::CasStore::new(cas_root);
-    // §2.8.4: preserve the pre-execution user_manifest_hash so result
+    // Preserve the pre-execution user_manifest_hash so result
     // snapshots derived from this pin carry user-space lineage. When
-    // user-space sync is inactive, this is None (no change in behaviour).
+    // user-space sync is inactive, this is None.
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash,
         user_manifest_hash: pre_user_manifest_hash.clone(),
@@ -767,7 +767,11 @@ pub async fn run_inline(
     };
 
     // Pin LocalPath native_resume to a snapshot before attach.
-    // pre_user_manifest_hash is None until §2 user-space sync lands.
+    // pre_user_manifest_hash is intentionally None here: the
+    // LocalPath flow runs against the daemon's live user space, not
+    // a captured snapshot, so there's no pre-execution user manifest
+    // to pin alongside the project manifest. The pushed_head flow is
+    // where user-manifest lineage matters and is handled separately.
     match pin_localpath_snapshot_if_needed(
         &state,
         &mut spawned.launch_metadata,
@@ -1096,7 +1100,9 @@ async fn dispatch_detached_bg_task(
     };
 
     // Pin LocalPath native_resume to a snapshot before attach.
-    // pre_user_manifest_hash is None until §2 user-space sync lands.
+    // pre_user_manifest_hash is intentionally None for the same
+    // reason as the inline-spawn path: LocalPath runs against the
+    // daemon's live user space, not a captured snapshot.
     match pin_localpath_snapshot_if_needed(
         &bg_state,
         &mut spawned.launch_metadata,

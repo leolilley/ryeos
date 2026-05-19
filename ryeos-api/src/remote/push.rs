@@ -28,6 +28,13 @@ pub struct PushResult {
     pub manifest_entries: usize,
     pub blobs_uploaded: usize,
     pub blobs_skipped: usize,
+    /// User-space manifest hash, if the operator's user space had any
+    /// content under the sync allow-list. Used by pull_results() as
+    /// the symmetric base for user-side diff/apply.
+    pub user_manifest_hash: Option<String>,
+    /// The exact pushed user manifest. None when the operator's user
+    /// space is empty / absent.
+    pub user_manifest: Option<SourceManifest>,
 }
 
 /// Push a project directory to a remote node.
@@ -77,7 +84,7 @@ pub async fn push_project(
     //     hashes each file. The remote materialises this into a
     //     per-request engine overlay so user-tier items resolve
     //     against the caller's user space, never the remote's.
-    let user_manifest_hash = ingest_user_space_for_push(&local_cas)?;
+    let (user_manifest_hash, user_manifest) = ingest_user_space_for_push(&local_cas)?;
 
     // 3. Build snapshot
     let snapshot = ryeos_state::objects::ProjectSnapshot {
@@ -102,24 +109,20 @@ pub async fn push_project(
     }
     // Include user manifest objects + their backing blobs so the
     // remote can materialise the per-request user root.
-    if let Some(ref umh) = user_manifest_hash {
-        if let Ok(Some(user_manifest_obj)) = local_cas.get_object(umh) {
-            if let Ok(user_manifest) =
-                ryeos_state::objects::SourceManifest::from_value(&user_manifest_obj)
-            {
-                for (_rel_path, obj_hash) in &user_manifest.item_source_hashes {
-                    all_hashes.push(obj_hash.clone());
-                    if let Ok(Some(item_obj)) = local_cas.get_object(obj_hash) {
-                        if let Some(blob_hash) =
-                            item_obj.get("content_blob_hash").and_then(|v| v.as_str())
-                        {
-                            all_hashes.push(blob_hash.to_string());
-                        }
-                    }
+    if let Some(ref um) = user_manifest {
+        for (_rel_path, obj_hash) in &um.item_source_hashes {
+            all_hashes.push(obj_hash.clone());
+            if let Ok(Some(item_obj)) = local_cas.get_object(obj_hash) {
+                if let Some(blob_hash) =
+                    item_obj.get("content_blob_hash").and_then(|v| v.as_str())
+                {
+                    all_hashes.push(blob_hash.to_string());
                 }
             }
         }
-        all_hashes.push(umh.clone());
+        if let Some(ref umh) = user_manifest_hash {
+            all_hashes.push(umh.clone());
+        }
     }
     all_hashes.push(manifest_hash.clone());
     all_hashes.push(snapshot_hash.clone());
@@ -166,6 +169,8 @@ pub async fn push_project(
         manifest_entries,
         blobs_uploaded,
         blobs_skipped,
+        user_manifest_hash,
+        user_manifest,
     })
 }
 
@@ -258,14 +263,16 @@ fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<(
 /// using [`ryeos_state::user_sync::is_trust_pin_path`] when building
 /// the request-scoped trust overlay — trust pins are NEVER written to
 /// the remote's persistent trust dir.
-fn ingest_user_space_for_push(cas: &CasStore) -> Result<Option<String>> {
+pub(crate) fn ingest_user_space_for_push(
+    cas: &CasStore,
+) -> Result<(Option<String>, Option<SourceManifest>)> {
     let user_root = match ryeos_engine::roots::user_root() {
         Ok(r) => r,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok((None, None)),
     };
     let user_ai = user_root.join(ryeos_engine::AI_DIR);
     if !user_ai.is_dir() {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let mut items: HashMap<String, String> = HashMap::new();
@@ -287,12 +294,12 @@ fn ingest_user_space_for_push(cas: &CasStore) -> Result<Option<String>> {
         // Nothing to push under the user allow-list — return None
         // rather than an empty manifest so the snapshot's
         // user_manifest_hash stays None.
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let manifest = SourceManifest { item_source_hashes: items };
     let manifest_hash = cas.store_object(&manifest.to_value())?;
-    Ok(Some(manifest_hash))
+    Ok((Some(manifest_hash), Some(manifest)))
 }
 
 /// Recursive helper for [`ingest_user_space_for_push`]. Walks `dir`,

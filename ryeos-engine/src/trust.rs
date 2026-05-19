@@ -235,7 +235,7 @@ impl TrustStore {
     /// Returns the number of signers actually inserted (i.e. that
     /// were not already in the store under the same fingerprint).
     ///
-    /// Used by the per-request engine overlay (§2.6) to UNION a
+    /// Used by the per-request engine overlay to UNION a
     /// caller-pushed trust overlay with the remote's persistent
     /// three-tier trust store, without mutating either source.
     pub fn extend_from(&mut self, other: &TrustStore) -> usize {
