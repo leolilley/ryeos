@@ -8,7 +8,10 @@
 # Build:
 #   docker build -f Dockerfile.dev -t ryeosd-full:dev .
 
-FROM debian:bookworm-slim
+# debian:trixie ships glibc 2.41+, matching modern host toolchains. The
+# previous base (debian:bookworm-slim, glibc 2.36) refused to load
+# host-built release binaries with `GLIBC_2.39 not found`.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg && \

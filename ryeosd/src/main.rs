@@ -26,7 +26,7 @@ use ryeos_app::{command_service, event_store_service, thread_lifecycle};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::load(&cli.to_sources())?;
+    let mut config = Config::load(&cli.to_sources())?;
 
     // Initialize tracing with file sink (writes ndjson to <system_space_dir>/.ai/state/trace-events.ndjson).
     // Must come after config load so system_space_dir is known.
@@ -311,6 +311,19 @@ async fn main() -> Result<()> {
 
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone()));
 
+    // Bind the TCP listener BEFORE constructing AppState so the
+    // status endpoint reports the actual bound address (when the
+    // operator passes `:0`, the kernel assigns an ephemeral port).
+    // Without this hoist, `ryeos status` would echo back the
+    // requested `127.0.0.1:0` instead of the real listener address.
+    let tcp_listener = TcpListener::bind(config.bind)
+        .await
+        .with_context(|| format!("failed to bind {}", config.bind))?;
+    let actual_bind = tcp_listener
+        .local_addr()
+        .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
+    config.bind = actual_bind;
+
     let mut app_state = AppState {
         config: Arc::new(config.clone()),
         state_store,
@@ -376,16 +389,9 @@ async fn main() -> Result<()> {
         webhook_dedupe,
     };
     let app = ryeos_api::build_router(api_state);
-    let tcp_listener = TcpListener::bind(config.bind)
-        .await
-        .with_context(|| format!("failed to bind {}", config.bind))?;
-    // Read back the actual bound address. When the caller passes
-    // `:0` the kernel assigns an ephemeral port — discover and
-    // advertise it via daemon.json so clients connect to the real
-    // port, not the literal `0`.
-    let actual_bind = tcp_listener
-        .local_addr()
-        .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
+    // `tcp_listener` and `actual_bind` were created above before
+    // AppState construction so the status endpoint reports the real
+    // bound address.
     let uds_listener = UnixListener::bind(&config.uds_path)
         .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
 

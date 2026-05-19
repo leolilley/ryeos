@@ -39,6 +39,13 @@ build/
 # Heavy deps (not needed in Docker)
 node_modules/
 target/
+# …except the three host-built release binaries that Dockerfile.dev
+# copies into the image. Whitelist them explicitly so the dev build
+# stays fast (no in-container compile) without shipping the entire
+# multi-GB target/ tree.
+!target/release/ryeosd
+!target/release/ryeos
+!target/release/ryeos-core-tools
 
 # Local-machine cargo config has an absolute target-dir that breaks the
 # container build (cargo writes binaries to the host path instead of /build).
