@@ -14,6 +14,7 @@ use ryeos_scheduler::ReloadSignal;
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
 use crate::config::Config;
+use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::identity::NodeIdentity;
@@ -36,6 +37,12 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub state_store: Arc<StateStore>,
     pub engine: Arc<Engine>,
+    /// Per-snapshot engine cache used for `pushed_head` requests.
+    /// The cache materialises user content + builds a per-request
+    /// engine overlay, keyed by `(system_install_generation,
+    /// snapshot_hash)`. `LiveFs` requests bypass this cache and
+    /// use `engine` directly. See §2.1 of the remote-workflow-fix-plan.
+    pub engine_cache: EngineCache,
     pub identity: Arc<NodeIdentity>,
     pub threads: Arc<ThreadLifecycleService>,
     pub events: Arc<EventStoreService>,

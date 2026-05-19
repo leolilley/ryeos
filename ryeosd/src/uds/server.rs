@@ -423,6 +423,9 @@ mod tests {
             config: Arc::new(config),
             state_store,
             engine: Arc::new(engine),
+            engine_cache: ryeos_app::engine_cache::EngineCache::new(
+                ryeos_app::engine_cache::EngineCacheConfig::default(),
+            ),
             identity: Arc::new(identity),
             threads,
             events,

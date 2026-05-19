@@ -1329,6 +1329,9 @@ mod tests {
             config: std::sync::Arc::new(config),
             state_store,
             engine: std::sync::Arc::new(engine),
+            engine_cache: ryeos_app::engine_cache::EngineCache::new(
+                ryeos_app::engine_cache::EngineCacheConfig::default(),
+            ),
             identity: std::sync::Arc::new(identity),
             threads,
             events,

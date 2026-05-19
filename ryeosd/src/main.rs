@@ -329,6 +329,9 @@ async fn main() -> Result<()> {
         config: Arc::new(config.clone()),
         state_store,
         engine: engine.clone(),
+        engine_cache: ryeos_app::engine_cache::EngineCache::new(
+            ryeos_app::engine_cache::EngineCacheConfig::default(),
+        ),
         identity: Arc::new(identity),
         threads,
         events,
@@ -706,6 +709,9 @@ async fn run_service_standalone(
         config: Arc::new(config.clone()),
         state_store,
         engine: engine.clone(),
+        engine_cache: ryeos_app::engine_cache::EngineCache::new(
+            ryeos_app::engine_cache::EngineCacheConfig::default(),
+        ),
         identity: Arc::new(identity),
         threads,
         events,
