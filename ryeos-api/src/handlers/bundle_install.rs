@@ -113,6 +113,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &state.identity,
     )?;
 
+    // Bump the engine cache generation so any cached per-request
+    // engines (built against the previous bundle set) are invalidated.
+    // The next pushed_head request will build a fresh engine that
+    // includes the newly installed bundle.
+    let new_gen = state.engine_cache.bump_system_install_generation();
+    tracing::info!(
+        bundle = %req.name,
+        engine_cache_generation = new_gen,
+        "bundle installed: bumped engine cache generation"
+    );
+
     let report = serde_json::json!({
         "name": req.name,
         "path": canonical_target.display().to_string(),

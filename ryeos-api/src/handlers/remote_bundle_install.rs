@@ -140,6 +140,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &state.identity,
     )?;
 
+    // Bump the engine cache generation — same as local bundle_install.
+    let new_gen = state.engine_cache.bump_system_install_generation();
+    tracing::info!(
+        bundle = %req.bundle_name,
+        engine_cache_generation = new_gen,
+        "remote bundle installed: bumped engine cache generation"
+    );
+
     Ok(serde_json::json!({
         "bundle_name": req.bundle_name,
         "files_installed": files_installed,

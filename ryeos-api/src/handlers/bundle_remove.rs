@@ -84,6 +84,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         false
     };
 
+    // Bump the engine cache generation so any cached per-request
+    // engines (built against the previous bundle set) are invalidated.
+    let new_gen = state.engine_cache.bump_system_install_generation();
+    tracing::info!(
+        bundle = %req.name,
+        engine_cache_generation = new_gen,
+        "bundle removed: bumped engine cache generation"
+    );
+
     Ok(serde_json::json!({
         "name": req.name,
         "removed_config_item": true,
