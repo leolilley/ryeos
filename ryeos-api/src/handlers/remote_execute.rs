@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
 use crate::remote::push::{push_project, PushResult};
-use crate::remote::pull::{self, pull_results, extract_snapshot_hash, PullResultsError};
+use crate::remote::pull::{pull_results, extract_snapshot_hash, PullResultsError};
 use crate::handler_error::{HandlerError, HandlerResult};
 use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
@@ -255,66 +255,52 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
              async remote execute not supported in v1".into()
         ))?;
 
-    // 4. Pull results and apply to local workspace
-    let pull_result = match abs_project_path {
-        Some(ref proj_path) => {
-            match pull_results(
-                &client,
-                &state.config.system_space_dir,
-                &push_result.snapshot_hash,
-                &snapshot_hash,
-                proj_path,
-                &push_result.manifest,
-                push_result.user_manifest.as_ref(),
-            )
-            .await
-            {
-                Ok(pr) => pr,
-                Err(PullResultsError::LocalConflict(path)) => {
-                    return Err(HandlerError::BadRequest(format!(
-                        "local workspace conflict at '{}' — local files changed since push. \
-                         Resolve conflicts and retry.",
-                        path
-                    )));
-                }
-                Err(PullResultsError::MissingSnapshotHash) => {
-                    return Err(HandlerError::BadRequest(
-                        "remote execution result missing snapshot_hash".into(),
-                    ));
-                }
-                Err(PullResultsError::InvalidRemoteSnapshot(msg)) => {
-                    return Err(HandlerError::BadRequest(format!(
-                        "invalid remote snapshot: {}", msg
-                    )));
-                }
-                Err(PullResultsError::UnrelatedSnapshot { pushed, result }) => {
-                    return Err(HandlerError::BadRequest(format!(
-                        "remote returned result snapshot '{}' which is not a \
-                         descendant of pushed snapshot '{}' — refusing to apply. \
-                         This indicates a misconfigured remote or a bug; do not \
-                         re-run blindly. Inspect the remote's HEAD ref.",
-                        result, pushed
-                    )));
-                }
-                Err(PullResultsError::Other(e)) => {
-                    return Err(HandlerError::Internal(format!("pull results failed: {e:#}")));
-                }
-            }
+    // 4. Pull results and apply to local workspace. pull_results
+    //    handles --no-project mode (local_project_root = None) by
+    //    skipping the project diff/apply step but still running the
+    //    snapshot-lineage check and the symmetric user-space
+    //    pull-back. So either branch — project or user-only — goes
+    //    through the same entrypoint.
+    let pull_result = match pull_results(
+        &client,
+        &state.config.system_space_dir,
+        &push_result.snapshot_hash,
+        &snapshot_hash,
+        abs_project_path.as_deref(),
+        &push_result.manifest,
+        push_result.user_manifest.as_ref(),
+    )
+    .await
+    {
+        Ok(pr) => pr,
+        Err(PullResultsError::LocalConflict(path)) => {
+            return Err(HandlerError::BadRequest(format!(
+                "local workspace conflict at '{}' — local files changed since push. \
+                 Resolve conflicts and retry.",
+                path
+            )));
         }
-        None => {
-            // --no-project mode: no local project workspace to apply
-            // changes to. The per-request engine overlay still drives
-            // execution against the pushed user space. A dedicated
-            // user-only pull entrypoint is future work; today,
-            // operators who need user pull-back should pass --project.
-            pull::PullResult {
-                snapshot_hash: snapshot_hash.clone(),
-                cas_objects_fetched: 0,
-                files_updated: 0,
-                files_deleted: 0,
-                user_files_updated: 0,
-                user_files_deleted: 0,
-            }
+        Err(PullResultsError::MissingSnapshotHash) => {
+            return Err(HandlerError::BadRequest(
+                "remote execution result missing snapshot_hash".into(),
+            ));
+        }
+        Err(PullResultsError::InvalidRemoteSnapshot(msg)) => {
+            return Err(HandlerError::BadRequest(format!(
+                "invalid remote snapshot: {}", msg
+            )));
+        }
+        Err(PullResultsError::UnrelatedSnapshot { pushed, result }) => {
+            return Err(HandlerError::BadRequest(format!(
+                "remote returned result snapshot '{}' which is not a \
+                 descendant of pushed snapshot '{}' — refusing to apply. \
+                 This indicates a misconfigured remote or a bug; do not \
+                 re-run blindly. Inspect the remote's HEAD ref.",
+                result, pushed
+            )));
+        }
+        Err(PullResultsError::Other(e)) => {
+            return Err(HandlerError::Internal(format!("pull results failed: {e:#}")));
         }
     };
 

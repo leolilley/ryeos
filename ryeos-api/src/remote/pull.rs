@@ -57,7 +57,10 @@ pub enum PullResultsError {
 ///   result snapshot must equal this OR list it in `parent_hashes` (direct
 ///   parent only, per resolved design decision).
 /// * `remote_snapshot_hash` — The snapshot hash from the remote execution result
-/// * `local_project_root` — The local project directory to apply changes to
+/// * `local_project_root` — The local project directory to apply changes
+///   to. `None` for `--no-project` mode: the project diff/apply is
+///   skipped entirely (no local workspace exists), but lineage check
+///   + user-space pull-back still run.
 /// * `base_manifest` — The exact manifest that was pushed (from PushResult.manifest)
 /// * `base_user_manifest` — The exact user manifest that was pushed
 ///   (from `PushResult.user_manifest`). When `None`, the user pull-back
@@ -68,7 +71,7 @@ pub async fn pull_results(
     system_space_dir: &Path,
     pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
-    local_project_root: &Path,
+    local_project_root: Option<&Path>,
     base_manifest: &SourceManifest,
     base_user_manifest: Option<&SourceManifest>,
 ) -> Result<PullResult, PullResultsError> {
@@ -85,87 +88,91 @@ pub async fn pull_results(
             format!("snapshot {} not found in objects_get response", remote_snapshot_hash)
         ))?;
 
-    // 1a. Lineage check.
+    // 1a. Lineage check. Runs in every mode — including --no-project —
+    //     so a misconfigured / hostile remote can't slip an unrelated
+    //     snapshot past us just because there's no local project to
+    //     diff against.
     verify_snapshot_lineage(&snapshot_val, pushed_snapshot_hash, remote_snapshot_hash)?;
 
-    let manifest_hash = snapshot_val.get("project_manifest_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
-            "missing project_manifest_hash in snapshot".into()
-        ))?
-        .to_string();
+    // 2 – 5: project-side diff + apply. Skipped entirely in
+    // --no-project mode (no local workspace to write into). The
+    // user-space pull-back below still runs.
+    let mut fetched_count = 0usize;
+    let (files_updated, files_deleted) = if let Some(local_project_root) = local_project_root {
+        let manifest_hash = snapshot_val.get("project_manifest_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
+                "missing project_manifest_hash in snapshot".into()
+            ))?
+            .to_string();
 
-    // 2. Fetch remote manifest
-    let manifest_objs = client.objects_get(&[manifest_hash.clone()])
-        .await
-        .map_err(PullResultsError::Other)?;
-
-    let manifest_val = manifest_objs.find_object(&manifest_hash)
-        .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
-            format!("manifest {} not found in objects_get response", manifest_hash)
-        ))?;
-
-    let remote_manifest: SourceManifest = parse_manifest(&manifest_val)?;
-
-    // 3. Diff manifests — find new/changed item source hashes + their blob hashes
-    let mut needed_hashes: Vec<String> = Vec::new();
-    let mut changed_paths: HashMap<String, String> = HashMap::new(); // path → new_hash
-
-    for (path, hash) in &remote_manifest.item_source_hashes {
-        let base_hash = base_manifest.item_source_hashes.get(path);
-        let is_new_or_changed = match base_hash {
-            None => true,
-            Some(old) => old != hash,
-        };
-        if is_new_or_changed {
-            needed_hashes.push(hash.clone());
-            changed_paths.insert(path.clone(), hash.clone());
-        }
-    }
-
-    // 4. Fetch needed items into local CAS
-    let fetched_count = if !needed_hashes.is_empty() {
-        let fetched = client.objects_get(&needed_hashes)
+        // 2. Fetch remote manifest
+        let manifest_objs = client.objects_get(&[manifest_hash.clone()])
             .await
             .map_err(PullResultsError::Other)?;
 
-        let mut count = 0;
-        for entry in &fetched.entries {
-            if entry.kind == "object" {
-                // Store the item source object
-                if let Some(ref val) = entry.value {
-                    local_cas.store_object(val)?;
-                    count += 1;
-                    // If the item source has a content_blob_hash, fetch that blob too
-                    if let Some(blob_hash) = val.get("content_blob_hash").and_then(|v| v.as_str()) {
-                        let blob_fetched = client.objects_get(&[blob_hash.to_string()])
-                            .await
-                            .map_err(PullResultsError::Other)?;
-                        if let Some(blob_data) = blob_fetched.find_blob(blob_hash) {
-                            local_cas.store_blob(&blob_data)?;
-                            count += 1;
+        let manifest_val = manifest_objs.find_object(&manifest_hash)
+            .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
+                format!("manifest {} not found in objects_get response", manifest_hash)
+            ))?;
+
+        let remote_manifest: SourceManifest = parse_manifest(&manifest_val)?;
+
+        // 3. Diff manifests — find new/changed item source hashes + their blob hashes
+        let mut needed_hashes: Vec<String> = Vec::new();
+        let mut changed_paths: HashMap<String, String> = HashMap::new();
+
+        for (path, hash) in &remote_manifest.item_source_hashes {
+            let base_hash = base_manifest.item_source_hashes.get(path);
+            let is_new_or_changed = match base_hash {
+                None => true,
+                Some(old) => old != hash,
+            };
+            if is_new_or_changed {
+                needed_hashes.push(hash.clone());
+                changed_paths.insert(path.clone(), hash.clone());
+            }
+        }
+
+        // 4. Fetch needed items into local CAS
+        if !needed_hashes.is_empty() {
+            let fetched = client.objects_get(&needed_hashes)
+                .await
+                .map_err(PullResultsError::Other)?;
+
+            for entry in &fetched.entries {
+                if entry.kind == "object" {
+                    if let Some(ref val) = entry.value {
+                        local_cas.store_object(val)?;
+                        fetched_count += 1;
+                        if let Some(blob_hash) = val.get("content_blob_hash").and_then(|v| v.as_str()) {
+                            let blob_fetched = client.objects_get(&[blob_hash.to_string()])
+                                .await
+                                .map_err(PullResultsError::Other)?;
+                            if let Some(blob_data) = blob_fetched.find_blob(blob_hash) {
+                                local_cas.store_blob(&blob_data)?;
+                                fetched_count += 1;
+                            }
                         }
                     }
-                }
-            } else if entry.kind == "blob" {
-                if let Some(ref blob_data) = entry.data {
-                    use base64::Engine;
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(blob_data)
-                        .map_err(|e| PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}")))?;
-                    local_cas.store_blob(&bytes)?;
-                    count += 1;
+                } else if entry.kind == "blob" {
+                    if let Some(ref blob_data) = entry.data {
+                        use base64::Engine;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(blob_data)
+                            .map_err(|e| PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}")))?;
+                        local_cas.store_blob(&bytes)?;
+                        fetched_count += 1;
+                    }
                 }
             }
         }
-        count
-    } else {
-        0
-    };
 
-    // 5. Apply project changes to local workspace with clean-base policy
-    let (files_updated, files_deleted) =
-        apply_manifest_diff(&local_cas, local_project_root, base_manifest, &remote_manifest)?;
+        // 5. Apply project changes with clean-base policy.
+        apply_manifest_diff(&local_cas, local_project_root, base_manifest, &remote_manifest)?
+    } else {
+        (0, 0)
+    };
 
     // 6. Symmetric user-space pull-back. Only runs when we pushed a
     //    user manifest AND the remote result snapshot carries one.
