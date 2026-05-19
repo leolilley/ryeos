@@ -7,6 +7,7 @@ pub mod callback_token;
 pub mod command_service;
 pub mod config;
 pub mod engine_cache;
+pub mod engine_init;
 pub mod event_store_service;
 pub mod event_stream;
 pub mod handler_context;

@@ -1,6 +1,6 @@
 //! Per-snapshot engine cache for the request-scoped engine overlay.
 //!
-//! Background (§2.1 of the remote-workflow-fix-plan):
+//! Background:
 //!
 //! The daemon builds one `Engine` at startup against its own roots
 //! (system bundles + the operator's own user space). For
@@ -302,11 +302,11 @@ mod tests {
     #[test]
     fn config_defaults_match_plan() {
         let cfg = EngineCacheConfig::default();
-        assert_eq!(cfg.capacity, 8, "plan default §2.1: 8 entries");
+        assert_eq!(cfg.capacity, 8, "default capacity: 8 entries");
         assert_eq!(
             cfg.idle_threshold,
             Duration::from_secs(30 * 60),
-            "plan default §2.1: 30 minutes"
+            "default idle threshold: 30 minutes"
         );
     }
 }

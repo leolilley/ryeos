@@ -41,7 +41,7 @@ pub struct AppState {
     /// The cache materialises user content + builds a per-request
     /// engine overlay, keyed by `(system_install_generation,
     /// snapshot_hash)`. `LiveFs` requests bypass this cache and
-    /// use `engine` directly. See §2.1 of the remote-workflow-fix-plan.
+    /// use `engine` directly.
     pub engine_cache: EngineCache,
     pub identity: Arc<NodeIdentity>,
     pub threads: Arc<ThreadLifecycleService>,

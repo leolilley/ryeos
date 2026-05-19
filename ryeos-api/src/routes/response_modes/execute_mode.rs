@@ -263,13 +263,16 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
         let site_id = state.threads.site_id();
         let project_source = request.project_source.clone().unwrap_or_default();
-        // §0a: For PushedHead, the client MUST send a canonical path so
+        // For PushedHead, the client MUST send a canonical path so
         // push and execute hash the same string. resolve_project_context
         // re-runs canonical_project_ref defensively, but we still need
         // a PathBuf here to feed it.
         //
-        // For LiveFs, project_path is optional — falls back to daemon cwd
-        // (legacy direct-execute behaviour; out of scope for §0a).
+        // For LiveFs with no project_path, fall back to the user-space
+        // root (~/.ryeos/). The daemon's cwd is irrelevant to the
+        // caller — when no project is in play the natural context for
+        // an item is the operator's user space, not whatever directory
+        // the daemon happens to have been launched from.
         let project_path = match &request.project_path {
             Some(p) => std::path::PathBuf::from(p),
             None => {
@@ -279,8 +282,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         axum::Json(json!({ "error": "project_path is required when project_source is pushed_head" })),
                     ).into_response());
                 }
-                std::env::current_dir()
-                    .map_err(|err| RouteDispatchError::Internal(err.to_string()))?
+                ryeos_engine::roots::user_root().map_err(|err| {
+                    RouteDispatchError::Internal(format!(
+                        "no project_path supplied and user_root unavailable: {err}"
+                    ))
+                })?
             }
         };
 
@@ -342,7 +348,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: caller_principal_id.clone(),
             caller_scopes: caller_scopes.clone(),
-            engine: state.engine.clone(),
+            // Per-request engine: for PushedHead this is the
+            // per-snapshot overlay engine (built against the caller's
+            // materialised user space + trust overlay). For LiveFs
+            // it's just state.engine. Either way, all downstream
+            // resolution flows through this Arc.
+            engine: project_ctx.request_engine.clone(),
             plan_ctx,
             requested_op: request.operation.clone(),
             requested_inputs: request.inputs.clone(),

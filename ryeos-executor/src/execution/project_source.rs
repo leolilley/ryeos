@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use ryeos_app::state::AppState;
+use ryeos_engine::engine::Engine;
+use ryeos_engine::trust::TrustStore;
 
 /// Typed error for `resolve_project_context`. Replaces the prior
 /// anyhow-only return so the execute response mode can pattern-match the
@@ -105,6 +108,33 @@ pub struct ResolvedProjectContext {
     pub snapshot_hash: Option<String>,
     /// Temp directory to clean up (CAS checkout dir for PushedHead).
     pub temp_dir: Option<PathBuf>,
+    /// Materialised user-space root for `PushedHead` requests with a
+    /// `user_manifest_hash`. `None` for `LiveFs` (the daemon's own
+    /// user space is used via the global engine) and for `PushedHead`
+    /// requests with no user manifest (strict-or-empty: no user-tier
+    /// items at all — never silently fall through to the remote
+    /// operator's user space).
+    pub user_root: Option<PathBuf>,
+    /// Temp directory to clean up (user-space CAS checkout dir for
+    /// `PushedHead`). Lifetime is tied to the cache entry: while the
+    /// per-request engine sits in `AppState.engine_cache`, this temp
+    /// dir is retained so concurrent threads sharing the snapshot
+    /// reuse the materialisation. Cleaned up when the cache entry is
+    /// evicted.
+    pub user_temp_dir: Option<PathBuf>,
+    /// Caller's pinned trust pubkeys, materialised in-memory from the
+    /// pushed user manifest's `config/keys/trusted/` sub-section.
+    /// Unioned with the remote's persistent trust store inside
+    /// [`Engine`] for THIS request only — never written to the
+    /// remote's persistent trust dir.
+    pub trust_overlay: Option<TrustStore>,
+    /// The engine to use for this request. For `LiveFs`, this is
+    /// `state.engine` (the daemon's startup engine). For `PushedHead`,
+    /// this is a per-snapshot overlay engine built from the daemon's
+    /// system roots + the caller's materialised user root + the
+    /// trust overlay. Cached in `AppState.engine_cache` keyed by
+    /// `(system_install_generation, snapshot_hash)`.
+    pub request_engine: Arc<Engine>,
 }
 
 /// Resolve a `ProjectSource` into a concrete execution context.
@@ -136,9 +166,16 @@ pub fn resolve_project_context(
             source: source.clone(),
             snapshot_hash: None,
             temp_dir: None,
+            user_root: None,
+            user_temp_dir: None,
+            trust_overlay: None,
+            // LiveFs uses the daemon's startup engine directly — no
+            // per-request overlay needed because the daemon's own
+            // user space is what resolves anyway.
+            request_engine: state.engine.clone(),
         },
         ProjectSource::PushedHead => {
-            // §0a: HEAD lookup MUST use the same canonical ref string as
+            // HEAD lookup MUST use the same canonical ref string as
             // push_head used when writing the ref. canonical_project_ref
             // is the single source of truth — it canonicalizes via
             // std::fs::canonicalize (matching push_head) and bypasses
@@ -168,24 +205,135 @@ pub fn resolve_project_context(
             let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
                 .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
 
+            // 1. Materialise project content (existing behaviour).
             let manifest_hash = &snapshot.project_manifest_hash;
             let exec_dir = state
                 .config
                 .system_space_dir
                 .join("executions")
                 .join(checkout_id);
-            let cache = crate::execution::cache::MaterializationCache::new(
+            let materialization_cache = crate::execution::cache::MaterializationCache::new(
                 state.config.system_space_dir.join("cache").join("snapshots"),
             );
-            crate::execution::checkout_project(&cas_root, manifest_hash, &exec_dir, Some(&cache))
-                .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+            crate::execution::checkout_project(
+                &cas_root,
+                manifest_hash,
+                &exec_dir,
+                Some(&materialization_cache),
+            )
+            .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+
+            // 2. Materialise user content. If the snapshot carries
+            //    `user_manifest_hash`, check it out into a sibling
+            //    temp dir. Otherwise leave user_root = None
+            //    (strict-or-empty: no user-tier resolution at all —
+            //    NEVER fall through to the remote operator's user space).
+            let (user_root, user_temp_dir, trust_overlay) =
+                if let Some(user_mh) = snapshot.user_manifest_hash.as_ref() {
+                    let user_exec_dir = state
+                        .config
+                        .system_space_dir
+                        .join("executions")
+                        .join(format!("{}-user", checkout_id));
+                    crate::execution::checkout_project(
+                        &cas_root,
+                        user_mh,
+                        &user_exec_dir,
+                        Some(&materialization_cache),
+                    )
+                    .map_err(|e| {
+                        ProjectSourceError::CheckoutFailed(format!(
+                            "user-manifest checkout failed: {e}"
+                        ))
+                    })?;
+
+                    // Extract trust pins from the materialised user
+                    // space into an in-memory overlay. This intentionally
+                    // does NOT use a side channel; the trust dir is part
+                    // of the user manifest, and `load_from_dir` parses
+                    // it. The result is then unioned into the per-request
+                    // engine's trust store via `trust_overlay` — never
+                    // written back to the remote's persistent trust dir.
+                    let trust_dir = user_exec_dir
+                        .join(ryeos_engine::AI_DIR)
+                        .join("config")
+                        .join("keys")
+                        .join("trusted");
+                    let overlay = if trust_dir.is_dir() {
+                        match TrustStore::load_from_dir(&trust_dir) {
+                            Ok(store) if !store.is_empty() => Some(store),
+                            Ok(_) => None,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "pushed user-space trust pins failed to load — \
+                                     proceeding with persistent trust store only"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    (Some(user_exec_dir.clone()), Some(user_exec_dir), overlay)
+                } else {
+                    (None, None, None)
+                };
+
+            // 3. Build (or reuse from cache) the per-request engine.
+            //    Cache key mixes the system-install generation so a
+            //    bundle install/uninstall invalidates cleanly.
+            let cache_key = ryeos_app::engine_cache::CacheKey {
+                system_install_generation: state.engine_cache.system_install_generation(),
+                snapshot_hash: snap_hash.clone(),
+            };
+            let request_engine = if let Some(eng) = state.engine_cache.get(&cache_key) {
+                eng
+            } else {
+                let bundle_roots = state.engine.system_roots.clone();
+                let built = ryeos_app::engine_init::build_engine_for_roots(
+                    &state.config,
+                    &bundle_roots,
+                    Some(exec_dir.as_path()),
+                    user_root.as_deref(),
+                    trust_overlay.as_ref(),
+                )
+                .map_err(|e| {
+                    ProjectSourceError::CheckoutFailed(format!(
+                        "per-request engine build failed: {e}"
+                    ))
+                })?;
+                let arc = Arc::new(built);
+                // Note: we hand the temp dirs to the cache via
+                // TempDirGuards so eviction triggers cleanup. The
+                // ResolvedProjectContext keeps its own PathBuf copies
+                // (not guards) — the cache owns lifecycle.
+                state.engine_cache.insert(
+                    cache_key,
+                    arc.clone(),
+                    Some(ryeos_app::engine_cache::TempDirGuard::new(exec_dir.clone())),
+                    user_temp_dir
+                        .as_ref()
+                        .map(|p| ryeos_app::engine_cache::TempDirGuard::new(p.clone())),
+                );
+                arc
+            };
 
             ResolvedProjectContext {
                 effective_path: exec_dir.clone(),
                 original_path,
                 source: source.clone(),
                 snapshot_hash: Some(snap_hash.clone()),
-                temp_dir: Some(exec_dir),
+                // Lifecycle of project + user temp dirs is owned by the
+                // engine cache entry. Don't double-clean — leave these
+                // None so the existing TempDirGuard in execute_mode
+                // (which calls `temp_dir.take()`) is a no-op.
+                temp_dir: None,
+                user_root,
+                user_temp_dir: None,
+                trust_overlay,
+                request_engine,
             }
         }
     };
@@ -261,7 +409,7 @@ impl ProjectPathSpec {
 /// string used everywhere identity keys are computed (push HEAD ref,
 /// execute HEAD lookup, pull lineage anchor).
 ///
-/// Rules (§0a):
+/// Rules:
 /// - The `NO_PROJECT_SENTINEL` passes through verbatim. Identity is
 ///   per-principal under this sentinel; no path semantics.
 /// - Empty string is rejected: client-side discovery is required to
