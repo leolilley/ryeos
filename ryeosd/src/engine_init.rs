@@ -28,13 +28,65 @@ use crate::config::Config;
 
 /// Build the native engine from daemon configuration (Model B).
 ///
-/// System roots come ONLY from registered bundles. The system_space_dir
-/// itself is never a root — it holds mutable node state (identity, vault,
-/// config, registrations) and installed bundles under `.ai/bundles/`.
+/// Thin wrapper around [`build_engine_for_roots`] that pulls the
+/// daemon's own `user_root` from the global config. Use this for the
+/// daemon's startup engine; use `build_engine_for_roots` directly for
+/// the per-request (pushed_head) engine overlay (§2.1 of the
+/// remote-workflow-fix-plan).
+pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine> {
+    let user_root = roots::user_root().ok();
+    build_engine_for_roots(
+        config,
+        bundle_roots,
+        None, // no project root at startup — resolved per-request
+        user_root.as_deref(),
+        None, // no overlay — daemon's persistent trust store wins
+    )
+}
+
+/// Pure constructor: build an `Engine` for a specific set of roots.
 ///
-/// `bundle_roots` is the resolved set of canonical paths from registered
-/// bundles (loaded by `bootstrap::load_node_config_two_phase` Phase 1).
-pub fn build_engine(_config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine> {
+/// This is the single shared engine builder used by both daemon startup
+/// (via [`build_engine`]) and per-request `pushed_head` overlays (the
+/// §2.1 engine cache).
+///
+/// # Arguments
+///
+/// * `config` — daemon config (used for diagnostic/env settings only).
+/// * `bundle_roots` — system-tier bundle roots installed on this node.
+///   The remote node's own bundles — same for every request.
+/// * `project_root` — optional materialised project root for the
+///   request. Currently used only for trust-store loading
+///   (`TrustStore::load_three_tier` takes a project root for the
+///   project-tier search); the engine itself resolves project items
+///   via `ResolutionRoots` at request time, not from this argument.
+/// * `user_root` — optional user-space root. Daemon startup passes its
+///   own `roots::user_root()`; per-request `pushed_head` passes the
+///   materialised temp dir derived from the caller's user manifest.
+///   `None` means no user-tier items (strict-or-empty rule for
+///   `pushed_head` requests with no `user_manifest_hash`).
+/// * `trust_overlay` — optional caller-pinned trust store to UNION
+///   with the persistent three-tier trust store. Used by per-request
+///   overlay so caller-trusted-only publishers can verify for the
+///   thread without leaking into the remote's persistent trust.
+///   `None` means use only the persistent trust store.
+///
+/// # Why a single constructor matters
+///
+/// Without this refactor, the per-request engine cache would have to
+/// duplicate every load step. Having both call sites go through the
+/// same function guarantees that:
+/// - the user-tier item resolution semantics are identical
+/// - kind / parser / handler / protocol load ordering is identical
+/// - boot validation runs the same way against both engine variants
+/// - changes only have to land in one place
+pub fn build_engine_for_roots(
+    _config: &Config,
+    bundle_roots: &[PathBuf],
+    project_root: Option<&std::path::Path>,
+    user_root: Option<&std::path::Path>,
+    trust_overlay: Option<&TrustStore>,
+) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
     if bundle_roots.is_empty() {
         anyhow::bail!(
@@ -54,7 +106,7 @@ pub fn build_engine(_config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine
     // 2. System roots = registered bundles only (Model B).
     //    system_space_dir is NOT a root — it contains node state, not content.
     let system_roots: Vec<PathBuf> = bundle_roots.to_vec();
-    let user_root = roots::user_root().ok();
+    let user_root: Option<PathBuf> = user_root.map(|p| p.to_path_buf());
 
     // 3. Collect kind schema search roots from all system roots + user space
     let mut schema_roots = Vec::new();
@@ -81,12 +133,24 @@ pub fn build_engine(_config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine
     //    store. Both use raw filesystem scanning (no item resolution
     //    dependency), so there is no bootstrap cycle.
     let trust_store = match TrustStore::load_three_tier(
-        None, // project root not known at daemon startup — resolved per-request
+        project_root,
         user_root.as_deref(),
         &system_roots,
     ) {
-        Ok(store) => {
+        Ok(mut store) => {
             tracing::info!(count = store.len(), "loaded operator trust store");
+            if let Some(overlay) = trust_overlay {
+                // Caller-scoped overlay: pins the caller trusts but the
+                // remote does not (per §2.6, never written to remote's
+                // persistent trust dir). The overlay lives for this
+                // engine's lifetime only.
+                let added = store.extend_from(overlay);
+                tracing::info!(
+                    overlay_added = added,
+                    total = store.len(),
+                    "applied per-request trust overlay"
+                );
+            }
             store
         }
         Err(err) => {

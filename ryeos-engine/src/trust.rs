@@ -231,6 +231,24 @@ impl TrustStore {
         Self { signers: map }
     }
 
+    /// Add every signer from `other` that we don't already have.
+    /// Returns the number of signers actually inserted (i.e. that
+    /// were not already in the store under the same fingerprint).
+    ///
+    /// Used by the per-request engine overlay (§2.6) to UNION a
+    /// caller-pushed trust overlay with the remote's persistent
+    /// three-tier trust store, without mutating either source.
+    pub fn extend_from(&mut self, other: &TrustStore) -> usize {
+        let mut added = 0;
+        for (fp, signer) in other.signers.iter() {
+            if !self.signers.contains_key(fp) {
+                self.signers.insert(fp.clone(), signer.clone());
+                added += 1;
+            }
+        }
+        added
+    }
+
     /// Load trusted signer keys from a directory.
     ///
     /// Supports three file types:
