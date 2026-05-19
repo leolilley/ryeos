@@ -266,6 +266,14 @@ pub async fn pull_results(
                 ))
             })?;
             let local_user_ai = local_user_root.join(ryeos_engine::AI_DIR);
+            // Ensure the user .ai/ directory exists — on a fresh node it
+            // won't and the apply would fail with ENOENT.
+            std::fs::create_dir_all(&local_user_ai).with_context(|| {
+                format!(
+                    "user-space pull-back: failed to create {}",
+                    local_user_ai.display()
+                )
+            })?;
             apply_manifest_diff(&local_cas, &local_user_ai, base_um, &remote_user_manifest)?
         }
         _ => (0, 0),

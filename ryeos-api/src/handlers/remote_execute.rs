@@ -321,6 +321,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             "cas_objects_fetched": pull_result.cas_objects_fetched,
             "files_updated": pull_result.files_updated,
             "files_deleted": pull_result.files_deleted,
+            "user_files_updated": pull_result.user_files_updated,
+            "user_files_deleted": pull_result.user_files_deleted,
         },
     }))
 }
