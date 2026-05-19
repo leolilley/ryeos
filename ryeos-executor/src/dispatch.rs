@@ -832,7 +832,7 @@ pub(crate) async fn dispatch_op(
         &system_roots,
         &executor_ref,
         &cache_root,
-        &state.engine.trust_store,
+        &ctx.engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .map_err(|e| DispatchError::RuntimeMaterializationFailed {
@@ -1348,6 +1348,7 @@ async fn dispatch_managed_subprocess(
     let result = launch::build_and_launch(
         launch::BuildAndLaunchParams {
             state,
+            engine: &ctx.engine,
             executor_ref: &executor_ref,
             acting_principal,
             resolved: &resolved,
@@ -1486,7 +1487,7 @@ async fn dispatch_streaming_subprocess(
         &system_roots,
         &executor_ref,
         &cache_root,
-        &state.engine.trust_store,
+        &ctx.engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .map_err(|e| DispatchError::RuntimeMaterializationFailed {
@@ -1550,7 +1551,7 @@ async fn dispatch_tool_subprocess(
 
     let mut resolved = ryeos_app::thread_lifecycle::resolve_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-            engine: &state.engine,
+            engine: &ctx.engine,
             site_id: &ctx.plan_ctx.current_site_id,
             project_path: request.project_path,
             item_ref: &item_ref,
@@ -1579,7 +1580,7 @@ async fn dispatch_tool_subprocess(
     }
 
     if request.validate_only {
-        let engine = state.engine.clone();
+        let engine = ctx.engine.clone();
         let resolved_clone = resolved.clone();
         let validated = tokio::task::spawn_blocking(move || {
             ryeos_app::thread_lifecycle::validate_item(&engine, &resolved_clone)
@@ -1628,6 +1629,9 @@ async fn dispatch_tool_subprocess(
         temp_dir: request.temp_dir.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps: Vec::new(),
+        // Per-request engine resolved upstream in execute_mode via
+        // resolve_project_context and threaded down on ctx.
+        engine: ctx.engine.clone(),
     };
 
     if request.launch_mode == "detached" {

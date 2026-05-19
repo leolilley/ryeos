@@ -537,6 +537,10 @@ pub(crate) fn derive_effective_caps(
 
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
+    /// Per-request engine (replaces all `state.engine` usage in this
+    /// function). For `LiveFs` this is `state.engine.clone()`, for
+    /// `PushedHead` it is the overlay engine from `resolve_project_context`.
+    pub engine: &'a std::sync::Arc<ryeos_engine::engine::Engine>,
     pub executor_ref: &'a str,
     pub acting_principal: &'a str,
     pub resolved: &'a ResolvedExecutionRequest,
@@ -549,6 +553,7 @@ pub struct BuildAndLaunchParams<'a> {
 pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
         state,
+        engine,
         executor_ref,
         acting_principal,
         resolved,
@@ -592,7 +597,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     //    the token instead of trusting the runtime to self-police.
 
     // 4. Build envelope
-    let engine_roots = state.engine.resolution_roots(Some(project_path.to_path_buf()));
+    let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
 
     let user_root = engine_roots.ordered.iter()
         .find(|r| r.space == ryeos_engine::contracts::ItemSpace::User)
@@ -612,21 +617,20 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // validated against it, and persisted it on `Engine::composers`.
     // Pulling it back out here guarantees launcher and boot use the
     // **same** instance (no split-brain).
-    let composers = &state.engine.composers;
+    let composers = &engine.composers;
 
     // Per-request: build the effective parser dispatcher so any
     // project-local `.ai/parsers/` overlay applies for this request.
-    let effective_parsers = state
-        .engine
+    let effective_parsers = engine
         .effective_parser_dispatcher(Some(project_path))
         .map_err(|e| anyhow::anyhow!("effective parser dispatcher: {e}"))?;
 
     let mut resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &resolved.resolved_item.canonical_ref,
-        &state.engine.kinds,
+        &engine.kinds,
         &effective_parsers,
         &engine_roots,
-        &state.engine.trust_store,
+        &engine.trust_store,
         composers,
     )
     .map_err(|e| anyhow::anyhow!("resolution pipeline failed: {e}"))?;
@@ -645,8 +649,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // resolution.composed.derived in place. On failure, abort the
     // parent launch with a structured error.
     {
-        let launching_kind_schema = state
-            .engine
+        let launching_kind_schema = engine
             .kinds
             .get(&resolved.resolved_item.kind)
             .ok_or_else(|| anyhow::anyhow!(
@@ -660,7 +663,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
                     &mut resolution,
                     &thread.thread_id,
                     project_path,
-                    &state.engine,
+                    engine,
                     &resolved.plan_context,
                     acting_principal,
                     state,
@@ -691,8 +694,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // The launching kind schema (e.g. `directive`, `graph`) drives
     // inventory build below; it does NOT carry the subprocess
     // terminator — those kinds run in-process inside a runtime.
-    let launching_kind_schema = state
-        .engine
+    let launching_kind_schema = engine
         .kinds
         .get(&resolved.resolved_item.kind)
         .ok_or_else(|| anyhow::anyhow!(
@@ -705,8 +707,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // build_and_launch is only ever called for managed-lifecycle
     // subprocess spawns where a runtime hosts the launching item; the
     // subprocess terminator + protocol_ref live on the runtime kind.
-    let runtime_kind_schema = state
-        .engine
+    let runtime_kind_schema = engine
         .kinds
         .get("runtime")
         .ok_or_else(|| anyhow::anyhow!(
@@ -727,8 +728,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
             "build_and_launch: `runtime` kind has no subprocess terminator with protocol ref"
         ))?;
 
-    let verified_protocol = state
-        .engine
+    let verified_protocol = engine
         .protocols
         .require(&protocol_ref)
         .map_err(|e| anyhow::anyhow!("protocol lookup failed for `{protocol_ref}`: {e}"))?;
@@ -758,7 +758,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     //     runtime is a pure consumer of `envelope.inventory`.
     let inventory = ryeos_engine::inventory::build_inventory_for_launching_kind(
         launching_kind_schema,
-        &state.engine.kinds,
+        &engine.kinds,
         &engine_roots,
         &effective_parsers,
     )
@@ -785,7 +785,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         &system_roots,
         executor_ref,
         &cache_root,
-        &state.engine.trust_store,
+        &engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedSystem, // executor binaries ship in system bundles
     )?;
 

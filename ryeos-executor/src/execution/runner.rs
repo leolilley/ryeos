@@ -85,6 +85,11 @@ pub struct ExecutionParams {
     /// caller MUST supply this explicitly — empty `Vec` means deny-all
     /// (the trust-boundary default).
     pub effective_caps: Vec<String>,
+    /// Per-request engine. For `LiveFs` this is the daemon's startup
+    /// engine (`state.engine`). For `PushedHead` this is the overlay
+    /// engine built from the caller's user space. **No runner code
+    /// should reach for `state.engine` after this is set.**
+    pub engine: std::sync::Arc<ryeos_engine::engine::Engine>,
 }
 
 /// Tracks execution state for explicit cleanup.
@@ -703,8 +708,9 @@ pub async fn run_inline(
             ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
     }
 
-    // Spawn
-    let engine = state.engine.clone();
+    // Spawn — use the per-request engine (pushed_head overlay or
+    // daemon startup engine), NOT state.engine directly.
+    let engine = params.engine.clone();
     let tid = running.thread_id.clone();
     let crid = running.chain_root_id.clone();
     let resolved = params.resolved.clone();
@@ -942,7 +948,8 @@ pub async fn run_detached(
     let bg_thread_id = running.thread_id.clone();
     let bg_chain_root_id = running.chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
-    let bg_engine = state.engine.clone();
+    // Per-request engine (pushed_head overlay or daemon startup engine).
+    let bg_engine = params.engine.clone();
     let bg_vault = params.vault_bindings.clone();
     let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
@@ -1409,6 +1416,13 @@ pub fn execution_params_from_resume_context(
         // resumed callbacks are enforced under the same set the
         // pre-crash run had.
         effective_caps: resume.effective_caps.clone(),
+        // Resume runs through prepare_cas_context (not
+        // resolve_project_context), so no per-snapshot overlay engine
+        // is built here — use the daemon's startup engine. If a
+        // resumed `pushed_head` snapshot needs the per-request
+        // overlay, that requires plumbing resolve_project_context
+        // into the resume path; tracked separately.
+        engine: state.engine.clone(),
     })
 }
 
@@ -1496,8 +1510,12 @@ pub async fn run_existing_detached(
         // Narrow preflight: resolve provider and inject its secret.
         // Uses effective_path for engine roots so model_routing.yaml
         // and provider configs are read from the snapshot checkout.
-        let engine_roots = state.engine.resolution_roots(Some(effective_path.clone()));
-        let effective_parsers = state
+        // Use the per-request engine (today the resume path falls back
+        // to state.engine in execution_params_from_resume_context;
+        // routing through params.engine keeps the contract honest if
+        // resume later starts threading an overlay engine).
+        let engine_roots = params.engine.resolution_roots(Some(effective_path.clone()));
+        let effective_parsers = params
             .engine
             .effective_parser_dispatcher(Some(&effective_path))
         .map_err(|e| {
@@ -1508,11 +1526,11 @@ pub async fn run_existing_detached(
 
         let resolution = ryeos_engine::resolution::run_resolution_pipeline(
             &params.resolved.resolved_item.canonical_ref,
-            &state.engine.kinds,
+            &params.engine.kinds,
             &effective_parsers,
             &engine_roots,
-            &state.engine.trust_store,
-            &state.engine.composers,
+            &params.engine.trust_store,
+            &params.engine.composers,
         )
         .map_err(|e| {
             guard.fail_thread("preflight_failed");
@@ -1578,7 +1596,9 @@ pub async fn run_existing_detached(
     let bg_thread_id = thread_id.clone();
     let bg_chain_root_id = chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
-    let bg_engine = state.engine.clone();
+    // Per-request engine (resume path uses daemon engine via
+    // execution_params_from_resume_context).
+    let bg_engine = params.engine.clone();
     let bg_vault = params.vault_bindings.clone();
     let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
