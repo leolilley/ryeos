@@ -306,6 +306,14 @@ pub(crate) fn ingest_user_space_for_push(
 /// hashes every regular file, and inserts an `ItemSource` keyed by
 /// the path relative to `user_ai` (so the remote can materialise into
 /// `<temp>/.ai/<rel>` and have everything line up).
+///
+/// **Symlinks are skipped** — user-space ingest must not follow
+/// symlinks because a symlink at `~/.ryeos/.ai/directives/exfil.md`
+/// pointing at `~/.ssh/id_rsa` would be read, hashed, and uploaded.
+/// The allow-list (`USER_SPACE_SYNC_DIRS`) constrains entry paths,
+/// but does not stop symlink content escape. We check
+/// `entry.file_type()?.is_symlink()` first (which does NOT follow
+/// the link, unlike `Path::is_dir()` / `Path::is_file()`).
 fn ingest_user_dir_for_push(
     cas: &CasStore,
     user_ai: &Path,
@@ -318,10 +326,18 @@ fn ingest_user_dir_for_push(
     };
     for entry in entries {
         let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            tracing::warn!(
+                path = %entry.path().display(),
+                "skipping symlink in user-space ingest (would follow outside user root)"
+            );
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             ingest_user_dir_for_push(cas, user_ai, &path, items)?;
-        } else if path.is_file() {
+        } else if ft.is_file() {
             let rel = path
                 .strip_prefix(user_ai)
                 .unwrap_or(&path)
@@ -562,6 +578,96 @@ mod refuse_walking_root_tests {
         assert!(
             msg.contains("home directory") || msg.contains("user root") || msg.contains(".ryeos"),
             "must refuse, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ingest_symlink_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ingest_user_space_skips_symlinks() {
+        // Set up a temp CAS store and a user .ai directory with a real
+        // file and a symlink (pointing outside the user root).
+        let cas_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path().to_path_buf());
+
+        let user_root = TempDir::new().unwrap();
+        let user_ai = user_root.path().join(".ai");
+        let directives_dir = user_ai.join("directives");
+        std::fs::create_dir_all(&directives_dir).unwrap();
+
+        // Real file.
+        std::fs::write(directives_dir.join("real.md"), "hello").unwrap();
+
+        // File outside user root (simulating ~/.ssh/id_rsa).
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret"), "sensitive").unwrap();
+
+        // Symlink under directives/ pointing at the outside file.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path().join("secret"), directives_dir.join("exfil.md"))
+            .unwrap();
+        #[cfg(not(unix))]
+        {
+            // Symlink support is Unix-only in practice for this test;
+            // skip on non-Unix.
+            return;
+        }
+
+        let mut items = HashMap::new();
+        ingest_user_dir_for_push(&cas, &user_ai, &user_ai, &mut items).unwrap();
+
+        // "real.md" should be in the manifest.
+        assert!(
+            items.keys().any(|k| k.contains("real.md")),
+            "real file must be ingested, got keys: {:?}",
+            items.keys().collect::<Vec<_>>()
+        );
+
+        // "exfil.md" must NOT be in the manifest.
+        assert!(
+            !items.keys().any(|k| k.contains("exfil.md")),
+            "symlink must be skipped, got keys: {:?}",
+            items.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ingest_user_space_skips_symlinked_subdir() {
+        // A symlinked directory should not be recursed into.
+        let cas_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path().to_path_buf());
+
+        let user_root = TempDir::new().unwrap();
+        let user_ai = user_root.path().join(".ai");
+        let directives_dir = user_ai.join("directives");
+        std::fs::create_dir_all(&directives_dir).unwrap();
+
+        // Directory outside user root with a file in it.
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(outside.path().join("sub")).unwrap();
+        std::fs::write(outside.path().join("sub").join("leaked.txt"), "oops").unwrap();
+
+        // Symlinked directory under directives/.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path().join("sub"), directives_dir.join("leaky-dir"))
+            .unwrap();
+        #[cfg(not(unix))]
+        {
+            return;
+        };
+
+        let mut items = HashMap::new();
+        ingest_user_dir_for_push(&cas, &user_ai, &user_ai, &mut items).unwrap();
+
+        // Nothing from the symlinked dir should appear.
+        assert!(
+            !items.keys().any(|k| k.contains("leaked.txt") || k.contains("leaky-dir")),
+            "symlinked directory must be skipped, got keys: {:?}",
+            items.keys().collect::<Vec<_>>()
         );
     }
 }
