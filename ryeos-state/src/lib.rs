@@ -13,6 +13,7 @@ pub mod head_cache;
 pub mod ignore;
 pub mod locators;
 pub mod objects;
+pub mod project_discovery;
 pub mod projection;
 pub mod queries;
 pub mod reachability;

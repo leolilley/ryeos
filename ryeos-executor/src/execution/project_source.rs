@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -209,6 +209,53 @@ pub fn resolve_project_context(
 /// Lives here (not in `ryeos-api`) so the helper below can recognise
 /// it without cross-crate dependencies.
 pub const NO_PROJECT_SENTINEL: &str = "__no_project__";
+
+/// Caller-supplied intent for the project root of a remote operation.
+///
+/// By the time a request reaches the daemon this MUST already be one
+/// of the concrete modes — no `Auto` variant. Auto-discovery from cwd
+/// is a *client-side* concern (the daemon's cwd is irrelevant to the
+/// caller). The CLI runs `discover_project_root` before sending and
+/// turns the result into either `Explicit` (an absolute, existing
+/// path) or `NoProject` (the operator passed `--no-project` or no
+/// marker was found and they opted out explicitly).
+///
+/// Wire format is tagged so future variants (e.g. `Snapshot { hash }`)
+/// extend cleanly without breaking old clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectPathSpec {
+    /// `--no-project` mode: skip project ingest entirely. Identity is
+    /// still per-principal under the `NO_PROJECT_SENTINEL` so two
+    /// different operators don't collide on HEAD state.
+    NoProject,
+    /// Explicit absolute project root. The CLI canonicalizes before
+    /// sending. The daemon re-validates via `canonical_project_ref`
+    /// as defence in depth.
+    Explicit { path: PathBuf },
+}
+
+impl ProjectPathSpec {
+    /// The string form used for `canonical_project_ref` lookups.
+    /// Returns `NO_PROJECT_SENTINEL` for `NoProject`, the path's
+    /// string for `Explicit`.
+    pub fn ref_string(&self) -> String {
+        match self {
+            Self::NoProject => NO_PROJECT_SENTINEL.to_string(),
+            Self::Explicit { path } => path.to_string_lossy().to_string(),
+        }
+    }
+
+    /// `Some(path)` for `Explicit`, `None` for `NoProject`. Used by
+    /// the push pipeline which only walks the filesystem in `Explicit`
+    /// mode.
+    pub fn as_path(&self) -> Option<&Path> {
+        match self {
+            Self::NoProject => None,
+            Self::Explicit { path } => Some(path.as_path()),
+        }
+    }
+}
 
 /// Resolve a raw `project_path` string into the canonical reference
 /// string used everywhere identity keys are computed (push HEAD ref,

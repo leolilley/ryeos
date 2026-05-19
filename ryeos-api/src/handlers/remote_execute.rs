@@ -18,6 +18,7 @@ use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_app::ignore::IgnoreMatcher;
+use ryeos_executor::execution::project_source::ProjectPathSpec;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,9 +28,17 @@ pub struct Request {
     pub remote: String,
     /// Item to execute (canonical ref).
     pub item_ref: String,
-    /// Project path on the remote.
-    #[serde(default = "default_project_path")]
-    pub project_path: String,
+    /// `--no-project` flag from the CLI. Mutually exclusive with
+    /// `project`. The two flat fields are translated into a
+    /// `ProjectPathSpec` inside the handler.
+    #[serde(default)]
+    pub no_project: bool,
+    /// `--project <abs>` from the CLI. The CLI is responsible for
+    /// running `discover_project_root` and canonicalizing the result
+    /// — by the time the request reaches the daemon this MUST be an
+    /// absolute path (or absent in `--no-project` mode).
+    #[serde(default)]
+    pub project: Option<PathBuf>,
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
@@ -37,13 +46,6 @@ pub struct Request {
 
 fn default_remote() -> String {
     "default".to_string()
-}
-
-fn default_project_path() -> String {
-    // Empty string triggers auto-discovery. The handler will walk up
-    // from cwd looking for a project marker (.ai/, .ryeos-project, .git).
-    // If none found and no explicit -p was given, it errors out.
-    String::new()
 }
 
 // `--no-project` sentinel value re-exported from the shared
@@ -55,56 +57,51 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     let client = RemoteClient::from_named_remote(&state, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
 
-    // Resolve project path using the three-mode algorithm:
-    // 1. --no-project (__no_project__ sentinel): skip project entirely
-    // 2. Explicit -p <path>: canonicalize and validate
-    // 3. Empty/default: auto-discover from cwd
-    let (abs_project_path, project_path_for_ref) = if req.project_path == NO_PROJECT_SENTINEL {
-        // Mode 1: --no-project — no project ingest, user space only
-        (None, NO_PROJECT_SENTINEL.to_string())
-    } else if req.project_path.is_empty() {
-        // Mode 3: auto-discover from cwd
-        let cwd = std::env::current_dir()
-            .map_err(|e| HandlerError::Internal(format!("cwd: {e}")))?;
-        let discovered = ryeos_app::project_discovery::discover_project_root(&cwd)
-            .map_err(|e| HandlerError::Internal(format!("project discovery: {e}")))?;
-        match discovered {
-            Some(root) => {
-                let canonical = root.canonicalize()
-                    .map_err(|e| HandlerError::BadRequest(format!(
-                        "cannot canonicalize discovered project path '{}': {e}",
-                        root.display()
-                    )))?;
-                let ref_str = canonical.to_string_lossy().to_string();
-                (Some(canonical), ref_str)
-            }
-            None => {
+    // Build the project spec from the two flat CLI fields. Validation:
+    //  - exactly one of `--no-project` / `--project` must be supplied
+    //  - in `Explicit` mode, the path must be absolute (the CLI is
+    //    responsible for canonicalising before sending)
+    //  - the path must canonicalize on the daemon side too (defence in
+    //    depth — guards against a misbehaved client)
+    let project_spec = match (req.no_project, req.project.as_ref()) {
+        (true, Some(_)) => {
+            return Err(HandlerError::BadRequest(
+                "cannot pass both --no-project and --project: choose one".into(),
+            ));
+        }
+        (true, None) => ProjectPathSpec::NoProject,
+        (false, Some(p)) => ProjectPathSpec::Explicit { path: p.clone() },
+        (false, None) => {
+            return Err(HandlerError::BadRequest(
+                "must pass --project <abs> or --no-project. The daemon does \
+                 NOT auto-discover from its own cwd; the CLI runs \
+                 discover_project_root before sending."
+                    .into(),
+            ));
+        }
+    };
+
+    let (abs_project_path, project_path_for_ref) = match &project_spec {
+        ProjectPathSpec::NoProject => (None, NO_PROJECT_SENTINEL.to_string()),
+        ProjectPathSpec::Explicit { path } => {
+            if !path.is_absolute() {
                 return Err(HandlerError::BadRequest(format!(
-                    "not in a project. No project marker (.ai/, .ryeos-project, .git) \
-                     found walking up from '{}'. Pass -p <path> explicitly, or use \
-                     --no-project to skip project ingest.",
-                    cwd.display()
+                    "project '{}' is not absolute: the CLI must \
+                     canonicalize before sending. The daemon's cwd is \
+                     irrelevant to the caller.",
+                    path.display()
                 )));
             }
+            let canonical = path.canonicalize().map_err(|e| {
+                HandlerError::BadRequest(format!(
+                    "cannot canonicalize project path '{}': {e}. \
+                     Ensure the path exists and is accessible.",
+                    path.display()
+                ))
+            })?;
+            let ref_str = canonical.to_string_lossy().to_string();
+            (Some(canonical), ref_str)
         }
-    } else {
-        // Mode 2: explicit -p <path>
-        let project_path = PathBuf::from(&req.project_path);
-        let abs = if project_path.is_absolute() {
-            project_path
-        } else {
-            std::env::current_dir()
-                .map_err(|e| HandlerError::Internal(format!("cwd: {e}")))?
-                .join(&project_path)
-        };
-        let canonical = abs.canonicalize()
-            .map_err(|e| HandlerError::BadRequest(format!(
-                "cannot canonicalize project path '{}': {e}. \
-                 Ensure the path exists and is accessible.",
-                abs.display()
-            )))?;
-        let ref_str = canonical.to_string_lossy().to_string();
-        (Some(canonical), ref_str)
     };
 
     // Load remote's cached ignore rules (required — remote configure always

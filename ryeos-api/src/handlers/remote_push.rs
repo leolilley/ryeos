@@ -20,8 +20,10 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// Project path to push. Defaults to the caller's project_path.
-    pub project_path: Option<String>,
+    /// `--project <abs>` from the CLI. Required: pushing nothing
+    /// is a no-op so `--no-project` is not accepted here. CLI must
+    /// canonicalize before sending.
+    pub project: PathBuf,
 }
 
 fn default_remote() -> String {
@@ -31,27 +33,22 @@ fn default_remote() -> String {
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let client = RemoteClient::from_named_remote(&state, &req.remote)?;
 
-    // §0a: canonicalize project_path the same way remote_execute does,
-    // so push HEAD ref keys agree with what execute later reads.
-    let raw_path = req.project_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!(
-            "remote_push requires --project-path. Pass `-p <path>` explicitly; \
-             defaulting to cwd was removed because the daemon's cwd is \
-             irrelevant to the caller."
-        ))?;
-    let project_path = PathBuf::from(raw_path);
-    let abs_project_path = if project_path.is_absolute() {
-        project_path
-    } else {
-        std::env::current_dir()?.join(&project_path)
-    };
-    let canonical_abs = abs_project_path.canonicalize()
-        .map_err(|e| anyhow::anyhow!(
-            "cannot canonicalize project_path '{}': {}. Ensure the path \
+    let path = &req.project;
+    if !path.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "project '{}' is not absolute: the CLI must canonicalize \
+             before sending. The daemon's cwd is irrelevant to the caller.",
+            path.display()
+        ));
+    }
+    let canonical_abs = path.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "cannot canonicalize project '{}': {}. Ensure the path \
              exists and is accessible.",
-            abs_project_path.display(), e
-        ))?;
+            path.display(),
+            e
+        )
+    })?;
     let project_path_for_ref = canonical_abs.to_string_lossy().to_string();
     let abs_project_path = canonical_abs;
 

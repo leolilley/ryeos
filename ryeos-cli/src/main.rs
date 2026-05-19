@@ -6,6 +6,7 @@ mod error;
 mod exit;
 mod help;
 mod local_verbs;
+mod project_resolve;
 mod transport;
 
 fn init_tracing(debug: bool) {

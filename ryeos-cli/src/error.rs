@@ -83,4 +83,10 @@ pub enum CliError {
     /// These run in-process without daemon dispatch.
     #[error("{detail}")]
     Local { detail: String },
+
+    /// Client-side project-path resolution failed: discovery returned
+    /// nothing and no `--no-project` / `--project` was provided, or the
+    /// provided path could not be canonicalized.
+    #[error("project resolution: {0}")]
+    ProjectResolution(String),
 }

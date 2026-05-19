@@ -14,6 +14,7 @@ impl CliError {
             CliError::UnknownVerb { .. } => EX_USAGE,
             CliError::Io(_) => EX_SOFTWARE,
             CliError::Local { .. } => 1,
+            CliError::ProjectResolution(_) => EX_USAGE,
         }
     }
 }

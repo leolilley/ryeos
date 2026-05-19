@@ -103,14 +103,40 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     // 6. Token dispatch — send tokens to daemon, it resolves via alias
     //    registry and binds tail parameters server-side.
+    //
+    //    For verbs that take a project root (`remote execute`,
+    //    `remote push`), CLI-side rewrite injects a canonical
+    //    `--project <abs>` or `--no-project` into the tail. The daemon
+    //    cannot do this — its cwd is irrelevant to the caller.
+    let tokens = if crate::project_resolve::verb_needs_project_resolution(&cli.rest) {
+        rewrite_remote_verb_tail(&cli.rest)?
+    } else {
+        cli.rest.clone()
+    };
+
     let body = serde_json::json!({
-        "tokens": cli.rest,
+        "tokens": tokens,
         "project_path": body_project_path,
     });
 
     let result = post_to_daemon(&system_space_dir, &body).await?;
     print_result(result);
     Ok(())
+}
+
+/// Rewrite a `remote execute` / `remote push` invocation by splitting
+/// the verb prefix off the tail, resolving the project flags, and
+/// reassembling. Pure transform around
+/// [`crate::project_resolve::rewrite_project_tail`].
+fn rewrite_remote_verb_tail(rest: &[String]) -> Result<Vec<String>, CliError> {
+    // Verb prefix is always the first two tokens for `remote execute`
+    // / `remote push`. The matcher above already verified the shape.
+    let (prefix, tail) = rest.split_at(2);
+    let new_tail = crate::project_resolve::rewrite_project_tail(tail)?;
+    let mut out = Vec::with_capacity(prefix.len() + new_tail.len());
+    out.extend_from_slice(prefix);
+    out.extend(new_tail);
+    Ok(out)
 }
 
 /// POST a JSON body to the daemon's /execute endpoint and return the response.

@@ -585,29 +585,40 @@ fn gate_17_trust_store_loads() {
     );
 }
 
-// ── Gate 18: remote execute default project_path triggers auto-discovery ──
+// ── Gate 18: remote execute project spec defaults reject implicit cwd ──
 //
-// Previously this gate pinned a `"."` default. That was wrong: defaulting
-// to cwd silently ingested whatever directory the daemon happened to be
-// in. The new behaviour: an empty/missing project_path triggers the
-// client-side auto-discovery walk (.ai/ > .ryeos-project > .git). If no
-// marker is found, `remote execute` hard-errors instead of ingesting an
-// arbitrary directory.
+// History: the original gate pinned `"."` as the project_path default.
+// That was wrong — defaulting to cwd silently ingested whatever
+// directory the daemon happened to be in. The intermediate fix made
+// it empty-string-as-auto-discover, but discovery walking the
+// *daemon's* cwd is still wrong: the daemon's cwd has nothing to do
+// with the operator's.
 //
-// This gate verifies that the Request struct's default is empty (so the
-// handler takes the auto-discovery path), NOT `"."`.
+// Current contract: there is NO default project mode. The CLI runs
+// `discover_project_root` against ITS own cwd and injects either
+// `--project <abs>` or `--no-project` into the tail. By the time the
+// daemon sees the Request, `no_project` must be true OR `project`
+// must be `Some(abs path)`. Both unset → bad request.
+//
+// This gate verifies the deserialised defaults (`no_project=false`,
+// `project=None`) and that the resulting "implicit" combination is
+// rejected at handler time.
 
 #[test]
-fn gate_18_project_path_default_is_empty_not_dot() {
-    // The default_project_path fn returns String::new() so the handler
-    // can distinguish "not given" from an explicit value.
+fn gate_18_remote_execute_request_defaults() {
+    // With nothing set, both flag fields default and the handler will
+    // reject the combination — the CLI must have set one of them.
     let req: ryeos_api::handlers::remote_execute::Request =
         serde_json::from_value(serde_json::json!({
             "item_ref": "directive:some/test",
         }))
         .expect("Request with only item_ref must parse");
-    assert_eq!(
-        req.project_path, "",
-        "default project_path must be empty (triggers auto-discovery), not '.'"
+    assert!(
+        !req.no_project,
+        "no_project must default to false (the CLI must set it explicitly for --no-project mode)"
+    );
+    assert!(
+        req.project.is_none(),
+        "project must default to None (the CLI must canonicalize and pass it explicitly)"
     );
 }

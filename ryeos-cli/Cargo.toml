@@ -30,6 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lillux         = { path = "../lillux" }
 ryeos-engine   = { path = "../ryeos-engine" }
 ryeos-runtime  = { path = "../ryeos-runtime" }
+ryeos-state    = { path = "../ryeos-state" }
 ryeos-tools    = { path = "../ryeos-tools" }
 
 [dev-dependencies]
