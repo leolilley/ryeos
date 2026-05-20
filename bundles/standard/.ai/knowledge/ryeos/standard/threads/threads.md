@@ -25,7 +25,7 @@ created → running → completed
 - **running** — subprocess active, events streaming
 - **completed** — execution finished successfully, result captured
 - **failed** — execution errored out
-- **cancelled** — operator cancelled via `ryeos thread cancel <id>`
+- **cancelled** — operator cancelled via `ryeos commands submit <id> cancel` or HTTP cancellation
 
 ## Thread IDs
 
@@ -78,10 +78,14 @@ Threads can have parent-child relationships:
 
 ## Cancellation
 
-Threads can be cancelled via `ryeos thread cancel <id>` or the HTTP
-endpoint. The daemon sends SIGTERM to the subprocess, waits
+Threads can be cancelled via `ryeos commands submit <id> cancel` or the HTTP
+`POST /threads/{thread_id}/cancel` endpoint. The daemon sends SIGTERM to the subprocess, waits
 `cancellation_grace_secs` (default 5s), then SIGKILL if still running.
 
 Cancellation mode is configurable in `config/execution/execution.yaml`:
 - `graceful` — SIGTERM → grace period → SIGKILL
 - `immediate` — SIGKILL immediately
+
+## Remote thread inspection
+
+Use `ryeos remote threads` and `ryeos remote thread-status` to inspect threads on another node. See [Remote Command Reference](../../core/remote/remote-command-reference.md).

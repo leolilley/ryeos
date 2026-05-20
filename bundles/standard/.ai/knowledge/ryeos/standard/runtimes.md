@@ -64,7 +64,7 @@ the actual graph traversal.
 4. Persists state at each step (CAS snapshots)
 5. Supports resume from persisted state after interruption
 
-See `knowledge:ryeos/core/graphs` for the full graph YAML format.
+See [Graphs](graphs/graphs.md) for the full graph YAML format.
 
 ## Knowledge Runtime (`runtime:knowledge-runtime`)
 

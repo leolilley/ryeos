@@ -50,7 +50,7 @@ When resolving `kind:path/to/item`, the engine searches three spaces
 in order:
 
 1. **Project** — `<project_root>/.ai/<kind_dir>/path/to/item.*`
-2. **User** — `~/.ai/<kind_dir>/path/to/item.*`
+2. **User** — `~/.ryeos/.ai/<kind_dir>/path/to/item.*`
 3. **System** — Each installed bundle's `.ai/<kind_dir>/path/to/item.*`
 
 First match wins. If no match is found, the engine returns a

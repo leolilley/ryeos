@@ -29,7 +29,7 @@ ryeos init [--source <dir>] [--system-space-dir <dir>] [--user-root <dir>]
 |------|---------|-------------|
 | `--source` | `/usr/share/ryeos` | Directory containing bundle subdirectories |
 | `--system-space-dir` | XDG data dir / ryeos | Daemon state and installed bundles |
-| `--user-root` | `$HOME` | User space root |
+| `--user-root` | `~/.ryeos` | User space root (parent of `.ai/`) |
 | `--trust-file` | (none) | Additional publisher trust docs to pin (repeatable) |
 
 Init is **idempotent** — running it again preserves keys, atomically
@@ -157,22 +157,29 @@ Print the daemon's node identity public key.
 
 ## Remote Operations
 
-Remote verbs are core daemon-control verbs:
+Remote verbs are core daemon-control verbs for cross-node transfer,
+execution, authorization, thread inspection, live bundle install, and
+vault proxy operations.
 
-- `ryeos remote configure`
+See [Remote Command Reference](../remote/remote-command-reference.md)
+for syntax, examples, required local capabilities, remote authorized-key
+scopes, HTTP routes, outputs, and failure modes.
+
+Quick list:
+
+- `ryeos remote configure --remote <name> --url <url>`
 - `ryeos remote list`
-- `ryeos remote status`
-- `ryeos remote push`
-- `ryeos remote pull`
-- `ryeos remote execute`
-- `ryeos remote authorize`
-- `ryeos remote threads`
-- `ryeos remote thread-status`
-- `ryeos remote bundle-install`
-- `ryeos remote vault-set`, `vault-list`, `vault-delete`
-
-These wrap daemon-only remote services for cross-node transfer, execution,
-authorization, thread inspection, bundle install, and vault operations.
+- `ryeos remote status --remote <name>`
+- `ryeos remote authorize --remote <name> --public-key <key> --label <label> --scopes <cap>`
+- `ryeos remote push --remote <name> --project <abs-path>`
+- `ryeos remote pull --remote <name> --hashes <hash>... [--output-dir <dir>]`
+- `ryeos remote execute --remote <name> --item-ref <ref> (--project <abs-path> | --no-project)`
+- `ryeos remote threads --remote <name> [--limit <n>]`
+- `ryeos remote thread-status --remote <name> --thread-id <id>`
+- `ryeos remote bundle-install --remote <name> --bundle-name <bundle>`
+- `ryeos remote vault-set --remote <name> --name <key> --value <value>`
+- `ryeos remote vault-list --remote <name>`
+- `ryeos remote vault-delete --remote <name> --name <key>`
 
 ## Vault Operations
 

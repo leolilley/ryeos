@@ -15,8 +15,13 @@ description: >
 Remote operations allow one ryeos node to execute items, push/pull
 CAS objects, and synchronize bundles with another node over HTTPS.
 
-See also: [Identity Model](../identity-model.md) for the four trust
-layers and request authentication flow.
+See also:
+
+- [Remote Command Reference](remote-command-reference.md) for command syntax, examples, capabilities, scopes, routes, and failure modes.
+- [Identity Model](../identity-model.md) for the four trust layers and request authentication flow.
+- [Spaces](../spaces.md) for project/user/system resolution.
+- [Execution Provenance](../execution/provenance.md) for local vs pushed-head execution source invariants.
+- [HTTP API](../node/http-api.md) and [Services: remote](../services/remote.md) for route/service mappings.
 
 ## v1 Trust Boundary
 
@@ -30,8 +35,9 @@ untrusted tenants.
 - All remote requests are signed with the **caller's node Ed25519 key**
   (not the user/CLI key); the remote node verifies the signature against
   its authorized-keys trust store.
-- Granting the `remote.admin` capability is operator-level access in
-  v1 — there is no per-action isolation between remote subcommands.
+- Granting the local `remote.admin` capability is operator-level access
+  to high-impact remote orchestrators in v1. It does not replace
+  target-node authorized-key scopes.
 
 ## Identity Requirements
 
@@ -53,39 +59,46 @@ the user CLI key. This means:
 
 ### On the remote node
 
-1. **Bootstrap**: `ryeos init` (generates node signing key, vault key,
-   bootstrap authorized key for the local operator).
+1. **Bootstrap**: run `ryeos init` so the remote has node identity,
+   vault key material, local operator authorization, and installed
+   bundles.
 
-2. **Authorize the caller's node key**: The remote operator needs the
-   caller's node public key (in `ed25519:<base64>` format). This is
-   obtained by running `ryeos identity public-key` on the caller node.
+2. **Authorize the caller node key**: the remote operator needs the
+   caller node public key in `ed25519:<base64>` form. The caller gets it
+   with:
+
+   ```bash
+   ryeos identity public-key
+   ```
+
+   The remote operator can then grant explicit scopes locally:
 
    ```bash
    ryeos authorize-key \
      --public-key "ed25519:<caller_node_pubkey_b64>" \
      --label "dev-machine" \
-      --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head,ryeos.execute.service.authorize.key"
-```
+     --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+   ```
 
-    The scopes listed above are the minimum required for the `remote
-    execute` push → execute → pull pipeline. The remote's
-    `objects.has`, `objects.put`, `objects.get`, and `push.head`
-    endpoints each check their own capability.
+3. **Choose scopes by operation**. Do not mix local remote-service caps
+   with remote authorized-key scopes. The complete matrix is in
+   [Remote Command Reference](remote-command-reference.md#authority-matrix).
 
- 3. **(Optional) Narrower scopes for specific operations**:
+   Common remote-side scopes:
 
-   | Operation | Required scopes (canonical) |
-   |-----------|-----------------------------|
-   | `remote execute` (full pipeline) | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.objects.get`, `ryeos.execute.service.push.head`, `ryeos.execute.service.authorize.key` |
+   | Operation | Remote scopes on target |
+   |-----------|-------------------------|
    | `remote push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push.head` |
    | `remote pull` | `ryeos.execute.service.objects.get` |
-   | `remote vault-set/list/delete` | `ryeos.execute.service.vault.set`, `ryeos.execute.service.vault.list`, `ryeos.execute.service.vault.delete` |
-   | `remote threads/thread-status` | (authenticated; threads are per-principal isolated) |
+   | `remote execute` | push scopes + `ryeos.execute.service.objects.get` + whatever caps the executed item requires |
+   | `remote authorize` | `ryeos.execute.service.authorize.key` |
    | `remote bundle-install` | `ryeos.execute.service.bundle.export`, `ryeos.execute.service.objects.get` |
+   | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
+   | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
 
    Short-form scopes like `bundle.install` will never authorize a
-   handler — the matcher does not auto-prefix and the daemon's
-   auth loader refuses to load TOMLs that contain them.
+   handler — the matcher does not auto-prefix and the daemon's auth
+   loader refuses to load TOMLs that contain them.
 
 ### On the caller node
 
@@ -95,8 +108,8 @@ the user CLI key. This means:
    ryeos remote configure --remote production --url https://ryeos.example.com
    ```
 
-   This discovers the remote's public key, vault fingerprint, and
-   caches its ingest-ignore rules.
+   This discovers the remote's public key, principal id, vault
+   fingerprint, and ingest-ignore rules.
 
 ## End-to-End Workflow
 
@@ -115,7 +128,7 @@ ryeos remote configure --remote prod --url https://ryeos.example.com
 ryeos authorize-key \
   --public-key "ed25519:<caller_node_pubkey_b64>" \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head,ryeos.execute.service.authorize.key"
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
 
 # ── Back on the CALLER node ──
 
@@ -206,7 +219,7 @@ ryeos remote pull --remote production --hashes abc123 --output-dir /tmp/objects
 ```
 
 **Fail-closed**: aborts if any requested hash is missing. No partial fetches.
-Required capability: `ryeos.execute.service.objects.get`
+Local capability and remote target scope: `ryeos.execute.service.objects.get`
 
 ### Remote Bundle Install
 
@@ -221,14 +234,15 @@ ryeos remote bundle-install --remote production --bundle-name standard
 - Preflight failure → clean up partial directory.
 - No registration written unless preflight passes.
 
-Required capabilities: `ryeos.execute.service.bundle.install`,
-`ryeos.execute.service.bundle.export`, `ryeos.execute.service.objects.get`
+Local capability: `ryeos.execute.service.bundle.install`.
+Remote scopes on the target: `ryeos.execute.service.bundle.export`,
+`ryeos.execute.service.objects.get`.
 
 ### Bundle Export (server-side)
 
 Walk an installed bundle's tree, ingest files into CAS, return manifest.
 Called automatically by `remote bundle-install` — not invoked directly.
-Required capability: `ryeos.execute.service.bundle.export`
+Remote target scope: `ryeos.execute.service.bundle.export`
 
 ## Additional Remote Commands
 
@@ -359,7 +373,7 @@ dispatcher (inline only).
 
 ### New user root: `~/.ryeos/`
 
-The user-space root is `~/.ryeos/` (was `~/.ai/`). All user-tier items
+The user-space root is `~/.ryeos/` (historically `~/.ai/`). All user-tier items
 (directives, tools, knowledge, trust pins) live under
 `~/.ryeos/.ai/`.
 

@@ -17,9 +17,9 @@ Every executable item must be signed before the daemon will run it.
 
 | Key | Purpose | Location |
 |-----|---------|----------|
-| **User key** | Operator identity — CLI auth, signing user/project items | `~/.ai/config/keys/signing/private_key.pem` |
+| **User key** | Operator identity — CLI auth, signing user/project items | `~/.ryeos/.ai/config/keys/signing/private_key.pem` |
 | **Node key** | Daemon identity — bundle registrations, node config | `<system>/.ai/node/identity/private_key.pem` |
-| **Publisher key** | Bundle author identity — signs items in published bundles | Pinned in `~/.ai/config/keys/trusted/` |
+| **Publisher key** | Bundle author identity — signs items in published bundles | Pinned in `~/.ryeos/.ai/config/keys/trusted/` |
 
 The user key and node key are generated at `ryeos init` time. The
 publisher key is **hardcoded in the binary** and pinned during init
@@ -66,7 +66,7 @@ message telling you exactly what to fix.
 
 ## Trust Store
 
-The trust store lives in `~/.ai/config/keys/trusted/` and contains
+The trust store lives in `~/.ryeos/.ai/config/keys/trusted/` and contains
 Ed25519 public keys indexed by SHA-256 fingerprint:
 
 ```toml

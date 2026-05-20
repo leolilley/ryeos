@@ -18,14 +18,14 @@ and lifecycle.
 
 | Layer | Purpose | Storage | Created by |
 |-------|---------|---------|------------|
-| **Publisher trust** | Verify signed bundle items | `~/.ai/config/keys/trusted/<fp>.toml` | `ryeos trust pin` |
-| **User (CLI) key** | Sign local HTTP requests from CLI to your own daemon | `~/.ai/config/keys/signing/private_key.pem` | `ryeos init` |
+| **Publisher trust** | Verify signed bundle items | `~/.ryeos/.ai/config/keys/trusted/<fp>.toml` | `ryeos trust pin` |
+| **User (CLI) key** | Sign local HTTP requests from CLI to your own daemon | `~/.ryeos/.ai/config/keys/signing/private_key.pem` | `ryeos init` |
 | **Node (daemon) key** | Sign outbound HTTP requests to remote daemons; sign authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem` | `ryeos init` or daemon auto-init |
 | **Vault X25519** | Seal/unseal vault secrets (XChaCha20-Poly1305 envelopes) | `<system>/.ai/node/vault/private_key.pem` | `ryeos init` or daemon auto-init |
 
 ### Publisher trust
 
-The operator trust store at `~/.ai/config/keys/trusted/` holds the public
+The operator trust store at `~/.ryeos/.ai/config/keys/trusted/` holds the public
 keys of publishers whose signed bundle items will be accepted. Each
 entry is a TOML file named by fingerprint, signed by the key it
 declares (self-signature).
@@ -57,7 +57,7 @@ The daemon's Ed25519 identity. Used for:
    authorized-key entries with its node key so they can be verified
    on next boot.
 3. **Self-trust** — the node key's public half is pinned in
-   `~/.ai/config/keys/trusted/` so daemon-written node-config items
+   `~/.ryeos/.ai/config/keys/trusted/` so daemon-written node-config items
    verify on subsequent boots.
 
 **Critical for remote operations**: when a remote daemon receives an
@@ -116,7 +116,7 @@ authorize the caller's **node key**:
 ryeos authorize-key \
   --public-key "ed25519:<CALLER_NODE_PUBKEY_B64>" \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.remote.admin,..."
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
 ```
 
 The fingerprint to authorize is the SHA-256 of the caller's **node**
@@ -140,7 +140,7 @@ ryeos identity public-key
 
 ### Local (CLI → daemon)
 
-1. CLI resolves user signing key from `~/.ai/config/keys/signing/`
+1. CLI resolves user signing key from `~/.ryeos/.ai/config/keys/signing/`
 2. CLI signs `POST /execute` with Ed25519(user_key, sha256(canonical_request))
 3. Daemon verifies against `authorized_keys/<fp>.toml`
 4. Scopes from the TOML are the caller's effective capabilities

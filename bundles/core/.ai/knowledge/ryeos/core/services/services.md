@@ -1,184 +1,162 @@
 ---
 category: ryeos/core
 tags: [reference, services, daemon, in-process]
-version: "1.1.0"
+version: "1.2.0"
 description: >
-  The in-process service layer — all daemon services,
-  their endpoints, and capabilities.
+  The in-process service layer — daemon services, endpoints,
+  capabilities, and exposure modes.
 ---
 
 # Services
 
-Services are in-process daemon endpoints. Unlike tools (subprocess),
-services run inside the daemon process with no spawn overhead.
+Services are in-process daemon endpoints. Unlike tools, services run
+inside the daemon process with no subprocess spawn overhead. A service
+can be exposed through `/execute`, through a dedicated HTTP route,
+through a CLI verb/alias, or through multiple surfaces at once.
 
-## Service Categories
+Service descriptors live under `.ai/services/`; the Rust handlers live
+under `crates/services/api/src/handlers/` and export `DESCRIPTOR`
+records consumed by the daemon registry.
 
-### Bundle Services
-Manage installed bundles.
+## Bundle Services
 
-| Service                | Endpoint              | Caps Required                          |
-|------------------------|-----------------------|----------------------------------------|
-| `bundle/install`       | `bundle.install`      | `ryeos.execute.service.bundle.install` |
-| `bundle/export`        | `bundle.export`       | `ryeos.execute.service.bundle.export`  |
-| `bundle/list`          | `bundle.list`         | none                                   |
-| `bundle/remove`        | `bundle.remove`       | `ryeos.execute.service.bundle.remove`  |
+| Service | Endpoint | Caps Required |
+|---|---|---|
+| `bundle/install` | `bundle.install` | `ryeos.execute.service.bundle.install` |
+| `bundle/export` | `bundle.export` | `ryeos.execute.service.bundle.export` |
+| `bundle/list` | `bundle.list` | none |
+| `bundle/remove` | `bundle.remove` | `ryeos.execute.service.bundle.remove` |
 
-Bundle install and remove are **offline-only** (daemon must be stopped).
-Bundle export is **daemon-only** — walks the bundle tree and ingests
-files into the node's CAS for cross-node transfer.
+Local bundle install/remove are offline-only. `bundle/export` is
+daemon-only and is used by remote bundle installation to export bundle
+file hashes through CAS.
 
-### Thread Services
-Query and manage execution threads.
+## Core System Services
 
-| Service                | Endpoint              | Caps Required |
-|------------------------|-----------------------|---------------|
-| `threads/list`         | `threads.list`        | none          |
-| `threads/get`          | `threads.get`         | none          |
-| `threads/children`     | `threads.children`    | none          |
-| `threads/chain`        | `threads.chain`       | none          |
+| Service | Endpoint | Caps Required |
+|---|---|---|
+| `fetch` | `fetch` | `ryeos.execute.service.fetch` |
+| `verify` | `verify` | `ryeos.execute.service.verify` |
+| `node-sign` | `node-sign` | `ryeos.execute.service.node_sign` |
+| `rebuild` | `rebuild` | `ryeos.execute.service.rebuild` |
+| `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance.gc` |
+| `health/status` | `health.status` | none |
+| `identity/public_key` | `identity.public_key` | none |
+| `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.authorize.key` |
+| `system/status` | `system.status` | none |
+| `system/ingest-ignore` | `system.ingest-ignore` | none |
+| `system/push-head` | `system.push-head` | `ryeos.execute.service.push.head` |
 
-### Event Services
-Replay persisted thread events.
+`health/status`, `identity/public_key`, and `system/ingest-ignore` back
+unauthenticated discovery routes. Mutating routes such as
+`identity/authorize-key` and `system/push-head` require signed auth plus
+the listed capability.
 
-| Service                | Endpoint              | Caps Required |
-|------------------------|-----------------------|---------------|
-| `events/replay`        | `events.replay`       | none          |
-| `events/chain_replay`  | `events.chain_replay` | none          |
+## Object Services
 
-### Scheduler Services
-CRUD operations for scheduled executions.
+| Service | Endpoint | Caps Required |
+|---|---|---|
+| `objects/has` | `objects.has` | `ryeos.execute.service.objects.has` |
+| `objects/put` | `objects.put` | `ryeos.execute.service.objects.put` |
+| `objects/get` | `objects.get` | `ryeos.execute.service.objects.get` |
 
-| Service                | Endpoint              | Caps Required                                    |
-|------------------------|-----------------------|--------------------------------------------------|
-| `scheduler/register`   | `scheduler.register`  | `ryeos.execute.service.scheduler.register`       |
-| `scheduler/list`       | `scheduler.list`      | `ryeos.execute.service.scheduler/list`           |
-| `scheduler/deregister` | `scheduler.deregister`| `ryeos.execute.service.scheduler.deregister`     |
-| `scheduler/pause`      | `scheduler.pause`     | `ryeos.execute.service.scheduler.pause`          |
-| `scheduler/resume`     | `scheduler.resume`    | `ryeos.execute.service.scheduler.resume`         |
-| `scheduler/show_fires` | `scheduler.show_fires`| `ryeos.execute.service.scheduler/show_fires`     |
+Object services read and write the node CAS. Remote push/pull, pushed
+HEAD execution, and remote bundle install all depend on these services.
+Object fetch flows fail closed when requested hashes are missing.
 
-### Core Services
+## Vault Services
 
-| Service                | Endpoint              | Caps Required                          |
-|------------------------|-----------------------|----------------------------------------|
-| `fetch`                | `fetch`               | `ryeos.execute.service.fetch`          |
-| `verify`               | `verify`              | `ryeos.execute.service.verify`         |
-| `node-sign`            | `node-sign`           | `ryeos.execute.service.node_sign`      |
-| `rebuild`              | `rebuild`             | `ryeos.execute.service.rebuild`        |
-| `maintenance/gc`       | `maintenance.gc`      | `ryeos.execute.service.maintenance.gc` |
-| `health/status`        | `health.status`       | none                                   |
-| `identity/public_key`  | `identity.public_key` | none                                   |
-| `system/status`        | `system.status`       | none                                   |
-| `ingest/ignore`        | `ingest.ignore`       | none                                   |
-| `commands/submit`      | `commands.submit`     | `ryeos.execute.service.commands.submit`|
+| Service | Endpoint | Caps Required |
+|---|---|---|
+| `vault/set` | `vault.set` | `ryeos.execute.service.vault.set` |
+| `vault/list` | `vault.list` | `ryeos.execute.service.vault.list` |
+| `vault/delete` | `vault.delete` | `ryeos.execute.service.vault.delete` |
 
-### Object Services
-CAS object operations.
+Vault services mutate or read the node vault. In v1, vault storage is a
+single node-level store protected by capabilities, not a per-principal
+namespace.
 
-| Service                | Endpoint              | Caps Required                          |
-|------------------------|-----------------------|----------------------------------------|
-| `objects/has`          | `objects.has`         | `ryeos.execute.service.objects.has`    |
-| `objects/put`          | `objects.put`         | `ryeos.execute.service.objects.put`    |
-| `objects/get`          | `objects.get`         | `ryeos.execute.service.objects.get`    |
+## Remote Services
 
-### Vault Services
-Sealed secret operations scoped to the caller's fingerprint.
+Remote services are daemon-only local orchestrators. They may call
+unauthenticated discovery routes, signed routes on a target daemon, or
+both. Keep local service caps separate from remote authorized-key scopes;
+see [Remote Command Reference](../remote/remote-command-reference.md)
+for the full matrix.
 
-| Service                | Endpoint              | Caps Required                          |
-|------------------------|-----------------------|----------------------------------------|
-| `vault/set`            | `vault.set`           | `ryeos.execute.service.vault.set`      |
-| `vault/list`           | `vault.list`          | `ryeos.execute.service.vault.list`     |
-| `vault/delete`         | `vault.delete`        | `ryeos.execute.service.vault.delete`   |
+| Service | Endpoint | Local Caps Required |
+|---|---|---|
+| `remote/configure` | `remote.configure` | `ryeos.execute.service.remote.configure` |
+| `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
+| `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
+| `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
+| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
+| `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |
+| `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote.admin` |
+| `remote/threads` | `remote.threads` | `ryeos.execute.service.remote.admin` |
+| `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote.admin` |
+| `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle.install` |
+| `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote.admin` |
+| `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote.admin` |
+| `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote.admin` |
 
-### Remote Services
-Cross-node operations. All are **daemon-only**.
+## Standard Thread/Event/Scheduler Services
 
-| Service                | Endpoint              | Caps Required                          |
-|------------------------|-----------------------|----------------------------------------|
-| `remote/configure`     | `remote.configure`    | `ryeos.execute.service.remote.configure`|
-| `remote/list`          | `remote.list`         | `ryeos.execute.service.remote.list`    |
-| `remote/status`        | `remote.status`       | `ryeos.execute.service.remote.status`  |
-| `remote/push`          | `remote.push`         | `ryeos.execute.service.remote.push`    |
-| `remote/pull`          | `remote.pull`         | `ryeos.execute.service.objects.get`    |
-| `remote/execute`       | `remote.execute`      | `ryeos.execute.service.remote.admin` |
-| `remote/authorize`     | `remote.authorize`    | `ryeos.execute.service.authorize.key`  |
-| `remote/threads`       | `remote.threads`      | `ryeos.execute.service.remote.threads` |
-| `remote/thread-status` | `remote.thread_status`| `ryeos.execute.service.remote.thread-status`|
-| `remote/bundle-install`| `remote.bundle_install`| `ryeos.execute.service.bundle.install`|
-| `remote/vault-set`     | `remote.vault_set`    | `ryeos.execute.service.vault.set`      |
-| `remote/vault-list`    | `remote.vault_list`   | `ryeos.execute.service.vault.list`     |
-| `remote/vault-delete`  | `remote.vault_delete` | `ryeos.execute.service.vault.delete`   |
+These are contributed by the standard bundle.
 
-`remote/pull` fetches CAS objects by hash from a remote node. Fail-closed:
-aborts if any requested hash is missing.
-
-`remote/bundle-install` installs a bundle from a remote via CAS pipeline.
-Fail-closed: aborts if any blob is missing, cleans up partial installs,
-runs preflight before registering.
-
-### Identity Services
-
-| Service                | Endpoint              | Caps Required                          |
-|------------------------|-----------------------|----------------------------------------|
-| `authorize-key`        | `authorize_key.set`   | `ryeos.execute.service.authorize.key`  |
+| Service | Endpoint | Caps Required |
+|---|---|---|
+| `threads/list` | `threads.list` | none |
+| `threads/get` | `threads.get` | none |
+| `threads/children` | `threads.children` | none |
+| `threads/chain` | `threads.chain` | none |
+| `threads/cancel` | `threads.cancel` | route-backed control surface |
+| `events/replay` | `events.replay` | none |
+| `events/chain_replay` | `events.chain_replay` | none |
+| `commands/submit` | `commands.submit` | `ryeos.execute.service.commands.submit` |
+| `scheduler/register` | `scheduler.register` | `ryeos.execute.service.scheduler.register` |
+| `scheduler/list` | `scheduler.list` | `ryeos.execute.service.scheduler/list` |
+| `scheduler/deregister` | `scheduler.deregister` | `ryeos.execute.service.scheduler.deregister` |
+| `scheduler/pause` | `scheduler.pause` | `ryeos.execute.service.scheduler.pause` |
+| `scheduler/resume` | `scheduler.resume` | `ryeos.execute.service.scheduler.resume` |
+| `scheduler/show_fires` | `scheduler.show_fires` | `ryeos.execute.service.scheduler/show_fires` |
 
 ## Service vs Tool
 
-| Aspect        | Service                 | Tool                      |
-|---------------|-------------------------|---------------------------|
-| Execution     | In-process              | Subprocess                |
-| Overhead      | Minimal                 | Fork + exec               |
-| Isolation     | Shared daemon memory    | Separate process          |
-| Protocol      | Direct function call    | Wire protocol             |
-| Use case      | Daemons ops, queries    | File ops, external commands|
-
-Services are best for daemon-internal operations (thread queries,
-bundle management, health checks). Tools are best for operations
-that need process isolation (file system, network, shell commands).
+| Aspect | Service | Tool |
+|---|---|---|
+| Execution | In-process | Subprocess |
+| Overhead | Minimal | Fork + exec |
+| Isolation | Shared daemon memory | Separate process |
+| Protocol | Direct function call | Runtime/tool wire protocol |
+| Best for | Daemon ops, queries, orchestration | External binaries, file/network/shell work |
 
 ## Exposure modes
-
-Invariant: a service descriptor may be exposed by an HTTP route, a node
-verb/alias, both, or neither; the descriptor itself is the executable
-unit, while routes and verbs are user-facing entry points.
 
 ### Route-backed services
 
 Route-backed services have a descriptor under `.ai/services/` and an
-HTTP route under `.ai/node/routes/`. Examples include:
+HTTP route under `.ai/node/routes/`. Examples:
 
 - `service:system/push-head` via `/push-head`
 - `service:objects/get` via `/objects/get`
 - `service:threads/list` via `/threads`
 
-The Rust handler lives under `crates/services/api/src/handlers/`, and the signed
-route descriptor maps the HTTP surface to that service.
-
 ### Verb-backed services
 
 Verb-backed services have a descriptor plus a verb/alias entry for CLI
-or node-command invocation. Examples include:
+or node-command invocation. Examples:
 
-- `service:bundle/install` via `bundle-install`
-- `service:remote/execute` via `remote-execute`
-- `service:vault/set` via `vault-set`
+- `service:bundle/install` via `bundle install`
+- `service:remote/execute` via `remote execute`
+- `service:vault/set` via `vault set`
 
 Verb descriptors live under `.ai/node/verbs/`; aliases live under
 `.ai/node/aliases/`.
 
 ### Execute-only services
 
-Some services are primarily invoked by canonical ref through the normal
-`/execute` path or by internal code. They still need signed service
-descriptors and Rust `ServiceDescriptor` records, but they do not need a
-dedicated public HTTP route or CLI alias.
-
-## Descriptor to handler mapping
-
-Every operational API handler exports a `DESCRIPTOR` in
-`crates/services/api/src/handlers/`, and `ryeos-api::handlers::ALL` is the
-daemon's canonical registry list. The bundle smoke tests in
-`crates/tools/core-tools/tests/build_bundle_smoke.rs` protect descriptor shape and
-catch stale bundle entries, including legacy tool descriptors that
-should not ship in the standard bundle.
+Some services are primarily invoked by canonical ref through `/execute`
+or by internal code. They still need signed service descriptors and Rust
+`ServiceDescriptor` records, but they do not need a dedicated route or
+alias.

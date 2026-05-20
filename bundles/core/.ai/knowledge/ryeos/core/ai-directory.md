@@ -119,10 +119,10 @@ Created by `ryeos init`. Lives in the system space
 
 ## User Space Overlay
 
-Lives at `~/.ai/`. Used for cross-project personal items:
+Lives at `~/.ryeos/.ai/`. Used for cross-project personal items:
 
 ```
-~/.ai/
+~/.ryeos/.ai/
 ├── config/
 │   └── keys/
 │       ├── signing/

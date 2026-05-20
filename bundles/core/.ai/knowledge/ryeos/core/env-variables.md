@@ -31,7 +31,7 @@ description: >
 | `RYEOS_STATE_DIR` | `$XDG_STATE_DIR/ryeosd` | Daemon state directory for CLI verbs. |
 | `RYEOS_CLI_KEY_PATH` | Node identity key | CLI signing key path. |
 | `RYEOSD_SOCKET_PATH` | `$XDG_RUNTIME_DIR/ryeosd.sock` | Daemon UDS socket path. |
-| `RYEOS_PUBLISHER_KEY` | `~/.ai/config/keys/signing/private_key.pem` | Publisher signing key for `ryeos sign`. |
+| `RYEOS_PUBLISHER_KEY` | `~/.ryeos/.ai/config/keys/signing/private_key.pem` | Publisher signing key for `ryeos sign`. |
 | `HOME` | — | Fallback for user root discovery. |
 
 ## Runtime subprocess (injected by daemon)

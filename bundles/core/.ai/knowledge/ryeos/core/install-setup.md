@@ -54,10 +54,10 @@ Init is a one-time setup that creates the full runtime environment. It's
 1. **Create directory layout** — system space, user space, CAS state,
    bundle dirs, vault, identity
 2. **User signing key** — load-or-create at
-   `~/.ai/config/keys/signing/private_key.pem`
+   `~/.ryeos/.ai/config/keys/signing/private_key.pem`
 3. **Node signing key** — load-or-create at
    `<system>/.ai/node/identity/private_key.pem`
-4. **Self-trust** — both keys pinned into `~/.ai/config/keys/trusted/`
+4. **Self-trust** — both keys pinned into `~/.ryeos/.ai/config/keys/trusted/`
 5. **Pin publisher key** — hardcoded official publisher Ed25519 key
    written to trust store (no on-disk trust needed)
 6. **Pin additional trust files** — any `--trust-file` args processed
@@ -164,7 +164,7 @@ is forbidden for non-local keys.
 ## Directory Layout After Init
 
 ```
-~/.ai/
+~/.ryeos/.ai/
 ├── config/keys/
 │   ├── signing/private_key.pem          ← your Ed25519 identity
 │   └── trusted/

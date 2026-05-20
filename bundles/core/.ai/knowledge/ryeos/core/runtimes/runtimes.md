@@ -48,7 +48,7 @@ All runtimes inherit defaults from `config:execution/execution`:
 | `cancellation_grace_secs`| 5        |
 
 Override at project level in `.ai/config/execution/execution.yaml`
-or user level in `~/.ai/config/execution/execution.yaml`.
+or user level in `~/.ryeos/.ai/config/execution/execution.yaml`.
 
 ## The `@subprocess` Alias
 

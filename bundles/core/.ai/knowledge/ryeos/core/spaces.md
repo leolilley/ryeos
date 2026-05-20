@@ -33,7 +33,7 @@ typically tracked in git (or at least `.ai/knowledge/` is).
 ## User Space
 
 ```
-~/.ai/
+~/.ryeos/.ai/
 ```
 
 Cross-project personal items. Shared across all projects on the same
@@ -43,7 +43,7 @@ applies everywhere.
 User space also holds the operator's signing key and trust store:
 
 ```
-~/.ai/
+~/.ryeos/.ai/
 ├── config/keys/
 │   ├── signing/private_key.pem      ← your Ed25519 identity
 │   └── trusted/
@@ -130,7 +130,7 @@ For a canonical ref like `tool:ryeos/core/sign`:
 
 ```
 1. <project>/.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}
-2. ~/.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}
+2. ~/.ryeos/.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}
 3. <bundle>/.../.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}  (for each installed bundle)
 ```
 

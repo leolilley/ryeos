@@ -162,6 +162,6 @@ against these capabilities before execution.
 
 Graphs run as threads. You can:
 - Tail events: `ryeos thread tail <id>`
-- Cancel: `ryeos thread cancel <id>`
+- Cancel: `ryeos commands submit <id> cancel`
 - Inspect state: `ryeos thread get <id>`
 - Resume interrupted graphs (state persisted in CAS)

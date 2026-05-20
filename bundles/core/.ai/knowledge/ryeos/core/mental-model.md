@@ -86,7 +86,7 @@ Items resolve **project → user → system** (first match wins):
 | Space   | Location                 | Purpose                      |
 |---------|--------------------------|------------------------------|
 | Project | `.ai/`                   | Project-specific items       |
-| User    | `~/.ai/`                 | Cross-project personal items |
+| User    | `~/.ryeos/.ai/`                 | Cross-project personal items |
 | System  | Bundle `.ai/` directories | Immutable standard library   |
 
 When you `fetch` or `execute` an item, the engine checks project first,
