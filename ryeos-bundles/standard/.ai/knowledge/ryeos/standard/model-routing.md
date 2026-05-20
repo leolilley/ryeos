@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-05-19T23:56:57Z:9ab6f00287274fed0faa9afa7c3f85bfbc569444da956fe3bf358ece0f1a6d85:69lsUeS6JscCOPVoviCFqmv5ERgTvgXJ/SnE4eUte74GF/zI7bjVypz1J4JpoWLwBtzkDUABziYF/RgHr3bvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-20T05:57:10Z:8519e564d7be5a9ec1260a136fd8bc4fec4630ed9c1fd11b0f6e5f15b4f4ad1c:aNseglauZvjYtj4reVMj7qU8LBtwCh0MGoc5R5O/07xJXB3o9QMQ03zfvE/DwHw54/8nqPWMlyHh1M4l4sLOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [models, providers, routing, tiers, llm]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   How model routing works — the tier system, the routing table,
-  and the four providers (Anthropic, OpenAI, OpenRouter, Zen).
+  and the active provider configs (Anthropic, OpenAI, Zen).
 ---
 
 # Model Routing
@@ -45,7 +45,7 @@ tier_name:
   context_window: 200000
 ```
 
-## Four Providers
+## Provider configs
 
 ### Zen (`config:ryeos-runtime/model-providers/zen`)
 The primary gateway. Routes to multiple model families through
@@ -70,28 +70,11 @@ Direct Anthropic Messages API access. Uses `x-api-key` auth,
 Direct OpenAI Chat Completions access. Uses `Bearer` token auth,
 standard `chat/completions` endpoint.
 
-### OpenRouter (`config:ryeos-runtime/model-providers/openrouter`)
-Multi-model gateway via OpenRouter. Uses OpenAI-compatible format
-with `HTTP-Referer` and `X-Title` headers.
-
-## Agent Adapters
-
-In addition to the runtime-level provider configs, the standard bundle
-includes **agent adapter tools** that are full HTTP client specifications:
-
-- `tool:ryeos/agent/providers/anthropic` — complete Anthropic client
-- `tool:ryeos/agent/providers/openai` — complete OpenAI client
-- `tool:ryeos/agent/providers/zen` — unified gateway client with profiles
-
-These adapters include:
-- Request building schemas (how to construct API calls)
-- Response parsing schemas (how to read API responses)
-- Streaming schemas (how to handle SSE deltas)
-- Tool-use schemas (how to present/call tools)
-- Pricing per model
-
-The adapters are used by the directive runtime to communicate with
-LLM providers during the prompt + tool loop.
+Legacy provider tool descriptors were removed: the directive runtime now
+uses the runtime-level provider configs directly. Adding a provider means
+adding a signed config under `config/ryeos-runtime/model-providers/` and,
+if it should be selected by tier, pointing `model_routing.yaml` at that
+provider.
 
 ## API Keys
 
@@ -102,6 +85,5 @@ Each provider reads its API key from an environment variable:
 | Zen         | `ZEN_API_KEY`         |
 | Anthropic   | `ANTHROPIC_API_KEY`   |
 | OpenAI      | `OPENAI_API_KEY`      |
-| OpenRouter  | `OPENROUTER_API_KEY`  |
 
 Set these in the daemon's environment or in `.ai/config/` secrets.

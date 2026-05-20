@@ -229,26 +229,44 @@ fn bundle_cas_contains_binary_blob() {
 }
 
 #[test]
-fn bundle_tools_dir_has_expected_signed_yamls() {
+fn standard_bundle_has_no_legacy_tool_descriptors() {
     let tools_dir = bundle_dir().join(".ai").join("tools").join("ryeos");
     if !tools_dir.is_dir() {
-        return; // Skip if bundle not built yet
+        return;
     }
 
     let mut yaml_files = Vec::new();
     walk_yaml_files(&tools_dir, &mut yaml_files);
 
-    // Standard bundle's `tools/ryeos/` directory contains:
-    // - 3 agent provider tool descriptors (anthropic, openai, zen)
-    // - 1 state-graph runtime descriptor
-    assert_eq!(
-        yaml_files.len(),
-        4,
-        "expected exactly 4 tool YAMLs in standard bundle's tools/ryeos/ \
-         (3 agent providers + state-graph runtime), found {}: {:?}",
-        yaml_files.len(),
+    // Standard bundle ships no Python/HTTP tool descriptors under
+    // tools/ryeos/. Runtime delegation is via runtimes/ pointing at
+    // native Rust binaries; model providers are config-driven.
+    assert!(
+        yaml_files.is_empty(),
+        "standard bundle's tools/ryeos/ must be empty after the legacy \
+         state-graph + provider tool descriptors were removed; found {:?}",
         yaml_files
     );
+}
+
+#[test]
+fn no_legacy_state_graph_executor_ids_in_fixtures() {
+    let workspace = bundle_dir().parent().unwrap().parent().unwrap().to_path_buf();
+    let fixtures = workspace.join("tests/e2e/.ai");
+    if !fixtures.exists() {
+        return;
+    }
+
+    let mut yaml_files = Vec::new();
+    walk_yaml_files(&fixtures, &mut yaml_files);
+    for path in yaml_files {
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("ryeos/core/runtimes/state-graph/runtime"),
+            "legacy state-graph executor_id remains in {}",
+            path.display()
+        );
+    }
 }
 
 #[test]
@@ -275,37 +293,36 @@ fn bundle_all_yamls_are_signed() {
 
 #[test]
 fn descriptor_table_count_and_prefix() {
-    // These must match the canonical list in ryeosd::services::handlers::ALL.
-    let services: &[&str] = &[
-        "service:system/status",
-        "service:identity/public_key",
-        "service:threads/list",
-        "service:threads/get",
-        "service:threads/children",
-        "service:threads/chain",
-        "service:events/replay",
-        "service:events/chain_replay",
-        "service:commands/submit",
-        "service:bundle/install",
-        "service:bundle/list",
-        "service:bundle/remove",
-        "service:maintenance/gc",
-        "service:rebuild",
-        "service:verify",
-        "service:fetch",
-        "service:sign",
-    ];
-    assert_eq!(
-        services.len(),
-        17,
-        "service descriptor table count drifted from expected 17"
-    );
+    let services = api_handler_service_refs();
+    assert!(!services.is_empty(), "failed to parse API handler service refs");
 
-    // Every entry should be service:*
     for service_ref in services {
         assert!(
-            service_ref.starts_with("service:"),
+            service_ref.as_str().starts_with("service:"),
             "unexpected service_ref: {service_ref}"
+        );
+    }
+}
+
+#[test]
+fn service_descriptor_table_matches_api_handlers() {
+    let services = api_handler_service_refs();
+    assert!(!services.is_empty(), "failed to parse API handler service refs");
+
+    let workspace = workspace_root();
+    for service_ref in services {
+        let bare = service_ref
+            .strip_prefix("service:")
+            .expect("service ref prefix checked by parser");
+        let rel = format!(".ai/services/{bare}.yaml");
+        let core = workspace.join("ryeos-bundles/core").join(&rel);
+        let standard = workspace.join("ryeos-bundles/standard").join(&rel);
+        assert!(
+            core.exists() || standard.exists(),
+            "API handler {service_ref} has no matching service descriptor; \
+             expected {} or {}",
+            core.display(),
+            standard.display()
         );
     }
 }
@@ -398,4 +415,43 @@ fn walk_yaml_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
             }
         }
     }
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    bundle_dir().parent().unwrap().parent().unwrap().to_path_buf()
+}
+
+fn api_handler_service_refs() -> Vec<String> {
+    let handlers_dir = workspace_root().join("ryeos-api/src/handlers");
+    let mod_rs = std::fs::read_to_string(handlers_dir.join("mod.rs")).unwrap();
+
+    let mut module_names = Vec::new();
+    for line in mod_rs.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("pub mod ") {
+            if let Some(name) = rest.strip_suffix(';') {
+                module_names.push(name.to_string());
+            }
+        }
+    }
+
+    let mut refs = Vec::new();
+    for module_name in module_names {
+        let path = handlers_dir.join(format!("{module_name}.rs"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        if let Some(idx) = content.find("service_ref:") {
+            let after = &content[idx..];
+            if let Some(start) = after.find('"') {
+                let after_quote = &after[start + 1..];
+                if let Some(end) = after_quote.find('"') {
+                    refs.push(after_quote[..end].to_string());
+                    continue;
+                }
+            }
+        }
+        panic!("{} does not declare a literal service_ref", path.display());
+    }
+    refs.sort();
+    refs.dedup();
+    refs
 }

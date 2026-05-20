@@ -961,6 +961,84 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-caps-empty", "T-caps-empty")).unwrap();
+        let cbt = state.callback_tokens.generate(
+            "T-caps-empty",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/p"),
+        );
+        let tat = state.thread_auth.mint(
+            "T-caps-empty",
+            "fp:server-authoritative-principal".to_string(),
+            vec!["execute".to_string()],
+            std::time::Duration::from_secs(300),
+        );
+
+        let resp = dispatch(rpc("runtime.dispatch_action", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-caps-empty",
+                "project_path": "/p",
+                "thread_auth_token": tat.token,
+                "action": {
+                    "item_id": "directive:ryeos/agent/core/base",
+                    "thread": "inline",
+                },
+            })),
+            &state,
+        ).await;
+        let err = rpc_err(&resp);
+        assert!(
+            err.message.contains("deny-all") && err.message.contains("no effective_caps"),
+            "expected UDS boundary deny-all from empty callback caps, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
+        let (_tmp, state) = setup_app_state();
+        state.threads.create_thread(&make_create_params("T-caps-wild", "T-caps-wild")).unwrap();
+        let cbt = state.callback_tokens.generate(
+            "T-caps-wild",
+            std::path::PathBuf::from("/p"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.*".to_string()],
+            test_provenance(&state, "/p"),
+        );
+        let tat = state.thread_auth.mint(
+            "T-caps-wild",
+            "fp:server-authoritative-principal".to_string(),
+            vec!["execute".to_string()],
+            std::time::Duration::from_secs(300),
+        );
+
+        let resp = dispatch(rpc("runtime.dispatch_action", json!({
+                "callback_token": cbt.token,
+                "thread_id": "T-caps-wild",
+                "project_path": "/p",
+                "thread_auth_token": tat.token,
+                "action": {
+                    "item_id": "directive:ryeos/agent/core/base",
+                    "thread": "inline",
+                },
+            })),
+            &state,
+        ).await;
+
+        if let Some(err) = resp.error.as_ref() {
+            assert!(
+                !err.message.contains("deny-all")
+                    && !err.message.contains("required cap")
+                    && !err.message.contains("effective_caps"),
+                "wildcard caps must pass UDS cap enforcement; downstream errors are fine: {err:?}"
+            );
+        }
+    }
+
     // ── facets (via runtime.* token-gated) ─────────────────────────
 
     #[tokio::test]

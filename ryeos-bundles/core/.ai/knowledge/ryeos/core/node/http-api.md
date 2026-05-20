@@ -20,6 +20,10 @@ unauthenticated: `/health` and `/public-key`.
 
 ## Routes
 
+Core contributes control-plane routes. Standard contributes workflow thread
+event/cancel routes. Every operational API handler has a matching signed
+`service:` descriptor under the core or standard bundle.
+
 ### `GET /health`
 Health check. No auth required.
 
@@ -72,3 +76,32 @@ Cancel a running thread. Authenticated.
 - **Timeout:** 30s
 - **Concurrency:** 64
 - **Response:** JSON confirmation
+
+## Object and CAS Routes
+
+- `POST /objects/has` — check whether CAS objects exist.
+- `POST /objects/get` — fetch CAS objects by hash.
+- `POST /objects/put` — ingest CAS objects.
+- `POST /push-head` — push a project HEAD snapshot for remote execution.
+- `POST /ingest-ignore` — evaluate ignore/ingest behavior for project snapshots.
+
+These routes back pushed-head and cross-node transfer flows. Object fetches
+fail closed if requested hashes are missing.
+
+## Vault Routes
+
+- `POST /vault/set`
+- `GET /vault/list`
+- `POST /vault/delete`
+
+Vault routes mutate or read sealed daemon vault state. Runtime executions see
+only resolved vault bindings from preflight, not raw vault storage.
+
+## Bundle and Identity Routes
+
+- `POST /bundle/export` — export bundle CAS state for transfer.
+- `POST /authorize-key` — authorize a caller key.
+- `GET /thread-status` — remote/thread status query surface.
+
+The public identity route is intentionally unauthenticated; authorization and
+bundle export require signed access.

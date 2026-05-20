@@ -1,7 +1,8 @@
-<!-- ryeos:signed:2026-05-19T23:56:57Z:53847ca46cfae82f4ef19b106be53de1e701b06d407a86eeeec5354eccf5c18d:89+gx3WqS9K83wSyXRAMhQq4ogxk6SNnuhuudPVSz73zCV6Qaz1zL14xTT/8AWbkBnKxERKL0bxZNyNpXlugDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-20T05:57:10Z:cd66123b1fb225405153d2ad4dba2ee0d46a2d19265886abb19ce50f83164bdb:e55k7KjCnb+AiR1x6DUNMI3Lo3kCbBumo2ut/JePdDIHfd+bg2m9Mg+3QBkO7tk/da3vo82HVXx02nzE3Jf+Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Rye agent base — extends general agent base with Rye identity and behavior"
-version: "2.0.0"
+version: "2.1.0"
+extends: directive:agent/core/base
 context:
   system:
     - knowledge:rye/agent/core/Identity

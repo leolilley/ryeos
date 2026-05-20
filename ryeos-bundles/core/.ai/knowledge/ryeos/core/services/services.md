@@ -1,7 +1,7 @@
 ---
 category: ryeos/core
 tags: [reference, services, daemon, in-process]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   The in-process service layer — all daemon services,
   their endpoints, and capabilities.
@@ -136,3 +136,49 @@ runs preflight before registering.
 Services are best for daemon-internal operations (thread queries,
 bundle management, health checks). Tools are best for operations
 that need process isolation (file system, network, shell commands).
+
+## Exposure modes
+
+Invariant: a service descriptor may be exposed by an HTTP route, a node
+verb/alias, both, or neither; the descriptor itself is the executable
+unit, while routes and verbs are user-facing entry points.
+
+### Route-backed services
+
+Route-backed services have a descriptor under `.ai/services/` and an
+HTTP route under `.ai/node/routes/`. Examples include:
+
+- `service:system/push-head` via `/push-head`
+- `service:objects/get` via `/objects/get`
+- `service:threads/list` via `/threads`
+
+The Rust handler lives under `ryeos-api/src/handlers/`, and the signed
+route descriptor maps the HTTP surface to that service.
+
+### Verb-backed services
+
+Verb-backed services have a descriptor plus a verb/alias entry for CLI
+or node-command invocation. Examples include:
+
+- `service:bundle/install` via `bundle-install`
+- `service:remote/execute` via `remote-execute`
+- `service:vault/set` via `vault-set`
+
+Verb descriptors live under `.ai/node/verbs/`; aliases live under
+`.ai/node/aliases/`.
+
+### Execute-only services
+
+Some services are primarily invoked by canonical ref through the normal
+`/execute` path or by internal code. They still need signed service
+descriptors and Rust `ServiceDescriptor` records, but they do not need a
+dedicated public HTTP route or CLI alias.
+
+## Descriptor to handler mapping
+
+Every operational API handler exports a `DESCRIPTOR` in
+`ryeos-api/src/handlers/`, and `ryeos-api::handlers::ALL` is the
+daemon's canonical registry list. The bundle smoke tests in
+`ryeos-tools/tests/build_bundle_smoke.rs` protect descriptor shape and
+catch stale bundle entries, including legacy tool descriptors that
+should not ship in the standard bundle.

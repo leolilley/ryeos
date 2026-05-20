@@ -95,10 +95,21 @@ then user, then all installed bundles.
 ### Bundles
 A **bundle** is a signed, self-contained `.ai/` tree. Two bundles ship
 with the system:
-- **core** — kinds, parsers, handlers, protocols, tools, verbs, services
-- **standard** — runtimes, model providers, routing, trusted keys
+- **core** — engine/control-plane kinds, parsers, handlers, protocols,
+  tools, verbs, routes, and services
+- **standard** — workflow kinds, workflow handlers/parsers, runtimes,
+  model providers/routing, and thread/scheduler/events services
 
 Additional bundles can be installed via `ryeos bundle install`.
+
+Current split:
+
+- **Core** owns the engine/control-plane layer: core kinds, parsers,
+  protocols, services, tools, route/verb/alias descriptors, remote/vault/CAS
+  services, and node bootstrap metadata.
+- **Standard** owns the workflow layer: directive/graph/knowledge kinds,
+  workflow composers and parser, directive/graph/knowledge runtimes, model
+  routing/provider configs, and thread/scheduler/events/commands services.
 
 ### Signing
 Every item carries an Ed25519 signature in a header comment. The signature

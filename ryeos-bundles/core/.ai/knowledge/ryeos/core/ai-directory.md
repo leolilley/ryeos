@@ -14,187 +14,69 @@ different layout serving different purposes.
 
 ## Bundle Layout (Core)
 
-The core bundle defines the engine's capabilities. Its `.ai/` tree
-contains all infrastructure items:
+The core bundle is the engine/control-plane layer. It contains the generic
+machine, not the LLM workflow layer:
 
 ```
 .ai/
-├── config/
-│   └── execution/
-│       └── execution.yaml              # subprocess defaults (timeout, steps, cancellation)
-│
-├── handlers/
-│   └── ryeos/core/
-│       ├── extends-chain.yaml           # directive inheritance composer
-│       ├── graph-permissions.yaml       # graph permission lifting
-│       ├── identity.yaml                # no-op pass-through composer
-│       ├── regex-kv.yaml                # regex key-value extraction
-│       ├── yaml-document.yaml           # full YAML file parser
-│       └── yaml-header-document.yaml    # YAML header + body parser (markdown)
-│
-├── knowledge/
-│   └── ryeos/core/                      # 20 knowledge entries (this file is one)
-│
+├── config/execution/execution.yaml
+├── handlers/ryeos/core/
+│   ├── identity.yaml
+│   ├── regex-kv.yaml
+│   ├── yaml-document.yaml
+│   └── yaml-header-document.yaml
+├── knowledge/ryeos/core/
 ├── node/
-│   ├── aliases/                         # 21 CLI alias shortcuts
-│   │   ├── f.yaml                       # tokens: ["f"] → verb: fetch
-│   │   ├── s.yaml                       # tokens: ["s"] → verb: sign
-│   │   ├── fetch.yaml                   # tokens: ["fetch"] → verb: fetch
-│   │   ├── sign.yaml
-│   │   ├── status.yaml
-│   │   └── ...                          # (19 more)
-│   │
-│   ├── engine/
-│   │   └── kinds/                       # 12 kind schema definitions
-│   │       ├── config/
-│   │       │   └── config.kind-schema.yaml
-│   │       ├── directive/
-│   │       │   └── directive.kind-schema.yaml
-│   │       ├── graph/
-│   │       │   └── graph.kind-schema.yaml
-│   │       ├── handler/
-│   │       │   └── handler.kind-schema.yaml
-│   │       ├── knowledge/
-│   │       │   └── knowledge.kind-schema.yaml
-│   │       ├── node/
-│   │       │   └── node.kind-schema.yaml
-│   │       ├── parser/
-│   │       │   └── parser.kind-schema.yaml
-│   │       ├── protocol/
-│   │       │   └── protocol.kind-schema.yaml
-│   │       ├── runtime/
-│   │       │   └── runtime.kind-schema.yaml
-│   │       ├── service/
-│   │       │   └── service.kind-schema.yaml
-│   │       ├── streaming_tool/
-│   │       │   └── streaming_tool.kind-schema.yaml
-│   │       └── tool/
-│   │           └── tool.kind-schema.yaml
-│   │
-│   ├── routes/                          # 7 HTTP route definitions
-│   │   ├── execute.yaml                 # POST /execute
-│   │   ├── execute-stream.yaml          # POST /execute/stream (SSE)
-│   │   ├── health.yaml                  # GET /health (no auth)
-│   │   ├── public-key.yaml              # GET /public-key (no auth)
-│   │   ├── thread-events-stream.yaml    # GET /threads/{id}/events/stream
-│   │   ├── threads-cancel.yaml          # POST /threads/{id}/cancel
-│   │   └── threads-detail.yaml          # GET /threads/{id}
-│   │
-│   └── verbs/                           # 26 CLI verb definitions
-│       ├── bundle-install.yaml
-│       ├── execute.yaml
-│       ├── fetch.yaml
-│       ├── sign.yaml
-│       ├── status.yaml
-│       └── ...                          # (21 more)
-│
-├── parsers/
-│   └── ryeos/core/
-│       ├── javascript/
-│       │   └── javascript.yaml
-│       ├── markdown/
-│       │   ├── directive.yaml
-│       │   └── frontmatter.yaml
-│       ├── python/
-│       │   └── ast.yaml
-│       └── yaml/
-│           └── yaml.yaml
-│
-├── protocols/
-│   └── ryeos/core/
-│       ├── opaque.yaml                  # simple tool stdin/stdout
-│       ├── runtime_v1.yaml              # full runtime with callbacks
-│       └── tool_streaming_v1.yaml       # streaming tool output
-│
-├── services/
-│   ├── bundle/
-│   │   ├── install.yaml
-│   │   ├── list.yaml
-│   │   └── remove.yaml
-│   ├── commands/
-│   │   └── submit.yaml
-│   ├── events/
-│   │   ├── chain_replay.yaml
-│   │   └── replay.yaml
-│   ├── scheduler/
-│   │   ├── deregister.yaml
-│   │   ├── list.yaml
-│   │   ├── pause.yaml
-│   │   ├── register.yaml
-│   │   ├── resume.yaml
-│   │   └── show_fires.yaml
-│   ├── threads/
-│   │   ├── chain.yaml
-│   │   ├── children.yaml
-│   │   ├── get.yaml
-│   │   └── list.yaml
-│   ├── fetch.yaml
-│   ├── node-sign.yaml
-│   ├── rebuild.yaml
-│   └── verify.yaml
-│
-└── tools/
-    └── ryeos/core/
-        ├── fetch.yaml
-        ├── sign.yaml
-        ├── verify.yaml
-        ├── identity/
-        │   └── public_key.yaml
-        ├── parsers/
-        │   ├── javascript/javascript.py
-        │   ├── markdown/frontmatter.py
-        │   ├── markdown/xml.py
-        │   ├── python/ast.py
-        │   ├── toml/toml.py
-        │   └── yaml/yaml.py
-        ├── runtimes/
-        │   ├── bash/bash.yaml
-        │   ├── python/
-        │   │   ├── function.yaml
-        │   │   ├── script.yaml
-        │   │   └── lib/
-        │   │       ├── interpolation.py
-        │   │       ├── condition_evaluator.py
-        │   │       └── module_loader.py
-        │   └── state-graph/
-        │       ├── runtime.yaml
-        │       └── walker.py
-        ├── subprocess/
-        │   └── execute.yaml
-        └── verbs/
-            ├── list.py
-            └── list.yaml
+│   ├── aliases/                         # core CLI aliases + remote/vault aliases
+│   ├── engine/kinds/                    # config, handler, parser, protocol,
+│   │                                     # runtime, service, node, tool,
+│   │                                     # streaming_tool
+│   ├── routes/                          # execute, health, public-key,
+│   │                                     # objects, vault, remote status, push-head
+│   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
+├── parsers/ryeos/core/                  # javascript, markdown/frontmatter,
+│                                         # python/ast, yaml/yaml
+├── protocols/ryeos/core/                # opaque, runtime_v1, tool_streaming_v1
+├── services/                            # bundle, fetch, verify, objects,
+│                                         # remote, vault, system, health, etc.
+└── tools/ryeos/core/                    # fetch/sign/verify, identity,
+                                          # subprocess, python runtimes, verbs/list
 ```
+
+Legacy Python parser implementations, the old Bash runtime descriptor, the
+old Python state-graph runtime, and provider tool descriptors are not part of
+the active bundle layout.
 
 ## Bundle Layout (Standard)
 
-The standard bundle adds runtimes, model providers, and agent adapters:
+The standard bundle is the agent workflow layer. It contributes workflow
+kinds, composers, runtime binaries, model routing, and workflow services:
 
 ```
 .ai/
-├── config/
-│   ├── keys/
-│   │   └── trusted/
-│   │       └── <fingerprint>.toml       # publisher Ed25519 public key
-│   └── ryeos-runtime/
-│       ├── execution.yaml               # API retry/backoff/timeout config
-│       ├── model_routing.yaml           # tier → (provider, model) mapping
-│       └── model-providers/
-│           ├── anthropic.yaml
-│           ├── openai.yaml
-│           ├── openrouter.yaml
-│           └── zen.yaml                 # multi-provider gateway
-│
+├── config/ryeos-runtime/
+│   ├── execution.yaml
+│   ├── model_routing.yaml
+│   └── model-providers/
+│       ├── anthropic.yaml
+│       ├── openai.yaml
+│       └── zen.yaml
+├── directives/
+├── handlers/ryeos/core/
+│   ├── extends-chain.yaml
+│   └── graph-permissions.yaml
+├── knowledge/ryeos/standard/
+├── node/
+│   ├── aliases/                         # thread/events/commands/compose aliases
+│   ├── engine/kinds/                    # directive, graph, knowledge
+│   ├── routes/                          # thread event stream + cancel
+│   └── verbs/                           # thread, scheduler, events, commands, compose
+├── parsers/ryeos/core/markdown/directive.yaml
 ├── runtimes/
-│   ├── directive-runtime.yaml           # binary_ref: bin/.../ryeos-directive-runtime
-│   ├── graph-runtime.yaml               # binary_ref: bin/.../ryeos-graph-runtime
-│   └── knowledge-runtime.yaml           # binary_ref: bin/.../ryeos-knowledge-runtime
-│
-└── tools/
-    └── ryeos/agent/providers/
-        ├── anthropic/anthropic.yaml
-        ├── openai/openai.yaml
-        └── zen/zen.yaml
+│   ├── directive-runtime.yaml
+│   ├── graph-runtime.yaml
+│   └── knowledge-runtime.yaml
+└── services/                            # threads, scheduler, events, commands
 ```
 
 ## Daemon State Directory

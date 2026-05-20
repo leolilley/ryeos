@@ -83,18 +83,25 @@ The server discovers the CLI binary in order:
 
 ## CLI Verbs
 
-26 daemon verbs, all **kebab-case**:
+Daemon verbs are **kebab-case** and are merged from installed bundles. Core
+contributes control-plane verbs; standard contributes workflow verbs.
 
 ```
-bundle-install          bundle-list            bundle-remove
-commands-submit         compose
-events-chain-replay     events-replay          execute
-fetch                   identity-public-key    maintenance-gc
-rebuild                 sign                   status
-scheduler-deregister    scheduler-list         scheduler-pause
-scheduler-register      scheduler-resume       scheduler-show-fires
-thread-chain            thread-children        thread-get
-thread-list             thread-tail            verify
+bundle-install              bundle-list              bundle-remove
+commands-submit             compose
+events-chain-replay         events-replay            execute
+fetch                       identity-public-key      maintenance-gc
+rebuild                     remote-authorize         remote-bundle-install
+remote-configure            remote-execute           remote-list
+remote-pull                 remote-push              remote-status
+remote-thread-status        remote-threads           remote-vault-delete
+remote-vault-list           remote-vault-set         sign
+status                      vault-delete             vault-list
+vault-set                   verify
+scheduler-deregister        scheduler-list           scheduler-pause
+scheduler-register          scheduler-resume         scheduler-show-fires
+thread-chain                thread-children          thread-get
+thread-list                 thread-tail
 ```
 
 Plus local verbs (no daemon needed):

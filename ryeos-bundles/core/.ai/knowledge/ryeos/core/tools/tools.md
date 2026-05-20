@@ -9,8 +9,8 @@ description: >
 
 # Tools
 
-Tools are the primary executable unit in Rye OS. A tool is a script
-(Python, Bash, JavaScript) or YAML descriptor that receives JSON
+Tools are a generic executable unit in Rye OS. A tool is a Python,
+JavaScript/TypeScript, JSON, or YAML descriptor that receives JSON
 parameters and returns results.
 
 ## File Formats
@@ -97,15 +97,14 @@ config:
 
 ## Runtime Environments
 
-The core bundle provides three tool runtimes:
-
-### Bash (`ryeos/core/runtimes/bash`)
-Runs shell commands via `/bin/bash -c`. Input: `command` string.
+The active core tool runtime descriptors are Python function and Python script.
+Shell commands are represented as YAML tools that use the subprocess executor;
+there is no separate Bash runtime descriptor.
 
 ### Python Function (`ryeos/core/runtimes/python/function`)
 Loads a Python module, calls its `execute(params, project_path)`
 function. Resolves interpreter from `.venv/bin/python3` or `RYE_PYTHON`.
-Adds `{tool_dir}` and `{runtime_dir}/lib` to `PYTHONPATH`.
+Adds `{tool_dir}` to `PYTHONPATH`.
 
 ### Python Script (`ryeos/core/runtimes/python/script`)
 Runs Python scripts that manage their own `__main__` entry point.

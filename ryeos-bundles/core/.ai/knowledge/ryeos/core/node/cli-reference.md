@@ -11,6 +11,8 @@ description: >
 
 The `ryeos` CLI communicates with the daemon via HTTP. Commands are
 dispatched through **verbs** (full names) and **aliases** (shortcuts).
+Core contributes engine/control-plane verbs; standard contributes workflow
+verbs such as threads, events, scheduler, commands, and compose.
 
 ## Setup
 
@@ -91,6 +93,8 @@ Remove an installed bundle. Offline-only.
 
 ## Thread Operations
 
+Thread verbs are contributed by the standard bundle.
+
 ### `ryeos thread list`
 List all threads. Optional `--limit` flag.
 
@@ -108,6 +112,8 @@ Get the full parent chain (thread tree + edges).
 
 ## Event Operations
 
+Event verbs are contributed by the standard bundle.
+
 ### `ryeos events replay <thread_id>`
 Replay persisted events for a single thread.
 
@@ -118,6 +124,8 @@ Replay persisted events for a single thread.
 Replay events across an entire chain (root + all descendants).
 
 ## Scheduler Operations
+
+Scheduler verbs are contributed by the standard bundle.
 
 ### `ryeos scheduler register`
 Create or update a schedule spec.
@@ -146,6 +154,33 @@ Run garbage collection on CAS objects. Supports `--dry-run` and
 
 ### `ryeos identity public-key`
 Print the daemon's node identity public key.
+
+## Remote Operations
+
+Remote verbs are core daemon-control verbs:
+
+- `ryeos remote configure`
+- `ryeos remote list`
+- `ryeos remote status`
+- `ryeos remote push`
+- `ryeos remote pull`
+- `ryeos remote execute`
+- `ryeos remote authorize`
+- `ryeos remote threads`
+- `ryeos remote thread-status`
+- `ryeos remote bundle-install`
+- `ryeos remote vault-set`, `vault-list`, `vault-delete`
+
+These wrap daemon-only remote services for cross-node transfer, execution,
+authorization, thread inspection, bundle install, and vault operations.
+
+## Vault Operations
+
+Core vault verbs are `ryeos vault set`, `ryeos vault list`, and
+`ryeos vault delete`. They operate on sealed daemon vault state and are
+separate from runtime vault bindings resolved during execution preflight.
+
+## Workflow Utilities
 
 ### `ryeos commands submit <thread_id> <command_type>`
 Submit a runtime command (cancel, kill, interrupt, continue) to an
