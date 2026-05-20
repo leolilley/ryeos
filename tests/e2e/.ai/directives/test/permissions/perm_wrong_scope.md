@@ -8,7 +8,7 @@ Has permission for rye.core.* tools but tries to use rye/file-system — should 
   <metadata>
     <description>Test: has core tool permission, tries file-system tool (should be denied).</description>
     <category>test/permissions</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="1024" />
     <permissions>

@@ -8,7 +8,7 @@ End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tes
   <metadata>
     <description>Root of a 4-level spawn chain. Writes root marker, spawns level 1 child. Tests full inheritance stack.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="1.00" depth="5" spawns="3" />
     <permissions>

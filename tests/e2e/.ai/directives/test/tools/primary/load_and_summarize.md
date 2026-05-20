@@ -9,7 +9,7 @@ Load a directive to inspect its structure, then write a summary of its metadata 
   <metadata>
     <description>Load a directive by ID to inspect its structure, then write a structured summary of its name, description, permissions, and steps to an output file.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Directive inspection and summarization</model>
     <limits turns="5" tokens="2048" />
     <permissions>

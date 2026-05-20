@@ -8,7 +8,7 @@ Recursive child for spawn chain test. Writes a marker at its level, then spawns 
   <metadata>
     <description>Chain child: writes marker at current level, spawns next level if below max_level.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.30" />
     <permissions>

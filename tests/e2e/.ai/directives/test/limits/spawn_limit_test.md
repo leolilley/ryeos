@@ -8,7 +8,7 @@ Test that spawn limit enforcement works. This directive has a low spawns limit.
   <metadata>
     <description>Test: verify spawn limit enforcement prevents excessive child threads.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="4096" spend="0.10" spawns="2" />
   </metadata>

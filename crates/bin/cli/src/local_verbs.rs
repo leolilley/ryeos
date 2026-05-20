@@ -106,7 +106,7 @@ struct InitArgs {
     #[arg(long)]
     system_space_dir: Option<PathBuf>,
 
-    /// User space root (parent of `~/.ai/`). Defaults to $HOME.
+    /// User space root (parent of `.ai/`). Defaults to the canonical user root.
     #[arg(long)]
     user_root: Option<PathBuf>,
 
@@ -260,7 +260,7 @@ struct PinArgs {
     #[arg(long, default_value = "third-party")]
     owner: String,
 
-    /// User space root (parent of `~/.ai/`). Defaults to $HOME.
+    /// User space root (parent of `.ai/`). Defaults to the canonical user root.
     #[arg(long)]
     user_root: Option<PathBuf>,
 }

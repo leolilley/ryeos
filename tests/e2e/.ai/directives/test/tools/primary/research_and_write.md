@@ -9,7 +9,7 @@ Research a topic by searching knowledge, loading the best match, then writing a 
   <metadata>
     <description>Research a topic by searching the knowledge base, loading a known reference entry for context, then writing a detailed report combining search results and loaded knowledge.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Multi-tool research and report generation</model>
     <limits turns="6" tokens="3072" />
     <permissions>

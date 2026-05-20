@@ -10,7 +10,7 @@ Takes text content and writes a concise summary to a file.
   <metadata>
     <description>Takes text content and writes a concise summary to a file.</description>
     <category>test/graphs</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" provider="zen" />
     <limits turns="4" tokens="16000" spend="0.05" />
     <permissions>

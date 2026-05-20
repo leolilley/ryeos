@@ -162,6 +162,6 @@ The CLI tries local verbs first (init, publish, trust, vault), then `execute <ca
 Three-tier trust model:
 - **Node key**: Daemon's Ed25519 identity, generated at init
 - **User key**: Operator's Ed25519 identity, generated at init
-- **Trusted signers**: Pinned public keys in `~/.ai/config/keys/trusted/*.toml`
+- **Trusted signers**: Pinned public keys in `~/.ryeos/.ai/config/keys/trusted/*.toml`
 
 At boot, the daemon loads the trust store and verifies every bundle item against it. Untrusted items are rejected.

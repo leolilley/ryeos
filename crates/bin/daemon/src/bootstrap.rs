@@ -212,7 +212,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 
     // 7. Authorize the USER key so the local CLI can authenticate to
     // the local daemon. The CLI signs requests with the user key
-    // (the operator's persistent identity at ~/.ai/config/keys/signing/).
+    // (the operator's persistent identity at ~/.ryeos/.ai/config/keys/signing/).
     // The authorized-key TOML must be signed by the node key per
     // auth::load_authorized_key().
     let user_auth_entry = config.authorized_keys_dir.join(format!(

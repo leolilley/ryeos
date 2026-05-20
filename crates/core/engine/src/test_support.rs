@@ -55,7 +55,7 @@ pub fn standard_bundle_root() -> PathBuf {
 /// in the dev tree — kind schemas, handler descriptor YAMLs, and the
 /// binary `item_source.json` sidecars all anchor to this single key.
 /// Public-key bytes are pinned here so the engine doesn't have to read
-/// `~/.ai/config/keys/signing/private_key.pem` from operator state.
+/// `~/.ryeos/.ai/config/keys/signing/private_key.pem` from operator state.
 ///
 /// PEM source: `crates/bin/daemon/tests/fixtures/trusted_signers/<fp>.toml`.
 pub fn platform_author_verifying_key() -> VerifyingKey {

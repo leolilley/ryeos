@@ -8,7 +8,7 @@ Test creating, signing, loading, and searching for a directive.
   <metadata>
     <description>Test the full directive lifecycle: create, sign, load, search</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="10" tokens="4096" />
     <permissions>

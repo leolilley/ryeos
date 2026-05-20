@@ -46,17 +46,17 @@ lillux cas verify --root /tmp/cas --hash <sha256>
 echo "raw bytes" | lillux cas store --root /tmp/cas --blob
 
 # Identity — signing
-lillux identity sign --key-dir ~/.ai/config/keys/signing --hash <sha256>
+lillux identity sign --key-dir ~/.ryeos/.ai/config/keys/signing --hash <sha256>
 lillux identity verify --hash <sha256> --signature <base64url> --public-key public_key.pem
 
 # Identity — keypairs
-lillux identity keypair generate --key-dir ~/.ai/config/keys/signing
+lillux identity keypair generate --key-dir ~/.ryeos/.ai/config/keys/signing
 lillux identity keypair fingerprint --public-key public_key.pem
 lillux identity keypair box-fingerprint --public-key box_pub.pem
 
 # Identity — sealed envelopes
 echo '{"API_KEY":"sk-..."}' | lillux identity envelope seal --box-pub /path/to/box_pub.pem
-cat envelope.json | lillux identity envelope open --key-dir ~/.ai/config/keys/signing
+cat envelope.json | lillux identity envelope open --key-dir ~/.ryeos/.ai/config/keys/signing
 echo '{"API_KEY":"sk-..."}' | lillux identity envelope validate
 cat envelope.json | lillux identity envelope inspect
 

@@ -8,7 +8,7 @@ No permissions block declared. All tool calls should be denied (fail-closed).
   <metadata>
     <description>Test: no permissions declared — all tool calls should be denied.</description>
     <category>test/permissions</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="1024" />
   </metadata>

@@ -53,9 +53,8 @@ The standard bundle ships signed provider configs for:
 - `anthropic` — direct Anthropic Messages API.
 - `openai` — direct OpenAI Chat Completions API.
 
-The previous `openrouter` config was removed because no routing tier,
-directive, fixture, or test selected it. Re-add it only with a routing
-entry or an integration test that exercises `provider: openrouter`.
+Add provider configs only when a routing entry, directive, fixture, or
+test selects that provider.
 
 ## Adding a provider
 

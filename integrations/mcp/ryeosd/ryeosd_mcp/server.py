@@ -110,11 +110,9 @@ def _resolve_bin() -> str:
     explicit = os.environ.get("RYE_BIN")
     if explicit:
         return explicit
-    # Try new binary name first, then old name for backwards compat
-    for name in ("ryeos", "rye"):
-        found = shutil.which(name)
-        if found:
-            return found
+    found = shutil.which("ryeos")
+    if found:
+        return found
     raise RuntimeError(
         "ryeos binary not found on PATH and RYE_BIN not set. "
         "Build via `cargo build --release -p ryeos-cli` and "

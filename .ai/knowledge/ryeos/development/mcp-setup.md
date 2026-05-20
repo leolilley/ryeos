@@ -1,106 +1,86 @@
 ---
 category: "ryeos/development"
 name: "mcp-setup"
-description: "Dual MCP setup for coexistence of old Python system and new Rust system in opencode and amp"
+description: "MCP setup for opencode and amp"
 ---
 
-# MCP Setup: Dual System Coexistence
+# MCP Setup
 
-## The situation
+The RyeOS MCP adapter lives at `integrations/mcp/ryeosd`. It exposes a
+single MCP tool named `cli` that runs the `ryeos` CLI binary in a
+subprocess.
 
-Two Rye OS systems coexist:
+## Architecture
 
-| | Old (Python) | New (Rust) |
-|---|---|---|
-| **Project** | `/home/leo/projects/ryeos/` | `/home/leo/projects/ryeos-next/` |
-| **MCP server** | `ryeos-mcp` (3 tools: execute, fetch, sign) | `ryeosd-mcp` (1 tool: cli) |
-| **Binary** | Python package, in-process | `ryeos` CLI binary, subprocess |
-| **Daemon** | None (MCP IS the server) | `ryeosd` running separately |
-| **MCP name in config** | `rye` | `ryeos` |
-| **Tools** | `mcp__rye__execute`, `mcp__rye__fetch`, `mcp__rye__sign` | `mcp__ryeos__cli` |
+| Component | Value |
+|---|---|
+| MCP package | `ryeosd-mcp` |
+| Python module | `ryeosd_mcp.server` |
+| Tool name | `cli` |
+| Wrapped binary | `ryeos` |
+| Binary override env | `RYE_BIN` |
+| Required daemon | `ryeosd` for daemon-backed commands |
 
-## opencode configuration
-
-Both MCP servers run simultaneously. The agent knows which project uses which server.
+The MCP tool accepts:
 
 ```json
 {
-  "mcp": {
-    "rye": {
-      "type": "local",
-      "command": ["/home/leo/projects/ryeos/.venv/bin/ryeos-mcp"],
-      "environment": {
-        "USER_SPACE": "/home/leo/rye-stable"
-      },
-      "enabled": true
-    },
-    "ryeos": {
-      "type": "local",
-      "command": ["/path/to/ryeosd-mcp-venv/bin/ryeosd-mcp"],
-      "environment": {
-        "RYE_BIN": "/home/leo/projects/ryeos-next/target/release/ryeos"
-      },
-      "enabled": true
-    }
-  }
+  "args": ["execute", "tool:ryeos/core/identity/public_key"],
+  "project_path": "/home/leo/projects/ryeos-next",
+  "timeout_s": 60
 }
 ```
 
-## Setup steps for new MCP server
+Do not include `ryeos` as the first argument; the MCP server prepends
+the binary path.
+
+## Setup steps
 
 ### 1. Build the ryeos CLI binary
 
 ```bash
-cd /home/leo/projects/ryeos-next
-cargo build --release -p ryeos-cli
+cargo build --release -p ryeos-cli --bin ryeos
 ```
 
-### 2. Create venv for ryeosd-mcp
+### 2. Create a venv for ryeosd-mcp
 
 ```bash
-cd /home/leo/projects/ryeos-next/integrations/mcp/ryeosd
+cd integrations/mcp/ryeosd
 uv venv .venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
 
-### 3. Verify
+### 3. Run the MCP server
 
 ```bash
-RYE_BIN=../../../target/release/ryeos .venv/bin/ryeosd-mcp
-# In another terminal, test via MCP client
+RYE_BIN=/home/leo/projects/ryeos-next/target/release/ryeos \
+  /home/leo/projects/ryeos-next/integrations/mcp/ryeosd/.venv/bin/ryeosd-mcp
 ```
 
-### 4. Update opencode config
+If `RYE_BIN` is unset, the adapter resolves `ryeos` from `PATH`.
 
-Add the `ryeos` entry alongside the existing `rye` entry.
+## opencode / amp configuration
 
-## Agent prompt design
+Configure an MCP server entry that launches `ryeosd-mcp` and sets
+`RYE_BIN` when the release binary is not on `PATH`.
 
-The agent prompt needs to be aware of both systems:
+Example command payload:
 
-- When working in `/home/leo/projects/ryeos/` → use `mcp__rye__*` tools
-- When working in `/home/leo/projects/ryeos-next/` → use `mcp__ryeos__cli` tool
-- The project path determines which system to use
-
-For the new system, the single `cli` tool accepts:
 ```json
 {
-  "args": ["execute", "tool:ryeos/core/identity/public_key"],
-  "project_path": "/home/leo/projects/ryeos-next"
+  "command": ["/home/leo/projects/ryeos-next/integrations/mcp/ryeosd/.venv/bin/ryeosd-mcp"],
+  "environment": {
+    "RYE_BIN": "/home/leo/projects/ryeos-next/target/release/ryeos"
+  }
 }
 ```
 
-## Current integrations/mcp/ryeosd status
+## Verification
 
-The `integrations/mcp/ryeosd` Python server wraps the `ryeos` CLI binary via subprocess. It exposes one tool (`cli`) that passes args through to the binary.
+```bash
+cd integrations/mcp/ryeosd
+uv run pytest tests
+```
 
-**Setup note:** if `ryeos` is not on `PATH`, set `RYE_BIN` to the built CLI binary (for example, `target/release/ryeos`).
-
-## amp configuration
-
-amp uses a similar MCP config format. The same dual-server pattern applies:
-- Old `rye` MCP for old projects
-- New `ryeos` MCP for this project
-
-Check amp's config format for specifics.
+The test suite builds `ryeos` unless `RYE_BIN` is already set.

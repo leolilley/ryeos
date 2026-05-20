@@ -9,7 +9,7 @@ Test directive that exercises the Zen provider with a Claude model — verifies 
   <metadata>
     <description>Test Zen provider with Claude model via Anthropic Messages API profile.</description>
     <category>test</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" provider="zen/zen" />
     <limits turns="6" tokens="4096" spend="0.05" />
     <permissions>

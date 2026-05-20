@@ -8,7 +8,7 @@ A test directive for lifecycle testing — echoes a greeting message.
   <metadata>
     <description>Test directive for lifecycle testing — writes an echo greeting.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="2048" spend="0.03" />
     <permissions>

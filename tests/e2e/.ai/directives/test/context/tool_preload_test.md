@@ -11,7 +11,7 @@ but should NOT see schemas for rye/bash/bash (not permitted).
   <metadata>
     <description>Tests tool schema preload — only permitted tool schemas should appear.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <permissions>

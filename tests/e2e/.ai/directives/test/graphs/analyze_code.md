@@ -10,7 +10,7 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
   <metadata>
     <description>Analyze a code snippet, write JSON analysis to a file, and return structured results.</description>
     <category>test/graphs</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="20000" spend="0.05" />
     <permissions>

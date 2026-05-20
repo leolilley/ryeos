@@ -9,7 +9,7 @@ figure out tool names and parameters from the `<capabilities>` block alone.
   <metadata>
     <description>Minimal guidance — LLM must infer tool usage from capabilities block only.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="12" tokens="32000" spend="0.15" />
   </metadata>

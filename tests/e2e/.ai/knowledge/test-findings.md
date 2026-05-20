@@ -5,7 +5,7 @@ title: Test Findings
 entry_type: context
 category: ""
 version: "1.0.0"
-author: rye-os
+author: ryeos
 tags:
   - test
   - findings

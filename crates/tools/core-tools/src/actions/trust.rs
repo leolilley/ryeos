@@ -29,7 +29,7 @@ use ryeos_engine::trust::{compute_fingerprint, pin_key, PublisherTrustDoc};
 
 #[derive(Debug)]
 pub struct PinFromOptions {
-    /// Operator user space root (parent of `~/.ai/`). Defaults to `$HOME`.
+    /// Operator user space root (parent of `.ai/`). Defaults to the canonical user root.
     pub user_root: PathBuf,
     /// Path to a PUBLISHER_TRUST.toml file.
     pub trust_file: PathBuf,
@@ -79,7 +79,7 @@ pub fn run_pin_from(opts: &PinFromOptions) -> Result<PinReport> {
 
 #[derive(Debug)]
 pub struct PinOptions {
-    /// Operator user space root (parent of `~/.ai/`). Defaults to `$HOME`.
+    /// Operator user space root (parent of `.ai/`). Defaults to the canonical user root.
     pub user_root: PathBuf,
     /// Expected fingerprint — recomputed and matched against the supplied key.
     pub expected_fingerprint: String,

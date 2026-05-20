@@ -10,7 +10,7 @@ ALT_IDENTITY_PRESENT but NOT BASE_IDENTITY_PRESENT in the system prompt.
   <metadata>
     <description>Tests suppress: replaces base-identity with alt-identity.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

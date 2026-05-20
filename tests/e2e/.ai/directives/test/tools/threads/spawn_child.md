@@ -9,7 +9,7 @@ Recursive directive spawning test. Parent writes a plan file, spawns child direc
   <metadata>
     <description>Recursive directive spawning — parent orchestrates a plan, spawns a child directive to write a greeting file, verifies the child's output, and appends a completion summary.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Child thread spawning and cross-thread verification</model>
     <limits turns="8" tokens="3072" />
     <permissions>

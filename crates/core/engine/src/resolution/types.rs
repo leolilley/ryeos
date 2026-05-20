@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub enum TrustClass {
     /// Item from immutable system bundle.
     TrustedSystem,
-    /// Item from user's ~/.ai/.
+    /// Item from user space.
     TrustedUser,
     /// Item from project or untrusted sources.
     UntrustedUserSpace,

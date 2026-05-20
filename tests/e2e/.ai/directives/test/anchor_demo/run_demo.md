@@ -8,7 +8,7 @@ Execute the anchor_demo tool to verify the anchor system works.
   <metadata>
     <description>Run the anchor demo tool with a greeting</description>
     <category>test/anchor_demo</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
   </metadata>
   <permissions>

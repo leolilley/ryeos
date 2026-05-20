@@ -8,7 +8,7 @@ Simple child directive — writes a message to a file, then reads it back to con
   <metadata>
     <description>Write a message to a file and read it back to verify. Used as a child thread target.</description>
     <category>test/tools/file_system</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="16000" />
     <permissions>

@@ -9,7 +9,7 @@ Test directive that exercises the Zen provider with an OpenAI-compatible model â
   <metadata>
     <description>Test Zen provider with OpenAI-compatible model (MiniMax) via Chat Completions profile.</description>
     <category>test</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model id="minimax-m2.5-free" provider="zen/zen" />
     <limits turns="6" tokens="4096" spend="0.05" />
     <permissions>

@@ -9,4 +9,4 @@ description: Python function runtime descriptor reference.
 
 Invariant: the Python function runtime imports a module and calls an `execute(params, project_path)` function rather than running a script as `__main__`.
 
-The descriptor configures interpreter resolution, command template, environment injection, timeout handling, and the `PYTHONPATH` needed for the target tool directory. The deleted legacy `python/lib` shim is not part of the active path.
+The descriptor configures interpreter resolution, command template, environment injection, timeout handling, and the `PYTHONPATH` needed for the target tool directory.

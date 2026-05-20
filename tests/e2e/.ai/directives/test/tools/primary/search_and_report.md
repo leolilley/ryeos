@@ -9,7 +9,7 @@ Multi-step directive that searches the knowledge base for entries on a topic, th
   <metadata>
     <description>Search knowledge entries for a topic and write a summary report.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022" />
     <limits turns="5" tokens="2048" />
     <permissions>

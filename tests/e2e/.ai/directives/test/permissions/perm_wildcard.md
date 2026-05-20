@@ -8,7 +8,7 @@ Wildcard permissions — all actions should be allowed.
   <metadata>
     <description>Test: wildcard permissions — all actions should be allowed.</description>
     <category>test/permissions</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="5" tokens="2048" />
     <permissions>*</permissions>

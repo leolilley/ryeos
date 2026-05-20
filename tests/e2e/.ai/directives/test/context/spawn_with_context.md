@@ -8,7 +8,7 @@ Orchestrator that spawns the leaf_context directive as a child thread. Tests tha
   <metadata>
     <description>Spawns leaf_context as child thread. Verifies full context injection in spawned thread transcript.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="8" tokens="4096" spend="0.50" depth="3" spawns="2" />
     <permissions>

@@ -9,7 +9,7 @@ Used to test that extended directives inherit the full `<capabilities>` XML.
   <metadata>
     <description>Base with all 3 capability types for inheritance testing.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

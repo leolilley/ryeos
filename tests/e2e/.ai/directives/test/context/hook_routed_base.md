@@ -9,7 +9,7 @@ This is NOT meant to be executed directly — it's a context provider for the ex
   <metadata>
     <description>Context base for hook-routed directives. Provides identity and rules.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

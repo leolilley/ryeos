@@ -134,7 +134,7 @@ ryeos identity public-key
 | User key | Manual replacement + re-pin trust | CLI auth breaks until new key authorized |
 | Node key | Regenerate node key + re-sign node-config items + re-trust + re-authorize | All remote authorizations invalidated; must re-authorize on every remote |
 | Vault key | `ryeos vault rewrap` | None — re-seals all entries under new key |
-| Publisher trust | `ryeos trust pin` (add new, remove old) | Items signed by old key fail verification |
+| Publisher trust | `ryeos trust pin` | Items signed by untrusted keys fail verification |
 
 ## Request Authentication Flow
 

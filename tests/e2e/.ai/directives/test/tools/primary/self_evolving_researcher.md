@@ -9,7 +9,7 @@ Self-evolution and research directive. Searches for existing knowledge, loads re
   <metadata>
     <description>Self-evolving researcher — searches knowledge, synthesizes a research report, creates a new knowledge entry from findings, signs it, and logs the evolution. Demonstrates fetch, execute, and sign across all item types.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Self-evolving research with knowledge creation and signing</model>
     <limits turns="12" tokens="4096" />
     <permissions>

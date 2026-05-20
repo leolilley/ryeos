@@ -9,7 +9,7 @@ Test directive that exercises the Zen provider with a Gemini model — verifies 
   <metadata>
     <description>Test Zen provider with Gemini model via Google Generative AI profile.</description>
     <category>test</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model id="gemini-3-flash" provider="zen/zen" />
     <limits turns="6" tokens="32000" spend="0.10" />
     <permissions>

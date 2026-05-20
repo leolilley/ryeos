@@ -9,7 +9,7 @@ Two-step directive that writes content to a file, then reads it back to verify t
   <metadata>
     <description>Write content to a file then read it back to verify correctness.</description>
     <category>test/tools/file_system</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022" />
     <limits turns="5" tokens="2048" />
     <permissions>

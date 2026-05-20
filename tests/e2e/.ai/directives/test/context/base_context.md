@@ -8,7 +8,7 @@ Root of an extends chain. Declares system context that should propagate to all c
   <metadata>
     <description>Base directive that injects system-level context via the extends chain.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

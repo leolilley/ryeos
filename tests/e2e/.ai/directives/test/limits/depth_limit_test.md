@@ -8,7 +8,7 @@ Test that depth limit enforcement prevents infinitely recursive thread spawning.
   <metadata>
     <description>Test: spawn a child that tries to spawn a grandchild. With depth=1, the grandchild should be rejected (depth exhausted).</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.50" depth="1" />
     <permissions>

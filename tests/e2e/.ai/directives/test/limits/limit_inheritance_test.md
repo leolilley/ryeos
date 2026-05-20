@@ -8,7 +8,7 @@ Test that parent limits constrain child threads. Parent sets turns=3, spend=0.20
   <metadata>
     <description>Test: parent limits (turns=3, spend=0.20) constrain child. Child declares turns=25 but should be capped to 3.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="4096" spend="0.20" />
     <permissions>

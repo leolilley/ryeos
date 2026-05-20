@@ -44,7 +44,7 @@
 //! Re-signing requires the platform-author signing key — the same key
 //! `./scripts/gate.sh` uses for its automatic re-sync. The key path is
 //! taken from the `RYEOS_SIGNING_KEY` environment variable, falling back
-//! to `~/.ai/config/keys/signing/private_key.pem`. Tests that run on
+//! to `~/.ryeos/.ai/config/keys/signing/private_key.pem`. Tests that run on
 //! a host without that key set up will fail loudly at the first call;
 //! that is the same precondition as `gate.sh`.
 

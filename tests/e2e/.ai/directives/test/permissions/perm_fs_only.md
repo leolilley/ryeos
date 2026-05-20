@@ -8,7 +8,7 @@ Has file-system execute permission only. Write should succeed, search should be 
   <metadata>
     <description>Test: has fs write permission, then tries search (should be denied).</description>
     <category>test/permissions</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="5" tokens="2048" />
     <permissions>

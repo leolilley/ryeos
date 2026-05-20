@@ -5,7 +5,7 @@ title: Mid-Layer Rules
 entry_type: context
 category: test/context
 version: "1.0.0"
-author: rye-os
+author: ryeos
 tags:
   - test
   - rules

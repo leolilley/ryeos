@@ -31,10 +31,10 @@ distinct to prevent collisions.
 │  System 4: ${path} + {input:name} — graph/directive bodies │
 │  System 5: {key} exact-match      — provider API templates │
 ├─────────────────────────────────┬───────────────────────────┤
-│                                 │ legacy (being replaced)   │
+│                                 │ descriptor-local          │
 │                                 ▼                           │
 │  PYTHON SUBPROCESS                                           │
-│  System 6: ${path} + {input:name} — state-graph walker     │
+│  System 6: ${path} + {input:name} — Python descriptors     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -168,9 +168,8 @@ Built-in variables: `${_now}` (ISO timestamp), `${_timestamp}` (epoch).
 | `{input:name:default}`  | Returns `default` if missing    |
 | `{input:name\|default}` | Returns `default` if missing    |
 
-**Important:** Unlike the legacy Python system, missing inputs without a
-modifier (`?`, `:`, or `|`) produce a **hard error** with a clear message
-suggesting the fix.
+**Important:** Missing inputs without a modifier (`?`, `:`, or `|`)
+produce a **hard error** with a clear message suggesting the fix.
 
 ### Pipe Filters
 `${value \| filter}` — apply transformations:
@@ -224,13 +223,8 @@ Missing placeholders become `null` with a warning log (not an error).
 **Syntax:** Identical to System 4 (same `${...}` and `{input:...}` forms).
 
 ### Difference from Rust (System 4)
-The Python version is more lenient: missing `{input:name}` without a
-modifier silently returns the original `{input:name}` text instead of
-erroring. The Rust version (System 4) hard-errors on missing inputs.
-
-### Status
-The Python walker is being replaced by the Rust graph runtime. System 6
-exists for backward compatibility during the transition.
+System 6 preserves descriptor-local Python templating semantics. System
+4 is the stricter Rust runtime path and hard-errors on missing inputs.
 
 ---
 

@@ -8,7 +8,7 @@ Simple single-step directive that writes a greeting message to a specified file 
   <metadata>
     <description>Write a greeting message to a file using rye/file-system/write.</description>
     <category>test/tools/file_system</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="4096" />
     <permissions>

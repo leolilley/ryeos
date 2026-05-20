@@ -8,7 +8,7 @@ Test that child threads inherit parent capabilities when child declares none. Pa
   <metadata>
     <description>Test: parent caps propagate to child. Parent has fs+thread caps. Spawns child that has its own caps (should use child's own).</description>
     <category>test/permissions</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.30" />
     <permissions>

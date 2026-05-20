@@ -8,7 +8,7 @@ Middle layer in extends chain. Adds before-context on top of base's system conte
   <metadata>
     <description>Mid-layer directive extending base. Adds before-context knowledge.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

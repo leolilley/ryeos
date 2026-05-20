@@ -43,9 +43,8 @@ machine, not the LLM workflow layer:
                                           # subprocess, python runtimes, verbs/list
 ```
 
-Legacy Python parser implementations, the old Bash runtime descriptor, the
-old Python state-graph runtime, and provider tool descriptors are not part of
-the active bundle layout.
+The active core bundle layout is the source of truth for parser,
+handler, service, protocol, tool, route, verb, and alias descriptors.
 
 ## Bundle Layout (Standard)
 

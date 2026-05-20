@@ -20,7 +20,7 @@ The thread should see:
   <metadata>
     <description>Tests full 3-layer composition: tool preload + hook routing + extends chain.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <permissions>

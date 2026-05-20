@@ -10,7 +10,7 @@ End-to-end test for the quality gate tool — verifies gate execution, pass/fail
   <metadata>
     <description>Test the quality gate tool — run configured gates and verify structured results.</description>
     <category>test/quality</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" provider="zen/zen" />
     <limits turns="8" tokens="8192" spend="0.10" />
     <permissions>

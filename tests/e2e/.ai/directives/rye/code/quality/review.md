@@ -9,7 +9,7 @@ Review code changes for quality issues — runs gates then uses LLM analysis aga
   <metadata>
     <description>Review code changes for quality — deterministic gates + semantic LLM analysis</description>
     <category>rye/code/quality</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="standard" />
     <limits turns="10" tokens="32000" />
     <context>

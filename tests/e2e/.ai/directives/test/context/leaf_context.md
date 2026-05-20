@@ -8,7 +8,7 @@ Leaf of extends chain. Adds after-context. Should receive base system + mid befo
   <metadata>
     <description>Leaf directive in 3-level extends chain. Tests full context composition.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

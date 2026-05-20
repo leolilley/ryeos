@@ -31,9 +31,8 @@ Runs a Python script as `__main__`.
 - **Timeout:** 300s
 - **Use case:** Self-contained Python scripts
 
-The legacy Bash runtime descriptor and Python state-graph runtime were
-removed. Shell commands now run through `tool:ryeos/core/subprocess/execute`,
-and graph workflows run through `runtime:graph-runtime` in the standard bundle.
+Shell commands run through `tool:ryeos/core/subprocess/execute`, and
+graph workflows run through `runtime:graph-runtime` in the standard bundle.
 
 ## Execution Config
 
@@ -61,8 +60,7 @@ The chain looks like:
 Tool action → @subprocess → subprocess/execute → fork + exec → result
 ```
 
-## Removed Python helper shims
+## Runtime implementation ownership
 
-The old `python/lib/` shim directory was deleted. Active interpolation,
-conditions, graph traversal, and resume behavior live in Rust runtimes and
-engine crates, not in bundle-local Python helper files.
+Active interpolation, conditions, graph traversal, and resume behavior
+live in Rust runtimes and engine crates.

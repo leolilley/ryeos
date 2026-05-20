@@ -19,4 +19,4 @@ Invariant: a graph is signed YAML describing explicit nodes, edges, conditions, 
 - Prefer explicit error edges/hooks over relying on runtime defaults.
 - Keep side-effecting nodes isolated so resume/retry behavior is understandable.
 
-The graph kind delegates to graph-runtime through the runtime registry. Do not set legacy `executor_id: ryeos/core/runtimes/state-graph/runtime`; that Python-era runtime was removed.
+The graph kind delegates to `runtime:graph-runtime` through the runtime registry.

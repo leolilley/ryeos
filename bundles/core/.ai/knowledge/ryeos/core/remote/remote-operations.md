@@ -175,7 +175,7 @@ delegated authority.
 1. Rotate the node key on the caller.
 2. On the remote: `ryeos authorize-key` with the new node public key.
 3. On the caller: `ryeos remote configure` to pick up changes.
-4. On the remote: remove the old authorized-key TOML from
+4. On the remote: remove any superseded authorized-key TOML from
    `.ai/node/auth/authorized_keys/`.
 
 ## Remote Ignore Cache
@@ -322,8 +322,8 @@ content rather than the remote operator's own user space.
   rebuilds call `BootstrapLoader::load_bundle_section()` to read the
   live registry, so the new bundle set takes effect on the next
   `pushed_head` request without a daemon restart.
-- Existing cached engines continue using the old bundle set until
-  evicted by LRU or the idle threshold.
+- Existing cached engines continue using the bundle set they were built
+  with until evicted by LRU or the idle threshold.
 - The cache uses single-flight builds: concurrent first requests for
   the same snapshot serialise on one `EngineCache::get_or_insert_with`
   build. Late arrivals receive a clone of the first-built
@@ -361,8 +361,7 @@ borrowed. Borrowed children:
 Nested callback children (callback within a callback) preserve the
 parent's provenance via `clone_for_borrowed_child`, so the grandchild's
 variant remains `BorrowedChildPushedHead` and its lifeline Arc still
-pins the original Root's temp dir. This closes the regression flagged
-by oracle review on the previous heuristic-based implementation.
+pins the original Root's temp dir.
 
 Resuming a `pushed_head` thread under the per-request overlay is
 tracked separately; the resume path falls back to the daemon engine.
@@ -371,11 +370,10 @@ dispatcher (inline only).
 
 ## User-Space Sync
 
-### New user root: `~/.ryeos/`
+### User root: `~/.ryeos/`
 
-The user-space root is `~/.ryeos/` (historically `~/.ai/`). All user-tier items
-(directives, tools, knowledge, trust pins) live under
-`~/.ryeos/.ai/`.
+The user-space root is `~/.ryeos/`. All user-tier items (directives,
+tools, knowledge, trust pins) live under `~/.ryeos/.ai/`.
 
 ### Allow-list for user-space push
 

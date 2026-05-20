@@ -8,7 +8,7 @@ Creates a mystery file, then investigates it — reads it back, lists the direct
   <metadata>
     <description>Write a mystery file, investigate it with reads and directory listing, then write a report.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="10" tokens="40000" />
     <permissions>

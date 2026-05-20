@@ -8,7 +8,7 @@ Test that the default_escalate_limit hook fires when turns limit is exceeded.
   <metadata>
     <description>Test: exceed turns limit — should trigger escalation hook.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="1" tokens="4096" spend="1.0" />
   </metadata>

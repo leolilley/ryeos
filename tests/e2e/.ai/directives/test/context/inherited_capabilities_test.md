@@ -16,7 +16,7 @@ Expected `<capabilities>` output:
   <metadata>
     <description>Tests capability inheritance — leaf has no permissions, inherits all 3 types from parent.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="8" tokens="32000" spend="0.15" />
   </metadata>

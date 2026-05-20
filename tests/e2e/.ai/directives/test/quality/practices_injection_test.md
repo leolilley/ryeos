@@ -10,7 +10,7 @@ End-to-end test for knowledge context injection — verifies that the practices 
   <metadata>
     <description>Test that anti-slop practices knowledge is injected into directive context via extends chain.</description>
     <category>test/quality</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" provider="zen/zen" />
     <limits turns="6" tokens="8192" spend="0.10" />
     <context>

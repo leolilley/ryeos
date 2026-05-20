@@ -9,7 +9,7 @@ Create a new knowledge entry file with YAML frontmatter, then sign it for valida
   <metadata>
     <description>Create a new knowledge entry file with YAML frontmatter and markdown body, then validate and sign it.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Knowledge creation and signing</model>
     <limits turns="5" tokens="2048" />
     <permissions>

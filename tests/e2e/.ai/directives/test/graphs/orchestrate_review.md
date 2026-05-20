@@ -10,7 +10,7 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
   <metadata>
     <description>Orchestrate a code review by chaining analyze_code and summarize_text directives via nested LLM threads.</description>
     <category>test/graphs</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="general" provider="zen/zen" />
     <limits turns="12" tokens="40000" spend="0.50" />
     <permissions>

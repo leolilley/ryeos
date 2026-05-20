@@ -34,7 +34,7 @@ Every YAML file under `bundles/<bundle>/.ai/` that loads through `VerifiedLoader
 3. Verifies the signature against the fingerprint's pubkey from the trust store
 4. Accepts (trusted), warns (unknown signer), or fails (invalid)
 
-You cannot edit a signed YAML and reuse the old signature. Any byte change invalidates it.
+You cannot edit a signed YAML and reuse the existing signature. Any byte change invalidates it.
 
 ## The dev publisher key
 

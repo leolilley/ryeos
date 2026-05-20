@@ -8,7 +8,7 @@ Test that the tokens limit triggers escalation. Set tokens=500 so the first LLM 
   <metadata>
     <description>Test: exceed tokens limit (500) — should trigger escalation hook after first response.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="10" tokens="500" spend="1.0" />
     <permissions>

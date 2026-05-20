@@ -8,7 +8,7 @@ Test that the duration_seconds limit triggers escalation. Set duration_seconds=1
   <metadata>
     <description>Test: exceed duration limit (1 second) — should trigger escalation hook when elapsed time exceeds 1s.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="10" tokens="100000" spend="1.0" duration_seconds="1" />
     <permissions>

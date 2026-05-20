@@ -8,7 +8,7 @@ Child directive spawned by depth_limit_test. Writes a marker then tries to spawn
   <metadata>
     <description>Intermediate child: writes marker, then tries to spawn a grandchild. Grandchild should be rejected if depth limit reached.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.25" />
     <permissions>

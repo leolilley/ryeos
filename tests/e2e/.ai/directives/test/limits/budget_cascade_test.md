@@ -8,7 +8,7 @@ Test that child thread spend cascades back to parent budget. Parent has $0.50 bu
   <metadata>
     <description>Test: parent spawns child, child's spend cascades back to parent budget. Check budget_ledger.db after run.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="0.50" />
     <permissions>

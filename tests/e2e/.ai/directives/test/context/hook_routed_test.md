@@ -12,7 +12,7 @@ and BASE_IDENTITY_PRESENT markers.
   <metadata>
     <description>Tests resolve_extends hook routing — no explicit extends, routed by hook.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <permissions>
