@@ -42,6 +42,26 @@ impl From<anyhow::Error> for ProjectSourceError {
     }
 }
 
+impl From<ryeos_app::engine_cache::BuildWaitError> for ProjectSourceError {
+    fn from(err: ryeos_app::engine_cache::BuildWaitError) -> Self {
+        Self::Other(err.to_string())
+    }
+}
+
+fn load_live_bundle_roots(state: &AppState) -> Result<Vec<PathBuf>, ProjectSourceError> {
+    let daemon_engine = &(*state).engine;
+    let loader = ryeos_app::node_config::loader::BootstrapLoader {
+        system_space_dir: state.config.system_space_dir.as_path(),
+        trust_store: &daemon_engine.trust_store,
+    };
+    let records = loader.load_bundle_section().map_err(|e| {
+        ProjectSourceError::Other(format!(
+            "failed to load live bundle registry for per-request engine rebuild: {e}"
+        ))
+    })?;
+    Ok(records.into_iter().map(|r| r.path).collect())
+}
+
 /// How the project root is determined for execution.
 ///
 /// Tagged enum — callers specify `{ "kind": "live_fs" }` or
@@ -58,7 +78,6 @@ pub enum ProjectSource {
     /// and checkout from CAS.
     PushedHead,
 }
-
 
 /// Request-scoped project execution context.
 ///
@@ -98,15 +117,45 @@ pub struct ResolvedProjectContext {
     /// at build time. Kept as a field for API compatibility.
     pub trust_overlay: Option<TrustStore>,
     /// The **authoritative** engine for this request. For `LiveFs`, this
-    /// is `state.engine` (the daemon's startup engine). For `PushedHead`,
-    /// this is a per-snapshot overlay engine built from the daemon's
-    /// system roots + the caller's materialised user root + trust pins.
+    /// is the daemon's startup engine. For `PushedHead`, this is a
+    /// per-snapshot overlay engine built from the daemon's system roots
+    /// + the caller's materialised user root + trust pins.
     ///
-    /// **No executor code should reach for `state.engine` after context
+    /// **No executor code should reach for the daemon engine after context
     /// resolution.** All resolution, trust verification, and kind/schema
     /// lookups MUST go through this field (or the `engine` on the
     /// `ExecutionContext` / `ExecutionParams` that it flows into).
     pub request_engine: Arc<Engine>,
+}
+
+impl ResolvedProjectContext {
+    /// Construct a borrowed context for a callback child. No checkout,
+    /// no temp dir tracking (parent owns it), and no engine rebuild
+    /// (parent's engine is reused).
+    pub fn borrowed(
+        borrowed_dir: PathBuf,
+        original_path: PathBuf,
+        request_engine: Arc<Engine>,
+    ) -> Result<Self, ProjectSourceError> {
+        if !borrowed_dir.is_dir() {
+            return Err(ProjectSourceError::CheckoutFailed(format!(
+                "borrowed working dir does not exist or is not a directory: {}",
+                borrowed_dir.display()
+            )));
+        }
+
+        Ok(Self {
+            effective_path: borrowed_dir,
+            original_path,
+            source: ProjectSource::PushedHead,
+            snapshot_hash: None,
+            temp_dir: None,
+            user_root: None,
+            user_temp_dir: None,
+            trust_overlay: None,
+            request_engine,
+        })
+    }
 }
 
 /// Resolve a `ProjectSource` into a concrete execution context.
@@ -144,7 +193,7 @@ pub fn resolve_project_context(
             // LiveFs uses the daemon's startup engine directly — no
             // per-request overlay needed because the daemon's own
             // user space is what resolves anyway.
-            request_engine: state.engine.clone(),
+            request_engine: Arc::clone(&(*state).engine),
         },
         ProjectSource::PushedHead => {
             // HEAD lookup MUST use the same canonical ref string as
@@ -187,6 +236,7 @@ pub fn resolve_project_context(
             let materialization_cache = crate::execution::cache::MaterializationCache::new(
                 state.config.system_space_dir.join("cache").join("snapshots"),
             );
+            let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
             crate::execution::checkout_project(
                 &cas_root,
                 manifest_hash,
@@ -201,22 +251,20 @@ pub fn resolve_project_context(
                 snapshot_hash: snap_hash.clone(),
             };
 
-            let request_engine = if let Some(eng) = state.engine_cache.get(&cache_key) {
-                // Cache hit: reuse engine + skip ALL user materialisation.
-                // The cached engine was built against the user overlay from
-                // the first request on this snapshot; the user temp dir lives
-                // as long as the cache entry.
-                eng
-            } else {
-                // Cache miss: materialise user overlay, build engine, insert.
-                let (user_root, trust_overlay) =
-                    if let Some(user_mh) = snapshot.user_manifest_hash.as_ref() {
+            let request_engine = state.engine_cache.get_or_insert_with(
+                cache_key,
+                || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
+                    // Cache miss: materialise user overlay and build engine.
+                    let (user_root, user_guard, trust_overlay) = if let Some(user_mh) =
+                        snapshot.user_manifest_hash.as_ref()
+                    {
                         let user_exec_dir = state
                             .config
                             .system_space_dir
                             .join("executions")
                             .join(format!("{}-user", checkout_id));
                         let user_ai_dir = user_exec_dir.join(ryeos_engine::AI_DIR);
+                        let user_guard = Arc::new(TempDirGuard::new(user_exec_dir.clone()));
                         crate::execution::checkout_project(
                             &cas_root,
                             user_mh,
@@ -250,52 +298,32 @@ pub fn resolve_project_context(
                             None
                         };
 
-                        (Some(user_exec_dir), overlay)
+                        (Some(user_exec_dir), Some(user_guard), overlay)
                     } else {
-                        (None, None)
+                        (None, None, None)
                     };
 
-                // Re-read live bundle roots from disk on each rebuild.
-                // This is the same directory the bundle install handler
-                // copies into, so a freshly installed bundle appears here
-                // immediately. Only runs on cache miss (generation bump
-                // invalidates the key), so the disk-scan cost is bounded.
-                let bundles_dir = state.config.system_space_dir.join(".ai").join("bundles");
-                let mut bundle_roots: Vec<PathBuf> = vec![state.config.system_space_dir.clone()];
-                if bundles_dir.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_dir() {
-                                bundle_roots.push(path);
-                            }
-                        }
-                    }
-                }
-                let built = ryeos_app::engine_init::build_engine_for_roots(
-                    &state.config,
-                    &bundle_roots,
-                    Some(exec_dir.as_path()),
-                    user_root.as_deref(),
-                    trust_overlay.as_ref(),
-                )
-                .map_err(|e| {
-                    ProjectSourceError::CheckoutFailed(format!(
-                        "per-request engine build failed: {e}"
-                    ))
-                })?;
-                let arc = Arc::new(built);
+                    // Re-read live bundle roots from the same signed
+                    // registry used by daemon startup. Only runs on cache
+                    // miss (generation bump invalidates the key), so the
+                    // read cost is bounded.
+                    let bundle_roots = load_live_bundle_roots(state)?;
+                    let built = ryeos_app::engine_init::build_engine_for_roots(
+                        &state.config,
+                        &bundle_roots,
+                        Some(exec_dir.as_path()),
+                        user_root.as_deref(),
+                        trust_overlay.as_ref(),
+                    )
+                    .map_err(|e| {
+                        ProjectSourceError::CheckoutFailed(format!(
+                            "per-request engine build failed: {e}"
+                        ))
+                    })?;
 
-                // Hand the user overlay temp dir to the cache. The
-                // project checkout is NOT cached — each request owns
-                // its own exec_dir.
-                state.engine_cache.insert(
-                    cache_key,
-                    arc.clone(),
-                    user_root.map(|p| Arc::new(TempDirGuard::new(p))),
-                );
-                arc
-            };
+                    Ok((Arc::new(built), user_guard))
+                },
+            )?;
 
             ResolvedProjectContext {
                 effective_path: exec_dir.clone(),
@@ -305,7 +333,7 @@ pub fn resolve_project_context(
                 // Request-owned: wrapped in Arc<TempDirGuard> so the
                 // runner and cache can both hold references. The project
                 // checkout is cleaned up when the last Arc drops.
-                temp_dir: Some(Arc::new(TempDirGuard::new(exec_dir))),
+                temp_dir: Some(project_guard),
                 user_root: None,
                 // Cache-owned: the user overlay temp dir lives as long as
                 // the cache entry. The request does not clean this up.
@@ -433,6 +461,18 @@ pub fn canonical_project_ref(raw: &str) -> Result<String, ProjectSourceError> {
 mod canonical_project_ref_tests {
     use super::*;
 
+    fn minimal_engine() -> Arc<Engine> {
+        Arc::new(Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::dispatcher::ParserDispatcher::new(
+                ryeos_engine::parsers::registry::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::registry::HandlerRegistry::empty()),
+            ),
+            None,
+            vec![],
+        ))
+    }
+
     #[test]
     fn passes_through_no_project_sentinel() {
         let out = canonical_project_ref(NO_PROJECT_SENTINEL).unwrap();
@@ -476,6 +516,53 @@ mod canonical_project_ref_tests {
         let r2 = canonical_project_ref(&abs.to_string_lossy()).unwrap();
         assert_eq!(r1, r2);
     }
+
+    #[test]
+    fn borrowed_constructor_returns_ctx_with_no_temp_dir_no_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = minimal_engine();
+        let ctx = ResolvedProjectContext::borrowed(
+            tmp.path().to_path_buf(),
+            PathBuf::from("/original"),
+            engine,
+        )
+        .unwrap();
+
+        assert_eq!(ctx.effective_path, tmp.path());
+        assert_eq!(ctx.original_path, PathBuf::from("/original"));
+        assert!(matches!(ctx.source, ProjectSource::PushedHead));
+        assert!(ctx.snapshot_hash.is_none());
+        assert!(ctx.temp_dir.is_none());
+    }
+
+    #[test]
+    fn borrowed_constructor_errors_when_dir_missing() {
+        let missing = std::env::temp_dir().join(format!(
+            "ryeos-missing-borrowed-{}",
+            rand::random::<u64>()
+        ));
+        let err = ResolvedProjectContext::borrowed(
+            missing.clone(),
+            PathBuf::from("/original"),
+            minimal_engine(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("borrowed working dir"));
+        assert!(msg.contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn borrowed_constructor_preserves_engine_arc_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = minimal_engine();
+        let ctx = ResolvedProjectContext::borrowed(
+            tmp.path().to_path_buf(),
+            PathBuf::from("/original"),
+            engine.clone(),
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&ctx.request_engine, &engine));
+    }
 }
-
-

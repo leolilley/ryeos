@@ -26,7 +26,6 @@ use crate::route_error::{RouteConfigError, RouteDispatchError};
 use ryeos_executor::execution::project_source::{self, ProjectSource};
 use crate::routes::compile::{CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
-use ryeos_app::temp_dir_guard::TempDirGuard;
 
 // ── Request shape ─────────────────────────────────────────────────────────
 
@@ -325,10 +324,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         };
 
-        // Hold the Arc<TempDirGuard> through dispatch so failures
-        // before runner ownership still clean up via Drop.
-        let temp_dir_guard: Option<Arc<TempDirGuard>> = project_ctx.temp_dir.clone();
-
         // Build plan context.
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
 
@@ -375,17 +370,34 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         };
 
+        let provenance = match project_source {
+            ProjectSource::LiveFs => ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+                project_ctx.effective_path.clone(),
+                project_ctx.request_engine.clone(),
+            ),
+            ProjectSource::PushedHead => ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
+                project_ctx.effective_path.clone(),
+                project_ctx.original_path.clone(),
+                project_ctx.request_engine.clone(),
+                project_ctx
+                    .temp_dir
+                    .clone()
+                    .expect("ResolvedProjectContext PushedHead must carry a temp_dir Arc"),
+                project_ctx
+                    .snapshot_hash
+                    .clone()
+                    .expect("ResolvedProjectContext PushedHead must carry a snapshot_hash"),
+            ),
+        };
+
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: request.launch_mode.as_str(),
             target_site_id: request.target_site_id.as_deref(),
-            project_source_is_pushed_head: matches!(project_source, ProjectSource::PushedHead),
             validate_only: request.validate_only,
             params: request.parameters.clone(),
             acting_principal: caller_principal_id.as_str(),
             project_path: &project_ctx.effective_path,
-            original_project_path: project_ctx.original_path.clone(),
-            snapshot_hash: project_ctx.snapshot_hash.clone(),
-            temp_dir: temp_dir_guard,
+            provenance,
             original_root_kind: root_canonical.kind.as_str(),
             pre_minted_thread_id: None,
             operation: request.operation.clone(),

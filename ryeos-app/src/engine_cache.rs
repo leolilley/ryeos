@@ -24,7 +24,7 @@
 //!
 //! # Eviction
 //!
-//! Two policies, applied on every `get()` and `insert()` call:
+//! Two policies, applied on every `get()` and cache-fill call:
 //!
 //!   1. **LRU** at the configured capacity, guarded by a
 //!      `strong_count` check: entries whose engine `Arc` is still
@@ -218,7 +218,7 @@ impl EngineCache {
     ) -> Result<Arc<Engine>, E>
     where
         F: FnOnce() -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), E>,
-        E: From<BuildWaitError>,
+        E: From<BuildWaitError> + std::fmt::Display,
     {
         let mut slots = self.inner.slots.lock().unwrap();
         self.sweep_idle_locked(&mut slots);
@@ -245,8 +245,25 @@ impl EngineCache {
         slots.insert(key.clone(), CacheSlot::Building(pending.clone()));
         drop(slots);
 
-        // Run the build outside the lock.
-        let build_result = build_fn();
+        // Run the build outside the lock. If the build panics, remove
+        // the in-flight slot and wake waiters before resuming unwind so
+        // a later caller can retry instead of deadlocking on `Building`.
+        let build_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(build_fn)) {
+            Ok(result) => result,
+            Err(payload) => {
+                let mut slots = self.inner.slots.lock().unwrap();
+                slots.remove(&key);
+                {
+                    let mut r = pending.result.lock().unwrap();
+                    *r = Some(Err(BuildWaitError {
+                        message: "build panicked".into(),
+                    }));
+                }
+                pending.done.notify_all();
+                drop(slots);
+                std::panic::resume_unwind(payload);
+            }
+        };
 
         let mut slots = self.inner.slots.lock().unwrap();
 
@@ -254,18 +271,27 @@ impl EngineCache {
         let (engine, user_temp) = build_result.map_err(|user_err| {
             // Remove slot so retry works.
             slots.remove(&key);
-            // Signal waiters with a generic error (we can't clone E).
+            // Signal waiters with the builder's failure detail so they
+            // see the same error class/message as the builder (modulo
+            // the BuildWaitError wrapping required because `E` is not
+            // Clone). Callers can map BuildWaitError back to their
+            // domain error type via the `From` impls.
             {
                 let mut r = pending.result.lock().unwrap();
                 *r = Some(Err(BuildWaitError {
-                    message: "build failed".into(),
+                    message: user_err.to_string(),
                 }));
             }
             pending.done.notify_all();
             user_err
         })?;
 
-        // Run eviction before inserting.
+        // Remove our own Building slot BEFORE evicting for capacity so
+        // the in-flight slot is not counted against the LRU budget.
+        // Otherwise a miss at capacity would evict one extra Ready
+        // entry (len = N ready + 1 building → evict to N-1, then insert
+        // ready → N). Removing first restores len = N before eviction.
+        slots.remove(&key);
         self.evict_for_capacity_locked(&mut slots);
         slots.insert(
             key,
@@ -300,10 +326,13 @@ impl EngineCache {
         }
     }
 
-    /// Insert a freshly built engine into the cache. Retained for
-    /// direct callers (tests, etc). New code should use
-    /// `get_or_insert_with`.
-    pub fn insert(
+    /// Bypass the single-flight guard. ONLY for tests that need
+    /// deterministic insert ordering. Production code MUST use
+    /// `get_or_insert_with` — using direct insertion can silently
+    /// drop a `_user_temp` while an `Arc<Engine>` clone still resolves
+    /// against it.
+    #[cfg(test)]
+    fn insert_unchecked(
         &self,
         key: CacheKey,
         engine: Arc<Engine>,
@@ -320,6 +349,17 @@ impl EngineCache {
                 _user_temp: user_temp,
             }),
         );
+    }
+
+    /// Test-only direct insert helper.
+    #[cfg(test)]
+    pub fn insert_for_test(
+        &self,
+        key: CacheKey,
+        engine: Arc<Engine>,
+        user_temp: Option<Arc<TempDirGuard>>,
+    ) {
+        self.insert_unchecked(key, engine, user_temp);
     }
 
     /// Number of cached Ready entries. Test/diagnostic helper.
@@ -390,6 +430,7 @@ impl EngineCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// Build a minimal `Arc<Engine>` suitable for cache tests — no
     /// bundles, no kinds, no parsers. Just enough to satisfy the type.
@@ -436,7 +477,7 @@ mod tests {
         });
         let key = dummy_key("snap-1");
         let eng = minimal_engine();
-        cache.insert(key.clone(), eng.clone(), None);
+        cache.insert_for_test(key.clone(), eng.clone(), None);
         assert_eq!(cache.len(), 1);
         let hit = cache.get(&key).expect("should hit");
         // The cached entry must be the exact same Arc we inserted, not
@@ -452,7 +493,7 @@ mod tests {
         });
         let key = dummy_key("snap-1");
         let eng = minimal_engine();
-        cache.insert(key.clone(), eng.clone(), None);
+        cache.insert_for_test(key.clone(), eng.clone(), None);
 
         let hit1 = cache.get(&key).expect("first hit");
         let hit2 = cache.get(&key).expect("second hit");
@@ -474,7 +515,7 @@ mod tests {
         let eng1 = minimal_engine();
         let eng2 = minimal_engine();
 
-        cache.insert(key1.clone(), eng1.clone(), None);
+        cache.insert_for_test(key1.clone(), eng1.clone(), None);
         assert_eq!(cache.len(), 1);
 
         // Hold a strong ref outside the cache.
@@ -482,7 +523,7 @@ mod tests {
 
         // Insert a second entry — key1's engine has strong_count > 1
         // so it should NOT be evicted.
-        cache.insert(key2.clone(), eng2.clone(), None);
+        cache.insert_for_test(key2.clone(), eng2.clone(), None);
         assert_eq!(cache.len(), 2, "cache should be over-capacity, not evict in-use entry");
 
         // key1 is still accessible
@@ -502,7 +543,7 @@ mod tests {
         // Now insert a third — should be able to evict key1 (no more refs).
         let key3 = dummy_key("snap-3");
         let eng3 = minimal_engine();
-        cache.insert(key3.clone(), eng3, None);
+        cache.insert_for_test(key3.clone(), eng3, None);
         // After drop, strong_count may or may not have hit zero yet
         // (depends on Arc deallocation timing), but len should be <= 2.
         assert!(cache.len() <= 2);
@@ -516,7 +557,7 @@ mod tests {
         });
         let key = dummy_key("old-snap");
         let eng = minimal_engine();
-        cache.insert(key.clone(), eng.clone(), None);
+        cache.insert_for_test(key.clone(), eng.clone(), None);
 
         // Hold a strong ref.
         let _held = cache.get(&key).expect("hit");
@@ -538,7 +579,7 @@ mod tests {
         });
         let key = dummy_key("old-snap");
         let eng = minimal_engine();
-        cache.insert(key.clone(), eng.clone(), None);
+        cache.insert_for_test(key.clone(), eng.clone(), None);
 
         // Don't hold any external refs.
         drop(eng);
@@ -560,7 +601,7 @@ mod tests {
         // Insert at generation 0.
         let key_gen0 = CacheKey { system_install_generation: 0, snapshot_hash: "snap-1".into() };
         let eng = minimal_engine();
-        cache.insert(key_gen0.clone(), eng, None);
+        cache.insert_for_test(key_gen0.clone(), eng, None);
         assert!(cache.get(&key_gen0).is_some());
 
         // Bump generation.
@@ -605,7 +646,7 @@ mod tests {
 
         let key1 = dummy_key("snap-A");
         let eng1 = minimal_engine();
-        cache.insert(
+        cache.insert_for_test(
             key1,
             eng1,
             Some(Arc::new(TempDirGuard::new(user_path.clone()))),
@@ -617,7 +658,7 @@ mod tests {
         // Evict by inserting a second entry (capacity=1).
         let key2 = dummy_key("snap-B");
         let eng2 = minimal_engine();
-        cache.insert(key2, eng2, None);
+        cache.insert_for_test(key2, eng2, None);
 
         // User dir should be removed by the TempDirGuard drop on eviction.
         assert!(
@@ -636,7 +677,7 @@ mod tests {
         });
         let key = dummy_key("shared-snap");
         let eng = minimal_engine();
-        cache.insert(key.clone(), eng.clone(), None);
+        cache.insert_for_test(key.clone(), eng.clone(), None);
 
         let handles: Vec<_> = (0..4)
             .map(|_| {
@@ -682,7 +723,7 @@ mod tests {
         });
         let key = dummy_key("snap-hit");
         let eng = minimal_engine();
-        cache.insert(key.clone(), eng.clone(), None);
+        cache.insert_for_test(key.clone(), eng.clone(), None);
 
         let called = std::sync::atomic::AtomicBool::new(false);
         let result = cache.get_or_insert_with::<_, BuildWaitError>(
@@ -740,6 +781,42 @@ mod tests {
     }
 
     #[test]
+    fn same_key_insert_does_not_drop_in_use_user_temp() {
+        // Invariant: an in-use Arc<Engine> survives same-key cache
+        // operations; the user temp dir is not dropped while held.
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 4,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("same-key-survives");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().to_path_buf();
+        std::fs::write(path.join("user.dat"), "user-content").unwrap();
+
+        cache
+            .get_or_insert_with::<_, BuildWaitError>(key.clone(), || {
+                Ok((
+                    minimal_engine(),
+                    Some(Arc::new(TempDirGuard::new(path.clone()))),
+                ))
+            })
+            .unwrap();
+        let held = cache.get(&key).unwrap();
+
+        // Force another same-key build path attempt; correct
+        // single-flight semantics return the existing entry and do not
+        // overwrite/drop the cached user temp guard.
+        let again = cache
+            .get_or_insert_with::<_, BuildWaitError>(key.clone(), || {
+                panic!("should not rebuild — entry exists");
+            })
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&held, &again));
+        assert!(path.exists(), "user temp dir survived");
+    }
+
+    #[test]
     fn build_failure_releases_slot_for_retry() {
         // Invariant: a failed build does not poison the slot; a second
         // call rebuilds successfully.
@@ -771,5 +848,205 @@ mod tests {
         ).unwrap();
         assert_eq!(attempt.load(Ordering::SeqCst), 2);
         assert!(Arc::ptr_eq(&result, &eng));
+    }
+
+    #[test]
+    fn miss_at_capacity_evicts_exactly_one_ready_entry() {
+        // Regression: prior to the fix, the in-flight `Building` slot
+        // was counted against capacity during eviction, so a miss at
+        // capacity N evicted N-1 ready entries then inserted ready,
+        // leaving the cache at N-1 instead of N. After the fix the
+        // Building slot is removed before eviction, so a miss at
+        // capacity evicts exactly one ready entry.
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 2,
+            idle_threshold: Duration::from_secs(9999),
+        });
+
+        // Fill to capacity with releasable (strong_count==1) entries.
+        cache.insert_for_test(dummy_key("snap-A"), minimal_engine(), None);
+        cache.insert_for_test(dummy_key("snap-B"), minimal_engine(), None);
+        assert_eq!(cache.len(), 2);
+
+        // Cache miss for a new key triggers eviction.
+        let new_eng = minimal_engine();
+        let new_eng_clone = new_eng.clone();
+        cache
+            .get_or_insert_with::<_, BuildWaitError>(dummy_key("snap-C"), || {
+                Ok((new_eng_clone, None))
+            })
+            .unwrap();
+
+        // Expect exactly capacity (2) ready entries — one evicted,
+        // one inserted. If the Building slot was incorrectly counted,
+        // we would end at len = 1 (two evicted, one inserted).
+        assert_eq!(
+            cache.len(),
+            2,
+            "miss at capacity must evict exactly one ready entry"
+        );
+    }
+
+    #[test]
+    fn concurrent_waiter_sees_builder_failure_detail() {
+        // Regression: the prior implementation stored the literal
+        // string "build failed" in the waiter's BuildWaitError,
+        // discarding the builder's Display detail. Waiters must see
+        // the builder's error message so HTTP-layer error classes
+        // line up across concurrent callers.
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 4,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("waiter-failure-detail");
+
+        // Two threads race on the same key. The builder sleeps so the
+        // second thread reliably becomes a waiter, then the builder
+        // fails with a distinctive message.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let cache_b = cache.clone();
+        let key_b = key.clone();
+        let barrier_b = barrier.clone();
+        let builder = std::thread::spawn(move || {
+            barrier_b.wait();
+            cache_b.get_or_insert_with::<_, BuildWaitError>(key_b, || {
+                std::thread::sleep(Duration::from_millis(50));
+                Err(BuildWaitError {
+                    message: "SENTINEL-DETAIL-checkout-snap-not-in-cas".into(),
+                })
+            })
+        });
+
+        let cache_w = cache.clone();
+        let key_w = key.clone();
+        let barrier_w = barrier.clone();
+        let waiter = std::thread::spawn(move || {
+            barrier_w.wait();
+            // Tiny delay so we hit the Building slot rather than racing
+            // for the build path ourselves.
+            std::thread::sleep(Duration::from_millis(10));
+            cache_w.get_or_insert_with::<_, BuildWaitError>(key_w, || {
+                Err(BuildWaitError {
+                    message: "waiter-build-should-not-run".into(),
+                })
+            })
+        });
+
+        let builder_res = builder.join().unwrap();
+        let waiter_res = waiter.join().unwrap();
+
+        let builder_err = builder_res.unwrap_err();
+        let waiter_err = waiter_res.unwrap_err();
+
+        assert!(
+            builder_err.message.contains("SENTINEL-DETAIL-checkout-snap-not-in-cas"),
+            "builder must see its own message; got: {}",
+            builder_err.message
+        );
+        assert!(
+            waiter_err.message.contains("SENTINEL-DETAIL-checkout-snap-not-in-cas"),
+            "waiter must see the builder's detail, not a generic 'build failed'; got: {}",
+            waiter_err.message
+        );
+    }
+
+    #[test]
+    fn panic_in_build_fn_releases_slot() {
+        // Invariant: a panic during build removes the Building slot so
+        // the same key can be retried without deadlock.
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 4,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("panic-slot");
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let cache = cache.clone();
+            let key = key.clone();
+            move || {
+                let _ = cache.get_or_insert_with::<_, BuildWaitError>(key, || {
+                    panic!("intentional build panic");
+                });
+            }
+        }));
+        assert!(panic_result.is_err());
+
+        let eng = minimal_engine();
+        let result = cache
+            .get_or_insert_with::<_, BuildWaitError>(key, || Ok((eng.clone(), None)))
+            .unwrap();
+        assert!(Arc::ptr_eq(&result, &eng));
+    }
+
+    #[test]
+    fn callback_token_keeps_cache_entry_alive_across_eviction_attempts() {
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 1,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("callback-held");
+        let engine = minimal_engine();
+        cache.insert_for_test(key.clone(), engine.clone(), None);
+
+        let provenance = crate::execution_provenance::ExecutionProvenance::root_live_fs(
+            PathBuf::from("/borrowed"),
+            engine.clone(),
+        );
+        drop(engine);
+
+        cache.insert_for_test(dummy_key("pressure"), minimal_engine(), None);
+        let hit = cache.get(&key).expect("callback-held entry survives eviction pressure");
+        assert!(Arc::ptr_eq(&hit, &provenance.request_engine));
+    }
+
+    #[test]
+    fn dropping_callback_token_releases_cache_entry() {
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 1,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let key = dummy_key("callback-dropped");
+        let engine = minimal_engine();
+        cache.insert_for_test(key.clone(), engine.clone(), None);
+        let provenance = crate::execution_provenance::ExecutionProvenance::root_live_fs(
+            PathBuf::from("/borrowed"),
+            engine.clone(),
+        );
+        drop(provenance);
+        drop(engine);
+
+        cache.insert_for_test(dummy_key("pressure-1"), minimal_engine(), None);
+        cache.insert_for_test(dummy_key("pressure-2"), minimal_engine(), None);
+        assert!(cache.get(&key).is_none(), "released entry can be evicted");
+    }
+
+    #[test]
+    fn bundle_install_during_active_callback_does_not_evict_pinned_engine() {
+        let cache = EngineCache::new(EngineCacheConfig {
+            capacity: 1,
+            idle_threshold: Duration::from_secs(9999),
+        });
+        let old_key = dummy_key("pre-install");
+        let old_engine = minimal_engine();
+        cache.insert_for_test(old_key.clone(), old_engine.clone(), None);
+        let provenance = crate::execution_provenance::ExecutionProvenance::root_live_fs(
+            PathBuf::from("/borrowed"),
+            old_engine.clone(),
+        );
+        drop(old_engine);
+
+        let generation = cache.bump_system_install_generation();
+        cache.insert_for_test(
+            CacheKey {
+                system_install_generation: generation,
+                snapshot_hash: "post-install".into(),
+            },
+            minimal_engine(),
+            None,
+        );
+
+        let hit = cache.get(&old_key).expect("old engine pinned by callback survives generation bump");
+        assert!(Arc::ptr_eq(&hit, &provenance.request_engine));
     }
 }

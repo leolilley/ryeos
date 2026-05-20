@@ -790,7 +790,7 @@ composed_value_contract:
     }
 
     #[test]
-    fn handler_unusable_emitted_for_missing_binary() {
+    fn handler_unusable_emitted_for_unknown_handler() {
         let parser_ref = "parser:ryeos/core/yaml/yaml";
         let kinds = kinds_with_directive(parser_ref);
 

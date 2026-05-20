@@ -73,17 +73,19 @@ impl SchedulerContext for AppSchedulerContext {
         });
         let project_path_buf = std::path::PathBuf::from(project_path);
 
+        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_path_buf.clone(),
+            self.0.engine.clone(),
+        );
+
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: "detached",
             target_site_id: None,
-            project_source_is_pushed_head: false,
             validate_only: false,
             params,
             acting_principal: &spec.requester_fingerprint,
             project_path: std::path::Path::new(project_path),
-            original_project_path: project_path_buf.clone(),
-            snapshot_hash: None,
-            temp_dir: None,
+            provenance,
             original_root_kind: "directive",
             pre_minted_thread_id: Some(thread_id.to_string()),
             operation: None,

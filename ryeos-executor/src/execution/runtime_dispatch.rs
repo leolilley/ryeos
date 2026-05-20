@@ -47,6 +47,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // cap-set is deny-all; a wildcard `*` short-circuits to allow.
     enforce_callback_caps(&params.action.item_id, &cap.effective_caps, &state.authorizer)?;
 
+    let child_provenance = cap.provenance.clone_for_borrowed_child();
+
     let thread_auth = state.thread_auth.validate(
         &params.thread_auth_token,
         &params.thread_id,
@@ -60,10 +62,12 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         thread_id = %params.thread_id,
         server_principal = %thread_auth.acting_principal,
         project_path = %params.project_path,
+        borrowed_dir = %child_provenance.effective_path.display(),
+        project_source = ?child_provenance.project_source,
         "thread auth token validated: using server-side principal",
     );
 
-    handle_execute(params, state, &thread_auth).await
+    handle_execute(params, state, &thread_auth, child_provenance).await
 }
 
 /// V5.5 P2: enforce the callback's composed `effective_caps` against
@@ -112,6 +116,7 @@ async fn handle_execute(
     params: DispatchActionParams,
     state: &AppState,
     thread_auth: &ThreadAuthState,
+    child_provenance: ryeos_app::execution_provenance::ExecutionProvenance,
 ) -> Result<Value> {
     // V5.4 P2 — strict typed callback contract requires every leaf
     // dispatcher reachable from a callback to emit
@@ -130,8 +135,6 @@ async fn handle_execute(
         );
     }
 
-    let project_path = std::path::PathBuf::from(&params.project_path);
-
     let caller_principal_id = thread_auth.acting_principal.clone();
     let caller_scopes = thread_auth.caller_scopes.clone();
     let site_id = state.threads.site_id();
@@ -146,7 +149,7 @@ async fn handle_execute(
             scopes: caller_scopes.clone(),
         }),
         project_context: ProjectContext::LocalPath {
-            path: project_path.clone(),
+            path: child_provenance.effective_path.clone(),
         },
         current_site_id: site_id.to_string(),
         origin_site_id: site_id.to_string(),
@@ -156,23 +159,22 @@ async fn handle_execute(
     let exec_ctx = crate::executor::ExecutionContext {
         principal_fingerprint: caller_principal_id.clone(),
         caller_scopes,
-        engine: state.engine.clone(),
+        // Use the parent's per-request engine — never the daemon engine.
+        engine: child_provenance.request_engine.clone(),
         plan_ctx,
         requested_op: None,
         requested_inputs: None,
     };
 
+    let project_path = child_provenance.effective_path.clone();
     let dispatch_req = crate::dispatch::DispatchRequest {
         launch_mode: params.action.thread.as_str(),
         target_site_id: None,
-        project_source_is_pushed_head: false,
         validate_only: false,
         params: params.action.params.clone(),
         acting_principal: caller_principal_id.as_str(),
-        project_path: &project_path,
-        original_project_path: project_path.clone(),
-        snapshot_hash: None,
-        temp_dir: None,
+        project_path: project_path.as_path(),
+        provenance: child_provenance,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
         operation: None,

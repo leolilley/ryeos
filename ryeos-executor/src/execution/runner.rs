@@ -32,6 +32,9 @@ use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 use ryeos_app::launch_metadata::ResumeContext;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::temp_dir_guard::TempDirGuard;
+use ryeos_app::execution_provenance::{
+    ExecutionProvenance, ExecutionRole, ProjectSourceKind,
+};
 use ryeos_app::thread_lifecycle::{
     self, ResolvedExecutionRequest, ThreadAttachProcessParams, ThreadFinalizeParams,
 };
@@ -63,20 +66,8 @@ pub enum ResumeError {
 pub struct ExecutionParams {
     pub resolved: ResolvedExecutionRequest,
     pub acting_principal: String,
-    /// Project working dir for live-FS execution and HEAD-ref naming.
-    /// `None` only on resume of a thread whose original `ProjectContext`
-    /// was non-`LocalPath` — in that case execution runs against the
-    /// pinned snapshot and HEAD fold-back is skipped (there is no
-    /// LocalPath to derive a project ref from).
-    pub project_path: Option<PathBuf>,
     pub vault_bindings: HashMap<String, String>,
-    pub snapshot_hash: Option<String>,
     pub parameters: Value,
-    /// Pre-checked-out CAS temp dir (from ResolvedProjectContext).
-    /// When set, the runner should reuse this instead of doing a second checkout.
-    /// Held as `Arc<TempDirGuard>` for shared ownership — the dir is
-    /// cleaned up when the last Arc holder drops.
-    pub temp_dir: Option<Arc<TempDirGuard>>,
     /// Caller-supplied thread id. When `Some(id)`, the new thread row
     /// uses that id (so an external subscriber registered against `id`
     /// receives every lifecycle event from `thread_started` onward).
@@ -89,11 +80,9 @@ pub struct ExecutionParams {
     /// caller MUST supply this explicitly — empty `Vec` means deny-all
     /// (the trust-boundary default).
     pub effective_caps: Vec<String>,
-    /// Per-request engine. For `LiveFs` this is the daemon's startup
-    /// engine (`state.engine`). For `PushedHead` this is the overlay
-    /// engine built from the caller's user space. **No runner code
-    /// should reach for `state.engine` after this is set.**
-    pub engine: std::sync::Arc<ryeos_engine::engine::Engine>,
+    /// Required provenance for this execution. Drives engine,
+    /// effective path, snapshot lifecycle gates, and callback minting.
+    pub provenance: ExecutionProvenance,
 }
 
 /// Tracks execution state for explicit cleanup.
@@ -249,92 +238,83 @@ struct ExecutionGuardParts {
     thread_auth_token: Option<String>,
 }
 
-/// Prepare CAS execution context.
-///
-/// Two explicit paths:
-///
-/// 1. **CAS-backed**: `snapshot_hash` is provided → checkout from CAS into
-///    an execution space. Used when the caller explicitly requests execution
-///    against a pushed snapshot.
-/// 2. **Live FS**: no `snapshot_hash` → ingest working dir into CAS for
-///    tracking, execute against the live project path.
-///
+/// Prepare CAS execution context from canonical provenance.
 /// Returns (effective_project_path, pre_manifest_hash, base_snapshot_hash).
 fn prepare_cas_context(
     state: &AppState,
-    project_path: Option<&std::path::Path>,
-    snapshot_hash: &Option<String>,
-    pre_checkout_dir: &Option<Arc<TempDirGuard>>,
+    provenance: &ExecutionProvenance,
     thread_id: &str,
     guard: &mut ExecutionGuard,
 ) -> Result<(PathBuf, Option<String>, Option<String>)> {
-    // If we have a pre-checked-out dir from ResolvedProjectContext,
-    // reuse it instead of doing a second checkout.
-    if let (Some(snap_hash), Some(checkout_guard)) = (snapshot_hash, pre_checkout_dir) {
-        let checkout_dir = checkout_guard.path().ok_or_else(|| {
-            anyhow::anyhow!("pre-checked-out temp dir was already disarmed")
-        })?;
-        let cas_root = state.state_store.cas_root()?;
-        let cas = lillux::cas::CasStore::new(cas_root);
-        let snap_obj = cas
-            .get_object(snap_hash)?
-            .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-        let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
-        let manifest_hash = snapshot.project_manifest_hash.clone();
-        guard.track_temp_dir(checkout_guard.clone());
-        tracing::trace!(thread_id = %thread_id, effective_path = %checkout_dir.display(), "CAS context prepared");
-        return Ok((checkout_dir, Some(manifest_hash), Some(snap_hash.clone())));
+    match provenance.role {
+        ExecutionRole::BorrowedCallbackChild => {
+            if !provenance.effective_path.is_dir() {
+                anyhow::bail!(
+                    "borrowed working dir does not exist or is not a directory: {}",
+                    provenance.effective_path.display()
+                );
+            }
+            tracing::trace!(thread_id = %thread_id, effective_path = %provenance.effective_path.display(), "borrowed CAS context prepared");
+            Ok((provenance.effective_path.clone(), None, None))
+        }
+        ExecutionRole::Root => match provenance.project_source {
+            ProjectSourceKind::LiveFs => {
+                let _permit = state.write_barrier.try_acquire()
+                    .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit for ingest: {e}"))?;
+                let cas_root = state.state_store.cas_root()?;
+                let items = super::ingest::ingest_directory(
+                    &cas_root,
+                    &provenance.effective_path,
+                    &state.ignore_matcher,
+                )?;
+                let manifest = ryeos_state::objects::SourceManifest { item_source_hashes: items };
+                let cas = lillux::cas::CasStore::new(cas_root);
+                let manifest_hash = cas.store_object(&manifest.to_value())?;
+
+                Ok((provenance.effective_path.clone(), Some(manifest_hash), None))
+            }
+            ProjectSourceKind::PushedHead => {
+                let checkout_guard = provenance.workspace_lifeline.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Root PushedHead provenance is missing workspace_lifeline (constructor invariant violated)"
+                    )
+                })?;
+                let checkout_dir = checkout_guard.path().ok_or_else(|| {
+                    anyhow::anyhow!("pre-checked-out temp dir was already disarmed")
+                })?;
+                if checkout_dir != provenance.effective_path {
+                    anyhow::bail!(
+                        "Root PushedHead provenance effective_path {} does not match lifeline path {}",
+                        provenance.effective_path.display(),
+                        checkout_dir.display()
+                    );
+                }
+                let snap_hash = provenance.snapshot_hash.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Root PushedHead provenance is missing snapshot_hash (constructor invariant violated)"
+                    )
+                })?;
+                let manifest_hash = read_pre_manifest_for_snapshot(state, snap_hash)?;
+                guard.track_temp_dir(checkout_guard.clone());
+                tracing::trace!(thread_id = %thread_id, effective_path = %provenance.effective_path.display(), "CAS context prepared");
+                Ok((
+                    provenance.effective_path.clone(),
+                    Some(manifest_hash),
+                    Some(snap_hash.clone()),
+                ))
+            }
+        },
     }
-
-    if let Some(snap_hash) = snapshot_hash {
-        let result = checkout_from_snapshot(state, snap_hash, thread_id, guard)?;
-        tracing::trace!(thread_id = %thread_id, effective_path = %result.0.display(), "CAS context prepared");
-        return Ok(result);
-    }
-
-    // Live FS — ingest working dir, no checkout. Requires a project_path.
-    let project_path = project_path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "live-FS execution requires a project_path; none provided \
-             (caller passed neither snapshot_hash nor a working dir)"
-        )
-    })?;
-    let _permit = state.write_barrier.try_acquire()
-        .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit for ingest: {e}"))?;
-    let cas_root = state.state_store.cas_root()?;
-    let items = super::ingest::ingest_directory(&cas_root, project_path, &state.ignore_matcher)?;
-    let manifest = ryeos_state::objects::SourceManifest { item_source_hashes: items };
-    let cas = lillux::cas::CasStore::new(cas_root);
-    let manifest_hash = cas.store_object(&manifest.to_value())?;
-
-    Ok((project_path.to_path_buf(), Some(manifest_hash), None))
 }
 
-/// Checkout a project from a CAS snapshot hash into an execution space.
-///
-/// Returns (exec_dir, manifest_hash, snapshot_hash).
-fn checkout_from_snapshot(
-    state: &AppState,
-    snap_hash: &str,
-    thread_id: &str,
-    guard: &mut ExecutionGuard,
-) -> Result<(PathBuf, Option<String>, Option<String>)> {
+fn read_pre_manifest_for_snapshot(state: &AppState, snap_hash: &str) -> Result<String> {
     let cas_root = state.state_store.cas_root()?;
-    let cas = lillux::cas::CasStore::new(cas_root.clone());
+    let cas = lillux::cas::CasStore::new(cas_root);
     let snap_obj = cas
         .get_object(snap_hash)?
         .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
     let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
-
-    let manifest_hash = snapshot.project_manifest_hash.clone();
-    let exec_dir = state.config.system_space_dir.join("executions").join(thread_id);
-    let cache = crate::execution::cache::MaterializationCache::new(
-        state.config.system_space_dir.join("cache").join("snapshots"),
-    );
-    crate::execution::checkout_project(&cas_root, &manifest_hash, &exec_dir, Some(&cache))?;
-
-    guard.track_temp_dir(Arc::new(TempDirGuard::new(exec_dir.clone())));
-    Ok((exec_dir, Some(manifest_hash), Some(snap_hash.to_string())))
+    Ok(snapshot.project_manifest_hash)
 }
 
 struct PostExecutionFoldbackParams<'a> {
@@ -591,6 +571,7 @@ fn mint_callback_env(
     effective_caps: Vec<String>,
     acting_principal: &str,
     caller_scopes: Vec<String>,
+    provenance: ExecutionProvenance,
 ) -> Result<(HashMap<String, String>, String, String)> {
     let ttl = compute_ttl(duration_seconds);
     let cap = state.callback_tokens.generate(
@@ -598,6 +579,7 @@ fn mint_callback_env(
         project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
         ttl,
         effective_caps,
+        provenance,
     );
 
     let thread_auth = state.thread_auth.mint(
@@ -674,12 +656,6 @@ pub async fn run_inline(
     mut params: ExecutionParams,
 ) -> Result<InlineResult> {
     let mut guard = ExecutionGuard::new(state.clone());
-    // Track pre-existing temp dir immediately so the explicit
-    // cleanup() / fail_thread() calls below cover handled-error
-    // returns. Synchronous panic outside those branches still leaks.
-    if let Some(ref d) = params.temp_dir {
-        guard.track_temp_dir(d.clone());
-    }
 
     // Create and track thread.
     // When the caller pre-minted a thread id (e.g. an SSE subscriber
@@ -700,7 +676,7 @@ pub async fn run_inline(
 
     // Prepare CAS context — if this fails, finalize thread as failed
     let (effective_path, pre_manifest_hash, mut base_snapshot_hash) =
-        match prepare_cas_context(&state, params.project_path.as_deref(), &params.snapshot_hash, &params.temp_dir, &running.thread_id, &mut guard) {
+        match prepare_cas_context(&state, &params.provenance, &running.thread_id, &mut guard) {
             Ok(ctx) => ctx,
             Err(err) => {
                 guard.fail_thread("cas_context_failed");
@@ -710,14 +686,14 @@ pub async fn run_inline(
         };
 
     // Update project context if CAS checkout changed the path
-    if Some(&effective_path) != params.project_path.as_ref() {
+    if effective_path != params.provenance.effective_path {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
     }
 
     // Spawn — use the per-request engine (pushed_head overlay or
     // daemon startup engine), NOT state.engine directly.
-    let engine = params.engine.clone();
+    let engine = params.provenance.request_engine.clone();
     let tid = running.thread_id.clone();
     let crid = running.chain_root_id.clone();
     let resolved = params.resolved.clone();
@@ -729,11 +705,13 @@ pub async fn run_inline(
     // below catch panics inside the blocking task and run cleanup;
     // a synchronous panic in run_inline itself between mint and the
     // explicit cleanup call would leak both tokens until TTL expiry.
+    let child_provenance = params.provenance.clone_for_borrowed_child();
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state, &tid, Some(&effective_path), None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
+        child_provenance,
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -785,24 +763,36 @@ pub async fn run_inline(
     // a captured snapshot, so there's no pre-execution user manifest
     // to pin alongside the project manifest. The pushed_head flow is
     // where user-manifest lineage matters and is handled separately.
-    match pin_localpath_snapshot_if_needed(
-        &state,
-        &mut spawned.launch_metadata,
-        &pre_manifest_hash,
-        &None,
-        &base_snapshot_hash,
-    ) {
-        Ok(Some(snap)) => {
-            base_snapshot_hash = Some(snap);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            tracing::error!(error = %err, "failed to pin LocalPath native_resume snapshot");
-            // Kill the live child since attach is about to fail anyway.
-            let _ = ryeos_app::process::hard_kill_process_group(spawned.pgid);
-            guard.fail_thread("snapshot_pin_failed");
-            guard.cleanup();
-            return Err(err);
+    // LIFECYCLE-INVARIANT: snapshot pin + foldback + HEAD advance run
+    // exactly once per pushed_head execution, owned by the Root.
+    // BorrowedCallbackChild executions inherit the parent's lineage
+    // and MUST NOT touch any of these.
+    //   - Root LiveFs:                 skip pin/foldback (no CAS)
+    //   - Root PushedHead:             pin + foldback
+    //   - BorrowedCallbackChild *:     never pin/foldback
+    // `provenance.skips_snapshot_lifecycle()` returns true iff
+    // BorrowedCallbackChild. LiveFs gating happens inside the
+    // pin/foldback helpers themselves (existing behaviour).
+    if !params.provenance.skips_snapshot_lifecycle() {
+        match pin_localpath_snapshot_if_needed(
+            &state,
+            &mut spawned.launch_metadata,
+            &pre_manifest_hash,
+            &None,
+            &base_snapshot_hash,
+        ) {
+            Ok(Some(snap)) => {
+                base_snapshot_hash = Some(snap);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(error = %err, "failed to pin LocalPath native_resume snapshot");
+                // Kill the live child since attach is about to fail anyway.
+                let _ = ryeos_app::process::hard_kill_process_group(spawned.pgid);
+                guard.fail_thread("snapshot_pin_failed");
+                guard.cleanup();
+                return Err(err);
+            }
         }
     }
 
@@ -831,20 +821,21 @@ pub async fn run_inline(
         }
     };
 
-    // Post-execution fold-back
-    let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
-    post_execution_foldback(
-        PostExecutionFoldbackParams {
-            state: &state,
-            thread_id: &running.thread_id,
-            acting_principal: &params.acting_principal,
-            pre_manifest_hash: &pre_manifest_hash,
-            base_snapshot_hash: &base_snapshot_hash,
-            project_path: params.project_path.as_deref(),
-            execution_dir: guard_exec_dir.as_deref(),
-            completion: &completion,
-        },
-    );
+    if !params.provenance.skips_snapshot_lifecycle() {
+        let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
+        post_execution_foldback(
+            PostExecutionFoldbackParams {
+                state: &state,
+                thread_id: &running.thread_id,
+                acting_principal: &params.acting_principal,
+                pre_manifest_hash: &pre_manifest_hash,
+                base_snapshot_hash: &base_snapshot_hash,
+                project_path: Some(params.provenance.original_project_path.as_path()),
+                execution_dir: guard_exec_dir.as_deref(),
+                completion: &completion,
+            },
+        );
+    }
 
     // Finalize
     let finalized = match finalize_completion(&state, &running.thread_id, completion) {
@@ -893,13 +884,6 @@ pub async fn run_detached(
     mut params: ExecutionParams,
 ) -> Result<DetachedResult> {
     let mut guard = ExecutionGuard::new(state.clone());
-    // Track pre-existing temp dir immediately so the explicit
-    // cleanup() / fail_thread() calls below cover handled-error
-    // returns. Pre-spawn synchronous panics still leak; once the
-    // background task is spawned, its deferred guards take over.
-    if let Some(ref d) = params.temp_dir {
-        guard.track_temp_dir(d.clone());
-    }
 
     // Create and track thread.
     // See `run_inline` for why pre_minted_thread_id is honored.
@@ -917,7 +901,7 @@ pub async fn run_detached(
 
     // Prepare CAS context
     let (effective_path, pre_manifest_hash, base_snapshot_hash) =
-        match prepare_cas_context(&state, params.project_path.as_deref(), &params.snapshot_hash, &params.temp_dir, &running.thread_id, &mut guard) {
+        match prepare_cas_context(&state, &params.provenance, &running.thread_id, &mut guard) {
             Ok(ctx) => ctx,
             Err(err) => {
                 guard.fail_thread("cas_context_failed");
@@ -927,7 +911,7 @@ pub async fn run_detached(
         };
 
     // Update project context if CAS checkout changed the path
-    if Some(&effective_path) != params.project_path.as_ref() {
+    if effective_path != params.provenance.effective_path {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
     }
@@ -938,11 +922,13 @@ pub async fn run_detached(
     // Mint callback + thread-auth tokens for the spawned subprocess.
     // Token lifetimes are owned by the background task (revoked via
     // CbTokenGuard / TatTokenGuard on wait completion, error, or panic).
+    let child_provenance = params.provenance.clone_for_borrowed_child();
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state, &running.thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
+        child_provenance,
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -957,13 +943,14 @@ pub async fn run_detached(
     let bg_chain_root_id = running.chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
     // Per-request engine (pushed_head overlay or daemon startup engine).
-    let bg_engine = params.engine.clone();
+    let bg_engine = params.provenance.request_engine.clone();
     let bg_vault = params.vault_bindings.clone();
     let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
-    let bg_project_path = params.project_path.clone();
+    let bg_project_path = Some(params.provenance.original_project_path.clone());
+    let bg_skip_snapshot_lifecycle = params.provenance.skips_snapshot_lifecycle();
     let bg_state_root = state.config.system_space_dir.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -979,6 +966,7 @@ pub async fn run_detached(
         bg_base_snapshot_hash,
         bg_project_path,
         bg_temp_dir,
+        bg_skip_snapshot_lifecycle,
         bg_state_root,
         false, // is_resume
         None,  // prior_status_for_mark_running
@@ -1018,7 +1006,8 @@ pub async fn run_detached(
         bg_state, bg_chain_root_id, bg_resolved, bg_engine, bg_vault,
         bg_cb_bindings, bg_acting_principal, bg_pre_manifest_hash,
         bg_base_snapshot_hash,
-        bg_project_path, bg_temp_dir, bg_state_root, prior_status_for_mark_running,
+        bg_project_path, bg_temp_dir, bg_skip_snapshot_lifecycle, bg_state_root,
+        prior_status_for_mark_running,
         bg_cb_token, bg_tat_token
     ),
     fields(
@@ -1041,6 +1030,7 @@ async fn dispatch_detached_bg_task(
     mut bg_base_snapshot_hash: Option<String>,
     bg_project_path: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
+    bg_skip_snapshot_lifecycle: bool,
     bg_state_root: PathBuf,
     is_resume: bool,
     prior_status_for_mark_running: Option<String>,
@@ -1118,27 +1108,29 @@ async fn dispatch_detached_bg_task(
     // pre_user_manifest_hash is intentionally None for the same
     // reason as the inline-spawn path: LocalPath runs against the
     // daemon's live user space, not a captured snapshot.
-    match pin_localpath_snapshot_if_needed(
-        &bg_state,
-        &mut spawned.launch_metadata,
-        &bg_pre_manifest_hash,
-        &None,
-        &bg_base_snapshot_hash,
-    ) {
-        Ok(Some(snap)) => {
-            bg_base_snapshot_hash = Some(snap);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            tracing::error!(
-                phase = log_phase,
-                error = %err,
-                "failed to pin LocalPath native_resume snapshot"
-            );
-            let _ = ryeos_app::process::hard_kill_process_group(spawned.pgid);
-            fail_thread_static(&bg_state, &bg_thread_id, "snapshot_pin_failed");
-            drop(bg_temp_dir.take());
-            return;
+    if !bg_skip_snapshot_lifecycle {
+        match pin_localpath_snapshot_if_needed(
+            &bg_state,
+            &mut spawned.launch_metadata,
+            &bg_pre_manifest_hash,
+            &None,
+            &bg_base_snapshot_hash,
+        ) {
+            Ok(Some(snap)) => {
+                bg_base_snapshot_hash = Some(snap);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(
+                    phase = log_phase,
+                    error = %err,
+                    "failed to pin LocalPath native_resume snapshot"
+                );
+                let _ = ryeos_app::process::hard_kill_process_group(spawned.pgid);
+                fail_thread_static(&bg_state, &bg_thread_id, "snapshot_pin_failed");
+                drop(bg_temp_dir.take());
+                return;
+            }
         }
     }
 
@@ -1180,18 +1172,20 @@ async fn dispatch_detached_bg_task(
     let bg_exec_dir_path = bg_temp_dir.as_ref().and_then(|g| g.path());
     match wait_result {
         Ok(completion) => {
-            post_execution_foldback(
-                PostExecutionFoldbackParams {
-                    state: &bg_state,
-                    thread_id: &bg_thread_id,
-                    acting_principal: &bg_acting_principal,
-                    pre_manifest_hash: &bg_pre_manifest_hash,
-                    base_snapshot_hash: &bg_base_snapshot_hash,
-                    project_path: bg_project_path.as_deref(),
-                    execution_dir: bg_exec_dir_path.as_deref(),
-                    completion: &completion,
-                },
-            );
+            if !bg_skip_snapshot_lifecycle {
+                post_execution_foldback(
+                    PostExecutionFoldbackParams {
+                        state: &bg_state,
+                        thread_id: &bg_thread_id,
+                        acting_principal: &bg_acting_principal,
+                        pre_manifest_hash: &bg_pre_manifest_hash,
+                        base_snapshot_hash: &bg_base_snapshot_hash,
+                        project_path: bg_project_path.as_deref(),
+                        execution_dir: bg_exec_dir_path.as_deref(),
+                        completion: &completion,
+                    },
+                );
+            }
             if let Err(err) = finalize_completion(&bg_state, &bg_thread_id, completion) {
                 tracing::error!(
                     phase = log_phase,
@@ -1397,6 +1391,14 @@ pub fn execution_params_from_resume_context(
         .requested_by_name()
         .unwrap_or_else(|| "fp:resume".to_string());
 
+    // TODO(resume-overlay): resume still uses the daemon startup
+    // engine and a LiveFs root provenance until the resume path can
+    // rebuild per-snapshot overlay engines and temp-dir lifelines.
+    let provenance = ExecutionProvenance::root_live_fs(
+        project_path.clone().unwrap_or_else(|| PathBuf::from(".")),
+        state.engine.clone(),
+    );
+
     // NOTE: read_required_secrets and preflight_inject_provider_secret
     // are NOT called here. They run later, inside run_existing_detached(),
     // AFTER prepare_cas_context() returns the effective_path — so that
@@ -1406,11 +1408,8 @@ pub fn execution_params_from_resume_context(
     Ok(ExecutionParams {
         resolved,
         acting_principal,
-        project_path,
         vault_bindings: HashMap::new(), // populated later in run_existing_detached
-        snapshot_hash: resume.original_snapshot_hash.clone(),
         parameters: resume.parameters.clone(),
-        temp_dir: None,
         // Resume reuses the existing thread row's id by going through
         // `attach_to_existing_thread` rather than `create_root_thread`,
         // so `pre_minted_thread_id` is irrelevant on this path.
@@ -1420,13 +1419,7 @@ pub fn execution_params_from_resume_context(
         // resumed callbacks are enforced under the same set the
         // pre-crash run had.
         effective_caps: resume.effective_caps.clone(),
-        // Resume runs through prepare_cas_context (not
-        // resolve_project_context), so no per-snapshot overlay engine
-        // is built here — use the daemon's startup engine. If a
-        // resumed `pushed_head` snapshot needs the per-request
-        // overlay, that requires plumbing resolve_project_context
-        // into the resume path; tracked separately.
-        engine: state.engine.clone(),
+        provenance,
     })
 }
 
@@ -1462,16 +1455,11 @@ pub async fn run_existing_detached(
 ) -> Result<(), ResumeError> {
     let mut guard = ExecutionGuard::new(state.clone());
     guard.track_thread(&thread_id);
-    if let Some(ref d) = params.temp_dir {
-        guard.track_temp_dir(d.clone());
-    }
 
     // Prepare CAS context.
     let (effective_path, pre_manifest_hash, base_snapshot_hash) = match prepare_cas_context(
         &state,
-        params.project_path.as_deref(),
-        &params.snapshot_hash,
-        &params.temp_dir,
+        &params.provenance,
         &thread_id,
         &mut guard,
     ) {
@@ -1485,7 +1473,7 @@ pub async fn run_existing_detached(
 
     // Update plan_context to point at the materialized path so the
     // engine resolves item refs from there.
-    if Some(&effective_path) != params.project_path.as_ref() {
+    if effective_path != params.provenance.effective_path {
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),
         };
@@ -1514,13 +1502,13 @@ pub async fn run_existing_detached(
         // Narrow preflight: resolve provider and inject its secret.
         // Uses effective_path for engine roots so model_routing.yaml
         // and provider configs are read from the snapshot checkout.
-        // Use the per-request engine (today the resume path falls back
-        // to state.engine in execution_params_from_resume_context;
-        // routing through params.engine keeps the contract honest if
-        // resume later starts threading an overlay engine).
-        let engine_roots = params.engine.resolution_roots(Some(effective_path.clone()));
+        // Use the provenance engine. Today resume provenance falls back
+        // to state.engine; the field keeps the contract honest if
+        // resume later starts threading an overlay engine.
+        let engine_roots = params.provenance.request_engine.resolution_roots(Some(effective_path.clone()));
         let effective_parsers = params
-            .engine
+            .provenance
+            .request_engine
             .effective_parser_dispatcher(Some(&effective_path))
         .map_err(|e| {
             guard.fail_thread("preflight_failed");
@@ -1530,11 +1518,11 @@ pub async fn run_existing_detached(
 
         let resolution = ryeos_engine::resolution::run_resolution_pipeline(
             &params.resolved.resolved_item.canonical_ref,
-            &params.engine.kinds,
+            &params.provenance.request_engine.kinds,
             &effective_parsers,
             &engine_roots,
-            &params.engine.trust_store,
-            &params.engine.composers,
+            &params.provenance.request_engine.trust_store,
+            &params.provenance.request_engine.composers,
         )
         .map_err(|e| {
             guard.fail_thread("preflight_failed");
@@ -1583,11 +1571,13 @@ pub async fn run_existing_detached(
     // subprocess (never reuse the originals — they were revoked when
     // the prior process exited via the bg task's CbTokenGuard /
     // TatTokenGuard drops).
+    let child_provenance = params.provenance.clone_for_borrowed_child();
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state, &thread_id, Some(effective_path.as_path()), None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
+        child_provenance,
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -1602,13 +1592,14 @@ pub async fn run_existing_detached(
     let bg_resolved = params.resolved.clone();
     // Per-request engine (resume path uses daemon engine via
     // execution_params_from_resume_context).
-    let bg_engine = params.engine.clone();
+    let bg_engine = params.provenance.request_engine.clone();
     let bg_vault = params.vault_bindings.clone();
     let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
-    let bg_project_path = params.project_path.clone();
+    let bg_project_path = Some(params.provenance.original_project_path.clone());
+    let bg_skip_snapshot_lifecycle = params.provenance.skips_snapshot_lifecycle();
     let bg_state_root = state.config.system_space_dir.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -1624,6 +1615,7 @@ pub async fn run_existing_detached(
         bg_base_snapshot_hash,
         bg_project_path,
         bg_temp_dir,
+        bg_skip_snapshot_lifecycle,
         bg_state_root,
         true, // is_resume
         Some(prior_status),

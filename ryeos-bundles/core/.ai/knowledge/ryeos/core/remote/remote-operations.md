@@ -1,7 +1,7 @@
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.1.0"
+version: "3.4.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -270,29 +270,48 @@ content rather than the remote operator's own user space.
    `(system_install_generation, snapshot_hash)`. On a miss, it:
    - Materialises the user overlay into a temp directory.
    - Loads any pushed trust pins into an in-memory overlay.
-   - Builds a fresh `Engine` against system roots + the user overlay.
+   - Reads the live signed bundle registry with
+     `BootstrapLoader::load_bundle_section()`.
+   - Builds a fresh `Engine` against registered bundle roots + the
+     project checkout + the user overlay.
 3. The project checkout is **per-request** (each request gets its own
    directory, cleaned up when the request completes). The user overlay
    temp dir is **shared** across concurrent requests on the same
    snapshot and lives as long as the cache entry.
-4. All resolution paths in the executor (dispatch, launch, runner,
-   direct runtime) use the per-request engine for `pushed_head`
-   requests. Callbacks from running subprocesses currently use the
-   daemon engine; threading the per-request engine through callbacks
-   is a separate workstream (`callback-engine-borrowed-workspace`).
+4. All dispatch paths — top-level routes, scheduler, callbacks, and
+   resume — construct a single `ExecutionProvenance` value at the
+   entry point. The provenance carries the engine, project source,
+   effective workspace, snapshot hash, and `Arc<TempDirGuard>`
+   lifeline. It flows through `DispatchRequest`, `ExecutionParams`,
+   `BuildAndLaunchParams`, and `CallbackCapability` unchanged.
+   Callback children clone via `clone_for_borrowed_child()` — they
+   never reconstruct provenance from other fields, and there is no
+   "infer from temp_dir/snapshot_hash" heuristic anywhere in the
+   codebase. Provenance is required on every callback token; there is
+   no `Option`, no fallback to the daemon engine, and no deploy-window
+   migration path.
+5. All materialised directories in `resolve_project_context` are
+   wrapped in `Arc<TempDirGuard>` immediately. Failures anywhere in
+   the build path drop those guards and clean up through the existing
+   `Drop` implementation. Cache-owned guards survive as long as the
+   cache entry; request-owned guards survive as long as the request's
+   execution guard.
 
 ### Cache invalidation
 
-- `bundle.install` and `bundle.remove` bump the
-  `system_install_generation` counter AND update the bundle registry
-  on disk. Subsequent per-request engine rebuilds read the **live
-  bundle registry** (re-scanning `<system_space_dir>/.ai/bundles/`),
-  so the new bundle set takes effect on the next `pushed_head`
-  request without a daemon restart.
-- Existing cached engines continue using the old bundle set (via
-  `Arc`'d engine) until evicted.
-- The cache uses single-flight builds: concurrent misses on the same
-  key serialise on one build, not race on insert.
+- `bundle.install` and `bundle.remove` write persistent registry YAMLs
+  at `<system_space_dir>/.ai/node/bundles/<name>.yaml` and bump the
+  `system_install_generation` counter. Subsequent per-request engine
+  rebuilds call `BootstrapLoader::load_bundle_section()` to read the
+  live registry, so the new bundle set takes effect on the next
+  `pushed_head` request without a daemon restart.
+- Existing cached engines continue using the old bundle set until
+  evicted by LRU or the idle threshold.
+- The cache uses single-flight builds: concurrent first requests for
+  the same snapshot serialise on one `EngineCache::get_or_insert_with`
+  build. Late arrivals receive a clone of the first-built
+  `Arc<Engine>`; there is no double materialisation and no same-key
+  overwrite race.
 - LRU eviction with a **strong-count guard**: entries whose engine
   `Arc` is still held by a running request are never evicted, even
   if that means temporarily exceeding capacity.
@@ -305,6 +324,34 @@ A `pushed_head` request NEVER resolves against the remote operator's
 user space. If the pushed snapshot has no user manifest, user-tier
 resolution returns "not found" rather than falling through to the
 operator's `~/.ryeos/.ai/`.
+
+### Borrowed workspace for callbacks
+
+Borrowed callback children carry `role: BorrowedCallbackChild` in
+their provenance. The runner's lifecycle gates read this directly:
+`provenance.skips_snapshot_lifecycle()` returns true iff the execution
+is borrowed. Borrowed children:
+
+- skip `pin_localpath_snapshot` and `post_execution_foldback` (parent
+  owns the snapshot lineage);
+- do not track the workspace temp dir on their `ExecutionGuard` (the
+  parent's `Arc<TempDirGuard>` pins it; the callback token's
+  `provenance.workspace_lifeline` keeps it alive across parent crash or
+  token-TTL grace period);
+- inherit `snapshot_hash: None` (the parent owns lineage; the child has
+  nothing to pin).
+
+Nested callback children (callback within a callback) preserve the
+parent's provenance via `clone_for_borrowed_child`, so the grandchild's
+`project_source` remains `PushedHead` and its `workspace_lifeline` Arc
+still pins the original Root's temp dir. This closes the regression
+flagged by oracle review on the previous heuristic-based
+implementation.
+
+Resuming a `pushed_head` thread under the per-request overlay is
+tracked separately; the resume path falls back to the daemon engine.
+Detached children from callbacks are disallowed at the callback
+dispatcher (inline only).
 
 ## User-Space Sync
 
@@ -379,12 +426,16 @@ creates it automatically.
 ## Hybrid Binary Resolution
 
 When a pushed user-tier handler descriptor references a binary that is
-not installed on the remote node, the engine build **warns** but does
-not fail — the handler is registered in `Unresolved` state.
+not installed on the remote node, the handler is recorded as
+`VerifiedHandler::Unresolved`. `build_engine_for_roots` logs a warning
+and proceeds.
 
-Boot-time subprocess validation for `Unresolved` handlers is **skipped
-with a warning**. Only actual **invocation** of an `Unresolved` handler
-returns `EngineError::HandlerBinaryMissing` with structured remediation:
+Boot-time subprocess validation for parser and composer handlers
+downgrades `HandlerBinaryMissing` specifically to a warning. Other
+validation errors — non-zero exit, spawn failure, protocol violation —
+still produce a `BootIssue` and fail boot. Actual **invocation** of an
+`Unresolved` handler returns `EngineError::HandlerBinaryMissing` with
+the handler id, reason, and structured remediation:
 
 ```
 handler binary missing: 'bin/x86_64-unknown-linux-gnu/my_tool'

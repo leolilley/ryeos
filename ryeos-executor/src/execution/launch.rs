@@ -537,14 +537,11 @@ pub(crate) fn derive_effective_caps(
 
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
-    /// Per-request engine (replaces all `state.engine` usage in this
-    /// function). For `LiveFs` this is `state.engine.clone()`, for
-    /// `PushedHead` it is the overlay engine from `resolve_project_context`.
-    pub engine: &'a std::sync::Arc<ryeos_engine::engine::Engine>,
     pub executor_ref: &'a str,
     pub acting_principal: &'a str,
     pub resolved: &'a ResolvedExecutionRequest,
     pub project_path: &'a Path,
+    pub provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
     pub parameters: &'a Value,
     pub vault_bindings: &'a HashMap<String, String>,
     pub pre_minted_thread_id: Option<&'a str>,
@@ -553,15 +550,16 @@ pub struct BuildAndLaunchParams<'a> {
 pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
         state,
-        engine,
         executor_ref,
         acting_principal,
         resolved,
         project_path,
+        provenance,
         parameters,
         vault_bindings,
         pre_minted_thread_id,
     } = params;
+    let engine = &provenance.request_engine;
     tracing::info!(
         executor_ref,
         acting_principal,
@@ -664,6 +662,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
                     &thread.thread_id,
                     project_path,
                     engine,
+                    provenance,
                     &resolved.plan_context,
                     acting_principal,
                     state,
@@ -746,11 +745,13 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // the runtime sees. This closes the trust gap where the runtime
     // was the only entity gating its own callback dispatches.
     let ttl = compute_ttl(Some(hard_limits.duration_seconds));
+    let child_provenance = provenance.clone_for_borrowed_child();
     let cap = state.callback_tokens.generate(
         thread_id,
         project_path.to_path_buf(),
         ttl,
         effective_caps.clone(),
+        child_provenance,
     );
 
     // 6b. Build inventory the launching kind asked for. The engine

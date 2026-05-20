@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 
+use crate::execution_provenance::ExecutionProvenance;
+
 /// Default TTL for callback tokens when no explicit duration is requested.
 const DEFAULT_CALLBACK_TTL_SECS: u64 = 300;
 
@@ -23,6 +25,10 @@ pub struct CallbackCapability {
     /// dispatcher can enforce caps at the trust boundary instead of
     /// trusting the runtime to self-police. Empty = deny-all.
     pub effective_caps: Vec<String>,
+    /// Required provenance from the parent dispatch. Callback children
+    /// are derived from this value with `clone_for_borrowed_child()`;
+    /// there is no deploy-window fallback or daemon-engine fallback.
+    pub provenance: ExecutionProvenance,
 }
 
 pub struct CallbackCapabilityStore {
@@ -48,6 +54,7 @@ impl CallbackCapabilityStore {
         project_path: PathBuf,
         ttl: Duration,
         effective_caps: Vec<String>,
+        provenance: ExecutionProvenance,
     ) -> CallbackCapability {
         let random_bytes: [u8; 32] = rand::random();
         let hex = lillux::cas::sha256_hex(&random_bytes);
@@ -64,6 +71,7 @@ impl CallbackCapabilityStore {
             project_path,
             expires_at: Instant::now() + ttl,
             effective_caps,
+            provenance,
         };
 
         self.capabilities
@@ -232,6 +240,27 @@ impl ThreadAuthStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::execution_provenance::{ExecutionProvenance, ProjectSourceKind};
+    use crate::temp_dir_guard::TempDirGuard;
+    use ryeos_engine::engine::Engine;
+
+    fn minimal_engine() -> Arc<Engine> {
+        Arc::new(Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::dispatcher::ParserDispatcher::new(
+                ryeos_engine::parsers::registry::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::registry::HandlerRegistry::empty()),
+            ),
+            None,
+            vec![],
+        ))
+    }
+
+    fn provenance(path: PathBuf) -> ExecutionProvenance {
+        ExecutionProvenance::root_live_fs(path, minimal_engine())
+    }
 
     #[test]
     fn generate_and_validate_round_trip() {
@@ -241,6 +270,7 @@ mod tests {
             PathBuf::from("/project"),
             Duration::from_secs(300),
             Vec::new(),
+            provenance(PathBuf::from("/project")),
         );
         assert!(cap.token.starts_with("cbt-"));
         assert!(cap.invocation_id.starts_with("inv-"));
@@ -269,6 +299,7 @@ mod tests {
             PathBuf::from("/p"),
             Duration::from_secs(300),
             Vec::new(),
+            provenance(PathBuf::from("/p")),
         );
         store.invalidate(&cap.token);
         assert!(store
@@ -284,12 +315,14 @@ mod tests {
             PathBuf::from("/p"),
             Duration::from_secs(300),
             Vec::new(),
+            provenance(PathBuf::from("/p")),
         );
         let cap2 = store.generate(
             "T-2",
             PathBuf::from("/p"),
             Duration::from_secs(300),
             Vec::new(),
+            provenance(PathBuf::from("/p")),
         );
         store.invalidate_for_thread("T-1");
         assert!(store
@@ -308,6 +341,7 @@ mod tests {
             PathBuf::from("/p"),
             Duration::from_secs(0),
             Vec::new(),
+            provenance(PathBuf::from("/p")),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         let err = store
@@ -324,6 +358,7 @@ mod tests {
             PathBuf::from("/p"),
             Duration::from_secs(300),
             Vec::new(),
+            provenance(PathBuf::from("/p")),
         );
         let err = store
             .validate(&cap.token, "T-2", PathBuf::from("/p").as_path())
@@ -339,6 +374,7 @@ mod tests {
             PathBuf::from("/project-a"),
             Duration::from_secs(300),
             Vec::new(),
+            provenance(PathBuf::from("/project-a")),
         );
         let err = store
             .validate(&cap.token, "T-1", PathBuf::from("/project-b").as_path())
@@ -354,6 +390,7 @@ mod tests {
             PathBuf::from("/p"),
             Duration::from_secs(0),
             Vec::new(),
+            provenance(PathBuf::from("/p")),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         store.generate(
@@ -361,9 +398,79 @@ mod tests {
             PathBuf::from("/p"),
             Duration::from_secs(300),
             Vec::new(),
+            provenance(PathBuf::from("/p")),
         );
         let pruned = store.prune_expired();
         assert_eq!(pruned, 1);
+    }
+
+    #[test]
+    fn provenance_lifeline_arc_identity_preserved_across_generate_validate() {
+        let store = CallbackCapabilityStore::new();
+        let engine = minimal_engine();
+        let tmp = tempfile::tempdir().unwrap();
+        let lifeline = Arc::new(TempDirGuard::new(tmp.path().to_path_buf()));
+        let provenance = ExecutionProvenance::root_pushed_head(
+            tmp.path().to_path_buf(),
+            PathBuf::from("/original"),
+            engine.clone(),
+            lifeline.clone(),
+            "snap".to_string(),
+        );
+
+        let cap = store.generate(
+            "T-test",
+            tmp.path().to_path_buf(),
+            Duration::from_secs(300),
+            vec!["ryeos.*".to_string()],
+            provenance,
+        );
+        let validated = store.validate(&cap.token, "T-test", tmp.path()).unwrap();
+
+        assert!(Arc::ptr_eq(&validated.provenance.request_engine, &engine));
+        assert_eq!(validated.provenance.original_project_path, PathBuf::from("/original"));
+        assert_eq!(validated.provenance.project_source, ProjectSourceKind::PushedHead);
+        assert_eq!(validated.provenance.effective_path, tmp.path());
+        assert!(Arc::ptr_eq(
+            validated.provenance.workspace_lifeline.as_ref().unwrap(),
+            &lifeline
+        ));
+    }
+
+    #[test]
+    fn provenance_engine_arc_identity_preserved_across_clone() {
+        let engine = minimal_engine();
+        let cap = CallbackCapability {
+            token: "cbt-test".to_string(),
+            invocation_id: "inv-test".to_string(),
+            thread_id: "T-test".to_string(),
+            project_path: PathBuf::from("/project"),
+            expires_at: Instant::now() + Duration::from_secs(300),
+            effective_caps: vec![],
+            provenance: ExecutionProvenance::root_live_fs(PathBuf::from("/project"), engine.clone()),
+        };
+
+        let cloned = cap.clone();
+        assert!(Arc::ptr_eq(
+            &cloned.provenance.request_engine,
+            &engine
+        ));
+    }
+
+    #[test]
+    fn provenance_required_round_trips_through_validate() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-test",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+        );
+        let validated = store
+            .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())
+            .unwrap();
+        assert_eq!(validated.provenance.effective_path, PathBuf::from("/p"));
     }
 
     #[test]

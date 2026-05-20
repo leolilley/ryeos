@@ -96,7 +96,7 @@ pub async fn route_dispatcher(
         _ => unreachable!("invoke_checked enforces Principal for auth"),
     };
 
-    let dispatch_ctx = RouteDispatchContext {
+    let route_dispatch_ctx = RouteDispatchContext {
         captures,
         request_parts: parts,
         body_raw,
@@ -111,14 +111,14 @@ pub async fn route_dispatcher(
     let no_timeout = is_streaming && limiter.timeout == Duration::ZERO;
 
     if no_timeout {
-        match route_ref.response_mode.handle(&route_ref, dispatch_ctx).await {
+        match route_ref.response_mode.handle(&route_ref, route_dispatch_ctx).await {
             Ok(resp) => resp,
             Err(e) => e.into_response(),
         }
     } else {
         let result = tokio::time::timeout(
             limiter.timeout,
-            route_ref.response_mode.handle(&route_ref, dispatch_ctx),
+            route_ref.response_mode.handle(&route_ref, route_dispatch_ctx),
         )
         .await;
 

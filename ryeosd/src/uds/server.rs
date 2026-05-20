@@ -358,6 +358,13 @@ mod tests {
     use std::time::Instant;
     use tempfile::TempDir;
 
+    fn test_provenance(state: &AppState, path: &str) -> ryeos_app::execution_provenance::ExecutionProvenance {
+        ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            std::path::PathBuf::from(path),
+            state.engine.clone(),
+        )
+    }
+
     /// Build a minimal AppState for UDS dispatch tests.
     fn setup_app_state() -> (TempDir, AppState) {
         std::env::set_var("HOSTNAME", "testhost");
@@ -585,6 +592,7 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
+            test_provenance(&state, "/test"),
         );
 
         let resp = dispatch(rpc("runtime.finalize_thread", json!({
@@ -623,6 +631,7 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
+            test_provenance(&state, "/test"),
         );
 
         state.threads.create_thread(&make_create_params("T-events-1", "T-events-1")).unwrap();
@@ -665,6 +674,7 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
+            test_provenance(&state, "/test"),
         );
         state
             .threads
@@ -708,6 +718,7 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
+            test_provenance(&state, "/test"),
         );
         state
             .threads
@@ -763,6 +774,7 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
+            test_provenance(&state, "/test"),
         );
 
         // Mark running first — cancel is only allowed on running threads
@@ -817,6 +829,7 @@ mod tests {
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             vec!["*".to_string()],
+            test_provenance(&state, "/p"),
         );
 
         // Note: `thread_auth_token` field intentionally absent.
@@ -847,6 +860,7 @@ mod tests {
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             vec!["*".to_string()],
+            test_provenance(&state, "/p"),
         );
 
         // Use a syntactically plausible but unminted tat — must not be
@@ -881,6 +895,7 @@ mod tests {
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             vec!["*".to_string()],
+            test_provenance(&state, "/p"),
         );
         // Mint a tat for a SPECIFIC principal — this is the value the
         // daemon must use, not anything caller-controllable.
@@ -956,6 +971,7 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
+            test_provenance(&state, "/test"),
         );
         let resp = dispatch(rpc("runtime.get_facets", json!({
                 "callback_token": cbt.token,
@@ -970,4 +986,3 @@ mod tests {
         }
     }
 }
-

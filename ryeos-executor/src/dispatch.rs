@@ -44,8 +44,7 @@
 //!   without spelunking the source.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -56,7 +55,7 @@ use ryeos_engine::kind_registry::{
     TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
-use ryeos_app::temp_dir_guard::TempDirGuard;
+use ryeos_app::execution_provenance::ProjectSourceKind;
 
 use crate::dispatch_error::DispatchError;
 use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
@@ -80,7 +79,7 @@ pub(crate) const ROOT_KIND_RUNTIME: &str = "runtime";
 /// once and let `dispatch::dispatch` do all routing.
 ///
 /// V5.2 native-runtime cap fields (`launch_mode`, `target_site_id`,
-/// `project_source_is_pushed_head`) are still surfaced verbatim so
+/// provenance project source) are still surfaced so
 /// `check_dispatch_capabilities` reproduces the pinned 400 wording
 /// (see `ryeosd/tests/dispatch_pin.rs`).
 ///
@@ -92,26 +91,15 @@ pub(crate) const ROOT_KIND_RUNTIME: &str = "runtime";
 pub struct DispatchRequest<'a> {
     pub launch_mode: &'a str,
     pub target_site_id: Option<&'a str>,
-    pub project_source_is_pushed_head: bool,
     pub validate_only: bool,
     pub params: Value,
     pub acting_principal: &'a str,
     /// Effective project root used for resolution (matches
     /// `ResolvedProjectContext.effective_path`).
     pub project_path: &'a Path,
-    /// Original project root from the HTTP request (used to derive
-    /// HEAD ref names in the runner). Matches
-    /// `ResolvedProjectContext.original_path`.
-    pub original_project_path: PathBuf,
-    /// CAS snapshot hash, when execution was bootstrapped from a
-    /// pushed HEAD checkout (carried into the runner so spawn-time
-    /// resume metadata can pin the snapshot).
-    pub snapshot_hash: Option<String>,
-    /// Optional pre-checked-out tempdir; ownership is transferred
-    /// into the runner's `ExecutionGuard` for cleanup. Held as
-    /// `Arc<TempDirGuard>` so pre-run dispatch failures still clean
-    /// up via Drop when the Arc goes out of scope.
-    pub temp_dir: Option<Arc<TempDirGuard>>,
+    /// Required execution provenance. Constructed once at the entry
+    /// point and never reconstructed downstream.
+    pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     /// **B1**: kind parsed from the user-supplied root `item_ref`.
     /// `dispatch_native_runtime` gates `runtime.execute` enforcement
     /// on this being `"runtime"` so indirect alias chains are not
@@ -146,7 +134,8 @@ fn check_dispatch_capabilities(
     caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
     request: &DispatchRequest<'_>,
 ) -> Result<(), DispatchError> {
-    if request.project_source_is_pushed_head && !caps.allows_pushed_head {
+    let is_pushed = matches!(request.provenance.project_source, ProjectSourceKind::PushedHead);
+    if is_pushed && !caps.allows_pushed_head {
         return Err(DispatchError::CapabilityRejected {
             reason: "pushed_head not yet supported for native runtimes".into(),
         });
@@ -791,13 +780,16 @@ pub(crate) async fn dispatch_op(
             anyhow::anyhow!("thread creation failed: {e}")
         ))?;
 
-    // Generate callback token.
+    // Generate callback token. The op child borrows the dispatch
+    // provenance instead of minting an unprovenanced token.
     let ttl = ryeos_app::callback_token::compute_ttl(None);
+    let child_provenance = request.provenance.clone_for_borrowed_child();
     let cap = state.callback_tokens.generate(
         &thread_id,
         request.project_path.to_path_buf(),
         ttl,
         Vec::new(), // op threads have no caps for now
+        child_provenance,
     );
 
     let callback = ryeos_runtime::envelope::EnvelopeCallback {
@@ -1351,11 +1343,11 @@ async fn dispatch_managed_subprocess(
     let result = launch::build_and_launch(
         launch::BuildAndLaunchParams {
             state,
-            engine: &ctx.engine,
             executor_ref: &executor_ref,
             acting_principal,
             resolved: &resolved,
             project_path,
+            provenance: &request.provenance,
             parameters: &params,
             vault_bindings: &vault_bindings,
             pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
@@ -1613,7 +1605,9 @@ async fn dispatch_tool_subprocess(
         enforce_runtime_caps(&state.authorizer, &item_ref_for_error, &required_caps, &ctx.caller_scopes)?;
     }
 
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(&request.original_project_path));
+    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(
+        &request.provenance.original_project_path,
+    ));
     let vault_bindings = ryeos_app::vault::read_required_secrets(
         state.vault.as_ref(),
         request.acting_principal,
@@ -1625,16 +1619,11 @@ async fn dispatch_tool_subprocess(
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
-        project_path: Some(request.original_project_path.clone()),
         vault_bindings,
-        snapshot_hash: request.snapshot_hash.clone(),
         parameters: request.params.clone(),
-        temp_dir: request.temp_dir.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps: Vec::new(),
-        // Per-request engine resolved upstream in execute_mode via
-        // resolve_project_context and threaded down on ctx.
-        engine: ctx.engine.clone(),
+        provenance: request.provenance.clone(),
     };
 
     if request.launch_mode == "detached" {

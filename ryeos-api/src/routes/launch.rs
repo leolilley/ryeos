@@ -113,17 +113,19 @@ pub(crate) fn spawn_dispatch_launch(
             requested_inputs: None,
         };
 
+        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_path_buf.clone(),
+            state_clone.engine.clone(),
+        );
+
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: "inline",
             target_site_id: None,
-            project_source_is_pushed_head: false,
             validate_only: false,
             params: parameters,
             acting_principal: principal_id.as_str(),
             project_path: project_path_buf.as_path(),
-            original_project_path: project_path_buf.clone(),
-            snapshot_hash: None,
-            temp_dir: None,
+            provenance,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
             operation: None,
@@ -160,4 +162,3 @@ mod tests {
         assert_eq!(e.code(), "not_root_executable");
     }
 }
-
