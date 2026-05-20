@@ -60,7 +60,7 @@ package() {
     #   /usr/share/ryeos/core/.ai/...
     #   /usr/share/ryeos/standard/.ai/...
     mkdir -p "$pkgdir/usr/share/ryeos"
-    for bundle_dir in ryeos-bundles/*/; do
+    for bundle_dir in bundles/*/; do
         name=$(basename "$bundle_dir")
         mkdir -p "$pkgdir/usr/share/ryeos/$name"
         cp -ra "$bundle_dir/.ai" "$pkgdir/usr/share/ryeos/$name/.ai"

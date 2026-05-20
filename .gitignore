@@ -78,11 +78,7 @@ logs/
 /.ai/*
 !.ai/knowledge/
 */.ai/
-!ryeos/rye/.ai/
-!ryeos/bundles/core/ryeos_core/.ai/
-!ryeos/bundles/web/ryeos_web/.ai/
-!ryeos/bundles/code/ryeos_code/.ai/
-!ryeos/bundles/email/ryeos_email/.ai/
+!bundles/*/.ai/
 
 ## Allow lib/ directories inside .ai/ (not Python build artifacts)
 !**/.ai/**/lib/
@@ -110,40 +106,44 @@ debug_*.py
 ## Backup files
 *.bak
 *.backup
-*~
 
 ## Node.js (if any JS tooling)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log*test_project/
+yarn-error.log*
 
 test_project/
 .repoql
 .ruff_cache
 tests/e2e/.venv
+.local/
+crates/bin/daemon/bin/
+crates/bin/daemon/Cargo.lock
 
 ## AI runtime state (cache, objects, threads, graphs — all ephemeral)
 **/.ai/state/
 
 ## E2E test generated knowledge (ephemeral)
 tests/e2e/.ai/knowledge/
-ryeosd/target/
 target/
 tests/e2e/.ai/knowledge/agent/threads/
+
+## Local binary scratch dir (source installables live in crates/bin/)
+/bin/
 
 ## Bundle CAS + binary artifacts — fully derivable from source.
 ## Single source of truth: scripts/populate-bundles.sh
 ##   - cargo build --release of all bins
-##   - install into ryeos-bundles/<name>/.ai/bin/<triple>/
-##   - ryeos publish ryeos-bundles/<name> --key <pem> --owner <label>
+##   - install into bundles/<name>/.ai/bin/<triple>/
+##   - ryeos publish bundles/<name> --key <pem> --owner <label>
 ## Run `./scripts/populate-bundles.sh --key <pem> --owner <label>` (or
 ## `./scripts/gate.sh`) after a fresh checkout. Dockerfile invokes the
 ## same script in the build stage.
-ryeos-bundles/*/.ai/objects/
-ryeos-bundles/*/.ai/refs/
-ryeos-bundles/*/.ai/bin/*/
-ryeos-bundles/*/PUBLISHER_TRUST.toml
+bundles/*/.ai/objects/
+bundles/*/.ai/refs/
+bundles/*/.ai/bin/*/
+bundles/*/PUBLISHER_TRUST.toml
 
 # Local daemon state from dev/test runs
 .local/

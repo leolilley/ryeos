@@ -1,0 +1,56 @@
+[package]
+name = "ryeos-tools"
+version = "0.2.1"
+edition = "2021"
+
+[lib]
+name = "ryeos_tools"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+ryeos-tracing = { path = "../../core/tracing" }
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+sha2 = "0.10"
+serde_yaml = "0.9"
+rmp-serde = "1"
+dirs = "5"
+glob = "0.3"
+rand = "0.8"
+toml = "0.8"
+
+# Engine + state
+ryeos-engine = { path = "../../core/engine" }
+ryeos-state = { path = "../../core/state" }
+ryeos-runtime = { path = "../../core/runtime" }
+
+# Required for verify
+lillux = { path = "../../kernel/lillux" }
+
+ryeos-vault = { path = "../../core/vault" }
+ryeos-bundle = { path = "../../core/bundle" }
+ryeos-app = { path = "../../core/app" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+
+# Exposes `ryeos_tools::test_support` for downstream test crates that
+# need a manifest-stable copy of the `core` bundle (eliminates the
+# dev-tree manifest concurrency race documented in
+# `docs/operations/dev-tree-caveats.md`).
+test-support = []
+
+# ── Unified core tools binary ──────────────────────────────────────
+# Subcommands: sign, fetch, verify, identity. Invoked by tool YAMLs
+# via `bin:ryeos-core-tools <subcommand>`.
+[[bin]]
+name = "ryeos-core-tools"
+path = "src/bin/ryeos-core-tools.rs"

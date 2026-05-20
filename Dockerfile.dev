@@ -28,8 +28,8 @@ COPY target/release/ryeos              /usr/local/bin/ryeos
 COPY target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
 
 # Already-published bundles (CAS rebuilt by populate-bundles.sh).
-COPY ryeos-bundles/core      /opt/ryeos/core
-COPY ryeos-bundles/standard  /opt/ryeos/standard
+COPY bundles/core      /opt/ryeos/core
+COPY bundles/standard  /opt/ryeos/standard
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

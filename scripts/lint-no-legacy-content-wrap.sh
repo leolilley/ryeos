@@ -13,7 +13,7 @@ declare -a forbidden=(
 fail=0
 for pat in "${forbidden[@]}"; do
     hits=$(rg -n -i "$pat" \
-        ryeos-bundles/ ryeos-runtime/src ryeos-directive-runtime/src docs/ \
+        bundles/ crates/core/runtime/src crates/runtimes/directive/src docs/ \
         --glob '!target/**' 2>/dev/null || true)
     if [[ -n "$hits" ]]; then
         echo "ERROR: forbidden legacy term '$pat' found:"

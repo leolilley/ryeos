@@ -87,7 +87,7 @@ The baseline init directive instructs RyeOS to handle your system setup and guid
 | `ryeos-cli`    | Standard bundle + terminal CLI — maps shell verbs to the three commands                  |
 | `ryeos-node`   | Remote execution server — CAS-native sync, materializer, thread tracking, Modal deployment |
 
-> **Note:** The CLI (`ryeos-cli/`, Rust crate, binary `ryeos`) is a developer/debugging tool, not the primary interface. RyeOS is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
+> **Note:** The CLI (`crates/bin/cli/`, Rust crate, binary `ryeos`) is a developer/debugging tool, not the primary interface. RyeOS is designed to be driven by an AI agent through MCP — use `ryeos-mcp` for normal usage.
 
 Both `ryeos` and `ryeos-mcp` support optional extras:
 

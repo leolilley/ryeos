@@ -14,12 +14,12 @@ source=("$pkgname-$pkgver.tar.gz::https://github.com/leolilley/ryeos/archive/ref
 sha256sums=('SKIP')
 
 build() {
-    cd "ryeos-${pkgver}/ryeosd-mcp"
+    cd "ryeos-${pkgver}/integrations/mcp/ryeosd"
     python -m build --wheel --no-isolation
 }
 
 package() {
-    cd "ryeos-${pkgver}/ryeosd-mcp"
+    cd "ryeos-${pkgver}/integrations/mcp/ryeosd"
     python -m installer --destdir="$pkgdir" dist/*.whl
     install -Dm644 ../LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

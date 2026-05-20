@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Populate ryeos-bundles/*/.ai/bin/<triple>/ with freshly built
+# Populate bundles/*/.ai/bin/<triple>/ with freshly built
 # binaries, then publish all bundles (sign items + rebuild CAS manifests).
 #
 # Use this whenever bundle bin/ contents are missing or stale:
@@ -51,14 +51,14 @@ if [ -z "$TARGET" ]; then
 fi
 echo "[populate-bundles] target dir: $TARGET"
 
-CORE="$ROOT/ryeos-bundles/core"
-STD="$ROOT/ryeos-bundles/standard"
+CORE="$ROOT/bundles/core"
+STD="$ROOT/bundles/standard"
 
 # ── Clean derived state from all bundles ────────────────────────────
 # Wipe everything that will be regenerated so stale artifacts (old
 # binaries, old manifests, old trust docs) don't leak through.
 
-for BUNDLE_DIR in "$ROOT/ryeos-bundles"/*/; do
+for BUNDLE_DIR in "$ROOT/bundles"/*/; do
   rm -rf "$BUNDLE_DIR.ai/bin"
   rm -rf "$BUNDLE_DIR.ai/objects"
   rm -rf "$BUNDLE_DIR.ai/refs"

@@ -3,14 +3,14 @@ tool_type: mcp_server
 executor_id: null
 category: mcp/servers
 version: 1.0.0
-description: 'MCP server: rye-os'
+description: 'MCP server: ryeosd'
 config:
   transport: stdio
   timeout: 30
-  command: /home/leo/projects/rye-os/.venv/bin/python
+  command: python
   args:
   - -m
-  - rye.server
+  - ryeosd_mcp.server
 cache:
   discovered_at: '2026-02-05T00:23:43.927670+00:00'
-  tool_count: 4
+  tool_count: 1

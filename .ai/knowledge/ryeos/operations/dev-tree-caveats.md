@@ -10,11 +10,11 @@ Notes for contributors working in the local checkout. None of these affect end-u
 
 ## Single-key signing model
 
-Every signable artifact in the dev bundle tree (`ryeos-bundles/{core,standard}`) is signed with the **dev publisher key** at `.dev-keys/PUBLISHER_DEV.pem`. The trust store the test harness pins is one-entry: the dev publisher fingerprint.
+Every signable artifact in the dev bundle tree (`bundles/{core,standard}`) is signed with the **dev publisher key** at `.dev-keys/PUBLISHER_DEV.pem`. The trust store the test harness pins is one-entry: the dev publisher fingerprint.
 
 ## ryeos-core-tools symlink invalidates core's manifest
 
-`ryeos-bundles/core/.ai/bin/<host-triple>/ryeos-core-tools` is a symlink to `target/debug/ryeos-core-tools`. Any `cargo build` that recompiles `ryeos-core-tools` produces a new binary, so the symlinked file's hash diverges from the manifest entry.
+`bundles/core/.ai/bin/<host-triple>/ryeos-core-tools` is a symlink to `target/debug/ryeos-core-tools`. Any `cargo build` that recompiles `ryeos-core-tools` produces a new binary, so the symlinked file's hash diverges from the manifest entry.
 
 Because `bin:` resolution requires a hash match, every `tool:ryeos/core/{fetch,verify,identity}` invocation will fail until the manifest is rebuilt.
 
@@ -51,14 +51,14 @@ The seed-42 key is NOT in the engine test trust store. Using it for bundle artif
 
 Recovery if you accidentally used it:
 ```bash
-git checkout ryeos-bundles/
-rm -rf ryeos-bundles/core/.ai/objects/blobs/*/
+git checkout bundles/
+rm -rf bundles/core/.ai/objects/blobs/*/
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
 ```
 
 ## The standard bundle
 
-`ryeos-bundles/standard/.ai/bin/<triple>/` ships with **real binary files** committed to the repo (no symlinks). Its manifest only invalidates if those binaries are replaced. If you do replace them, re-sign:
+`bundles/standard/.ai/bin/<triple>/` ships with **real binary files** committed to the repo (no symlinks). Its manifest only invalidates if those binaries are replaced. If you do replace them, re-sign:
 ```bash
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
 ```

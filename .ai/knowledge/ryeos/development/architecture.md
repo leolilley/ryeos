@@ -9,24 +9,24 @@ description: "Rust crate architecture, workspace structure, and how components c
 ## Workspace crates
 
 ```
-ryeos-cas-as-truth/
-├── lillux/              # Crypto primitives (Ed25519, X25519, SHA-256)
-├── ryeos-engine/        # Core engine: resolution, verification, plan building
-├── ryeos-state/         # SQLite-backed state store, CAS objects, thread state
-├── ryeos-runtime/       # Shared runtime library (callback client, envelope)
-├── ryeos-handler-protocol/  # Handler subprocess protocol types
-├── ryeos-handler-bins/  # Parser/composer binary implementations
-├── ryeos-tracing/       # Structured tracing utilities
-├── ryeos-tools/         # CLI action implementations (init, publish, trust, vault)
-├── ryeosd/              # The daemon (HTTP + UDS server)
-├── ryeos-cli/           # The CLI binary (`ryeos`)
-├── ryeos-directive-runtime/  # Directive execution subprocess
-├── ryeos-graph-runtime/      # State graph execution subprocess
-├── ryeos-knowledge-runtime/  # Knowledge composition subprocess
-├── ryeos-bundles/       # Bundle source trees (core + standard)
+ryeos-next/
+├── crates/kernel/lillux/              # Crypto primitives (Ed25519, X25519, SHA-256)
+├── crates/core/engine/        # Core engine: resolution, verification, plan building
+├── crates/core/state/         # SQLite-backed state store, CAS objects, thread state
+├── crates/core/runtime/       # Shared runtime library (callback client, envelope)
+├── crates/core/handler-protocol/  # Handler subprocess protocol types
+├── crates/tools/handler-bins/  # Parser/composer binary implementations
+├── crates/core/tracing/       # Structured tracing utilities
+├── crates/tools/core-tools/         # CLI action implementations (init, publish, trust, vault)
+├── crates/bin/daemon/              # The daemon (HTTP + UDS server)
+├── crates/bin/cli/           # The CLI binary (`ryeos`)
+├── crates/runtimes/directive/  # Directive execution subprocess
+├── crates/runtimes/graph/      # State graph execution subprocess
+├── crates/runtimes/knowledge/  # Knowledge composition subprocess
+├── bundles/       # Bundle source trees (core + standard)
 │   ├── core/            # Kind schemas, parsers, handlers, protocols, tools
 │   └── standard/        # Runtimes, model providers, directives
-├── ryeosd-mcp/          # Python MCP adapter (wraps CLI binary)
+├── integrations/mcp/ryeosd/  # Python MCP adapter (wraps CLI binary)
 ├── scripts/             # Build/gate/dev scripts
 └── .dev-keys/           # Development publisher keypair
 ```
@@ -98,7 +98,7 @@ Daemon: receives request
 
 Bundles are content-addressed directory trees. Two bundles ship with the system:
 
-### Core bundle (`ryeos-bundles/core/`)
+### Core bundle (`bundles/core/`)
 
 Infrastructure that the daemon needs to function:
 
@@ -117,14 +117,14 @@ Infrastructure that the daemon needs to function:
 | `.ai/node/aliases/` | CLI alias shortcuts |
 | `.ai/bin/<triple>/` | Compiled binaries (ryeos-core-tools, parsers, composers) |
 
-### Standard bundle (`ryeos-bundles/standard/`)
+### Standard bundle (`bundles/standard/`)
 
 User-facing runtimes and configuration:
 
 | Directory | Contents |
 |---|---|
 | `.ai/runtimes/` | Runtime definitions (directive, graph, knowledge) |
-| `.ai/config/ryeos-runtime/` | Model providers, model routing, execution config |
+| `.ai/config/crates/core/runtime/` | Model providers, model routing, execution config |
 | `.ai/tools/ryeos/agent/providers/` | LLM provider adapter tools (Anthropic, OpenAI, Zen) |
 | `.ai/directives/` | Example directives (hello.md) |
 | `.ai/bin/<triple>/` | Runtime binaries (directive-runtime, graph-runtime, knowledge-runtime) |

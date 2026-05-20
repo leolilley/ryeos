@@ -37,28 +37,28 @@ jobs:
       - name: Build lillux wheel
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: lillux/lillux
+          working-directory: crates/kernel/lillux/lillux
           args: --release --out dist-wheel
           manylinux: auto
 
       - name: Build lillux sdist
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: lillux/lillux
+          working-directory: crates/kernel/lillux/lillux
           command: sdist
           args: --out dist-sdist
 
       - name: Combine dist artifacts
         run: |
-          mkdir -p lillux/lillux/dist
-          cp lillux/lillux/dist-wheel/* lillux/lillux/dist/
-          cp lillux/lillux/dist-sdist/* lillux/lillux/dist/
+          mkdir -p crates/kernel/lillux/crates/kernel/lillux/dist
+          cp crates/kernel/lillux/crates/kernel/lillux/dist-wheel/* crates/kernel/lillux/crates/kernel/lillux/dist/
+          cp crates/kernel/lillux/crates/kernel/lillux/dist-sdist/* crates/kernel/lillux/crates/kernel/lillux/dist/
 
       - name: Upload lillux dist
         uses: actions/upload-artifact@v6
         with:
           name: lillux-dist
-          path: lillux/lillux/dist/
+          path: crates/kernel/lillux/crates/kernel/lillux/dist/
           retention-days: 1
 
   # ── Re-sign with CI key and run tests ────────────────────────────
@@ -77,10 +77,10 @@ jobs:
         uses: actions/download-artifact@v6
         with:
           name: lillux-dist
-          path: lillux/lillux/dist
+          path: crates/kernel/lillux/crates/kernel/lillux/dist
 
       - name: Install lillux wheel
-        run: pip install lillux/lillux/dist/*.whl
+        run: pip install crates/kernel/lillux/crates/kernel/lillux/dist/*.whl
 
       - name: Install dependencies
         run: |
@@ -171,13 +171,13 @@ jobs:
         uses: actions/download-artifact@v6
         with:
           name: lillux-dist
-          path: lillux/lillux/dist
+          path: crates/kernel/lillux/crates/kernel/lillux/dist
 
       - name: Install build tools and runtime
         if: steps.check.outputs.skip == 'false'
         run: |
           pip install build
-          pip install lillux/lillux/dist/*.whl
+          pip install crates/kernel/lillux/crates/kernel/lillux/dist/*.whl
           pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard -e ryeos-cli
 
       - name: Import CI signing key
@@ -271,12 +271,12 @@ jobs:
         uses: actions/download-artifact@v6
         with:
           name: lillux-dist
-          path: lillux/lillux/dist
+          path: crates/kernel/lillux/crates/kernel/lillux/dist
 
       - name: Install from local checkout
         if: steps.check.outputs.skip == 'false'
         run: |
-          pip install lillux/lillux/dist/*.whl
+          pip install crates/kernel/lillux/crates/kernel/lillux/dist/*.whl
           pip install -e ryeos -e ryeos/bundles/core -e ryeos/bundles/standard -e ryeos-cli
 
       - name: Import CI signing key

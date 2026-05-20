@@ -1,0 +1,56 @@
+# ryeos:signed:2026-05-20T05:57:10Z:2e8e11bcd7623bb1091882483d7f6d721743edc3f3f4d4d7d9da4377ef47d14a:cRwn68el96+hnPhLZSlXcG+fJHvZY7I3a8lRvead5kcEihxYD/s3AtJfGKsEuoTeAB1aG8ZgOgNdvs1vLSnGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "crates/core/runtime/model-providers"
+family: anthropic_messages
+base_url: "https://api.anthropic.com/v1/messages"
+auth:
+  env_var: ANTHROPIC_API_KEY
+  header_name: x-api-key
+  prefix: ""
+headers:
+  Content-Type: application/json
+  anthropic-version: "2023-06-01"
+schemas:
+  messages:
+    role_map: {user: user, assistant: assistant, system: system, tool: user}
+    content_key: content
+    text_placement: blocks_array
+    text_block_template:
+      type: text
+      text: "{text}"
+    assistant_tool_calls_placement: inline_blocks
+    system_message: {mode: body_field, field: system}
+    tool_result:
+      role: user
+      wrap_mode: content_blocks
+      block_template:
+        type: tool_result
+        tool_use_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      type: tool_use
+      id: "{id}"
+      name: "{name}"
+      input: "{input}"
+  tools:
+    template:
+      name: "{name}"
+      description: "{description}"
+      input_schema: "{schema}"
+  streaming: {mode: event_typed}
+body_template:
+  model: "{model}"
+  max_tokens: "{max_tokens}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
+body_extra:
+  max_tokens: 8192
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+  models:
+    claude-haiku-4-5-20251001:  {input_per_million: 1.00, output_per_million: 5.00}
+    claude-sonnet-4-5-20250929: {input_per_million: 3.00, output_per_million: 15.00}
+    claude-opus-4-1-20250805:   {input_per_million: 15.00, output_per_million: 75.00}
+extra:
+  stream_url: ""

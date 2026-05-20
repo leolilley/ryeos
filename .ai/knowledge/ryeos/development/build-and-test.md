@@ -61,7 +61,7 @@ Produces these binaries in `target/release/`:
   --owner ryeos-dev
 ```
 
-This stages binaries into `ryeos-bundles/{core,standard}/.ai/bin/<triple>/`, then runs `ryeos publish` on both bundles to sign all items and rebuild CAS manifests.
+This stages binaries into `bundles/{core,standard}/.ai/bin/<triple>/`, then runs `ryeos publish` on both bundles to sign all items and rebuild CAS manifests.
 
 **Idempotent.** Safe to re-run. Required after any `cargo build` that changes binary hashes.
 
@@ -95,4 +95,4 @@ For development iteration, use `cargo build` for compile speed, then run `gate.s
 
 `.dev-keys/PUBLISHER_DEV.pem` is the development publisher key. It is intentionally checked into version control. **Never trust this key in production.**
 
-The engine test harness trusts exactly one key: the official publisher fingerprint (`OFFICIAL_PUBLISHER_FP` in `ryeos-tools/src/actions/init.rs`). For dev bundles, that's the dev key's fingerprint.
+The engine test harness trusts exactly one key: the official publisher fingerprint (`OFFICIAL_PUBLISHER_FP` in `crates/tools/core-tools/src/actions/init.rs`). For dev bundles, that's the dev key's fingerprint.

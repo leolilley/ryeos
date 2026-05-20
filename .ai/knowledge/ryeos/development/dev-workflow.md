@@ -25,7 +25,7 @@ cargo nextest run -p ryeos-engine
 
 ### Full iteration (bundle changes)
 
-If you changed anything in `ryeos-bundles/`:
+If you changed anything in `bundles/`:
 
 ```bash
 ./scripts/gate.sh
@@ -63,13 +63,13 @@ Note: `dev-up.sh` uses `--system-space-dir .local/ryeos` for isolation from any 
 
 | What | Where |
 |---|---|
-| Daemon source | `ryeosd/src/` |
-| CLI source | `ryeos-cli/src/` |
-| Engine core | `ryeos-engine/src/` |
-| Test support | `ryeos-engine/src/test_support.rs` |
-| CLI actions | `ryeos-tools/src/actions/` |
-| Core bundle items | `ryeos-bundles/core/.ai/` |
-| Standard bundle items | `ryeos-bundles/standard/.ai/` |
+| Daemon source | `crates/bin/daemon/src/` |
+| CLI source | `crates/bin/cli/src/` |
+| Engine core | `crates/core/engine/src/` |
+| Test support | `crates/core/engine/src/test_support.rs` |
+| CLI actions | `crates/tools/core-tools/src/actions/` |
+| Core bundle items | `bundles/core/.ai/` |
+| Standard bundle items | `bundles/standard/.ai/` |
 | Dev publisher key | `.dev-keys/PUBLISHER_DEV.pem` |
 | Gate script | `scripts/gate.sh` |
 | Bundle populator | `scripts/populate-bundles.sh` |
@@ -98,11 +98,11 @@ Tests in `tests/` spin up a real daemon process. These require:
 
 ## Git workflow
 
-- `ryeos-bundles/{core,standard}/.ai/bin/` — `.gitignored` (derived, rebuilt by scripts)
-- `ryeos-bundles/{core,standard}/.ai/objects/` — `.gitignored` (CAS objects, regenerated)
-- `ryeos-bundles/{core,standard}/.ai/refs/` — `.gitignored` (CAS refs, regenerated)
-- `ryeos-bundles/{core,standard}/PUBLISHER_TRUST.toml` — committed (deterministic from key)
-- `ryeos-bundles/{core,standard}/.ai/**/*.yaml` — committed (signed bundle items)
+- `bundles/{core,standard}/.ai/bin/` — `.gitignored` (derived, rebuilt by scripts)
+- `bundles/{core,standard}/.ai/objects/` — `.gitignored` (CAS objects, regenerated)
+- `bundles/{core,standard}/.ai/refs/` — `.gitignored` (CAS refs, regenerated)
+- `bundles/{core,standard}/PUBLISHER_TRUST.toml` — committed (deterministic from key)
+- `bundles/{core,standard}/.ai/**/*.yaml` — committed (signed bundle items)
 - `target/` — `.gitignored`
 
 ## CI

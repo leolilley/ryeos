@@ -4,7 +4,7 @@
 # Published to ghcr.io/leolilley/ryeosd-full:<version> by .github/workflows/publish-ryeosd.yml.
 
 # ── Stage 1: Build all binaries + publish bundles ──
-FROM rust:1.86-slim AS builder
+FROM rust:1.95-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev ca-certificates && \
@@ -41,8 +41,8 @@ COPY --from=builder /build/target/release/ryeos              /usr/local/bin/ryeo
 COPY --from=builder /build/target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
 
 # Bundles with rebuilt CAS, baked into /opt (read-only template).
-COPY --from=builder /build/ryeos-bundles/core      /opt/ryeos/core
-COPY --from=builder /build/ryeos-bundles/standard  /opt/ryeos/standard
+COPY --from=builder /build/bundles/core      /opt/ryeos/core
+COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
 
 # Entrypoint runs ryeos init every boot (idempotent) then starts daemon.
 # Both /data/core (system) and /data/user (operator) persist across redeploys.

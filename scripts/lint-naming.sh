@@ -6,7 +6,7 @@ set -euo pipefail
 # Scan everything except generated/build artifacts.
 SCAN_ROOTS=(
   deploy/
-  ryeos-bundles/
+  bundles/
   ryeos-*/src/
   scripts/
   .ai/
@@ -38,7 +38,7 @@ DENY=(
 # docs and help text. The real capability format is canonical
 # `ryeos.<verb>.<kind>.<subject>`. A bare `bundle.install` or
 # `remote.admin` in a `--scopes` example will produce useless
-# authorized_keys TOMLs (see ryeos-runtime/src/authorizer.rs).
+# authorized_keys TOMLs (see crates/core/runtime/src/authorizer.rs).
 DENY+=(
   '--scopes "bundle.'              # e.g. --scopes "bundle.install" (short form)
   '--scopes "remote.'              # e.g. --scopes "remote.admin"   (short form)

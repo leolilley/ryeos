@@ -20,14 +20,14 @@ This signs every signable item in both bundles, rebuilds CAS manifests, and emit
 
 ## When you must re-sign
 
-- After editing any YAML under `ryeos-bundles/`
+- After editing any YAML under `bundles/`
 - After `cargo build` (binaries change, manifest hashes go stale)
 - After a fresh checkout (binaries are `.gitignored`)
 - Before running tests that load the bundle tree
 
 ## What "signed" means
 
-Every YAML file under `ryeos-bundles/<bundle>/.ai/` that loads through `VerifiedLoader` carries an inline `# ryeos:signed:...` header. The header is an Ed25519 signature over the file's content hash, plus a publisher fingerprint. When the runtime loads the file, it:
+Every YAML file under `bundles/<bundle>/.ai/` that loads through `VerifiedLoader` carries an inline `# ryeos:signed:...` header. The header is an Ed25519 signature over the file's content hash, plus a publisher fingerprint. When the runtime loads the file, it:
 
 1. Strips the signature line
 2. Hashes the remaining content
@@ -49,7 +49,7 @@ The dev key fingerprint is `741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d2
 
 Verify after signing:
 ```bash
-head -1 ryeos-bundles/standard/.ai/config/ryeos-runtime/model-providers/zen.yaml
+head -1 bundles/standard/.ai/config/crates/core/runtime/model-providers/zen.yaml
 # Trailing fingerprint should be 741a8bc...
 ```
 
@@ -61,8 +61,8 @@ Older docs may reference `--seed 42`. **Do not use it for bundle artifacts.** Th
 
 Recovery:
 ```bash
-git checkout ryeos-bundles/
-rm -rf ryeos-bundles/core/.ai/objects/blobs/*/
+git checkout bundles/
+rm -rf bundles/core/.ai/objects/blobs/*/
 ```
 Then rebuild with `--key .dev-keys/PUBLISHER_DEV.pem`.
 
@@ -72,7 +72,7 @@ No `--file` or `--single` flag exists. Use `populate-bundles.sh` or `ryeos publi
 
 ### Stale manifest after cargo build
 
-The dev tree symlinks `ryeos-bundles/core/.ai/bin/<triple>/ryeos-core-tools` to `target/debug/ryeos-core-tools`. Any rebuild changes the binary hash. Fix:
+The dev tree symlinks `bundles/core/.ai/bin/<triple>/ryeos-core-tools` to `target/debug/ryeos-core-tools`. Any rebuild changes the binary hash. Fix:
 ```bash
 ./scripts/gate.sh --no-tests
 ```
