@@ -1,7 +1,7 @@
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.4.0"
+version: "3.5.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -279,10 +279,13 @@ content rather than the remote operator's own user space.
    temp dir is **shared** across concurrent requests on the same
    snapshot and lives as long as the cache entry.
 4. All dispatch paths — top-level routes, scheduler, callbacks, and
-   resume — construct a single `ExecutionProvenance` value at the
-   entry point. The provenance carries the engine, project source,
-   effective workspace, snapshot hash, and `Arc<TempDirGuard>`
-   lifeline. It flows through `DispatchRequest`, `ExecutionParams`,
+   resume — construct a single type-state `ExecutionProvenance` value
+   at the entry point. Its four variants encode the legal combinations
+   of role and source: `RootLiveFs`, `RootPushedHead`,
+   `BorrowedChildLiveFs`, and `BorrowedChildPushedHead`. Pushed roots
+   carry the snapshot hash and a non-optional `Arc<TempDirGuard>`;
+   borrowed children carry no snapshot hash, so they cannot own lineage.
+   It flows through `DispatchRequest`, `ExecutionParams`,
    `BuildAndLaunchParams`, and `CallbackCapability` unchanged.
    Callback children clone via `clone_for_borrowed_child()` — they
    never reconstruct provenance from other fields, and there is no
@@ -327,26 +330,25 @@ operator's `~/.ryeos/.ai/`.
 
 ### Borrowed workspace for callbacks
 
-Borrowed callback children carry `role: BorrowedCallbackChild` in
-their provenance. The runner's lifecycle gates read this directly:
-`provenance.skips_snapshot_lifecycle()` returns true iff the execution
-is borrowed. Borrowed children:
+Borrowed callback children carry a borrowed variant tag in their
+provenance. The runner's lifecycle gates read this directly:
+`provenance.is_borrowed_child()` returns true iff the execution is
+borrowed. Borrowed children:
 
 - skip `pin_localpath_snapshot` and `post_execution_foldback` (parent
   owns the snapshot lineage);
 - do not track the workspace temp dir on their `ExecutionGuard` (the
-  parent's `Arc<TempDirGuard>` pins it; the callback token's
-  `provenance.workspace_lifeline` keeps it alive across parent crash or
+  parent's `Arc<TempDirGuard>` pins it; the callback token's borrowed
+  pushed provenance variant keeps it alive across parent crash or
   token-TTL grace period);
-- inherit `snapshot_hash: None` (the parent owns lineage; the child has
-  nothing to pin).
+- have no snapshot hash field at all (the parent owns lineage; the
+  child has nothing to pin).
 
 Nested callback children (callback within a callback) preserve the
 parent's provenance via `clone_for_borrowed_child`, so the grandchild's
-`project_source` remains `PushedHead` and its `workspace_lifeline` Arc
-still pins the original Root's temp dir. This closes the regression
-flagged by oracle review on the previous heuristic-based
-implementation.
+variant remains `BorrowedChildPushedHead` and its lifeline Arc still
+pins the original Root's temp dir. This closes the regression flagged
+by oracle review on the previous heuristic-based implementation.
 
 Resuming a `pushed_head` thread under the per-request overlay is
 tracked separately; the resume path falls back to the daemon engine.

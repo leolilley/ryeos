@@ -997,7 +997,7 @@ mod tests {
 
         cache.insert_for_test(dummy_key("pressure"), minimal_engine(), None);
         let hit = cache.get(&key).expect("callback-held entry survives eviction pressure");
-        assert!(Arc::ptr_eq(&hit, &provenance.request_engine));
+        assert!(Arc::ptr_eq(&hit, provenance.request_engine()));
     }
 
     #[test]
@@ -1047,6 +1047,6 @@ mod tests {
         );
 
         let hit = cache.get(&old_key).expect("old engine pinned by callback survives generation bump");
-        assert!(Arc::ptr_eq(&hit, &provenance.request_engine));
+        assert!(Arc::ptr_eq(&hit, provenance.request_engine()));
     }
 }

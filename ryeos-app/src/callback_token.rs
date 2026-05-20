@@ -240,11 +240,14 @@ impl ThreadAuthStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Arc;
 
     use crate::execution_provenance::{ExecutionProvenance, ProjectSourceKind};
     use crate::temp_dir_guard::TempDirGuard;
     use ryeos_engine::engine::Engine;
+
+    type TestProvenance = ExecutionProvenance;
 
     fn minimal_engine() -> Arc<Engine> {
         Arc::new(Engine::new(
@@ -258,7 +261,7 @@ mod tests {
         ))
     }
 
-    fn provenance(path: PathBuf) -> ExecutionProvenance {
+    fn provenance(path: PathBuf) -> TestProvenance {
         ExecutionProvenance::root_live_fs(path, minimal_engine())
     }
 
@@ -427,14 +430,17 @@ mod tests {
         );
         let validated = store.validate(&cap.token, "T-test", tmp.path()).unwrap();
 
-        assert!(Arc::ptr_eq(&validated.provenance.request_engine, &engine));
-        assert_eq!(validated.provenance.original_project_path, PathBuf::from("/original"));
-        assert_eq!(validated.provenance.project_source, ProjectSourceKind::PushedHead);
-        assert_eq!(validated.provenance.effective_path, tmp.path());
-        assert!(Arc::ptr_eq(
-            validated.provenance.workspace_lifeline.as_ref().unwrap(),
-            &lifeline
-        ));
+        assert!(Arc::ptr_eq(validated.provenance.request_engine(), &engine));
+        assert_eq!(validated.provenance.original_project_path(), Path::new("/original"));
+        assert_eq!(validated.provenance.project_source(), ProjectSourceKind::PushedHead);
+        assert_eq!(validated.provenance.effective_path(), tmp.path());
+        match &validated.provenance {
+            ExecutionProvenance::RootPushedHead {
+                workspace_lifeline,
+                ..
+            } => assert!(Arc::ptr_eq(workspace_lifeline, &lifeline)),
+            other => panic!("expected RootPushedHead, got {other:?}"),
+        }
     }
 
     #[test]
@@ -451,10 +457,7 @@ mod tests {
         };
 
         let cloned = cap.clone();
-        assert!(Arc::ptr_eq(
-            &cloned.provenance.request_engine,
-            &engine
-        ));
+        assert!(Arc::ptr_eq(cloned.provenance.request_engine(), &engine));
     }
 
     #[test]
@@ -470,7 +473,7 @@ mod tests {
         let validated = store
             .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())
             .unwrap();
-        assert_eq!(validated.provenance.effective_path, PathBuf::from("/p"));
+        assert_eq!(validated.provenance.effective_path(), Path::new("/p"));
     }
 
     #[test]

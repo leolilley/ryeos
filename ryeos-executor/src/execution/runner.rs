@@ -32,9 +32,7 @@ use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 use ryeos_app::launch_metadata::ResumeContext;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::temp_dir_guard::TempDirGuard;
-use ryeos_app::execution_provenance::{
-    ExecutionProvenance, ExecutionRole, ProjectSourceKind,
-};
+use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::thread_lifecycle::{
     self, ResolvedExecutionRequest, ThreadAttachProcessParams, ThreadFinalizeParams,
 };
@@ -246,64 +244,75 @@ fn prepare_cas_context(
     thread_id: &str,
     guard: &mut ExecutionGuard,
 ) -> Result<(PathBuf, Option<String>, Option<String>)> {
-    match provenance.role {
-        ExecutionRole::BorrowedCallbackChild => {
-            if !provenance.effective_path.is_dir() {
+    match provenance {
+        ExecutionProvenance::BorrowedChildLiveFs { project_path, .. } => {
+            if !project_path.is_dir() {
                 anyhow::bail!(
-                    "borrowed working dir does not exist or is not a directory: {}",
-                    provenance.effective_path.display()
+                    "borrowed effective_path does not exist or is not a directory: {}",
+                    project_path.display()
                 );
             }
-            tracing::trace!(thread_id = %thread_id, effective_path = %provenance.effective_path.display(), "borrowed CAS context prepared");
-            Ok((provenance.effective_path.clone(), None, None))
+            tracing::trace!(
+                thread_id = %thread_id,
+                effective_path = %project_path.display(),
+                "borrowed CAS context prepared"
+            );
+            Ok((project_path.clone(), None, None))
         }
-        ExecutionRole::Root => match provenance.project_source {
-            ProjectSourceKind::LiveFs => {
-                let _permit = state.write_barrier.try_acquire()
-                    .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit for ingest: {e}"))?;
-                let cas_root = state.state_store.cas_root()?;
-                let items = super::ingest::ingest_directory(
-                    &cas_root,
-                    &provenance.effective_path,
-                    &state.ignore_matcher,
-                )?;
-                let manifest = ryeos_state::objects::SourceManifest { item_source_hashes: items };
-                let cas = lillux::cas::CasStore::new(cas_root);
-                let manifest_hash = cas.store_object(&manifest.to_value())?;
+        ExecutionProvenance::BorrowedChildPushedHead { effective_path, .. } => {
+            if !effective_path.is_dir() {
+                anyhow::bail!(
+                    "borrowed effective_path does not exist or is not a directory: {}",
+                    effective_path.display()
+                );
+            }
+            tracing::trace!(
+                thread_id = %thread_id,
+                effective_path = %effective_path.display(),
+                "borrowed CAS context prepared"
+            );
+            Ok((effective_path.clone(), None, None))
+        }
+        ExecutionProvenance::RootLiveFs { project_path, .. } => {
+            let _permit = state.write_barrier.try_acquire()
+                .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit for ingest: {e}"))?;
+            let cas_root = state.state_store.cas_root()?;
+            let items = super::ingest::ingest_directory(
+                &cas_root,
+                project_path,
+                &state.ignore_matcher,
+            )?;
+            let manifest = ryeos_state::objects::SourceManifest { item_source_hashes: items };
+            let cas = lillux::cas::CasStore::new(cas_root);
+            let manifest_hash = cas.store_object(&manifest.to_value())?;
+            tracing::trace!(
+                thread_id = %thread_id,
+                effective_path = %project_path.display(),
+                "live CAS context prepared"
+            );
 
-                Ok((provenance.effective_path.clone(), Some(manifest_hash), None))
-            }
-            ProjectSourceKind::PushedHead => {
-                let checkout_guard = provenance.workspace_lifeline.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Root PushedHead provenance is missing workspace_lifeline (constructor invariant violated)"
-                    )
-                })?;
-                let checkout_dir = checkout_guard.path().ok_or_else(|| {
-                    anyhow::anyhow!("pre-checked-out temp dir was already disarmed")
-                })?;
-                if checkout_dir != provenance.effective_path {
-                    anyhow::bail!(
-                        "Root PushedHead provenance effective_path {} does not match lifeline path {}",
-                        provenance.effective_path.display(),
-                        checkout_dir.display()
-                    );
-                }
-                let snap_hash = provenance.snapshot_hash.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Root PushedHead provenance is missing snapshot_hash (constructor invariant violated)"
-                    )
-                })?;
-                let manifest_hash = read_pre_manifest_for_snapshot(state, snap_hash)?;
-                guard.track_temp_dir(checkout_guard.clone());
-                tracing::trace!(thread_id = %thread_id, effective_path = %provenance.effective_path.display(), "CAS context prepared");
-                Ok((
-                    provenance.effective_path.clone(),
-                    Some(manifest_hash),
-                    Some(snap_hash.clone()),
-                ))
-            }
-        },
+            Ok((project_path.clone(), Some(manifest_hash), None))
+        }
+        ExecutionProvenance::RootPushedHead {
+            effective_path,
+            workspace_lifeline,
+            snapshot_hash,
+            ..
+        } => {
+            guard.track_temp_dir(workspace_lifeline.clone());
+            let manifest_hash = read_pre_manifest_for_snapshot(state, snapshot_hash)?;
+            tracing::trace!(
+                thread_id = %thread_id,
+                effective_path = %effective_path.display(),
+                snapshot_hash = %snapshot_hash,
+                "pushed CAS context prepared"
+            );
+            Ok((
+                effective_path.clone(),
+                Some(manifest_hash),
+                Some(snapshot_hash.clone()),
+            ))
+        }
     }
 }
 
@@ -686,14 +695,14 @@ pub async fn run_inline(
         };
 
     // Update project context if CAS checkout changed the path
-    if effective_path != params.provenance.effective_path {
+    if effective_path != params.provenance.effective_path() {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
     }
 
     // Spawn — use the per-request engine (pushed_head overlay or
     // daemon startup engine), NOT state.engine directly.
-    let engine = params.provenance.request_engine.clone();
+    let engine = params.provenance.request_engine().clone();
     let tid = running.thread_id.clone();
     let crid = running.chain_root_id.clone();
     let resolved = params.resolved.clone();
@@ -770,10 +779,10 @@ pub async fn run_inline(
     //   - Root LiveFs:                 skip pin/foldback (no CAS)
     //   - Root PushedHead:             pin + foldback
     //   - BorrowedCallbackChild *:     never pin/foldback
-    // `provenance.skips_snapshot_lifecycle()` returns true iff
-    // BorrowedCallbackChild. LiveFs gating happens inside the
+    // `provenance.is_borrowed_child()` returns true iff this is a
+    // borrowed callback child. LiveFs gating happens inside the
     // pin/foldback helpers themselves (existing behaviour).
-    if !params.provenance.skips_snapshot_lifecycle() {
+    if !params.provenance.is_borrowed_child() {
         match pin_localpath_snapshot_if_needed(
             &state,
             &mut spawned.launch_metadata,
@@ -821,7 +830,7 @@ pub async fn run_inline(
         }
     };
 
-    if !params.provenance.skips_snapshot_lifecycle() {
+    if !params.provenance.is_borrowed_child() {
         let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
         post_execution_foldback(
             PostExecutionFoldbackParams {
@@ -830,7 +839,7 @@ pub async fn run_inline(
                 acting_principal: &params.acting_principal,
                 pre_manifest_hash: &pre_manifest_hash,
                 base_snapshot_hash: &base_snapshot_hash,
-                project_path: Some(params.provenance.original_project_path.as_path()),
+                project_path: Some(params.provenance.original_project_path()),
                 execution_dir: guard_exec_dir.as_deref(),
                 completion: &completion,
             },
@@ -911,7 +920,7 @@ pub async fn run_detached(
         };
 
     // Update project context if CAS checkout changed the path
-    if effective_path != params.provenance.effective_path {
+    if effective_path != params.provenance.effective_path() {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
     }
@@ -943,14 +952,14 @@ pub async fn run_detached(
     let bg_chain_root_id = running.chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
     // Per-request engine (pushed_head overlay or daemon startup engine).
-    let bg_engine = params.provenance.request_engine.clone();
+    let bg_engine = params.provenance.request_engine().clone();
     let bg_vault = params.vault_bindings.clone();
     let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
-    let bg_project_path = Some(params.provenance.original_project_path.clone());
-    let bg_skip_snapshot_lifecycle = params.provenance.skips_snapshot_lifecycle();
+    let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
+    let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
     let bg_state_root = state.config.system_space_dir.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -1473,7 +1482,7 @@ pub async fn run_existing_detached(
 
     // Update plan_context to point at the materialized path so the
     // engine resolves item refs from there.
-    if effective_path != params.provenance.effective_path {
+    if effective_path != params.provenance.effective_path() {
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),
         };
@@ -1505,24 +1514,27 @@ pub async fn run_existing_detached(
         // Use the provenance engine. Today resume provenance falls back
         // to state.engine; the field keeps the contract honest if
         // resume later starts threading an overlay engine.
-        let engine_roots = params.provenance.request_engine.resolution_roots(Some(effective_path.clone()));
+        let engine_roots = params
+            .provenance
+            .request_engine()
+            .resolution_roots(Some(effective_path.clone()));
         let effective_parsers = params
             .provenance
-            .request_engine
+            .request_engine()
             .effective_parser_dispatcher(Some(&effective_path))
-        .map_err(|e| {
-            guard.fail_thread("preflight_failed");
-            guard.cleanup();
-            ResumeError::Other(anyhow::anyhow!("resume: effective parser dispatcher: {e}"))
-        })?;
+            .map_err(|e| {
+                guard.fail_thread("preflight_failed");
+                guard.cleanup();
+                ResumeError::Other(anyhow::anyhow!("resume: effective parser dispatcher: {e}"))
+            })?;
 
         let resolution = ryeos_engine::resolution::run_resolution_pipeline(
             &params.resolved.resolved_item.canonical_ref,
-            &params.provenance.request_engine.kinds,
+            &params.provenance.request_engine().kinds,
             &effective_parsers,
             &engine_roots,
-            &params.provenance.request_engine.trust_store,
-            &params.provenance.request_engine.composers,
+            &params.provenance.request_engine().trust_store,
+            &params.provenance.request_engine().composers,
         )
         .map_err(|e| {
             guard.fail_thread("preflight_failed");
@@ -1592,14 +1604,14 @@ pub async fn run_existing_detached(
     let bg_resolved = params.resolved.clone();
     // Per-request engine (resume path uses daemon engine via
     // execution_params_from_resume_context).
-    let bg_engine = params.provenance.request_engine.clone();
+    let bg_engine = params.provenance.request_engine().clone();
     let bg_vault = params.vault_bindings.clone();
     let bg_cb_bindings = cb_bindings;
     let bg_acting_principal = params.acting_principal.clone();
     let bg_pre_manifest_hash = pre_manifest_hash;
     let bg_base_snapshot_hash = base_snapshot_hash;
-    let bg_project_path = Some(params.provenance.original_project_path.clone());
-    let bg_skip_snapshot_lifecycle = params.provenance.skips_snapshot_lifecycle();
+    let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
+    let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
     let bg_state_root = state.config.system_space_dir.clone();
 
     tokio::spawn(dispatch_detached_bg_task(

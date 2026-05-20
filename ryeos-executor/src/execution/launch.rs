@@ -559,7 +559,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         vault_bindings,
         pre_minted_thread_id,
     } = params;
-    let engine = &provenance.request_engine;
+    let engine = provenance.request_engine();
     tracing::info!(
         executor_ref,
         acting_principal,

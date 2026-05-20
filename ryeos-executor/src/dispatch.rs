@@ -134,7 +134,7 @@ fn check_dispatch_capabilities(
     caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
     request: &DispatchRequest<'_>,
 ) -> Result<(), DispatchError> {
-    let is_pushed = matches!(request.provenance.project_source, ProjectSourceKind::PushedHead);
+    let is_pushed = matches!(request.provenance.project_source(), ProjectSourceKind::PushedHead);
     if is_pushed && !caps.allows_pushed_head {
         return Err(DispatchError::CapabilityRejected {
             reason: "pushed_head not yet supported for native runtimes".into(),
@@ -1606,7 +1606,7 @@ async fn dispatch_tool_subprocess(
     }
 
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(
-        &request.provenance.original_project_path,
+        request.provenance.original_project_path(),
     ));
     let vault_bindings = ryeos_app::vault::read_required_secrets(
         state.vault.as_ref(),

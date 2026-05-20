@@ -358,7 +358,9 @@ mod tests {
     use std::time::Instant;
     use tempfile::TempDir;
 
-    fn test_provenance(state: &AppState, path: &str) -> ryeos_app::execution_provenance::ExecutionProvenance {
+    type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
+
+    fn test_provenance(state: &AppState, path: &str) -> TestProvenance {
         ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             std::path::PathBuf::from(path),
             state.engine.clone(),

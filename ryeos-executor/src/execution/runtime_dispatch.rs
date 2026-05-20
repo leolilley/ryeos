@@ -62,8 +62,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         thread_id = %params.thread_id,
         server_principal = %thread_auth.acting_principal,
         project_path = %params.project_path,
-        borrowed_dir = %child_provenance.effective_path.display(),
-        project_source = ?child_provenance.project_source,
+        borrowed_dir = %child_provenance.effective_path().display(),
+        project_source = ?child_provenance.project_source(),
         "thread auth token validated: using server-side principal",
     );
 
@@ -149,7 +149,7 @@ async fn handle_execute(
             scopes: caller_scopes.clone(),
         }),
         project_context: ProjectContext::LocalPath {
-            path: child_provenance.effective_path.clone(),
+            path: child_provenance.effective_path().to_path_buf(),
         },
         current_site_id: site_id.to_string(),
         origin_site_id: site_id.to_string(),
@@ -160,13 +160,13 @@ async fn handle_execute(
         principal_fingerprint: caller_principal_id.clone(),
         caller_scopes,
         // Use the parent's per-request engine — never the daemon engine.
-        engine: child_provenance.request_engine.clone(),
+        engine: child_provenance.request_engine().clone(),
         plan_ctx,
         requested_op: None,
         requested_inputs: None,
     };
 
-    let project_path = child_provenance.effective_path.clone();
+    let project_path = child_provenance.effective_path().to_path_buf();
     let dispatch_req = crate::dispatch::DispatchRequest {
         launch_mode: params.action.thread.as_str(),
         target_site_id: None,
