@@ -317,6 +317,28 @@ async fn main() -> Result<()> {
                     replacement_tokens: r.replacement_tokens.clone(),
                     removed_in: r.removed_in.clone(),
                     positional_field: r.positional_field.clone(),
+                    positional_forms: r
+                        .positional_forms
+                        .iter()
+                        .map(|f| ryeos_runtime::alias_registry::PositionalForm {
+                            slots: f
+                                .slots
+                                .iter()
+                                .map(|s| ryeos_runtime::alias_registry::PositionalSlot {
+                                    field: s.field.clone(),
+                                    matcher: match s.matcher {
+                                        ryeos_app::node_config::sections::alias::PositionalMatcher::Any => ryeos_runtime::alias_registry::PositionalMatcher::Any,
+                                        ryeos_app::node_config::sections::alias::PositionalMatcher::CanonicalRef => ryeos_runtime::alias_registry::PositionalMatcher::CanonicalRef,
+                                    },
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    project_resolution: match r.project_resolution {
+                        ryeos_app::node_config::sections::alias::ProjectResolution::None => ryeos_runtime::alias_registry::ProjectResolution::None,
+                        ryeos_app::node_config::sections::alias::ProjectResolution::Required => ryeos_runtime::alias_registry::ProjectResolution::Required,
+                        ryeos_app::node_config::sections::alias::ProjectResolution::Optional => ryeos_runtime::alias_registry::ProjectResolution::Optional,
+                    },
                 })
                 .collect::<Vec<_>>(),
         )
@@ -738,6 +760,28 @@ async fn run_service_standalone(
                     replacement_tokens: r.replacement_tokens.clone(),
                     removed_in: r.removed_in.clone(),
                     positional_field: r.positional_field.clone(),
+                    positional_forms: r
+                        .positional_forms
+                        .iter()
+                        .map(|f| ryeos_runtime::alias_registry::PositionalForm {
+                            slots: f
+                                .slots
+                                .iter()
+                                .map(|s| ryeos_runtime::alias_registry::PositionalSlot {
+                                    field: s.field.clone(),
+                                    matcher: match s.matcher {
+                                        ryeos_app::node_config::sections::alias::PositionalMatcher::Any => ryeos_runtime::alias_registry::PositionalMatcher::Any,
+                                        ryeos_app::node_config::sections::alias::PositionalMatcher::CanonicalRef => ryeos_runtime::alias_registry::PositionalMatcher::CanonicalRef,
+                                    },
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    project_resolution: match r.project_resolution {
+                        ryeos_app::node_config::sections::alias::ProjectResolution::None => ryeos_runtime::alias_registry::ProjectResolution::None,
+                        ryeos_app::node_config::sections::alias::ProjectResolution::Required => ryeos_runtime::alias_registry::ProjectResolution::Required,
+                        ryeos_app::node_config::sections::alias::ProjectResolution::Optional => ryeos_runtime::alias_registry::ProjectResolution::Optional,
+                    },
                 })
                 .collect::<Vec<_>>(),
         )

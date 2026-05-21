@@ -18,21 +18,26 @@ pub fn preflight_verify_bundle(
     system_space_dir: &Path,
     user_root: Option<&Path>,
 ) -> Result<()> {
+    // Runtime uses registered bundle paths under .ai/bundles/*, NOT
+    // system_space_dir itself. Generic bundle install verifies against
+    // the current installed set so new bundles can depend on already-
+    // installed bundles.
+    let installed_bundle_roots = discover_installed_bundle_roots(system_space_dir);
+    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, user_root)
+}
+
+pub fn preflight_verify_bundle_in_context(
+    source_path: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    user_root: Option<&Path>,
+) -> Result<()> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     if !ai_dir.is_dir() {
         bail!("preflight: source has no .ai/ at {}", source_path.display());
     }
 
-    // ── Discover installed bundle roots (Model B) ──
-    // Runtime uses registered bundle paths under .ai/bundles/*, NOT
-    // system_space_dir itself. Preflight must mirror this so that
-    // bundle-install / init can verify a bundle whose dependencies
-    // are provided by a previously-installed bundle (e.g. standard
-    // depends on core's parsers and kind schemas).
-    let installed_bundle_roots = discover_installed_bundle_roots(system_space_dir);
-
     let mut schema_roots = Vec::new();
-    for root in &installed_bundle_roots {
+    for root in dependency_bundle_roots {
         let kinds_dir = root
             .join(ryeos_engine::AI_DIR)
             .join(ryeos_engine::KIND_SCHEMAS_DIR);
@@ -75,8 +80,10 @@ pub fn preflight_verify_bundle(
             roots.push((path, trust));
         }
     };
-    // Installed bundles are trusted system roots (mirrors daemon's Model B).
-    for root in &installed_bundle_roots {
+    // Dependency bundles are trusted system roots selected by the caller's
+    // verification plan. `init --source` passes source-bundle dependency
+    // roots; generic install passes currently installed bundle roots.
+    for root in dependency_bundle_roots {
         push_unique(
             root.clone(),
             ryeos_engine::resolution::TrustClass::TrustedSystem,
@@ -558,6 +565,20 @@ mod tests {
         assert!(
             verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok(),
             "no manifest should pass (optional)"
+        );
+    }
+
+    #[test]
+    fn installed_bundle_roots_discovers_immediate_installed_bundles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundles_dir = tmp.path().join(".ai/bundles");
+        std::fs::create_dir_all(bundles_dir.join("core/.ai")).unwrap();
+        std::fs::create_dir_all(bundles_dir.join("standard/.ai")).unwrap();
+
+        let roots = discover_installed_bundle_roots(tmp.path());
+        assert_eq!(
+            roots,
+            vec![bundles_dir.join("core"), bundles_dir.join("standard")]
         );
     }
 }

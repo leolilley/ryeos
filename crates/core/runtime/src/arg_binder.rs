@@ -6,6 +6,7 @@
 //! ## Rules
 //!
 //! - `--key=value` → `{ "key": "value" }`  (hyphens normalised to underscores)
+//! - `key=value` → `{ "key": "value" }` (convenience form used by Rye's Python CLI)
 //! - `--key value` → `{ "key": "value" }`  (next token consumed as value)
 //! - `--key` (alone or before `--next`) → `{ "key": true }`
 //! - `--key -1` → `{ "key": "-1" }` (single-dash values are values, not flags)
@@ -15,6 +16,8 @@
 //!   Single occurrence remains scalar; handlers wanting `Vec<T>` should
 //!   deserialize via [`crate::scalar_or_vec`] to accept both forms.
 //! - Empty input → `{}`
+
+use crate::alias_registry::{AliasDef, PositionalForm, PositionalMatcher, PositionalSlot};
 
 /// Normalise a flag key: strip the `--` prefix (already done by caller)
 /// and replace hyphens with underscores so `--public-key` becomes `public_key`.
@@ -62,6 +65,20 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
                 (normalise_key(key), serde_json::Value::Bool(true))
             };
             insert_or_accumulate(&mut params, k, v);
+        } else if let Some((key, value)) = token.split_once('=') {
+            // Rye Python CLI compatibility / prompt-friendly shorthand:
+            // `remote=railway` should bind exactly like `--remote railway`.
+            // Keep `=foo` and `foo=` positional-ish rather than inventing
+            // empty keys or surprising empty values.
+            if !key.is_empty() && !value.is_empty() {
+                insert_or_accumulate(
+                    &mut params,
+                    normalise_key(key),
+                    serde_json::Value::String(value.to_string()),
+                );
+            } else {
+                positional.push(serde_json::Value::String(token.clone()));
+            }
         } else {
             positional.push(serde_json::Value::String(token.clone()));
         }
@@ -122,6 +139,87 @@ pub fn bind_argv_with_positional_field(
     value
 }
 
+/// Alias-aware binding driven by alias metadata. Supports ordered
+/// positional forms while retaining `positional_field` as a migration
+/// shim for old aliases.
+pub fn bind_argv_with_alias(
+    argv: &[String],
+    alias: Option<&AliasDef>,
+) -> Result<serde_json::Value, String> {
+    let Some(alias) = alias else {
+        return Ok(bind_argv(argv));
+    };
+
+    let mut forms = alias.positional_forms.clone();
+    if forms.is_empty() {
+        if let Some(field) = &alias.positional_field {
+            forms.push(PositionalForm {
+                slots: vec![PositionalSlot {
+                    field: field.clone(),
+                    matcher: PositionalMatcher::Any,
+                }],
+            });
+        }
+    }
+    if forms.is_empty() {
+        return Ok(bind_argv(argv));
+    }
+
+    let mut value = bind_argv(argv);
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(value);
+    };
+    let positionals: Vec<String> = obj
+        .remove("_args")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(ToString::to_string))
+        .collect();
+
+    if positionals.is_empty() {
+        return Ok(value);
+    }
+
+    for form in &forms {
+        let unset_slots: Vec<&PositionalSlot> = form
+            .slots
+            .iter()
+            .filter(|slot| !obj.contains_key(&normalise_key(&slot.field)))
+            .collect();
+        if unset_slots.len() != positionals.len() {
+            continue;
+        }
+        if unset_slots
+            .iter()
+            .zip(positionals.iter())
+            .all(|(slot, arg)| positional_matches(slot.matcher, arg))
+        {
+            for (slot, arg) in unset_slots.into_iter().zip(positionals.iter()) {
+                obj.insert(
+                    normalise_key(&slot.field),
+                    serde_json::Value::String(arg.clone()),
+                );
+            }
+            return Ok(value);
+        }
+    }
+
+    Err(format!(
+        "positional arguments {:?} do not match any positional form for alias {:?}",
+        positionals, alias.tokens
+    ))
+}
+
+fn positional_matches(matcher: PositionalMatcher, arg: &str) -> bool {
+    match matcher {
+        PositionalMatcher::Any => true,
+        PositionalMatcher::CanonicalRef => {
+            ryeos_engine::canonical_ref::CanonicalRef::parse(arg).is_ok()
+        }
+    }
+}
+
 /// Insert a key/value into the params map; on repeat, accumulate into
 /// an array. The first repeat promotes the existing scalar to a
 /// one-element array, then appends the new value. Subsequent repeats
@@ -167,6 +265,28 @@ mod tests {
     fn flag_with_equals() {
         let result = bind_argv(&["--seed=119".into()]);
         assert_eq!(result["seed"], "119");
+    }
+
+    #[test]
+    fn bare_key_value_binds_like_flag_value() {
+        let result = bind_argv(&["remote=railway".into(), "limit=5".into()]);
+        assert_eq!(result["remote"], "railway");
+        assert_eq!(result["limit"], "5");
+        assert!(result.get("_args").is_none());
+    }
+
+    #[test]
+    fn bare_key_value_normalises_hyphens() {
+        let result = bind_argv(&["remote-project=/srv/app".into()]);
+        assert_eq!(result["remote_project"], "/srv/app");
+        assert!(result.get("remote-project").is_none());
+    }
+
+    #[test]
+    fn empty_bare_key_value_stays_positional() {
+        let result = bind_argv(&["foo=".into(), "=bar".into()]);
+        let args = result["_args"].as_array().unwrap();
+        assert_eq!(args, &["foo=", "=bar"]);
     }
 
     #[test]

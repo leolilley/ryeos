@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-21T09:36:59Z:6a68532ad050cb6c454e72959f1a876964af6d20558b101601d71ff4aa888646:whhIasoh38ajLV7LE9y27rzc7K6Co3ipMqVLcldeAZdBv3XO8i4Sz6yTbabtiSGAa1jJHmL7GCKy0Oi8h9GJCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-21T11:11:47Z:6a68532ad050cb6c454e72959f1a876964af6d20558b101601d71ff4aa888646:whhIasoh38ajLV7LE9y27rzc7K6Co3ipMqVLcldeAZdBv3XO8i4Sz6yTbabtiSGAa1jJHmL7GCKy0Oi8h9GJCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: vault.delete
 required_caps: ["ryeos.execute.service.vault.delete"]

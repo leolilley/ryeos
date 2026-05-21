@@ -208,7 +208,7 @@ pub async fn push_project(
     })
 }
 
-fn collect_snapshot_hashes(
+pub(crate) fn collect_snapshot_hashes(
     cas: &CasStore,
     manifest: &SourceManifest,
     user_manifest: Option<&SourceManifest>,
@@ -246,7 +246,7 @@ fn collect_manifest_hashes(
     }
 }
 
-async fn upload_missing(
+pub(crate) async fn upload_missing(
     client: &RemoteClient,
     local_cas: &CasStore,
     all_hashes: &[String],

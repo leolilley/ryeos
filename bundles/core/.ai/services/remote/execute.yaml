@@ -1,10 +1,11 @@
-# ryeos:signed:2026-05-21T09:36:59Z:20ef751bec96c62e63172fa79104d00366bcee25739a033088bd55f89d00ae95:ajfMnXDsZcN0DgAMFSbULcgwhzyYaD/pm4E9WEzwPPBpj8UbAoouMxMdiaX57NPFk/pDAYDPSECZB+Ghu/XtDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-21T11:11:47Z:4879332b214dca4bb5ab668003afe25de466cb10e7ce32abfec50158514d4448:Dzad6o2nyFRSuOvbofE34HkZZyIb2Td/IbrKmRdnfqySzngF3R/MDkt5iPVbut7fqGV6FzBxw3EzM8XelHy+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.execute
 required_caps: ["ryeos.execute.service.remote.admin"]
 schema:
   remote: string?
   item_ref: string
-  project_path: string?
+  no_project: boolean?
+  project: string?
   parameters: object?
 description: "Execute an item on a remote node"

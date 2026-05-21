@@ -7,9 +7,10 @@
 //! 1. Detecting an explicit `--project <path>` (or `-p <path>`) in the
 //!    tail and canonicalizing the path against the *CLI's* cwd.
 //! 2. Detecting `--no-project` in the tail and passing it through.
-//! 3. If neither is present, walking up from cwd with
-//!    `discover_project_root`. If nothing is found, hard-erroring with
-//!    a message pointing at `--project` and `--no-project`.
+//! 3. If neither is present, using cwd as the project root only when
+//!    cwd directly contains `.ai/` and is not the RyeOS user-space root.
+//!    Otherwise, falling back to `--no-project` so execution resolves
+//!    against user space.
 //!
 //! The resolved spec is then re-injected into the tail as either
 //! `--project <abs>` or `--no-project`, in canonical form. The daemon's
@@ -27,33 +28,14 @@ pub enum ResolvedProjectSpec {
     Explicit(PathBuf),
 }
 
-/// Verbs whose tail must be processed by this resolver. These are
-/// the only commands today that need a project root; other verbs
-/// (status, vault, bundle, fetch, …) ignore project entirely so we
-/// don't touch their tail.
-pub fn verb_needs_project_resolution(tokens: &[String]) -> bool {
-    matches!(
-        tokens
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        ["remote", "execute", ..]
-            | ["remote", "push", ..]
-            | ["remote", "bind-project", ..]
-            | ["remote", "sync-project-ai", ..]
-            | ["remote", "project-status", ..]
-    )
-}
-
 /// Process the tail of a project-bearing verb, returning a rewritten
 /// tail where `--project` and `--no-project` are in their canonical
 /// daemon-friendly form (absolute paths, no `-p`/`--project=foo`
 /// syntactic noise).
 ///
 /// Returns an error if both `--no-project` and `--project` are present,
-/// or if discovery fails to find a project root and the operator did
-/// not opt out via `--no-project`.
+/// if the explicit project path cannot be canonicalized, or if user-space
+/// execution is selected but the RyeOS user space is unavailable.
 pub fn rewrite_project_tail(tail: &[String]) -> Result<Vec<String>, CliError> {
     let mut out: Vec<String> = Vec::with_capacity(tail.len() + 2);
     let mut explicit_path: Option<PathBuf> = None;
@@ -91,7 +73,9 @@ pub fn rewrite_project_tail(tail: &[String]) -> Result<Vec<String>, CliError> {
         i += 1;
     }
 
-    let resolved = resolve_spec(no_project, explicit_path)?;
+    let cwd =
+        std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
+    let resolved = resolve_spec_from_cwd(no_project, explicit_path, &cwd)?;
     match resolved {
         ResolvedProjectSpec::NoProject => out.push("--no-project".into()),
         ResolvedProjectSpec::Explicit(p) => {
@@ -102,21 +86,21 @@ pub fn rewrite_project_tail(tail: &[String]) -> Result<Vec<String>, CliError> {
     Ok(out)
 }
 
-/// Combine the parsed flags with auto-discovery to produce a single
-/// concrete spec. Pure — no IO except `current_dir` and the discovery
-/// walk.
-fn resolve_spec(
+/// Combine the parsed flags with cwd into a single concrete spec.
+fn resolve_spec_from_cwd(
     no_project: bool,
     explicit: Option<PathBuf>,
+    cwd: &std::path::Path,
 ) -> Result<ResolvedProjectSpec, CliError> {
     match (no_project, explicit) {
         (true, Some(_)) => Err(CliError::ProjectResolution(
             "cannot pass both --no-project and --project: choose one".into(),
         )),
-        (true, None) => Ok(ResolvedProjectSpec::NoProject),
+        (true, None) => {
+            ensure_user_space_available()?;
+            Ok(ResolvedProjectSpec::NoProject)
+        }
         (false, Some(p)) => {
-            let cwd = std::env::current_dir()
-                .map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
             let abs = if p.is_absolute() { p } else { cwd.join(p) };
             let canonical = abs.canonicalize().map_err(|e| {
                 CliError::ProjectResolution(format!(
@@ -128,72 +112,75 @@ fn resolve_spec(
             Ok(ResolvedProjectSpec::Explicit(canonical))
         }
         (false, None) => {
-            // Auto-discover from cwd.
-            let cwd = std::env::current_dir()
-                .map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
-            let discovered = ryeos_state::project_discovery::discover_project_root(&cwd)
-                .map_err(|e| CliError::ProjectResolution(format!("project discovery: {e}")))?;
-            match discovered {
-                Some(root) => {
-                    let canonical = root.canonicalize().map_err(|e| {
-                        CliError::ProjectResolution(format!(
-                            "cannot canonicalize discovered project path '{}': {e}",
-                            root.display()
-                        ))
-                    })?;
-                    Ok(ResolvedProjectSpec::Explicit(canonical))
-                }
-                None => Err(CliError::ProjectResolution(format!(
-                    "not in a project. No project marker (.ai/, .ryeos-project, \
-                     .git) found walking up from '{}'. Pass --project <path> \
-                     explicitly, or --no-project to skip project ingest.",
+            let canonical_cwd = cwd.canonicalize().map_err(|e| {
+                CliError::ProjectResolution(format!(
+                    "cannot canonicalize current directory '{}': {e}",
                     cwd.display()
-                ))),
+                ))
+            })?;
+
+            let user_root = ensure_user_space_available()?;
+            if canonical_cwd.starts_with(&user_root) {
+                return Ok(ResolvedProjectSpec::NoProject);
+            }
+
+            if canonical_cwd.join(ryeos_engine::AI_DIR).is_dir() {
+                Ok(ResolvedProjectSpec::Explicit(canonical_cwd))
+            } else {
+                Ok(ResolvedProjectSpec::NoProject)
             }
         }
     }
 }
 
+fn ensure_user_space_available() -> Result<PathBuf, CliError> {
+    let user_root = ryeos_engine::roots::user_root()
+        .map_err(|e| CliError::ProjectResolution(format!("user space unavailable: {e}")))?;
+    let canonical = user_root.canonicalize().map_err(|e| {
+        CliError::ProjectResolution(format!(
+            "user space root '{}' is unavailable: {e}. Run `ryeos init` to create it.",
+            user_root.display()
+        ))
+    })?;
+    let user_ai = canonical.join(ryeos_engine::AI_DIR);
+    if !user_ai.is_dir() {
+        return Err(CliError::ProjectResolution(format!(
+            "user space '{}' is missing. Run `ryeos init` to create it.",
+            user_ai.display()
+        )));
+    }
+    Ok(canonical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    #[test]
-    fn verb_needs_project_resolution_matches_remote_execute_push() {
-        assert!(verb_needs_project_resolution(&[
-            "remote".into(),
-            "execute".into(),
-        ]));
-        assert!(verb_needs_project_resolution(&[
-            "remote".into(),
-            "push".into(),
-            "--remote".into(),
-            "default".into(),
-        ]));
-        assert!(verb_needs_project_resolution(&[
-            "remote".into(),
-            "bind-project".into(),
-        ]));
-        assert!(verb_needs_project_resolution(&[
-            "remote".into(),
-            "sync-project-ai".into(),
-        ]));
-        assert!(verb_needs_project_resolution(&[
-            "remote".into(),
-            "project-status".into(),
-        ]));
-        assert!(!verb_needs_project_resolution(&["status".into()]));
-        assert!(!verb_needs_project_resolution(&[
-            "remote".into(),
-            "configure".into(),
-        ]));
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn with_user_space<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var_os("USER_SPACE");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(ryeos_engine::AI_DIR)).unwrap();
+        std::env::set_var("USER_SPACE", tmp.path());
+        let result = f(tmp.path());
+        if let Some(v) = saved {
+            std::env::set_var("USER_SPACE", v);
+        } else {
+            std::env::remove_var("USER_SPACE");
+        }
+        result
     }
 
     #[test]
     fn rewrite_passes_no_project_through() {
-        let tail = vec!["--no-project".into(), "tool:foo/bar".into()];
-        let out = rewrite_project_tail(&tail).unwrap();
-        assert_eq!(out, vec!["tool:foo/bar".to_string(), "--no-project".into()]);
+        with_user_space(|_| {
+            let tail = vec!["--no-project".into(), "tool:foo/bar".into()];
+            let out = rewrite_project_tail(&tail).unwrap();
+            assert_eq!(out, vec!["tool:foo/bar".to_string(), "--no-project".into()]);
+        });
     }
 
     #[test]
@@ -227,5 +214,57 @@ mod tests {
         let tail = vec![format!("--project={}", tmp.path().display())];
         let out = rewrite_project_tail(&tail).unwrap();
         assert_eq!(out[0], "--project");
+    }
+
+    #[test]
+    fn default_uses_cwd_when_cwd_contains_dot_ai() {
+        with_user_space(|user_space| {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(project.path().join(ryeos_engine::AI_DIR)).unwrap();
+            let resolved = resolve_spec_from_cwd(false, None, project.path()).unwrap();
+            assert_eq!(
+                resolved,
+                ResolvedProjectSpec::Explicit(project.path().canonicalize().unwrap())
+            );
+            assert_ne!(
+                project.path().canonicalize().unwrap(),
+                user_space.canonicalize().unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn default_uses_no_project_when_cwd_has_no_dot_ai() {
+        with_user_space(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let resolved = resolve_spec_from_cwd(false, None, dir.path()).unwrap();
+            assert_eq!(resolved, ResolvedProjectSpec::NoProject);
+        });
+    }
+
+    #[test]
+    fn user_space_cwd_uses_no_project_even_with_dot_ai() {
+        with_user_space(|user_space| {
+            let resolved = resolve_spec_from_cwd(false, None, user_space).unwrap();
+            assert_eq!(resolved, ResolvedProjectSpec::NoProject);
+        });
+    }
+
+    #[test]
+    fn no_project_errors_when_user_space_is_missing() {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var_os("USER_SPACE");
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing-user-space");
+        std::env::set_var("USER_SPACE", &missing);
+
+        let err = resolve_spec_from_cwd(true, None, tmp.path()).unwrap_err();
+        assert!(format!("{err}").contains("user space root"));
+
+        if let Some(v) = saved {
+            std::env::set_var("USER_SPACE", v);
+        } else {
+            std::env::remove_var("USER_SPACE");
+        }
     }
 }

@@ -39,6 +39,8 @@ pub enum ResolveError {
     VerbNotFound { verb: String },
     #[error("verb '{verb}' has no execute ref (abstract verb)")]
     VerbNotExecutable { verb: String },
+    #[error("failed to bind arguments for alias {tokens:?}: {detail}")]
+    Bind { tokens: Vec<String>, detail: String },
 }
 
 /// Resolve a token sequence into a fully-bound command.
@@ -85,8 +87,12 @@ pub fn resolve_command(
     //    positional_field, route a lone positional argument into that
     //    named field instead of `_args`.
     let tail: Vec<String> = tokens[consumed..].to_vec();
-    let positional_field = alias_def.and_then(|d| d.positional_field.as_deref());
-    let parameters = crate::arg_binder::bind_argv_with_positional_field(&tail, positional_field);
+    let parameters = crate::arg_binder::bind_argv_with_alias(&tail, alias_def).map_err(|e| {
+        ResolveError::Bind {
+            tokens: consumed_tokens.clone(),
+            detail: e,
+        }
+    })?;
 
     // 5. Check deprecation
     let deprecated = alias_def.map(|d| d.deprecated).unwrap_or(false);
@@ -121,6 +127,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             crate::alias_registry::AliasDef {
                 tokens: vec!["bundle".into(), "install".into()],
@@ -129,6 +137,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             crate::alias_registry::AliasDef {
                 tokens: vec!["sign".into()],
@@ -137,6 +147,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             crate::alias_registry::AliasDef {
                 tokens: vec!["sig".into()],
@@ -145,6 +157,8 @@ mod tests {
                 replacement_tokens: Some(vec!["sign".into()]),
                 removed_in: Some("0.4.0".into()),
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
         ])
         .unwrap();
@@ -286,6 +300,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: Some("item_ref".into()),
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
         ])
         .unwrap();
@@ -309,6 +325,81 @@ mod tests {
             cmd.parameters.get("_args").is_none(),
             "lone positional must NOT fall through to _args when positional_field is set; got {:?}",
             cmd.parameters
+        );
+    }
+
+    #[test]
+    fn alias_positional_forms_support_remote_execute_two_shapes() {
+        let aliases = crate::alias_registry::AliasRegistry::from_records(&[
+            crate::alias_registry::AliasDef {
+                tokens: vec!["remote".into(), "execute".into()],
+                verb: "remote-execute".into(),
+                deprecated: false,
+                replacement_tokens: None,
+                removed_in: None,
+                positional_field: None,
+                positional_forms: vec![
+                    crate::alias_registry::PositionalForm {
+                        slots: vec![
+                            crate::alias_registry::PositionalSlot {
+                                field: "remote".into(),
+                                matcher: crate::alias_registry::PositionalMatcher::Any,
+                            },
+                            crate::alias_registry::PositionalSlot {
+                                field: "item_ref".into(),
+                                matcher: crate::alias_registry::PositionalMatcher::CanonicalRef,
+                            },
+                        ],
+                    },
+                    crate::alias_registry::PositionalForm {
+                        slots: vec![crate::alias_registry::PositionalSlot {
+                            field: "item_ref".into(),
+                            matcher: crate::alias_registry::PositionalMatcher::CanonicalRef,
+                        }],
+                    },
+                ],
+                project_resolution: crate::alias_registry::ProjectResolution::Optional,
+            },
+        ])
+        .unwrap();
+        let verbs =
+            crate::verb_registry::VerbRegistry::from_records(&[crate::verb_registry::VerbDef {
+                name: "remote-execute".into(),
+                execute: Some("service:remote/execute".into()),
+            }])
+            .unwrap();
+
+        let with_remote = resolve_command(
+            &[
+                "remote".into(),
+                "execute".into(),
+                "railway".into(),
+                "service:health/status".into(),
+                "--no-project".into(),
+            ],
+            &aliases,
+            &verbs,
+        )
+        .unwrap();
+        assert_eq!(with_remote.parameters["remote"], "railway");
+        assert_eq!(with_remote.parameters["item_ref"], "service:health/status");
+        assert_eq!(with_remote.parameters["no_project"], true);
+
+        let default_remote = resolve_command(
+            &[
+                "remote".into(),
+                "execute".into(),
+                "service:health/status".into(),
+                "--no-project".into(),
+            ],
+            &aliases,
+            &verbs,
+        )
+        .unwrap();
+        assert!(default_remote.parameters.get("remote").is_none());
+        assert_eq!(
+            default_remote.parameters["item_ref"],
+            "service:health/status"
         );
     }
 

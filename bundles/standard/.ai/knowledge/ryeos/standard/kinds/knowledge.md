@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-21T09:37:01Z:9ffcb5728f7abe0dba34fd257b563307ce2ab30d294bca03efbeb1c9489c8b8d:udMEilQB6vnrLpOifjyCy6Dfx4Z/2JuFiUw/5GXoL5sPgoi68h09JoNvoSOxz7fK0Vrt7GhGeycz6HBlSMq3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-21T11:11:49Z:9ffcb5728f7abe0dba34fd257b563307ce2ab30d294bca03efbeb1c9489c8b8d:udMEilQB6vnrLpOifjyCy6Dfx4Z/2JuFiUw/5GXoL5sPgoi68h09JoNvoSOxz7fK0Vrt7GhGeycz6HBlSMq3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/kinds
 tags: [kind, knowledge, context]

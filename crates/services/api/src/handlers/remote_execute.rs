@@ -15,7 +15,7 @@ use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
 use crate::remote::pull::{extract_snapshot_hash, pull_results, PullResultsError};
-use crate::remote::push::{push_project, PushResult};
+use crate::remote::push::{collect_snapshot_hashes, push_project, upload_missing, PushResult};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
 use ryeos_executor::execution::project_source::ProjectPathSpec;
@@ -217,46 +217,23 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                 .store_object(&snapshot.to_value())
                 .map_err(|e| HandlerError::Internal(format!("store snapshot: {e:#}")))?;
 
-            // Upload user manifest + items + blobs so the remote can
-            // materialise the per-request engine overlay.
-            let mut all_hashes: Vec<String> = vec![manifest_hash.clone(), snapshot_hash.clone()];
-            if let (Some(ref umh), Some(ref um)) = (&user_manifest_hash, &user_manifest) {
-                all_hashes.push(umh.clone());
-                for (_rel, obj_hash) in &um.item_source_hashes {
-                    all_hashes.push(obj_hash.clone());
-                    if let Ok(Some(item_obj)) = local_cas.get_object(obj_hash) {
-                        if let Some(blob_hash) =
-                            item_obj.get("content_blob_hash").and_then(|v| v.as_str())
-                        {
-                            all_hashes.push(blob_hash.to_string());
-                        }
-                    }
-                }
-            }
-            all_hashes.sort();
-            all_hashes.dedup();
-
-            let has_resp = client
-                .objects_has(&all_hashes)
+            // Upload the empty project manifest, snapshot, and any
+            // user-space manifest/items using the same collection path
+            // as normal project pushes. The duplicated hand-rolled path
+            // previously missed referenced objects in some no-project
+            // runs, so push-head saw a snapshot whose manifest was not
+            // present on the remote CAS.
+            let all_hashes = collect_snapshot_hashes(
+                &local_cas,
+                &empty_manifest,
+                user_manifest.as_ref(),
+                user_manifest_hash.as_deref(),
+                &manifest_hash,
+                &snapshot_hash,
+            );
+            let (blobs_uploaded, blobs_skipped) = upload_missing(&client, &local_cas, &all_hashes)
                 .await
-                .map_err(|e| HandlerError::Internal(format!("objects_has: {e:#}")))?;
-            let mut blobs = Vec::new();
-            let mut objects = Vec::new();
-            for hash in &has_resp.missing {
-                if let Ok(Some(data)) = local_cas.get_blob(hash) {
-                    use base64::Engine as _;
-                    let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-                    blobs.push(crate::remote::client::BlobUpload { data: encoded });
-                } else if let Ok(Some(value)) = local_cas.get_object(hash) {
-                    objects.push(value);
-                }
-            }
-            if !blobs.is_empty() || !objects.is_empty() {
-                client
-                    .objects_put(&blobs, &objects)
-                    .await
-                    .map_err(|e| HandlerError::Internal(format!("objects_put: {e:#}")))?;
-            }
+                .map_err(|e| HandlerError::Internal(format!("upload missing objects: {e:#}")))?;
 
             client
                 .push_head(&project_path_for_ref, &snapshot_hash)
@@ -268,8 +245,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                 manifest_hash,
                 manifest: empty_manifest,
                 manifest_entries: 0,
-                blobs_uploaded: blobs.len() + objects.len(),
-                blobs_skipped: 0,
+                blobs_uploaded,
+                blobs_skipped,
                 user_manifest_hash,
                 user_manifest,
             }

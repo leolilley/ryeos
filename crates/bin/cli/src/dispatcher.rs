@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use ryeos_runtime::alias_registry::{AliasDef, PositionalForm, ProjectResolution};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::CliError;
@@ -65,6 +67,20 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // `ryeos <verb...> --help` / `-h` should feel like a normal CLI.
+    // Without this guard the trailing help flag is bound as service
+    // input and strict service schemas return noisy "unknown field help".
+    if let Some(help_idx) = cli.rest.iter().position(|t| t == "--help" || t == "-h") {
+        let verb_tokens = &cli.rest[..help_idx];
+        if verb_tokens.is_empty() {
+            crate::help::print_help(std::io::stdout())?;
+        } else {
+            crate::help::print_verb_help(verb_tokens, &system_space_dir, &body_project_path)
+                .await?;
+        }
+        return Ok(());
+    }
+
     // 5. Hardcoded `ryeos execute <item_ref>` — the universal escape hatch
     if cli.rest.first().map(|s| s.as_str()) == Some("execute") {
         if cli.rest.len() < 2 {
@@ -108,11 +124,8 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    For remote verbs that take a project root, CLI-side rewrite injects a canonical
     //    `--project <abs>` or `--no-project` into the tail. The daemon
     //    cannot do this — its cwd is irrelevant to the caller.
-    let tokens = if crate::project_resolve::verb_needs_project_resolution(&cli.rest) {
-        rewrite_remote_verb_tail(&cli.rest)?
-    } else {
-        cli.rest.clone()
-    };
+    let normalized_kv = normalize_bare_key_value_args(&cli.rest);
+    let tokens = canonicalize_tokens_from_alias_metadata(&normalized_kv, &system_space_dir)?;
 
     let body = serde_json::json!({
         "tokens": tokens,
@@ -124,19 +137,181 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Rewrite a remote project-bearing invocation by splitting the verb
-/// prefix off the tail, resolving the project flags, and reassembling.
-/// Pure transform around
-/// [`crate::project_resolve::rewrite_project_tail`].
-fn rewrite_remote_verb_tail(rest: &[String]) -> Result<Vec<String>, CliError> {
-    // Verb prefix is always the first two tokens for supported remote
-    // project-bearing verbs. The matcher above already verified the shape.
-    let (prefix, tail) = rest.split_at(2);
-    let new_tail = crate::project_resolve::rewrite_project_tail(tail)?;
-    let mut out = Vec::with_capacity(prefix.len() + new_tail.len());
-    out.extend_from_slice(prefix);
-    out.extend(new_tail);
+/// CLI-side compatibility for Rye's historical `key=value` shorthand.
+/// Token-mode binding happens inside the daemon; rewriting here means a
+/// newer CLI remains pleasant even when talking to an older local daemon.
+fn normalize_bare_key_value_args(rest: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(rest.len());
+    for token in rest {
+        if token.starts_with('-') {
+            out.push(token.clone());
+            continue;
+        }
+        if let Some((key, value)) = token.split_once('=') {
+            if !key.is_empty() && !value.is_empty() {
+                out.push(format!("--{key}"));
+                out.push(value.to_string());
+                continue;
+            }
+        }
+        out.push(token.clone());
+    }
+    out
+}
+
+fn canonicalize_tokens_from_alias_metadata(
+    rest: &[String],
+    system_space_dir: &std::path::Path,
+) -> Result<Vec<String>, CliError> {
+    let aliases = load_aliases_from_disk(system_space_dir);
+    canonicalize_tokens_with_aliases(rest, &aliases)
+}
+
+fn canonicalize_tokens_with_aliases(
+    rest: &[String],
+    aliases: &[AliasDef],
+) -> Result<Vec<String>, CliError> {
+    let Some((alias, consumed)) = match_alias(rest, aliases) else {
+        return Ok(rest.to_vec());
+    };
+    let tail = &rest[consumed..];
+
+    if alias.positional_field.is_none()
+        && alias.positional_forms.is_empty()
+        && alias.project_resolution == ProjectResolution::None
+    {
+        return Ok(rest.to_vec());
+    }
+
+    let bound = ryeos_runtime::arg_binder::bind_argv_with_alias(tail, Some(alias))
+        .map_err(CliError::ProjectResolution)?;
+    let mut canonical_tail = params_to_tail(&bound);
+
+    match alias.project_resolution {
+        ProjectResolution::None => {}
+        ProjectResolution::Optional => {
+            canonical_tail = crate::project_resolve::rewrite_project_tail(&canonical_tail)?;
+        }
+        ProjectResolution::Required => {
+            if canonical_tail.iter().any(|t| t == "--no-project") {
+                return Err(CliError::ProjectResolution(
+                    "this command requires a project; do not pass --no-project".into(),
+                ));
+            }
+            canonical_tail = crate::project_resolve::rewrite_project_tail(&canonical_tail)?;
+            if canonical_tail.iter().any(|t| t == "--no-project") {
+                return Err(CliError::ProjectResolution(
+                    "this command requires a project; run it from a directory containing .ai/ \
+                     or pass --project <path>"
+                        .into(),
+                ));
+            }
+        }
+    }
+
+    let mut out = rest[..consumed].to_vec();
+    out.extend(canonical_tail);
     Ok(out)
+}
+
+fn match_alias<'a>(rest: &[String], aliases: &'a [AliasDef]) -> Option<(&'a AliasDef, usize)> {
+    for len in (1..=rest.len()).rev() {
+        let prefix = &rest[..len];
+        if let Some(alias) = aliases.iter().find(|a| a.tokens == prefix) {
+            return Some((alias, len));
+        }
+    }
+    None
+}
+
+fn params_to_tail(params: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(obj) = params.as_object() else {
+        return out;
+    };
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.sort();
+    for key in keys {
+        emit_param(&mut out, key, &obj[key]);
+    }
+    out
+}
+
+fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
+    match value {
+        Value::Bool(true) => out.push(format!("--{}", key.replace('_', "-"))),
+        Value::Bool(false) | Value::Null => {}
+        Value::Array(values) => {
+            for v in values {
+                emit_param(out, key, v);
+            }
+        }
+        other => {
+            out.push(format!("--{}", key.replace('_', "-")));
+            out.push(match other {
+                Value::String(s) => s.clone(),
+                _ => other.to_string(),
+            });
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AliasYaml {
+    tokens: Vec<String>,
+    verb: String,
+    #[serde(default)]
+    deprecated: Option<bool>,
+    #[serde(default)]
+    replacement_tokens: Option<Vec<String>>,
+    #[serde(default)]
+    removed_in: Option<String>,
+    #[serde(default)]
+    positional_field: Option<String>,
+    #[serde(default)]
+    positional_forms: Vec<PositionalForm>,
+    #[serde(default)]
+    project_resolution: ProjectResolution,
+}
+
+fn load_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<AliasDef> {
+    let mut out = Vec::new();
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let Ok(bundle_entries) = std::fs::read_dir(&bundles_dir) else {
+        return out;
+    };
+    for bundle_entry in bundle_entries.flatten() {
+        let aliases_dir = bundle_entry.path().join(".ai/node/aliases");
+        let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
+            continue;
+        };
+        for alias_file in alias_files.flatten() {
+            let path = alias_file.path();
+            if !matches!(
+                path.extension().and_then(|s| s.to_str()),
+                Some("yaml") | Some("yml")
+            ) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(alias) = serde_yaml::from_str::<AliasYaml>(&content) else {
+                continue;
+            };
+            out.push(AliasDef {
+                tokens: alias.tokens,
+                verb: alias.verb,
+                deprecated: alias.deprecated.unwrap_or(false),
+                replacement_tokens: alias.replacement_tokens,
+                removed_in: alias.removed_in,
+                positional_field: alias.positional_field,
+                positional_forms: alias.positional_forms,
+                project_resolution: alias.project_resolution,
+            });
+        }
+    }
+    out
 }
 
 /// POST a JSON body to the daemon's /execute endpoint and return the response.
@@ -171,4 +346,204 @@ fn discover_system_space_dir() -> PathBuf {
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
         .expect("could not determine XDG data directory")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_runtime::{PositionalMatcher, PositionalSlot};
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn with_user_space<T>(f: impl FnOnce() -> T) -> T {
+        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = std::env::var_os("USER_SPACE");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(ryeos_engine::AI_DIR)).unwrap();
+        std::env::set_var("USER_SPACE", tmp.path());
+        let result = f();
+        if let Some(v) = saved {
+            std::env::set_var("USER_SPACE", v);
+        } else {
+            std::env::remove_var("USER_SPACE");
+        }
+        result
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    fn alias(
+        tokens: &[&str],
+        forms: Vec<Vec<(&str, PositionalMatcher)>>,
+        project_resolution: ProjectResolution,
+    ) -> AliasDef {
+        AliasDef {
+            tokens: s(tokens),
+            verb: tokens.join("-"),
+            deprecated: false,
+            replacement_tokens: None,
+            removed_in: None,
+            positional_field: None,
+            positional_forms: forms
+                .into_iter()
+                .map(|slots| PositionalForm {
+                    slots: slots
+                        .into_iter()
+                        .map(|(field, matcher)| PositionalSlot {
+                            field: field.to_string(),
+                            matcher,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            project_resolution,
+        }
+    }
+
+    #[test]
+    fn remote_threads_positional_remote_is_normalized() {
+        let aliases = vec![alias(
+            &["remote", "threads"],
+            vec![vec![("remote", PositionalMatcher::Any)]],
+            ProjectResolution::None,
+        )];
+        let out = canonicalize_tokens_with_aliases(&s(&["remote", "threads", "railway"]), &aliases)
+            .unwrap();
+        assert_eq!(out, s(&["remote", "threads", "--remote", "railway"]));
+    }
+
+    #[test]
+    fn bare_key_value_is_normalized_for_token_mode() {
+        let out =
+            normalize_bare_key_value_args(&s(&["remote", "status", "remote=railway", "limit=5"]));
+        assert_eq!(
+            out,
+            s(&["remote", "status", "--remote", "railway", "--limit", "5",])
+        );
+    }
+
+    #[test]
+    fn remote_project_status_positional_remote_is_normalized() {
+        let aliases = vec![alias(
+            &["remote", "project-status"],
+            vec![vec![("remote", PositionalMatcher::Any)]],
+            ProjectResolution::Required,
+        )];
+        let out = canonicalize_tokens_with_aliases(
+            &s(&["remote", "project-status", "railway", "--project", "/tmp"]),
+            &aliases,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            s(&[
+                "remote",
+                "project-status",
+                "--remote",
+                "railway",
+                "--project",
+                "/tmp",
+            ])
+        );
+    }
+
+    #[test]
+    fn remote_execute_remote_then_item_is_normalized() {
+        with_user_space(|| {
+            let aliases = vec![alias(
+                &["remote", "execute"],
+                vec![
+                    vec![
+                        ("remote", PositionalMatcher::Any),
+                        ("item_ref", PositionalMatcher::CanonicalRef),
+                    ],
+                    vec![("item_ref", PositionalMatcher::CanonicalRef)],
+                ],
+                ProjectResolution::Optional,
+            )];
+            let out = canonicalize_tokens_with_aliases(
+                &s(&[
+                    "remote",
+                    "execute",
+                    "railway",
+                    "service:health/status",
+                    "--no-project",
+                ]),
+                &aliases,
+            )
+            .unwrap();
+            assert_eq!(
+                out,
+                s(&[
+                    "remote",
+                    "execute",
+                    "--item-ref",
+                    "service:health/status",
+                    "--remote",
+                    "railway",
+                    "--no-project",
+                ])
+            );
+        });
+    }
+
+    #[test]
+    fn remote_execute_item_only_is_left_for_default_remote() {
+        with_user_space(|| {
+            let aliases = vec![alias(
+                &["remote", "execute"],
+                vec![
+                    vec![
+                        ("remote", PositionalMatcher::Any),
+                        ("item_ref", PositionalMatcher::CanonicalRef),
+                    ],
+                    vec![("item_ref", PositionalMatcher::CanonicalRef)],
+                ],
+                ProjectResolution::Optional,
+            )];
+            let input = s(&["remote", "execute", "service:health/status", "--no-project"]);
+            let out = canonicalize_tokens_with_aliases(&input, &aliases).unwrap();
+            assert_eq!(
+                out,
+                s(&[
+                    "remote",
+                    "execute",
+                    "--item-ref",
+                    "service:health/status",
+                    "--no-project",
+                ])
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_remote_forms_are_not_rewritten() {
+        let aliases = vec![alias(
+            &["remote", "threads"],
+            vec![vec![("remote", PositionalMatcher::Any)]],
+            ProjectResolution::None,
+        )];
+        let flag = s(&["remote", "threads", "--remote", "railway"]);
+        assert_eq!(
+            canonicalize_tokens_with_aliases(&flag, &aliases).unwrap(),
+            flag
+        );
+
+        let equals_flag = s(&["remote", "threads", "--remote=railway"]);
+        assert_eq!(
+            canonicalize_tokens_with_aliases(&equals_flag, &aliases).unwrap(),
+            s(&["remote", "threads", "--remote", "railway"])
+        );
+    }
+
+    #[test]
+    fn aliases_without_metadata_preserve_positional_tail() {
+        let aliases = vec![alias(&["status"], Vec::new(), ProjectResolution::None)];
+        let input = s(&["status", "extra-arg"]);
+        let out = canonicalize_tokens_with_aliases(&input, &aliases).unwrap();
+        assert_eq!(out, input);
+    }
 }

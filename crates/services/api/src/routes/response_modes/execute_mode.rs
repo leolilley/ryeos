@@ -237,6 +237,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         ryeos_runtime::ResolveError::VerbNotExecutable { .. } => {
                             RouteDispatchError::BadRequest(e.to_string())
                         }
+                        ryeos_runtime::ResolveError::Bind { .. } => {
+                            RouteDispatchError::BadRequest(e.to_string())
+                        }
                     })?;
 
             tracing::debug!(

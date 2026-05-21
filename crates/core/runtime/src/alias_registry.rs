@@ -9,6 +9,38 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectResolution {
+    #[default]
+    None,
+    Required,
+    Optional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PositionalMatcher {
+    #[default]
+    Any,
+    CanonicalRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionalSlot {
+    pub field: String,
+    #[serde(default)]
+    pub matcher: PositionalMatcher,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionalForm {
+    #[serde(default)]
+    pub slots: Vec<PositionalSlot>,
+}
+
 /// A single alias definition: a token sequence that routes to a verb.
 #[derive(Debug, Clone)]
 pub struct AliasDef {
@@ -29,6 +61,12 @@ pub struct AliasDef {
     /// `ryeos remote configure <remote_name>`. See
     /// [`crate::arg_binder::bind_argv_with_positional_field`].
     pub positional_field: Option<String>,
+    /// Ordered alternative positional forms for this alias. The first
+    /// form whose matchers accept the positional tail is used. This is
+    /// the data-driven replacement for command-specific CLI shims.
+    pub positional_forms: Vec<PositionalForm>,
+    /// Whether the CLI should canonicalize a project path for this alias.
+    pub project_resolution: ProjectResolution,
 }
 
 /// Registry of aliases (routing convenience).
@@ -175,6 +213,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             AliasDef {
                 tokens: vec!["s".into()],
@@ -183,6 +223,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             AliasDef {
                 tokens: vec!["fetch".into()],
@@ -191,6 +233,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             AliasDef {
                 tokens: vec!["f".into()],
@@ -199,6 +243,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             AliasDef {
                 tokens: vec!["bundle".into(), "install".into()],
@@ -207,6 +253,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             AliasDef {
                 tokens: vec!["sig".into()],
@@ -215,6 +263,8 @@ mod tests {
                 replacement_tokens: Some(vec!["sign".into()]),
                 removed_in: Some("0.4.0".into()),
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
         ]
     }
@@ -337,6 +387,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
             AliasDef {
                 tokens: vec!["sign".into()],
@@ -345,6 +397,8 @@ mod tests {
                 replacement_tokens: None,
                 removed_in: None,
                 positional_field: None,
+                positional_forms: Vec::new(),
+                project_resolution: crate::alias_registry::ProjectResolution::None,
             },
         ]);
         assert!(result.is_err());

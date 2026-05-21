@@ -1,6 +1,10 @@
-# ryeos:signed:2026-05-21T09:36:59Z:224a57122ee1aacf24c0d3ef99e8bd277ad41e3ce147bd4de91ce4cfead2ab5a:5jpD8JlF7ZnvRReTDA82DdjiE5Pchwxg8pccvjvplSU1jj22Ga/yWf9mKA7zxGnZG0ONt9tUwFk8Xu/UajXZBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-21T11:11:49Z:4991c146c65f0c54bad4974c5526fe2d2c01238f659da972912a9449202ab6f7:9oyHpHmWG6VnQXAEWSHeh67Vz5h0JW0x9az05IMG87u3XbDk6wnB9bjUasucNRBnTAqcX8VrUy8VBL6a+R+SCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "aliases"
 section: aliases
 tokens: ["remote", "sync-project-ai"]
 verb: remote-sync-project-ai
 description: "Sync managed project .ai content to a remote node and apply it"
+project_resolution: required
+positional_forms:
+  - slots:
+      - field: remote

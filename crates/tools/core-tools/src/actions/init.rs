@@ -40,6 +40,7 @@
 //! lack a `.ai/` subdirectory, are silently skipped. Hidden directories
 //! (starting with `.`) are also skipped.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -242,6 +243,10 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         "installation order determined"
     );
 
+    if !opts.skip_preflight {
+        preflight_discovered_source_bundles(&discovered, opts.user_root.as_path())?;
+    }
+
     // ── 7. Install each bundle (atomic stage → swap) ──
     let mut bundles_installed = Vec::new();
     for (name, source_path) in &discovered {
@@ -254,15 +259,6 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         if target.exists() {
             // Bundle already installed — replace atomically.
             verify_bundle_structure(&target)?;
-
-            if !opts.skip_preflight {
-                crate::actions::install::preflight_verify_bundle(
-                    source_path,
-                    &opts.system_space_dir,
-                    Some(opts.user_root.as_path()),
-                )
-                .with_context(|| format!("verify {} source against pinned publisher key", name))?;
-            }
 
             replace_bundle(source_path, &target).with_context(|| {
                 format!(
@@ -288,7 +284,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 &node_key,
                 &opts.system_space_dir,
                 opts.user_root.as_path(),
-                opts.skip_preflight,
+                true,
             )?;
         }
 
@@ -458,6 +454,113 @@ pub use ryeos_bundle::manifest::{
     derive_provides_kinds, materialize_manifest, parse_manifest, sort_bundles_by_dependency,
     validate_manifest_dependencies, BundleManifest, BundleManifestSource,
 };
+
+fn preflight_discovered_source_bundles(
+    discovered: &[(String, PathBuf)],
+    user_root: &Path,
+) -> Result<()> {
+    let mut manifests: HashMap<String, Option<BundleManifest>> = HashMap::new();
+    let mut providers_by_kind: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (name, source_path) in discovered {
+        let manifest = parse_manifest(source_path, name)
+            .with_context(|| format!("parse manifest for bundle {}", name))?;
+        if let Some(manifest) = &manifest {
+            for kind in &manifest.provides_kinds {
+                providers_by_kind
+                    .entry(kind.clone())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+        manifests.insert(name.clone(), manifest);
+    }
+
+    for providers in providers_by_kind.values_mut() {
+        providers.sort();
+    }
+
+    for (name, source_path) in discovered {
+        let mut dependency_names = HashSet::new();
+        collect_source_bundle_dependencies(
+            name,
+            &manifests,
+            &providers_by_kind,
+            &mut dependency_names,
+            &mut Vec::new(),
+        )?;
+        let dependency_roots: Vec<PathBuf> = discovered
+            .iter()
+            .filter(|(dep_name, _)| dependency_names.contains(dep_name))
+            .map(|(_, dep_path)| dep_path.clone())
+            .collect();
+
+        ryeos_bundle::preflight::preflight_verify_bundle_in_context(
+            source_path,
+            &dependency_roots,
+            Some(user_root),
+        )
+        .with_context(|| format!("verify {} source against pinned publisher key", name))?;
+    }
+
+    Ok(())
+}
+
+fn collect_source_bundle_dependencies(
+    name: &str,
+    manifests: &HashMap<String, Option<BundleManifest>>,
+    providers_by_kind: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<String>,
+    stack: &mut Vec<String>,
+) -> Result<()> {
+    if stack.iter().any(|n| n == name) {
+        bail!(
+            "bundle dependency cycle detected: {} -> {name}",
+            stack.join(" -> ")
+        );
+    }
+    stack.push(name.to_string());
+
+    let Some(Some(manifest)) = manifests.get(name) else {
+        stack.pop();
+        return Ok(());
+    };
+
+    for required_kind in &manifest.requires_kinds {
+        let providers = providers_by_kind
+            .get(required_kind)
+            .cloned()
+            .unwrap_or_default();
+        match providers.as_slice() {
+            [] => bail!(
+                "bundle '{}' requires kind '{}' but no source bundle provides it",
+                name,
+                required_kind
+            ),
+            [provider] if provider == name => {}
+            [provider] => {
+                if out.insert(provider.clone()) {
+                    collect_source_bundle_dependencies(
+                        provider,
+                        manifests,
+                        providers_by_kind,
+                        out,
+                        stack,
+                    )?;
+                }
+            }
+            many => bail!(
+                "bundle '{}' requires kind '{}' but multiple source bundles provide it: {}",
+                name,
+                required_kind,
+                many.join(", ")
+            ),
+        }
+    }
+
+    stack.pop();
+    Ok(())
+}
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
 /// guaranteeing the fingerprint matches [`OFFICIAL_PUBLISHER_FP`].

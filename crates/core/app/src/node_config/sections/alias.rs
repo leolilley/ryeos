@@ -6,6 +6,38 @@ use serde_json::Value;
 
 use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectResolution {
+    #[default]
+    None,
+    Required,
+    Optional,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PositionalMatcher {
+    #[default]
+    Any,
+    CanonicalRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PositionalSlot {
+    pub field: String,
+    #[serde(default)]
+    pub matcher: PositionalMatcher,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PositionalForm {
+    #[serde(default)]
+    pub slots: Vec<PositionalSlot>,
+}
+
 /// A parsed alias definition loaded from `.ai/node/aliases/<name>.yaml`.
 ///
 /// Aliases are routing sugar: `tokens` maps to a verb name. They have no
@@ -42,6 +74,13 @@ pub struct AliasRecord {
     /// verb must accept this field name. See `arg_binder::bind_argv_with_positional_field`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub positional_field: Option<String>,
+    /// Ordered alternative positional forms. Replaces one-off CLI
+    /// command shims with data-driven tail binding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub positional_forms: Vec<PositionalForm>,
+    /// CLI project canonicalisation policy for this alias.
+    #[serde(default)]
+    pub project_resolution: ProjectResolution,
     /// Path to the YAML file that declared this record. Set by loader.
     #[serde(skip)]
     pub source_file: PathBuf,
@@ -112,6 +151,20 @@ impl NodeConfigSection for AliasSection {
                      (local escape hatch, uses item_ref directly)",
                     name
                 );
+            }
+        }
+
+        for (form_idx, form) in record.positional_forms.iter().enumerate() {
+            if form.slots.is_empty() {
+                bail!("alias '{}' positional_forms[{form_idx}] has no slots", name);
+            }
+            for (slot_idx, slot) in form.slots.iter().enumerate() {
+                if slot.field.trim().is_empty() {
+                    bail!(
+                        "alias '{}' positional_forms[{form_idx}].slots[{slot_idx}] has empty field",
+                        name
+                    );
+                }
             }
         }
 

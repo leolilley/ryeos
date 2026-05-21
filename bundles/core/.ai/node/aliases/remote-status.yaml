@@ -1,7 +1,10 @@
-# ryeos:signed:2026-05-21T09:36:58Z:1c0bd9fe583fccf713ecd9139e51f8f178cbc0e6b388b7d40ade6fc4705210f7:DtLKbKRNghxb/XvSl3NEDIHjTp+NEPQDG7pagO3HDepCAcMCNNAx0H2xOnxJ1yqH2VZpbRK2VSGBDuhkgxQ1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-21T11:11:48Z:64b8c6947d4aaa4d23dca9760c38c2cd9bbe867a3df81126192dd6993c6165f1:jbZ8mR/YcVT8R29a0MBCeCeGyLHIwarmcU6L4e+uK2u/oYjcDed9EIpSq7mLAzEuH4/zLhRLLfeC7s4wGGnBBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "aliases"
 section: aliases
 tokens: ["remote", "status"]
 verb: remote-status
 description: "Check a remote node's status and public key"
 positional_field: remote
+positional_forms:
+  - slots:
+      - field: remote

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-21T09:36:59Z:36aad5ecaa9cab25e0632fd1f4dbedc7772bea226af389c7a5818afaa42f0fac:DdAHiFRCjd+IDQ7Q6cqY/KYOeBvG5iB/q4x1XibkIGbaKnM1Hm9QrJOrcFxvb0qvrykC/1QvIcPofl6C+6CyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-21T11:11:47Z:36aad5ecaa9cab25e0632fd1f4dbedc7772bea226af389c7a5818afaa42f0fac:DdAHiFRCjd+IDQ7Q6cqY/KYOeBvG5iB/q4x1XibkIGbaKnM1Hm9QrJOrcFxvb0qvrykC/1QvIcPofl6C+6CyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: vault.list
 required_caps: ["ryeos.execute.service.vault.list"]

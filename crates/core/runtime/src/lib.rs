@@ -26,7 +26,10 @@ pub mod transcript;
 pub mod verb_registry;
 pub mod verified_loader;
 
-pub use alias_registry::{AliasDef, AliasRegistry, AliasRegistryError};
+pub use alias_registry::{
+    AliasDef, AliasRegistry, AliasRegistryError, PositionalForm, PositionalMatcher, PositionalSlot,
+    ProjectResolution,
+};
 pub use arg_binder::bind_argv;
 pub use authorizer::{
     canonical_cap, cap_matches, AuthorizationError, AuthorizationPolicy, Authorizer, Capability,
