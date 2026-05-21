@@ -23,7 +23,9 @@ RUN --mount=type=secret,id=publisher-key \
       --owner ryeos-official
 
 # ── Stage 2: Runtime image ──
-FROM debian:bookworm-slim
+# Keep the runtime Debian generation compatible with the Rust builder image;
+# rust:1.95-slim currently links binaries requiring GLIBC_2.39+.
+FROM debian:trixie-slim
 
 # Node 22 for TS-authored project tools (e.g. backend-client.js).
 RUN apt-get update && apt-get install -y --no-install-recommends \
