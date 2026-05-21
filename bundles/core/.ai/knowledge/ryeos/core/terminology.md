@@ -1,4 +1,3 @@
-# ryeos:signed:2026-05-20T11:41:17Z:9c2b44c120c7b2cfcb6021e6273a0a72195983953f84af7a4c988b15f4102def:vTrLOlqahRdxjYbXirqULLwKU9+ouHXnqB1OBXdRQVsoJut9PsuSEy2uyrpvlE2ixM8iu7VLvZz/dCYr8OpqAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 
 ---
 category: ryeos/core

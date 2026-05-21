@@ -154,7 +154,6 @@ async fn post_execute_with_extras(
 
     // Sign with the fast fixture keys if available.
     if let (Some(user_key), Some(node_key)) = (&h.user_key, &h.node_key) {
-        use common::fast_fixture;
         let fp = lillux::signature::compute_fingerprint(&user_key.verifying_key());
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

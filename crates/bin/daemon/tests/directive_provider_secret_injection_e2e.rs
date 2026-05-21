@@ -3,7 +3,7 @@
 //! Exercises the full chain that turns a YAML model-provider config into
 //! a live HTTP request with the operator's secret in the auth header:
 //!
-//! 1. Daemon loads `.ai/config/crates/core/runtime/model-providers/<id>.yaml`
+//! 1. Daemon loads `.ai/config/ryeos-runtime/model-providers/<id>.yaml`
 //!    via the verified-loader (signature + trust-class checked at boot).
 //! 2. Directive declares `model.tier: general`; `model_routing.yaml`
 //!    maps that tier to provider `mock`.
@@ -54,7 +54,7 @@ fn plant_mock_provider_with_auth(
     prefix: Option<&str>,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/crates/core/runtime/model-providers");
+    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let mut auth_lines = format!("  env_var: \"{env_var}\"\n");
     auth_lines.push_str(&format!(

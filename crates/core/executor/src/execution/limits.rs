@@ -112,7 +112,7 @@ fn clamp_f64(value: f64, cap: f64) -> f64 {
     }
 }
 
-/// Load limits config from the project's `.ai/config/crates/core/runtime/limits.yaml`.
+/// Load limits config from the project's `.ai/config/ryeos-runtime/limits.yaml`.
 ///
 /// Returns `Ok(None)` if the file doesn't exist (limits config is optional).
 /// Returns `Err` if the file exists but is malformed — no silent fallback.

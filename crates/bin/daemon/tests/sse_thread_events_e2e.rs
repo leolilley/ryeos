@@ -26,7 +26,7 @@ fn plant_mock_provider(
     mock_base_url: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/crates/core/runtime/model-providers");
+    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"
@@ -96,31 +96,6 @@ model:
     );
     let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
     std::fs::write(&path, signed)?;
-    Ok(())
-}
-
-fn plant_route_yaml(state_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = state_path.join(".ai/node/routes");
-    std::fs::create_dir_all(&dir)?;
-    let body = r#"section: routes
-id: thread/events-stream
-path: /threads/{thread_id}/events/stream
-methods:
-  - GET
-auth: ryeos_signed
-limits:
-  body_bytes_max: 0
-  timeout_ms: 0
-  concurrent_max: 64
-response:
-  mode: event_stream
-  source: thread_events
-  source_config:
-    thread_id: "${path.thread_id}"
-    keep_alive_secs: 15
-"#;
-    let signed = lillux::signature::sign_content(body, signer, "#", None);
-    std::fs::write(dir.join("thread-events-stream.yaml"), signed)?;
     Ok(())
 }
 
@@ -240,7 +215,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     .await
     .expect("start daemon with mock + route YAML");
 
-    let user_fp = fixture.user_fp();
+    let _user_fp = fixture.user_fp();
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 
@@ -404,7 +379,7 @@ async fn boot_and_run_directive_with_extra_keys(
     .await
     .expect("start daemon with mock + route YAML");
 
-    let user_fp = fixture.user_fp();
+    let _user_fp = fixture.user_fp();
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 

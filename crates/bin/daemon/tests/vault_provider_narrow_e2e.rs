@@ -46,7 +46,7 @@ fn plant_provider_config(
 ) -> anyhow::Result<()> {
     let dir = user_space
         .join(ryeos_engine::AI_DIR)
-        .join("config/crates/core/runtime/model-providers");
+        .join("config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let auth_block = match env_var {
         Some(ev) => format!("  env_var: \"{ev}\"\n  header_name: \"Authorization\"\n"),

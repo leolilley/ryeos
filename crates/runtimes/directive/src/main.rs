@@ -243,12 +243,14 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 content: Some(json!(before)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
             messages.push(directive::ProviderMessage {
                 role: "assistant".to_string(),
                 content: Some(json!("Understood. I will use this context.")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
 
@@ -257,6 +259,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             content: Some(json!(prompt)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
 
         // Context after: injected after user prompt
@@ -266,12 +269,14 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 content: Some(json!(after)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
             messages.push(directive::ProviderMessage {
                 role: "assistant".to_string(),
                 content: Some(json!("Noted. I will apply this guidance.")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
 

@@ -92,9 +92,6 @@ async fn cli_daemon_up_uses_execute() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_daemon_down_fails_fast_with_exit_75() {
-    let outer = tempfile::tempdir().expect("tempdir");
-    // `state_path` does NOT exist; no `daemon.json` is anywhere on disk.
-    let state_path = outer.path().join("state-never-initialized");
     let user_space = tempfile::tempdir().expect("user tempdir");
     common::populate_user_space(user_space.path());
 
@@ -123,7 +120,6 @@ async fn cli_daemon_down_fails_fast_with_exit_75() {
         stderr.contains("daemon.json not found"),
         "expected stderr to mention 'daemon.json not found' (typed fail-loud), got: {stderr}"
     );
-    drop(outer);
     drop(user_space);
 }
 

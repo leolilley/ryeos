@@ -135,12 +135,14 @@ mod tests {
                 content: Some(json!("hello")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "assistant".to_string(),
                 content: Some(json!("hi there")),
                 tool_calls: Some(vec![]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
         write_thread_transcript(dir.path(), "T-abc", "my/directive", &messages).unwrap();

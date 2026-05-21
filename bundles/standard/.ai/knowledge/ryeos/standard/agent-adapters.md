@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-20T11:41:17Z:226bb46508da29192f41c7afbf6013a4fc59684c1aea5ef706cb3819d20ca7be:HnNyaKqA+Eh+/wo98Csl5nbBod4CyW6CwcaGuuQY8evyqBVgAyTOuOVP6FCj8LG7/Dv/xif4ExI8P/PitlGHAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+<!-- ryeos:signed:2026-05-21T09:37:00Z:f2e07a584fe8411a301b1c291534e8865047ae791eeb3581e3a714df43a9be57:1oLN+KHhQd2pepnP03Y1xJArTR9lf2+oupb5bHEG4euPFM0FdOFr/1WhK7rC304OAOPt/YivKmEEsCOG/BC2AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, providers, zen, anthropic, openai, adapter]

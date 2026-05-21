@@ -34,6 +34,8 @@
 //! makes a real-provider test impossible to write without changing
 //! the daemon's runtime spawn env.
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

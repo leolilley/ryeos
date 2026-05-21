@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{run_service_standalone_fresh, ryeosd_binary, StandaloneHarness};
+use common::{run_service_standalone_fresh, StandaloneHarness};
 
 // ── 5.1 rebuild standalone — succeeds on fresh state ────────────────────
 

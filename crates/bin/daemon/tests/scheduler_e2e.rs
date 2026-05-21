@@ -414,7 +414,7 @@ async fn scheduler_interval_schedule_fires() {
         }),
     )
     .await;
-    let result = unwrap_result(status, &body, "scheduler.register interval");
+    unwrap_result(status, &body, "scheduler.register interval");
 
     // Debug: verify the schedule is in the list (proves DB write worked)
     let (status, body) = exec(&h, "service:scheduler/list", json!({})).await;
@@ -795,7 +795,7 @@ async fn scheduler_registered_at_preserved_on_update() {
         }),
     )
     .await;
-    let result = unwrap_result(status, &body, "first register");
+    unwrap_result(status, &body, "first register");
 
     // Get the schedule from list (to see registered_at in the YAML)
     // Note: the list endpoint returns schedule data; we can verify the

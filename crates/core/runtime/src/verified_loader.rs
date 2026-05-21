@@ -286,7 +286,7 @@ impl VerifiedLoader {
             "directive" => ".ai/directives/",
             "tool" => ".ai/tools/",
             "knowledge" => ".ai/knowledge/",
-            "config" => ".ai/config/crates/core/runtime/",
+            "config" => ".ai/config/",
             _ => ".ai/",
         }
     }
@@ -623,11 +623,9 @@ impl VerifiedLoader {
             }
         }
 
-        {
-            let p = self.project_root.join(&item_path);
-            if p.exists() {
-                candidate_paths.push((p, "project"));
-            }
+        let p = self.project_root.join(&item_path);
+        if p.exists() {
+            candidate_paths.push((p, "project"));
         }
 
         if candidate_paths.is_empty() {
@@ -897,21 +895,9 @@ pem = """
         let user = tmp.path().join("user");
         let system = tmp.path().join("system");
 
-        create_file(
-            &system,
-            ".ai/config/crates/core/runtime/test.yaml",
-            "name: system\n",
-        );
-        create_file(
-            &user,
-            ".ai/config/crates/core/runtime/test.yaml",
-            "name: user\n",
-        );
-        create_file(
-            &project,
-            ".ai/config/crates/core/runtime/test.yaml",
-            "name: project\n",
-        );
+        create_file(&system, ".ai/config/test.yaml", "name: system\n");
+        create_file(&user, ".ai/config/test.yaml", "name: user\n");
+        create_file(&project, ".ai/config/test.yaml", "name: project\n");
 
         let loader = VerifiedLoader::new(project, Some(user), vec![system]);
         let config: serde_yaml::Value = loader.load_config_strict("test").unwrap().unwrap();
@@ -937,11 +923,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        create_file(
-            &project,
-            ".ai/config/crates/core/runtime/bad.yaml",
-            "not valid yaml: [",
-        );
+        create_file(&project, ".ai/config/bad.yaml", "not valid yaml: [");
 
         let loader = VerifiedLoader::new(project, None, vec![]);
         let result = loader.load_config_strict::<serde_yaml::Value>("bad");
@@ -958,11 +940,7 @@ pem = """
         let project = tmp.path().join("project");
         let system = tmp.path().join("system");
 
-        create_file(
-            &system,
-            ".ai/config/crates/core/runtime/defaults.yaml",
-            "key: from_system\n",
-        );
+        create_file(&system, ".ai/config/defaults.yaml", "key: from_system\n");
 
         let loader = VerifiedLoader::new(project, None, vec![system]);
         let config: serde_yaml::Value = loader.load_config_strict("defaults").unwrap().unwrap();
@@ -1165,7 +1143,7 @@ pem = """
     fn strict_load_rejects_unsigned_config() {
         let tmp = tempfile::tempdir().unwrap();
         let system = tmp.path().join("system");
-        let cfg_subpath = ".ai/config/crates/core/runtime/model-providers/test.yaml";
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
         std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
         // NO signature header.
         std::fs::write(
@@ -1175,7 +1153,8 @@ pem = """
         .unwrap();
 
         let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
-        let res = loader.load_config_strict_signed::<serde_yaml::Value>("model-providers/test");
+        let res = loader
+            .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unsigned config");
         let msg = format!("{:#}", res.unwrap_err());
         assert!(
@@ -1188,7 +1167,7 @@ pem = """
     fn strict_load_rejects_unknown_signer() {
         let tmp = tempfile::tempdir().unwrap();
         let system = tmp.path().join("system");
-        let cfg_subpath = ".ai/config/crates/core/runtime/model-providers/test.yaml";
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
         std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
 
         // Sign with a throwaway key that is NOT in the trust store.
@@ -1199,7 +1178,8 @@ pem = """
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
         let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
-        let res = loader.load_config_strict_signed::<serde_yaml::Value>("model-providers/test");
+        let res = loader
+            .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unknown signer");
         let msg = format!("{:#}", res.unwrap_err());
         assert!(
@@ -1212,7 +1192,7 @@ pem = """
     fn strict_load_accepts_trusted_signed_config() {
         let tmp = tempfile::tempdir().unwrap();
         let system = tmp.path().join("system");
-        let cfg_subpath = ".ai/config/crates/core/runtime/model-providers/test.yaml";
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
         std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
 
         let yaml_body = "base_url: https://example.com/v1\n";
@@ -1220,7 +1200,8 @@ pem = """
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
         let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
-        let res = loader.load_config_strict_signed::<serde_yaml::Value>("model-providers/test");
+        let res = loader
+            .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_ok(), "strict mode must accept trusted-signed config");
         let val = res.unwrap().expect("should have a value");
         assert_eq!(val["base_url"].as_str(), Some("https://example.com/v1"));

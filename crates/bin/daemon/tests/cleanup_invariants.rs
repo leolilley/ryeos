@@ -13,7 +13,7 @@
 //! bundle and trust store fixtures.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ryeos_api::{handlers as service_handlers, ServiceAvailability, ServiceDescriptor};
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -27,9 +27,10 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    manifest_dir()
-        .parent()
-        .expect("ryeosd has a parent dir")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|p| p.join("bundles").is_dir())
+        .expect("workspace root with bundles/ directory")
         .to_path_buf()
 }
 

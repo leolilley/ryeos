@@ -41,12 +41,12 @@
 //!
 //! ## Signing key
 //!
-//! Re-signing requires the platform-author signing key — the same key
+//! Re-signing requires the dev publisher signing key — the same key
 //! `./scripts/gate.sh` uses for its automatic re-sync. The key path is
 //! taken from the `RYEOS_SIGNING_KEY` environment variable, falling back
-//! to `~/.ryeos/.ai/config/keys/signing/private_key.pem`. Tests that run on
-//! a host without that key set up will fail loudly at the first call;
-//! that is the same precondition as `gate.sh`.
+//! to the workspace's checked-in `.dev-keys/PUBLISHER_DEV.pem`, then to
+//! operator key locations for older local setups. This keeps tests from
+//! depending on the caller's `HOME` while still allowing explicit override.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,9 +70,27 @@ fn signing_key_path() -> PathBuf {
     if let Some(explicit) = std::env::var_os("RYEOS_SIGNING_KEY") {
         return PathBuf::from(explicit);
     }
+
+    let dev_key = workspace_root().join(".dev-keys/PUBLISHER_DEV.pem");
+    if dev_key.is_file() {
+        return dev_key;
+    }
+
+    if let Some(user_space) = std::env::var_os("USER_SPACE") {
+        let key = PathBuf::from(user_space).join(".ai/config/keys/signing/private_key.pem");
+        if key.is_file() {
+            return key;
+        }
+    }
+
     let home =
-        std::env::var_os("HOME").expect("$HOME must be set to locate platform-author signing key");
-    PathBuf::from(home).join(".ai/config/keys/signing/private_key.pem")
+        std::env::var_os("HOME").expect("$HOME must be set to locate dev publisher signing key");
+    let home = PathBuf::from(home);
+    let ryeos_key = home.join(".ryeos/.ai/config/keys/signing/private_key.pem");
+    if ryeos_key.is_file() {
+        return ryeos_key;
+    }
+    home.join(".ai/config/keys/signing/private_key.pem")
 }
 
 /// Recursive copy that dereferences symlinks (so the destination tree

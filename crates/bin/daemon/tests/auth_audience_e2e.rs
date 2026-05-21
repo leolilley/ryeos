@@ -11,7 +11,7 @@ mod common;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
+use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by};
 use common::DaemonHarness;
 use lillux::crypto::{Signer as _, SigningKey};
 

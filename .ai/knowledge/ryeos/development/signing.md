@@ -49,7 +49,7 @@ The dev key fingerprint is `741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d2
 
 Verify after signing:
 ```bash
-head -1 bundles/standard/.ai/config/crates/core/runtime/model-providers/zen.yaml
+head -1 bundles/standard/.ai/config/ryeos-runtime/model-providers/zen.yaml
 # Trailing fingerprint should be 741a8bc...
 ```
 

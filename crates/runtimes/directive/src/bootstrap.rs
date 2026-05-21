@@ -64,8 +64,8 @@ pub fn bootstrap(
     );
 
     let execution = loader
-        .load_config_strict::<ExecutionConfig>("execution")
-        .map_err(|e| anyhow!("loading config `execution`: {e}"))?
+        .load_config_strict::<ExecutionConfig>("ryeos-runtime/execution")
+        .map_err(|e| anyhow!("loading config `ryeos-runtime/execution`: {e}"))?
         .unwrap_or_default();
 
     // Consumer for the `category` round-trip fields on each typed
@@ -309,8 +309,8 @@ fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefiniti
     // gave system > user > project (first-found-wins), silently
     // discarding project-level hook overrides.
     let Some(config): Option<serde_yaml::Value> = loader
-        .load_config_strict("hook_conditions")
-        .map_err(|e| anyhow!("load_hooks: loading config `hook_conditions`: {e}"))?
+        .load_config_strict("ryeos-runtime/hook_conditions")
+        .map_err(|e| anyhow!("load_hooks: loading config `ryeos-runtime/hook_conditions`: {e}"))?
     else {
         return Ok(Vec::new());
     };
@@ -326,14 +326,16 @@ fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefiniti
     };
     let hooks_arr = hooks_value.as_sequence().ok_or_else(|| {
         anyhow!(
-            "load_hooks: `builtin_hooks` in `hook_conditions` must be a YAML sequence, \
+            "load_hooks: `builtin_hooks` in `ryeos-runtime/hook_conditions` must be a YAML sequence, \
              got {}",
             yaml_kind(hooks_value)
         )
     })?;
     for (idx, h) in hooks_arr.iter().enumerate() {
-        let hook = serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone())
-            .map_err(|e| anyhow!("load_hooks: malformed hook[{idx}] in `hook_conditions`: {e}"))?;
+        let hook =
+            serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone()).map_err(|e| {
+                anyhow!("load_hooks: malformed hook[{idx}] in `ryeos-runtime/hook_conditions`: {e}")
+            })?;
         hooks.push(hook);
     }
 
@@ -341,11 +343,11 @@ fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefiniti
 }
 
 fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::RiskPolicy>> {
-    // Absence of capability_risk.yaml is fine (optional config).
+    // Absence of ryeos-runtime/capability_risk.yaml is fine (optional config).
     // But if it exists and is broken, we fail loud with file path.
     let Some(config) = loader
-        .load_config_strict::<serde_yaml::Value>("capability_risk")
-        .map_err(|e| anyhow!("loading config `capability_risk`: {e}"))?
+        .load_config_strict::<serde_yaml::Value>("ryeos-runtime/capability_risk")
+        .map_err(|e| anyhow!("loading config `ryeos-runtime/capability_risk`: {e}"))?
     else {
         return Ok(None);
     };

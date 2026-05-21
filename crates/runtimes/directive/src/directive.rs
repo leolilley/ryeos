@@ -197,6 +197,11 @@ pub struct ProviderMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default)]
     pub tool_call_id: Option<String>,
+    /// Provider-specific hidden reasoning that must be replayed with an
+    /// assistant tool-call message for OpenAI-compatible reasoning models
+    /// such as DeepSeek thinking-mode endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone)]

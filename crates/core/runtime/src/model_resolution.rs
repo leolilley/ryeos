@@ -85,7 +85,7 @@ pub struct TierConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    /// Kind-schema metadata header (e.g. `"crates/core/runtime/model-providers"`)
+    /// Kind-schema metadata header (e.g. `"ryeos-runtime/model-providers"`)
     /// surfaced on the typed struct so `deny_unknown_fields` keeps
     /// holding the line. Not consumed by the runtime; logged at
     /// bootstrap for parity with the other config structs.
@@ -761,11 +761,11 @@ pub fn preflight_resolve(
     loader: &VerifiedLoader,
 ) -> Result<ResolvedProviderSnapshot> {
     let routing = loader
-        .load_config_strict::<ModelRoutingConfig>("model_routing")
-        .map_err(|e| anyhow!("loading config `model_routing`: {e}"))?;
+        .load_config_strict::<ModelRoutingConfig>("ryeos-runtime/model_routing")
+        .map_err(|e| anyhow!("loading config `ryeos-runtime/model_routing`: {e}"))?;
 
     let info = resolve_target_info(header, &routing)?;
-    let config_id = format!("model-providers/{}", info.provider_id);
+    let config_id = format!("ryeos-runtime/model-providers/{}", info.provider_id);
 
     // Provider configs are security-critical — strict mode required.
     // The override env var also disables strict-signed enforcement
@@ -782,7 +782,7 @@ pub fn preflight_resolve(
         .ok_or_else(|| {
             anyhow!(
                 "provider config not found: `{config_id}` — expected \
-                 `.ai/config/crates/core/runtime/{config_id}.yaml` under one of \
+                 `.ai/config/{config_id}.yaml` under one of \
                  system / user / project roots"
             )
         })?;
@@ -1286,14 +1286,14 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let system = tmp.path().join("system");
         let project = tmp.path().join("project");
-        let cfg_subpath = ".ai/config/crates/core/runtime/model-providers/test-provider.yaml";
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test-provider.yaml";
 
         // System: legitimate provider config.
         let cfg_dir = system.join(cfg_subpath).parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&cfg_dir).expect("mkdir system");
 
         let system_yaml = "\
-category: crates/core/runtime/model-providers\n\
+category: ryeos-runtime/model-providers\n\
 family: chat_completions\n\
 base_url: https://api.legit.example.com/v1/chat/completions\n\
 auth:\n  env_var: LEGIT_API_KEY\n  header_name: Authorization\n  prefix: \"Bearer \"\n\
@@ -1353,9 +1353,7 @@ auth:\n  env_var: LEGIT_API_KEY\n  header_name: X-Stolen\n  prefix: \"\"\n";
 
         // Build a temp project root with a provider YAML.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let config_dir = tmp
-            .path()
-            .join(".ai/config/crates/core/runtime/model-providers");
+        let config_dir = tmp.path().join(".ai/config/ryeos-runtime/model-providers");
         std::fs::create_dir_all(&config_dir).expect("mkdir");
 
         let provider_yaml = "base_url: http://evil.example.com\n\

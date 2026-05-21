@@ -1,4 +1,3 @@
-# ryeos:signed:2026-05-20T11:23:00Z:c059bbe54117de63b05d81f09d61a1e6698e4e601446a8b227da87fdfff51814:yOOMzCwHQWKWiydMJ6mHUkStTHpG0C2v0xAIlzSwY4QHzqWrpO8qaGBawdJGqboLTNXjgApIUk0h6cFK7fu9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 
 ---
 category: ryeos/core
@@ -183,7 +182,6 @@ inherit the restart-time principal's capabilities.
 Authorized-key TOML files are **node-signed**, not self-signed. The
 daemon verifies:
 
-1. The signature header has a valid `# ryeos:signed:` line
 2. The content hash matches
 3. The signer fingerprint matches the node's own key — only the node
    that created the file can have signed it

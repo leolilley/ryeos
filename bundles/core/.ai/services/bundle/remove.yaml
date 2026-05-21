@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-20T05:57:09Z:6fec38a4f97dd287162110091f02f10a527229f0a4aad1c1a4d6b1f559d706a9:ZVVcgBVsWV7C/Om6j1/AEjKdusbXWrTMrTAbIutHH3HQZ7FlpsC+bjXXCzE24uw+HuWk8waa2RSBZxW3S36hBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-21T09:36:59Z:6fec38a4f97dd287162110091f02f10a527229f0a4aad1c1a4d6b1f559d706a9:ZVVcgBVsWV7C/Om6j1/AEjKdusbXWrTMrTAbIutHH3HQZ7FlpsC+bjXXCzE24uw+HuWk8waa2RSBZxW3S36hBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.remove
 required_caps: ["ryeos.execute.service.bundle.remove"]

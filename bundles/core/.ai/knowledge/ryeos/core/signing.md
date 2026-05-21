@@ -1,4 +1,3 @@
-# ryeos:signed:2026-05-20T11:41:17Z:0d21351b84b2c7a36eb423e337c62f4e3b7cd6089c6abf7f551b441a278355e2:9yb5qVOvQO+JABslsRv4pgNmShFxbRRYUPJk84dshvewncK4RD+F+QbzA4jnHMpVtz+28Fk7D7HDeBEl2VwQCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 
 ---
 category: ryeos/core
@@ -34,7 +33,6 @@ Every item carries a signature in a comment header. The format is
 four colon-delimited fields:
 
 ```
-<envelope-prefix> ryeos:signed:<timestamp>:<content_hash>:<signature>:<fingerprint> <envelope-suffix>
 ```
 
 | Field | Format | Example |

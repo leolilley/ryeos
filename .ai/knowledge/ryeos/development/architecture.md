@@ -124,7 +124,7 @@ User-facing runtimes and configuration:
 | Directory | Contents |
 |---|---|
 | `.ai/runtimes/` | Runtime definitions (directive, graph, knowledge) |
-| `.ai/config/crates/core/runtime/` | Model providers, model routing, execution config |
+| `.ai/config/ryeos-runtime/` | Model providers, model routing, execution config |
 | `.ai/tools/ryeos/agent/providers/` | LLM provider adapter tools (Anthropic, OpenAI, Zen) |
 | `.ai/directives/` | Example directives (hello.md) |
 | `.ai/bin/<triple>/` | Runtime binaries (directive-runtime, graph-runtime, knowledge-runtime) |

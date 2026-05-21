@@ -77,6 +77,7 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                     content,
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
             }
             "assistant_message" => {
@@ -113,6 +114,7 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                     content,
                     tool_calls,
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
             }
             "tool_result" => {
@@ -128,6 +130,7 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                     content,
                     tool_calls: None,
                     tool_call_id: call_id,
+                    reasoning_content: None,
                 });
             }
             other => {
@@ -337,24 +340,28 @@ mod tests {
                 content: Some(json!("hello")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "assistant".to_string(),
                 content: Some(json!("hi")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "user".to_string(),
                 content: Some(json!("again")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "assistant".to_string(),
                 content: Some(json!("there")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
         assert_eq!(count_turns(&messages), 2);
@@ -369,6 +376,7 @@ mod tests {
                 content: Some(json!(format!("message {} with some content here", i))),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         let trimmed = trim_to_token_budget(messages, 200);

@@ -53,7 +53,7 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 
 ```
 .ai/
-├── config/crates/core/runtime/
+├── config/ryeos-runtime/
 │   ├── execution.yaml
 │   ├── model_routing.yaml
 │   └── model-providers/

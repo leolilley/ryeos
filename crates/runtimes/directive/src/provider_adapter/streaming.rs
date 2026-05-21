@@ -355,6 +355,18 @@ fn parse_delta_merge(
                 events.push(StreamEvent::Delta(content.to_string()));
             }
 
+            if let Some(reasoning) = choice
+                .get("delta")
+                .and_then(|d| {
+                    d.get("reasoning_content")
+                        .or_else(|| d.get("reasoning"))
+                        .or_else(|| d.get("thinking"))
+                })
+                .and_then(|r| r.as_str())
+            {
+                events.push(StreamEvent::ReasoningDelta(reasoning.to_string()));
+            }
+
             if let Some(tool_calls) = choice
                 .get("delta")
                 .and_then(|d| d.get("tool_calls"))
@@ -812,6 +824,7 @@ pub async fn call_provider_streaming(
     let mut utf8_carry: Vec<u8> = Vec::new();
     let mut all_events: Vec<StreamEvent> = Vec::new();
     let mut accumulated_text = String::new();
+    let mut accumulated_reasoning = String::new();
     let mut accumulated_tools: Vec<ToolCall> = Vec::new();
     let mut last_usage: Option<TokenUsage> = None;
     let mut last_finish: Option<String> = None;
@@ -989,7 +1002,9 @@ pub async fn call_provider_streaming(
                     StreamEvent::Finish { .. } => {}
                     StreamEvent::Usage(_) => {}
                     StreamEvent::Warning { .. } => {}
-                    StreamEvent::ReasoningDelta(_) => {}
+                    StreamEvent::ReasoningDelta(text) => {
+                        accumulated_reasoning.push_str(text);
+                    }
                 }
                 all_events.push(ev);
             }
@@ -1076,7 +1091,9 @@ pub async fn call_provider_streaming(
                 StreamEvent::Finish { .. } => {}
                 StreamEvent::Usage(_) => {}
                 StreamEvent::Warning { .. } => {}
-                StreamEvent::ReasoningDelta(_) => {}
+                StreamEvent::ReasoningDelta(text) => {
+                    accumulated_reasoning.push_str(text);
+                }
             }
             all_events.push(ev);
         }
@@ -1095,6 +1112,11 @@ pub async fn call_provider_streaming(
             Some(accumulated_tools)
         },
         tool_call_id: None,
+        reasoning_content: if accumulated_reasoning.is_empty() {
+            None
+        } else {
+            Some(accumulated_reasoning)
+        },
     };
 
     Ok((
@@ -2302,12 +2324,14 @@ owner = "ryeos-dev"
                 content: Some(json!("You are helpful.")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "user".to_string(),
                 content: Some(json!("What is 2+2?")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "assistant".to_string(),
@@ -2318,18 +2342,21 @@ owner = "ryeos-dev"
                     arguments: json!({"expr": "2+2"}),
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "tool".to_string(),
                 content: Some(json!("4")),
                 tool_calls: None,
                 tool_call_id: Some("call_1".to_string()),
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "user".to_string(),
                 content: Some(json!("Thanks.")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]
     }
@@ -2340,6 +2367,7 @@ owner = "ryeos-dev"
             content: Some(json!("hi")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }]
     }
 

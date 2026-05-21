@@ -25,7 +25,6 @@ use lillux::crypto::SigningKey;
 /// vault entry the preflight fails with `required_secret_missing`.
 fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
     use std::collections::HashMap;
-    let sk = common::fast_fixture::vault_secret_key();
     let pub_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("node")

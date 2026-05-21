@@ -43,6 +43,11 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
             if let Some(ref id) = msg.tool_call_id {
                 obj["tool_call_id"] = json!(id);
             }
+            if msg.role == "assistant" {
+                if let Some(ref reasoning) = msg.reasoning_content {
+                    obj["reasoning_content"] = json!(reasoning);
+                }
+            }
             obj
         })
         .collect();
@@ -136,6 +141,12 @@ fn convert_with_schemas(
         };
 
         let mut obj = json!({ "role": mapped_role });
+
+        if msg.role == "assistant" {
+            if let Some(ref reasoning) = msg.reasoning_content {
+                obj["reasoning_content"] = json!(reasoning);
+            }
+        }
 
         if msg.role == "system" && system_mode == SystemMessageMode::MessageRole {
             match &msg.content {
@@ -350,18 +361,21 @@ mod tests {
                 content: Some(json!("You are helpful.")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "user".to_string(),
                 content: Some(json!("Hello")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "assistant".to_string(),
                 content: Some(json!("Hi there!")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ]
     }
@@ -386,12 +400,14 @@ mod tests {
                 content: Some(json!("Hello")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "assistant".to_string(),
                 content: Some(json!("Hi!")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
         let schemas = MessageSchemas {
@@ -471,6 +487,7 @@ mod tests {
             content: Some(json!("Hello world")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         // Without text_placement: plain string content.
         let schemas = MessageSchemas {
@@ -509,6 +526,7 @@ mod tests {
             content: Some(json!("test")),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let schemas = MessageSchemas {
             role_map: None,
@@ -562,12 +580,14 @@ mod tests {
                 content: Some(Value::String("you are helpful".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "user".to_string(),
                 content: Some(Value::String("hi".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
         let schemas = MessageSchemas {
@@ -639,6 +659,7 @@ mod tests {
             content: Some(Value::String("hello".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let schemas = MessageSchemas {
             role_map: Some({
@@ -672,12 +693,14 @@ mod tests {
                 content: Some(Value::String("result-1".to_string())),
                 tool_calls: None,
                 tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "tool".to_string(),
                 content: Some(Value::String("result-2".to_string())),
                 tool_calls: None,
                 tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
             },
         ];
         let schemas = MessageSchemas {
@@ -717,6 +740,7 @@ mod tests {
             content: Some(Value::String("calc result".to_string())),
             tool_calls: None,
             tool_call_id: Some("tc_xyz".to_string()),
+            reasoning_content: None,
         }];
         let schemas = MessageSchemas {
             role_map: None,
@@ -755,6 +779,7 @@ mod tests {
                 arguments: json!({"q": "rust"}),
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let schemas = MessageSchemas {
             role_map: None,
@@ -807,6 +832,7 @@ mod tests {
                 arguments: json!({"q": "rust"}),
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let schemas = MessageSchemas {
             role_map: None,
@@ -844,6 +870,7 @@ mod tests {
                 content: Some(Value::String("search rust".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "assistant".to_string(),
@@ -854,12 +881,14 @@ mod tests {
                     arguments: json!({"q": "rust"}),
                 }]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "tool".to_string(),
                 content: Some(Value::String("results: ...".to_string())),
                 tool_calls: None,
                 tool_call_id: Some("gemini_tc_0".to_string()),
+                reasoning_content: None,
             },
         ];
         let schemas = MessageSchemas {
@@ -916,12 +945,14 @@ mod tests {
                 content: Some(Value::String("be brief".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ProviderMessage {
                 role: "user".to_string(),
                 content: Some(Value::String("hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ];
         let schemas = MessageSchemas {
@@ -966,6 +997,7 @@ mod tests {
                 arguments: json!({"q":"rust"}),
             }]),
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let schemas = MessageSchemas {
             role_map: None,

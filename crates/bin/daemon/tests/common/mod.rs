@@ -7,6 +7,8 @@
 //! Used by `cleanup_e2e.rs`. NOT used by `cleanup_invariants.rs`
 //! (those are pure in-process invariant checks).
 
+#![allow(dead_code)]
+
 pub mod fast_fixture;
 pub mod mock_provider;
 

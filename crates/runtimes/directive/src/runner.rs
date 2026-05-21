@@ -219,6 +219,7 @@ impl Runner {
                 content: Some(json!(sys)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
 
@@ -807,6 +808,7 @@ impl Runner {
                         content: Some(json!(tool_result.content)),
                         tool_calls: None,
                         tool_call_id: Some(call_id),
+                        reasoning_content: None,
                     });
 
                     let next_index = index + 1;
@@ -942,6 +944,7 @@ impl Runner {
                         content: Some(json!(tool_result_content)),
                         tool_calls: None,
                         tool_call_id: Some(call_id),
+                        reasoning_content: None,
                     });
                     State::CheckingContinuation
                 }
@@ -1348,6 +1351,7 @@ mod tests {
                 content: Some(json!("hello")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             tools: vec![],
             system_prompt: Some("You are helpful".to_string()),
