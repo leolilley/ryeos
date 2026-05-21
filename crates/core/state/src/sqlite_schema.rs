@@ -104,7 +104,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
     // Collect user tables (excluding sqlite internals)
     let mut actual_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut stmt = conn.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
     )?;
     let rows: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
@@ -116,9 +116,7 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
     // Check for missing expected tables
     for table_name in &expected_table_names {
         if !actual_tables.contains(*table_name) {
-            bail!(
-                "missing expected table '{table_name}' in database ({path_display})"
-            );
+            bail!("missing expected table '{table_name}' in database ({path_display})");
         }
     }
 
@@ -137,18 +135,15 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
 
     // 3. Column verification per table
     for table in spec.tables {
-        let mut col_stmt = conn.prepare(&format!(
-            "PRAGMA table_info({})",
-            table.name
-        ))?;
+        let mut col_stmt = conn.prepare(&format!("PRAGMA table_info({})", table.name))?;
         let col_rows: Vec<(i32, String, String, i32, i32)> = col_stmt
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, i32>(0)?,  // cid
-                    row.get::<_, String>(1)?,  // name
-                    row.get::<_, String>(2)?,  // type
-                    row.get::<_, i32>(5)?,   // pk (non-zero = primary key)
-                    row.get::<_, i32>(3)?,  // notnull (0 or 1)
+                    row.get::<_, i32>(0)?,    // cid
+                    row.get::<_, String>(1)?, // name
+                    row.get::<_, String>(2)?, // type
+                    row.get::<_, i32>(5)?,    // pk (non-zero = primary key)
+                    row.get::<_, i32>(3)?,    // notnull (0 or 1)
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -167,15 +162,20 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             );
         }
 
-        for (i, (_cid, actual_name, actual_type, pk_flag, notnull_flag)) in col_rows.iter().enumerate() {
+        for (i, (_cid, actual_name, actual_type, pk_flag, notnull_flag)) in
+            col_rows.iter().enumerate()
+        {
             let expected = &expected_cols[i];
             if actual_name != expected.name {
-            bail!(
-                "table '{}' column {}: name '{}' != expected '{}'; \
+                bail!(
+                    "table '{}' column {}: name '{}' != expected '{}'; \
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
                  then restart the daemon (auto-init will recreate missing state).",
-                    table.name, i, actual_name, expected.name,
+                    table.name,
+                    i,
+                    actual_name,
+                    expected.name,
                     path_display,
                 );
             }
@@ -186,7 +186,10 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
                      then restart the daemon (auto-init will recreate missing state).",
-                    table.name, actual_name, actual_type, expected.col_type,
+                    table.name,
+                    actual_name,
+                    actual_type,
+                    expected.col_type,
                     path_display,
                 );
             }
@@ -196,7 +199,10 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
                      then restart the daemon (auto-init will recreate missing state).",
-                    table.name, actual_name, *pk_flag > 0, expected.pk,
+                    table.name,
+                    actual_name,
+                    *pk_flag > 0,
+                    expected.pk,
                     path_display,
                 );
             }
@@ -209,7 +215,10 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
                      then restart the daemon (auto-init will recreate missing state).",
-                    table.name, actual_name, *notnull_flag != 0, expected.not_null,
+                    table.name,
+                    actual_name,
+                    *notnull_flag != 0,
+                    expected.not_null,
                     path_display,
                 );
             }
@@ -219,14 +228,11 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
     // 4. Index verification — check names, columns, and uniqueness.
     let mut idx_stmt = conn.prepare(
         "SELECT name, tbl_name FROM sqlite_master WHERE type='index' \
-         AND name NOT LIKE 'sqlite_%'"
+         AND name NOT LIKE 'sqlite_%'",
     )?;
     let actual_indexes: Vec<(String, String)> = idx_stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -241,7 +247,9 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         let Some(matching) = user_indexes.iter().find(|(name, _)| name == idx.name) else {
             bail!(
                 "missing expected index '{}' on table '{}' in database ({})",
-                idx.name, idx.table, path_display,
+                idx.name,
+                idx.table,
+                path_display,
             );
         };
         // Verify table matches
@@ -251,21 +259,22 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
                  then restart the daemon (auto-init will recreate missing state).",
-                idx.name, matching.1, idx.table, path_display,
+                idx.name,
+                matching.1,
+                idx.table,
+                path_display,
             );
         }
 
         // R2: Verify columns and uniqueness via PRAGMA index_list + index_info
         // Check uniqueness via PRAGMA index_list
-        let mut il_stmt = conn.prepare(&format!(
-            "PRAGMA index_list('{}')", idx.table
-        ))?;
+        let mut il_stmt = conn.prepare(&format!("PRAGMA index_list('{}')", idx.table))?;
         let index_list_rows: Vec<(String, bool)> = il_stmt
             .query_map([], |row| {
                 // PRAGMA index_list columns: seq, name, unique, origin, partial
                 Ok((
-                    row.get::<_, String>(1)?,  // name
-                    row.get::<_, bool>(2)?,    // unique
+                    row.get::<_, String>(1)?, // name
+                    row.get::<_, bool>(2)?,   // unique
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -274,7 +283,9 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         match listed {
             None => bail!(
                 "index '{}' not found in PRAGMA index_list('{}') in database ({})",
-                idx.name, idx.table, path_display,
+                idx.name,
+                idx.table,
+                path_display,
             ),
             Some((_, unique_flag)) => {
                 if *unique_flag != idx.unique {
@@ -283,20 +294,22 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                          this file ({}) was not created by this daemon. \
                          Recovery: mv <file> <file>.foreign.$(date +%s); \
                          then restart the daemon (auto-init will recreate missing state).",
-                        idx.name, idx.table, unique_flag, idx.unique, path_display,
+                        idx.name,
+                        idx.table,
+                        unique_flag,
+                        idx.unique,
+                        path_display,
                     );
                 }
             }
         }
 
         // Check columns via PRAGMA index_info
-        let mut ii_stmt = conn.prepare(&format!(
-            "PRAGMA index_info('{}')", idx.name
-        ))?;
+        let mut ii_stmt = conn.prepare(&format!("PRAGMA index_info('{}')", idx.name))?;
         let index_info_rows: Vec<String> = ii_stmt
             .query_map([], |row| {
                 // PRAGMA index_info columns: seqno, cid, name
-                row.get::<_, String>(2)  // name
+                row.get::<_, String>(2) // name
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -306,7 +319,11 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                  this file ({}) was not created by this daemon. \
                  Recovery: mv <file> <file>.foreign.$(date +%s); \
                  then restart the daemon (auto-init will recreate missing state).",
-                idx.name, idx.table, idx.columns, index_info_rows, path_display,
+                idx.name,
+                idx.table,
+                idx.columns,
+                index_info_rows,
+                path_display,
             );
         }
         for (i, actual_col) in index_info_rows.iter().enumerate() {
@@ -316,7 +333,12 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                      this file ({}) was not created by this daemon. \
                      Recovery: mv <file> <file>.foreign.$(date +%s); \
                      then restart the daemon (auto-init will recreate missing state).",
-                    idx.name, idx.table, i, actual_col, idx.columns[i], path_display,
+                    idx.name,
+                    idx.table,
+                    i,
+                    actual_col,
+                    idx.columns[i],
+                    path_display,
                 );
             }
         }
@@ -370,11 +392,8 @@ pub fn init_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) 
 
     // Stamp application_id — use execute (not execute_batch) to ensure
     // the pragma is written to the database file header.
-    conn.execute_batch(&format!(
-        "PRAGMA application_id = {};",
-        spec.application_id,
-    ))
-    .context("failed to stamp application_id")?;
+    conn.execute_batch(&format!("PRAGMA application_id = {};", spec.application_id,))
+        .context("failed to stamp application_id")?;
 
     Ok(())
 }

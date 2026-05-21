@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use crate::directive::{
-    MessageSchemas, ProviderMessage,
-    AssistantToolCallsPlacement, SystemMessageMode, TextPlacement, ToolResultWrapMode,
+    AssistantToolCallsPlacement, MessageSchemas, ProviderMessage, SystemMessageMode, TextPlacement,
+    ToolResultWrapMode,
 };
 
 #[tracing::instrument(level = "debug", name = "provider:build_messages", skip(messages, schemas), fields(count = messages.len()))]
@@ -26,16 +26,19 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
                 None => obj["content"] = Value::Null,
             }
             if let Some(ref calls) = msg.tool_calls {
-                obj["tool_calls"] = json!(calls.iter().map(|tc| {
-                    json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments,
-                        }
+                obj["tool_calls"] = json!(calls
+                    .iter()
+                    .map(|tc| {
+                        json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                            }
+                        })
                     })
-                }).collect::<Vec<_>>());
+                    .collect::<Vec<_>>());
             }
             if let Some(ref id) = msg.tool_call_id {
                 obj["tool_call_id"] = json!(id);
@@ -54,9 +57,7 @@ fn convert_with_schemas(
 
     let role_map = schemas.role_map.as_ref();
     let content_key = schemas.content_key.as_deref().unwrap_or("content");
-    let tc_placement = schemas
-        .assistant_tool_calls_placement
-        .unwrap_or_default();
+    let tc_placement = schemas.assistant_tool_calls_placement.unwrap_or_default();
     // When system_message is configured, use its declared mode.
     // When absent, system prompts stay inline as regular messages
     // (OpenAI behavior — no extraction, no injection).
@@ -79,10 +80,7 @@ fn convert_with_schemas(
         .as_ref()
         .map(|t| t.wrap_mode)
         .unwrap_or_default();
-    let tr_block_template = schemas
-        .tool_result
-        .as_ref()
-        .map(|t| &t.block_template);
+    let tr_block_template = schemas.tool_result.as_ref().map(|t| &t.block_template);
     let tc_block_template = schemas.tool_call_block_template.as_ref();
 
     // Build tool_call_id → tool_name lookup so tool-result messages
@@ -123,16 +121,17 @@ fn convert_with_schemas(
 
         // Flush any pending tool-result blocks before processing a
         // non-tool message (content_blocks wrap_mode requirement).
-        if msg.role != "tool" && msg.tool_call_id.is_none()
-            && !pending_tool_results.is_empty()
-        {
+        if msg.role != "tool" && msg.tool_call_id.is_none() && !pending_tool_results.is_empty() {
             let mut tr_msg = json!({"role": tr_role});
             tr_msg[content_key] = json!(std::mem::take(&mut pending_tool_results));
             converted.push(tr_msg);
         }
 
         let mapped_role = match role_map {
-            Some(rm) => rm.get(&msg.role).cloned().unwrap_or_else(|| msg.role.clone()),
+            Some(rm) => rm
+                .get(&msg.role)
+                .cloned()
+                .unwrap_or_else(|| msg.role.clone()),
             None => msg.role.clone(),
         };
 
@@ -159,17 +158,14 @@ fn convert_with_schemas(
 
             let rendered_block = if let Some(tmpl) = tr_block_template {
                 use ryeos_runtime::template::apply_template;
-                let tool_name = tc_id_to_name
-                    .get(tc_id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            tool_call_id = tc_id,
-                            "tool-result message has no preceding assistant tool-call \
+                let tool_name = tc_id_to_name.get(tc_id).cloned().unwrap_or_else(|| {
+                    tracing::warn!(
+                        tool_call_id = tc_id,
+                        "tool-result message has no preceding assistant tool-call \
                              with this id; tool_name in template will be empty"
-                        );
-                        String::new()
-                    });
+                    );
+                    String::new()
+                });
                 let mut ctx: HashMap<String, Value> = HashMap::new();
                 ctx.insert("tool_call_id".to_string(), json!(tc_id));
                 ctx.insert("tool_name".to_string(), json!(tool_name));
@@ -302,7 +298,7 @@ fn wrap_content(content: Value, _content_key: &str, template: Option<&Value>) ->
     let render_text = |text: &str| -> Value {
         let t = template.expect(
             "wrap_content requires text_block_template — \
-             ProviderConfig::validate() should have caught this"
+             ProviderConfig::validate() should have caught this",
         );
         let mut ctx: HashMap<String, Value> = HashMap::new();
         ctx.insert("text".to_string(), Value::String(text.to_string()));
@@ -342,7 +338,9 @@ fn wrap_content(content: Value, _content_key: &str, template: Option<&Value>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::{MessageSchemas, ProviderMessage, SystemMessageConfig, ToolResultConfig};
+    use crate::directive::{
+        MessageSchemas, ProviderMessage, SystemMessageConfig, ToolResultConfig,
+    };
     use ryeos_tracing::test as trace_test;
 
     fn sample_messages() -> Vec<ProviderMessage> {
@@ -434,7 +432,9 @@ mod tests {
         let (converted, system) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(system, Some("You are helpful.".to_string()));
         assert_eq!(converted.len(), 2);
-        assert!(converted.iter().all(|m| m.get("role").and_then(|r| r.as_str()) != Some("system")));
+        assert!(converted
+            .iter()
+            .all(|m| m.get("role").and_then(|r| r.as_str()) != Some("system")));
     }
 
     #[test]
@@ -495,8 +495,11 @@ mod tests {
             ..schemas.clone()
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas_wrap));
-        assert_eq!(converted[0]["parts"], json!([{"text": "Hello world"}]),
-            "Gemini-style parts_array with text_block_template");
+        assert_eq!(
+            converted[0]["parts"],
+            json!([{"text": "Hello world"}]),
+            "Gemini-style parts_array with text_block_template"
+        );
     }
 
     #[test]
@@ -531,11 +534,21 @@ mod tests {
         });
 
         let span = trace_test::find_span(&spans, "provider:build_messages");
-        assert!(span.is_some(), "expected provider:build_messages span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected provider:build_messages span, got: {:?}",
+            spans
+                .iter()
+                .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
+                .collect::<Vec<_>>()
+        );
 
         let span = span.unwrap();
         let field_val = |name: &str| -> Option<&str> {
-            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+            span.fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
         };
         assert_eq!(field_val("count"), Some(msgs.len().to_string().as_str()));
     }
@@ -599,11 +612,8 @@ mod tests {
     #[test]
     fn wrap_content_with_anthropic_blocks_template() {
         let template = json!({"type": "text", "text": "{text}"});
-        let result = super::wrap_content(
-            Value::String("hi".to_string()),
-            "content",
-            Some(&template),
-        );
+        let result =
+            super::wrap_content(Value::String("hi".to_string()), "content", Some(&template));
         assert_eq!(result, json!([{"type": "text", "text": "hi"}]));
     }
 
@@ -616,7 +626,10 @@ mod tests {
             Some(&template),
         );
         // Structured parts pass through unchanged.
-        assert_eq!(result, json!([{"inlineData": {"mimeType": "image/png", "data": "..."}}]));
+        assert_eq!(
+            result,
+            json!([{"inlineData": {"mimeType": "image/png", "data": "..."}}])
+        );
     }
 
     #[test]
@@ -762,13 +775,24 @@ mod tests {
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "assistant");
         // tool_calls MUST NOT be at top level
-        assert!(converted[0].get("tool_calls").is_none(),
-            "Anthropic must NOT have top-level tool_calls; got: {}", converted[0]);
+        assert!(
+            converted[0].get("tool_calls").is_none(),
+            "Anthropic must NOT have top-level tool_calls; got: {}",
+            converted[0]
+        );
         // The tool_use block MUST be inside content array (alongside the text content).
         let content = converted[0].get("content").unwrap();
-        let arr = content.as_array().expect("content should be an array after tool_call merge");
-        let has_tool_use = arr.iter().any(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_use"));
-        assert!(has_tool_use, "tool_use block missing from content: {:?}", arr);
+        let arr = content
+            .as_array()
+            .expect("content should be an array after tool_call merge");
+        let has_tool_use = arr
+            .iter()
+            .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_use"));
+        assert!(
+            has_tool_use,
+            "tool_use block missing from content: {:?}",
+            arr
+        );
     }
 
     #[test]
@@ -800,7 +824,8 @@ mod tests {
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted.len(), 1);
-        let tc_arr = converted[0]["tool_calls"].as_array()
+        let tc_arr = converted[0]["tool_calls"]
+            .as_array()
             .expect("OpenAI must have top-level tool_calls array");
         assert_eq!(tc_arr.len(), 1);
         assert_eq!(tc_arr[0]["id"], "call_xyz");
@@ -870,10 +895,15 @@ mod tests {
         let tool_result_msg = &converted[2];
         assert_eq!(tool_result_msg["role"], "user");
         let parts = tool_result_msg["parts"].as_array().expect("parts is array");
-        let fr = parts[0].get("functionResponse").expect("functionResponse block");
+        let fr = parts[0]
+            .get("functionResponse")
+            .expect("functionResponse block");
         // The KEY assertion: name MUST come from the lookup, not "".
-        assert_eq!(fr["name"], "search",
-            "tool_name must be threaded from preceding assistant tool_call; got: {}", fr);
+        assert_eq!(
+            fr["name"], "search",
+            "tool_name must be threaded from preceding assistant tool_call; got: {}",
+            fr
+        );
         assert_eq!(fr["response"]["content"], "results: ...");
     }
 
@@ -909,12 +939,17 @@ mod tests {
             tool_result: None,
         };
         let (converted, system) = convert_messages(&msgs, &Some(schemas));
-        assert_eq!(system, Some("be brief".to_string()),
-            "system must be extracted into the side-channel return");
+        assert_eq!(
+            system,
+            Some("be brief".to_string()),
+            "system must be extracted into the side-channel return"
+        );
         assert_eq!(converted.len(), 1, "system msg removed; only user remains");
         assert_eq!(converted[0]["role"], "user");
-        assert_eq!(converted[0]["content"], "hello",
-            "Anthropic content stays as plain string when text_placement is unset");
+        assert_eq!(
+            converted[0]["content"], "hello",
+            "Anthropic content stays as plain string when text_placement is unset"
+        );
     }
 
     #[test]
@@ -946,18 +981,25 @@ mod tests {
         };
         let (converted, _) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(converted.len(), 1);
-        let content = converted[0]["content"].as_array()
+        let content = converted[0]["content"]
+            .as_array()
             .expect("content must be array");
         // First block must be the typed text block, not a raw string.
-        assert_eq!(content[0]["type"], "text",
-            "Anthropic text must be wrapped in {{type:text,text:...}}, got: {}", content[0]);
+        assert_eq!(
+            content[0]["type"], "text",
+            "Anthropic text must be wrapped in {{type:text,text:...}}, got: {}",
+            content[0]
+        );
         assert_eq!(content[0]["text"], "Let me check.");
         // Second block must be the tool_use.
-        let has_tool_use = content.iter()
+        let has_tool_use = content
+            .iter()
             .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_use"));
         assert!(has_tool_use, "tool_use block missing: {content:?}");
         // No raw strings allowed.
-        assert!(content.iter().all(|v| !v.is_string()),
-            "no element may be a raw string in Anthropic block array");
+        assert!(
+            content.iter().all(|v| !v.is_string()),
+            "no element may be a raw string in Anthropic block array"
+        );
     }
 }

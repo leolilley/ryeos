@@ -8,9 +8,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(Debug, serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -39,8 +39,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let report = tokio::task::spawn_blocking(move || -> Result<RebuildReport> {
         let projection = ryeos_state::ProjectionDb::open(&projection_path)?;
-        let report =
-            ryeos_state::rebuild::rebuild_projection(&projection, &cas_root, &refs_root)?;
+        let report = ryeos_state::rebuild::rebuild_projection(&projection, &cas_root, &refs_root)?;
         let mut out = RebuildReport {
             chains_rebuilt: report.chains_rebuilt,
             threads_restored: report.threads_restored,
@@ -49,8 +48,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             reachable_blobs: None,
         };
         if req.verify && report.chains_rebuilt > 0 {
-            let reachable =
-                ryeos_state::reachability::collect_reachable(&cas_root, &refs_root)?;
+            let reachable = ryeos_state::reachability::collect_reachable(&cas_root, &refs_root)?;
             out.reachable_objects = Some(reachable.object_hashes.len());
             out.reachable_blobs = Some(reachable.blob_hashes.len());
         }

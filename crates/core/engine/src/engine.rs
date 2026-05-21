@@ -9,9 +9,9 @@ use crate::contracts::{
     VerifiedItem,
 };
 use crate::error::EngineError;
+use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
-use crate::item_resolution::ResolutionRoots;
 use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
@@ -126,11 +126,12 @@ impl Engine {
         };
 
         // Kind schemas are system-only — no project overlay
-        let kind_schema = self.kinds.get(&item_ref.kind).ok_or_else(|| {
-            EngineError::UnsupportedKind {
-                kind: item_ref.kind.clone(),
-            }
-        })?;
+        let kind_schema =
+            self.kinds
+                .get(&item_ref.kind)
+                .ok_or_else(|| EngineError::UnsupportedKind {
+                    kind: item_ref.kind.clone(),
+                })?;
 
         // Build resolution roots (system-first order)
         let roots = self.resolution_roots(project_root.clone());
@@ -152,11 +153,9 @@ impl Engine {
         let hash = crate::item_resolution::content_hash(&content);
 
         // Parse signature header using the matched extension's envelope
-        let signature_header = kind_schema
-            .spec_for(&result.matched_ext)
-            .and_then(|spec| {
-                crate::item_resolution::parse_signature_header(&content, &spec.signature)
-            });
+        let signature_header = kind_schema.spec_for(&result.matched_ext).and_then(|spec| {
+            crate::item_resolution::parse_signature_header(&content, &spec.signature)
+        });
 
         // Build ResolvedSourceFormat from the matched extension
         let source_format = kind_schema
@@ -279,26 +278,22 @@ impl Engine {
         // `.ai/parsers/` twice, opening a window where a concurrent
         // write to the overlay produces a plan whose runtime
         // behaviour (snapshot A) and cache key (snapshot B) disagree.
-        let effective_parsers =
-            self.effective_parser_dispatcher(project_root.as_deref())?;
-        let effective_fp =
-            self.fingerprint_for(effective_parsers.parser_tools.fingerprint());
+        let effective_parsers = self.effective_parser_dispatcher(project_root.as_deref())?;
+        let effective_fp = self.fingerprint_for(effective_parsers.parser_tools.fingerprint());
 
         // Kind schemas and trust are system-only — no overlays
-        crate::plan_builder::build_plan(
-            crate::plan_builder::BuildPlanInput {
-                item,
-                parameters,
-                hints,
-                ctx,
-                kinds: &self.kinds,
-                parsers: &effective_parsers,
-                roots: &roots,
-                registry_fingerprint: &effective_fp,
-                trust_store: &self.trust_store,
-                host_env: &self.host_env,
-            },
-        )
+        crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
+            item,
+            parameters,
+            hints,
+            ctx,
+            kinds: &self.kinds,
+            parsers: &effective_parsers,
+            roots: &roots,
+            registry_fingerprint: &effective_fp,
+            trust_store: &self.trust_store,
+            host_env: &self.host_env,
+        })
     }
 
     /// Execute a plan via Lillux subprocess dispatch.
@@ -328,11 +323,7 @@ impl Engine {
 
     /// Build resolution roots for a given project root (system-first order).
     pub fn resolution_roots(&self, project_root: Option<PathBuf>) -> ResolutionRoots {
-        let system_ai: Vec<PathBuf> = self
-            .system_roots
-            .iter()
-            .map(|p| p.join(AI_DIR))
-            .collect();
+        let system_ai: Vec<PathBuf> = self.system_roots.iter().map(|p| p.join(AI_DIR)).collect();
         let user_ai = self.user_root.clone().map(|p| p.join(AI_DIR));
         let project_ai = project_root.map(|p| p.join(AI_DIR));
         ResolutionRoots::from_flat(project_ai, user_ai, system_ai)
@@ -424,10 +415,11 @@ impl Engine {
                             .into(),
                     });
                 }
-                let overlaid = self
-                    .parser_dispatcher
-                    .parser_tools
-                    .with_project_overlay(path, &self.trust_store, &self.kinds)?;
+                let overlaid = self.parser_dispatcher.parser_tools.with_project_overlay(
+                    path,
+                    &self.trust_store,
+                    &self.kinds,
+                )?;
                 Ok(self.parser_dispatcher.with_parser_tools(overlaid))
             }
         }
@@ -440,7 +432,7 @@ mod tests {
     use crate::contracts::{
         EffectivePrincipal, ExecutionHints, ItemSpace, Principal, ProjectContext, TrustClass,
     };
-    use crate::trust::{TrustedSigner, TrustStore};
+    use crate::trust::{TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
     use std::fs;
     use std::path::Path;
@@ -467,7 +459,16 @@ mod tests {
         let yaml_owned = if yaml.contains("composed_value_contract") {
             yaml.to_string()
         } else {
-            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:ryeos/core/identity\n") } }
+            {
+                let with_contract = format!(
+                    "{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"
+                );
+                if with_contract.contains("composer:") {
+                    with_contract
+                } else {
+                    format!("{with_contract}composer: handler:ryeos/core/identity\n")
+                }
+            }
         };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }
@@ -528,11 +529,8 @@ formats:
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos() as u64;
-        let dir = std::env::temp_dir().join(format!(
-            "rye_engine_test_{}_{}",
-            std::process::id(),
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rye_engine_test_{}_{}", std::process::id(), nanos));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -565,8 +563,15 @@ formats:
         let engine = test_engine();
         let roots = engine.resolution_roots(Some(PathBuf::from("/workspace/project")));
         assert!(roots.ordered.iter().any(|r| r.space == ItemSpace::Project));
-        let project_root = roots.ordered.iter().find(|r| r.space == ItemSpace::Project).unwrap();
-        assert_eq!(project_root.ai_root, PathBuf::from("/workspace/project/.ai"));
+        let project_root = roots
+            .ordered
+            .iter()
+            .find(|r| r.space == ItemSpace::Project)
+            .unwrap();
+        assert_eq!(
+            project_root.ai_root,
+            PathBuf::from("/workspace/project/.ai")
+        );
     }
 
     #[test]
@@ -620,16 +625,16 @@ formats:
         assert_eq!(resolved.kind, "tool");
         assert_eq!(resolved.source_space, ItemSpace::Project);
         assert_eq!(resolved.source_format.extension, ".py");
-        assert_eq!(resolved.source_format.parser, "parser:ryeos/core/python/ast");
+        assert_eq!(
+            resolved.source_format.parser,
+            "parser:ryeos/core/python/ast"
+        );
         assert!(resolved.signature_header.is_some());
         let sig = resolved.signature_header.unwrap();
         assert_eq!(sig.timestamp, "2026-04-10T00:00:00Z");
         assert_eq!(sig.content_hash, "abc123");
         assert_eq!(sig.signer_fingerprint, "fp_test");
-        assert_eq!(
-            resolved.materialized_project_root,
-            Some(project_dir)
-        );
+        assert_eq!(resolved.materialized_project_root, Some(project_dir));
         assert!(!resolved.content_hash.is_empty());
     }
 
@@ -652,9 +657,7 @@ formats:
         };
         let sig: lillux::crypto::Signature = signing_key.sign(hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
-        format!(
-            "# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fingerprint}\n{body}"
-        )
+        format!("# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fingerprint}\n{body}")
     }
 
     use base64::Engine as _;
@@ -697,9 +700,7 @@ formats:
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
             }),
-            project_context: ProjectContext::LocalPath {
-                path: project_dir,
-            },
+            project_context: ProjectContext::LocalPath { path: project_dir },
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -739,9 +740,7 @@ formats:
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
             }),
-            project_context: ProjectContext::LocalPath {
-                path: project_dir,
-            },
+            project_context: ProjectContext::LocalPath { path: project_dir },
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -787,9 +786,7 @@ formats:
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
             }),
-            project_context: ProjectContext::LocalPath {
-                path: project_dir,
-            },
+            project_context: ProjectContext::LocalPath { path: project_dir },
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -814,7 +811,10 @@ formats:
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
 
         // Project overlay: tool → .yaml only — should be IGNORED
-        let overlay_dir = project_dir.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR).join("tool");
+        let overlay_dir = project_dir
+            .join(crate::AI_DIR)
+            .join(crate::KIND_SCHEMAS_DIR)
+            .join("tool");
         fs::create_dir_all(&overlay_dir).unwrap();
         let overlay_yaml = "\
 location:
@@ -862,7 +862,10 @@ formats:
         let ref_ = CanonicalRef::parse("tool:hello").unwrap();
         let resolved = engine.resolve(&ctx, &ref_).unwrap();
         assert_eq!(resolved.source_format.extension, ".py");
-        assert_eq!(resolved.source_format.parser, "parser:ryeos/core/python/ast");
+        assert_eq!(
+            resolved.source_format.parser,
+            "parser:ryeos/core/python/ast"
+        );
     }
 
     #[test]
@@ -896,9 +899,7 @@ formats:
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
             }),
-            project_context: ProjectContext::LocalPath {
-                path: project_dir,
-            },
+            project_context: ProjectContext::LocalPath { path: project_dir },
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1193,8 +1194,7 @@ formats:
         let dispatcher = engine
             .effective_parser_dispatcher(Some(&project_dir))
             .expect("effective dispatcher loads");
-        let via_dispatcher =
-            engine.fingerprint_for(dispatcher.parser_tools.fingerprint());
+        let via_dispatcher = engine.fingerprint_for(dispatcher.parser_tools.fingerprint());
 
         assert_eq!(
             via_helper, via_dispatcher,

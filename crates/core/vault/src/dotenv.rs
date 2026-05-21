@@ -5,17 +5,15 @@ use anyhow::{bail, Context, Result};
 
 use crate::policy::BLOCKED_NAMES;
 
-pub fn read_dotenv_overlay(
-    search_dirs: &[PathBuf],
-) -> Result<HashMap<String, String>> {
+pub fn read_dotenv_overlay(search_dirs: &[PathBuf]) -> Result<HashMap<String, String>> {
     let mut out: HashMap<String, String> = HashMap::new();
     for dir in search_dirs {
         let path = dir.join(".env");
         if !path.exists() {
             continue;
         }
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let content =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let parsed = parse_dotenv_text(&content, &path)?;
         for (k, v) in parsed {
             out.insert(k, v);

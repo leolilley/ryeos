@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use crate::handler_error::{HandlerError, HandlerResult};
 use crate::handler_context::HandlerContext;
+use crate::handler_error::{HandlerError, HandlerResult};
+use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,7 +18,11 @@ pub struct Request {
     pub name: String,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> HandlerResult<Value> {
     ctx.require_verified()?;
 
     let deleted = state

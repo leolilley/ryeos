@@ -192,17 +192,14 @@ impl RequiredPattern {
                 subject,
             } => {
                 if let Ok(cap) = Capability::parse(granted) {
-                    if cap.verb == *verb && cap.kind == *kind
-                        && cap_matches(subject, &cap.subject)
+                    if cap.verb == *verb && cap.kind == *kind && cap_matches(subject, &cap.subject)
                     {
                         return true;
                     }
                 }
                 cap_matches(granted, &format!("ryeos.{}.{}.{}", verb, kind, subject))
             }
-            RequiredPattern::Other(req) => {
-                cap_matches(granted, req)
-            }
+            RequiredPattern::Other(req) => cap_matches(granted, req),
         }
     }
 }
@@ -383,11 +380,23 @@ mod tests {
     use crate::verb_registry::VerbDef;
 
     fn test_authorizer() -> Authorizer {
-        Authorizer::new(Arc::new(VerbRegistry::from_records(&[
-            VerbDef { name: "execute".into(), execute: None },
-            VerbDef { name: "fetch".into(), execute: None },
-            VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
-        ]).unwrap()))
+        Authorizer::new(Arc::new(
+            VerbRegistry::from_records(&[
+                VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+                VerbDef {
+                    name: "fetch".into(),
+                    execute: None,
+                },
+                VerbDef {
+                    name: "sign".into(),
+                    execute: Some("tool:ryeos/core/sign".into()),
+                },
+            ])
+            .unwrap(),
+        ))
     }
 
     // ── Capability parsing ────────────────────────────────────────
@@ -457,7 +466,11 @@ mod tests {
     fn required_pattern_full() {
         let p = RequiredPattern::parse("ryeos.execute.service.bundle.install");
         match p {
-            RequiredPattern::Full { verb, kind, subject } => {
+            RequiredPattern::Full {
+                verb,
+                kind,
+                subject,
+            } => {
                 assert_eq!(verb, "execute");
                 assert_eq!(kind, "service");
                 assert_eq!(subject, "bundle.install");
@@ -468,7 +481,10 @@ mod tests {
 
     #[test]
     fn required_pattern_other() {
-        assert!(matches!(RequiredPattern::parse("*"), RequiredPattern::Other(_)));
+        assert!(matches!(
+            RequiredPattern::parse("*"),
+            RequiredPattern::Other(_)
+        ));
         assert!(matches!(
             RequiredPattern::parse("node.maintenance"),
             RequiredPattern::Other(_)
@@ -663,8 +679,12 @@ mod tests {
     fn rye_wildcard_required_satisfied_by_any_rye_grant() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("ryeos.*");
-        assert!(auth.authorize(&["ryeos.execute.service.x".to_string()], &policy).is_ok());
-        assert!(auth.authorize(&["ryeos.fetch.tool.y".to_string()], &policy).is_ok());
+        assert!(auth
+            .authorize(&["ryeos.execute.service.x".to_string()], &policy)
+            .is_ok());
+        assert!(auth
+            .authorize(&["ryeos.fetch.tool.y".to_string()], &policy)
+            .is_ok());
         assert!(auth.authorize(&["ryeos.*".to_string()], &policy).is_ok());
         assert!(auth.authorize(&["*".to_string()], &policy).is_ok());
     }
@@ -689,7 +709,10 @@ mod tests {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("ryeos.execute.service.*");
         assert!(auth
-            .authorize(&["ryeos.execute.service.bundle.install".to_string()], &policy)
+            .authorize(
+                &["ryeos.execute.service.bundle.install".to_string()],
+                &policy
+            )
             .is_ok());
         assert!(auth
             .authorize(&["ryeos.execute.service.threads.get".to_string()], &policy)
@@ -759,15 +782,30 @@ mod tests {
 
     #[test]
     fn authorizer_shares_registry_instance() {
-        let vr = Arc::new(VerbRegistry::from_records(&[
-            VerbDef { name: "execute".into(), execute: None },
-            VerbDef { name: "fetch".into(), execute: None },
-            VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
-        ]).unwrap());
+        let vr = Arc::new(
+            VerbRegistry::from_records(&[
+                VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+                VerbDef {
+                    name: "fetch".into(),
+                    execute: None,
+                },
+                VerbDef {
+                    name: "sign".into(),
+                    execute: Some("tool:ryeos/core/sign".into()),
+                },
+            ])
+            .unwrap(),
+        );
         let auth = Authorizer::new(vr.clone());
         let state_ptr = &*vr as *const VerbRegistry;
         let auth_ptr = auth.verb_registry() as *const VerbRegistry;
-        assert_eq!(state_ptr, auth_ptr, "Authorizer must share the same VerbRegistry instance");
+        assert_eq!(
+            state_ptr, auth_ptr,
+            "Authorizer must share the same VerbRegistry instance"
+        );
     }
 
     // ── Subject formatting consistency ────────────────────────────
@@ -790,8 +828,14 @@ mod tests {
 
     #[test]
     fn slash_subject_matches_across_systems() {
-        assert!(cap_matches("ryeos.execute.*", &canonical_cap("service", "node-sign", "execute")));
-        assert!(cap_matches("ryeos.execute.*", &canonical_cap("directive", "ryeos/code/review", "execute")));
+        assert!(cap_matches(
+            "ryeos.execute.*",
+            &canonical_cap("service", "node-sign", "execute")
+        ));
+        assert!(cap_matches(
+            "ryeos.execute.*",
+            &canonical_cap("directive", "ryeos/code/review", "execute")
+        ));
     }
 }
 
@@ -843,7 +887,10 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
         return Err(format!("scope '{}' must not end with '.'", scope));
     }
     if scope.contains("..") {
-        return Err(format!("scope '{}' must not contain consecutive dots", scope));
+        return Err(format!(
+            "scope '{}' must not contain consecutive dots",
+            scope
+        ));
     }
     // Validate each segment's character class. `*` is permitted only
     // as a complete segment.

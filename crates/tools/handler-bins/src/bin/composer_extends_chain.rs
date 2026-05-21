@@ -5,10 +5,7 @@ fn main() {
     std::process::exit(run_handler(|req| match req {
         HandlerRequest::Compose(c) => match extends_chain::compose(&c.composer_config, &c) {
             Ok(success) => HandlerResponse::ComposeOk(success),
-            Err((step, reason)) => HandlerResponse::ComposeErr {
-                step,
-                reason,
-            },
+            Err((step, reason)) => HandlerResponse::ComposeErr { step, reason },
         },
         HandlerRequest::ValidateComposerConfig(v) => {
             match extends_chain::validate_config(&v.composer_config) {

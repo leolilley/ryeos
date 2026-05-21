@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use ryeos_engine::contracts::{
-    CancellationMode, EffectivePrincipal, ExecutionHints, NativeResumeSpec, Principal,
-    ProjectContext, PlanSubprocessSpec,
+    CancellationMode, EffectivePrincipal, ExecutionHints, NativeResumeSpec, PlanSubprocessSpec,
+    Principal, ProjectContext,
 };
 use serde::{Deserialize, Serialize};
 
@@ -163,9 +163,7 @@ impl ResumeContext {
     /// `requested_by: Option<String>` thread-record column.
     pub fn requested_by_name(&self) -> Option<String> {
         match &self.requested_by {
-            EffectivePrincipal::Local(Principal { fingerprint, .. }) => {
-                Some(fingerprint.clone())
-            }
+            EffectivePrincipal::Local(Principal { fingerprint, .. }) => Some(fingerprint.clone()),
             EffectivePrincipal::Delegated(d) => Some(d.caller_fingerprint.clone()),
         }
     }
@@ -292,7 +290,10 @@ mod tests {
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(serde_json::to_value(&m).unwrap(), serde_json::to_value(&back).unwrap());
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            serde_json::to_value(&back).unwrap()
+        );
     }
 
     #[test]
@@ -301,7 +302,10 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(back.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
-        assert_eq!(serde_json::to_value(&m).unwrap(), serde_json::to_value(&back).unwrap());
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            serde_json::to_value(&back).unwrap()
+        );
     }
 
     #[test]
@@ -337,11 +341,11 @@ mod tests {
 
     #[test]
     fn daemon_thread_state_dir_is_under_system_space_dir() {
-        let dir = daemon_thread_state_dir(
-            std::path::Path::new("/var/lib/ryeosd"),
-            "T-abc",
+        let dir = daemon_thread_state_dir(std::path::Path::new("/var/lib/ryeosd"), "T-abc");
+        assert_eq!(
+            dir,
+            PathBuf::from("/var/lib/crates/bin/daemon/threads/T-abc")
         );
-        assert_eq!(dir, PathBuf::from("/var/lib/crates/bin/daemon/threads/T-abc"));
     }
 
     #[test]

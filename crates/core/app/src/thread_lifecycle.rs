@@ -8,12 +8,12 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::event_store_service::EventStoreService;
+use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
-    StateStore, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, ThreadArtifactRecord,
+    FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, StateStore, ThreadArtifactRecord,
     ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
-use crate::kind_profiles::KindProfileRegistry;
-use crate::event_store_service::EventStoreService;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
@@ -171,11 +171,13 @@ impl ThreadLifecycleService {
     ) -> anyhow::Result<Self> {
         let hostname = env::var("HOSTNAME")
             .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
-            .map_err(|_| anyhow::anyhow!(
-                "HOSTNAME env var not set and system hostname unavailable. \
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "HOSTNAME env var not set and system hostname unavailable. \
                  Set HOSTNAME to this node's identity (e.g. hostname or unique site ID). \
                  This is used to construct the site_id for thread isolation."
-            ))?;
+                )
+            })?;
         if hostname.trim().is_empty() {
             anyhow::bail!(
                 "HOSTNAME environment variable is set but empty. \
@@ -195,7 +197,11 @@ impl ThreadLifecycleService {
 
     /// Wire the scheduler DB for thread completion tracking.
     /// Called once after construction, once the scheduler DB is available.
-    pub fn set_scheduler_db(&self, db: Arc<ryeos_scheduler::db::SchedulerDb>, system_space_dir: std::path::PathBuf) {
+    pub fn set_scheduler_db(
+        &self,
+        db: Arc<ryeos_scheduler::db::SchedulerDb>,
+        system_space_dir: std::path::PathBuf,
+    ) {
         *self.scheduler_db.write().unwrap() = Some(db);
         *self.system_space_dir.write().unwrap() = Some(system_space_dir);
     }
@@ -466,9 +472,14 @@ impl ThreadLifecycleService {
                                 "signer_fingerprint": jsonl_signer_fp,
                             });
                             let fires_path = sys_dir
-                                .join(ryeos_engine::AI_DIR).join("state").join("schedules")
-                                .join(&jsonl_schedule_id).join("fires.jsonl");
-                            if let Err(e) = ryeos_scheduler::projection::append_jsonl_entry(&fires_path, &entry) {
+                                .join(ryeos_engine::AI_DIR)
+                                .join("state")
+                                .join("schedules")
+                                .join(&jsonl_schedule_id)
+                                .join("fires.jsonl");
+                            if let Err(e) =
+                                ryeos_scheduler::projection::append_jsonl_entry(&fires_path, &entry)
+                            {
                                 tracing::warn!(
                                     thread_id = %params.thread_id,
                                     error = %e,
@@ -668,9 +679,7 @@ fn validate_thread_id_format(id: &str) -> Result<()> {
     let suffix = &id[2..];
     let segments: Vec<&str> = suffix.split('-').collect();
     if segments.len() != 5 {
-        bail!(
-            "thread_id suffix must have 5 dash-separated hex groups: got `{suffix}`"
-        );
+        bail!("thread_id suffix must have 5 dash-separated hex groups: got `{suffix}`");
     }
     let expected_lengths: &[usize] = &[8, 4, 4, 4, 12];
     for (seg, &expected) in segments.iter().zip(expected_lengths.iter()) {
@@ -723,7 +732,9 @@ pub struct ResolveRootExecutionParams<'a> {
     pub validate_only: bool,
 }
 
-pub fn resolve_root_execution(params: ResolveRootExecutionParams<'_>) -> Result<ResolvedExecutionRequest> {
+pub fn resolve_root_execution(
+    params: ResolveRootExecutionParams<'_>,
+) -> Result<ResolvedExecutionRequest> {
     let ResolveRootExecutionParams {
         engine,
         site_id,
@@ -764,12 +775,7 @@ pub fn resolve_root_execution(params: ResolveRootExecutionParams<'_>) -> Result<
         .metadata
         .executor_id
         .clone()
-        .ok_or_else(|| {
-            anyhow!(
-                "item {} does not declare an executor_id",
-                item_ref
-            )
-        })?;
+        .ok_or_else(|| anyhow!("item {} does not declare an executor_id", item_ref))?;
 
     Ok(ResolvedExecutionRequest {
         kind: thread_kind,
@@ -927,7 +933,11 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
             }
             // Layer daemon callback env last — daemon-controlled infra
             // must always win over anything else.
-            spec.env.extend(daemon_callback_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+            spec.env.extend(
+                daemon_callback_env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
         }
     }
 
@@ -940,15 +950,11 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     let mut allocated_checkpoint_dir: Option<std::path::PathBuf> = None;
     if let Some(ts_dir) = thread_state_dir {
         for node in &mut plan.nodes {
-            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node
-            {
+            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
                 if spec.execution.native_resume.is_some() {
                     let ckpt = ts_dir.join("checkpoints");
                     std::fs::create_dir_all(&ckpt).map_err(|e| {
-                        anyhow!(
-                            "failed to create checkpoint dir {}: {e}",
-                            ckpt.display()
-                        )
+                        anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
                     })?;
                     spec.env.insert(
                         "RYEOS_CHECKPOINT_DIR".to_string(),
@@ -1011,8 +1017,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     // exact project version captured at spawn time, not the current
     // working-dir head. See `docs/future/RESUME-ADVANCED-PATH.md`.
     if launch_metadata.native_resume.is_some() {
-        launch_metadata = launch_metadata.with_resume_context(
-            crate::launch_metadata::ResumeContext {
+        launch_metadata =
+            launch_metadata.with_resume_context(crate::launch_metadata::ResumeContext {
                 kind: resolved.kind.clone(),
                 item_ref: resolved.item_ref.clone(),
                 launch_mode: resolved.launch_mode.clone(),
@@ -1029,8 +1035,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 // runtime spawns that DO have a permissions model go
                 // through `launch::build_and_launch`, not `spawn_item`.
                 effective_caps: Vec::new(),
-            },
-        );
+            });
     }
     let spawned = engine
         .spawn_plan(&engine_ctx, &plan)

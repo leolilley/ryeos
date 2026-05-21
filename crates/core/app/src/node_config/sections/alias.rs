@@ -57,8 +57,8 @@ impl NodeConfigSection for AliasSection {
     }
 
     fn parse(&self, name: &str, body: &Value) -> Result<Box<dyn SectionRecord>> {
-        let record: AliasRecord = serde_json::from_value(body.clone())
-            .context("failed to parse alias record")?;
+        let record: AliasRecord =
+            serde_json::from_value(body.clone()).context("failed to parse alias record")?;
 
         // Section must be "aliases"
         if record.section != "aliases" {
@@ -101,7 +101,10 @@ impl NodeConfigSection for AliasSection {
                 bail!("alias '{}' uses reserved first token 'help'", name);
             }
             if first == "init" {
-                bail!("alias '{}' uses reserved first token 'init' (local-only)", name);
+                bail!(
+                    "alias '{}' uses reserved first token 'init' (local-only)",
+                    name
+                );
             }
             if first == "execute" {
                 bail!(
@@ -300,6 +303,9 @@ mod tests {
     #[test]
     fn source_policy_is_effective_bundle_roots_and_state() {
         let section = AliasSection;
-        assert_eq!(section.source_policy(), SectionSourcePolicy::EffectiveBundleRootsAndState);
+        assert_eq!(
+            section.source_policy(),
+            SectionSourcePolicy::EffectiveBundleRootsAndState
+        );
     }
 }

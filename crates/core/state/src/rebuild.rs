@@ -52,8 +52,9 @@ pub fn rebuild_projection(
          DELETE FROM thread_edges;
          DELETE FROM thread_results;
          DELETE FROM thread_artifacts;
-         DELETE FROM thread_facets;"
-    ).context("failed to clear projection tables")?;
+         DELETE FROM thread_facets;",
+    )
+    .context("failed to clear projection tables")?;
 
     // Enumerate chain head refs
     let chains_dir = refs_root.join("generic/chains");
@@ -61,9 +62,7 @@ pub fn rebuild_projection(
         return Ok(report);
     }
 
-    for entry in std::fs::read_dir(&chains_dir)
-        .context("failed to read chains refs directory")?
-    {
+    for entry in std::fs::read_dir(&chains_dir).context("failed to read chains refs directory")? {
         let entry = entry.context("failed to read chain ref entry")?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -88,12 +87,7 @@ pub fn rebuild_projection(
         }
 
         // Walk chain history (newest to oldest via prev_chain_state_hash)
-        let chain_report = rebuild_chain(
-            projection,
-            cas_root,
-            &chain_root_id,
-            chain_state_hash,
-        )?;
+        let chain_report = rebuild_chain(projection, cas_root, &chain_root_id, chain_state_hash)?;
 
         // Update projection_meta to point to the head
         // Read the head chain_state to get updated_at
@@ -134,9 +128,7 @@ pub fn catch_up_projection(
         return Ok(report);
     }
 
-    for entry in std::fs::read_dir(&chains_dir)
-        .context("failed to read chains refs directory")?
-    {
+    for entry in std::fs::read_dir(&chains_dir).context("failed to read chains refs directory")? {
         let entry = entry.context("failed to read chain ref entry")?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -232,7 +224,10 @@ fn rebuild_chain(
     chain_root_id: &str,
     head_hash: &str,
 ) -> Result<ChainReport> {
-    let mut report = ChainReport { threads: 0, events: 0 };
+    let mut report = ChainReport {
+        threads: 0,
+        events: 0,
+    };
 
     // Walk chain state history head → oldest
     let mut state_hashes = Vec::new();
@@ -311,11 +306,7 @@ fn rebuild_chain(
             if let Ok(cs_value) = serde_json::from_str::<Value>(&cs_json) {
                 // Walk all events from last_event_hash
                 if let Some(last_event) = cs_value.get("last_event_hash").and_then(|v| v.as_str()) {
-                    let event_count = walk_and_project_events(
-                        projection,
-                        cas_root,
-                        last_event,
-                    )?;
+                    let event_count = walk_and_project_events(projection, cas_root, last_event)?;
                     report.events += event_count;
                 }
             }
@@ -386,7 +377,10 @@ fn rebuild_chain_delta(
     // Reverse to get chronological order of new states
     state_hashes.reverse();
 
-    let mut report = ChainReport { threads: 0, events: 0 };
+    let mut report = ChainReport {
+        threads: 0,
+        events: 0,
+    };
 
     // Project thread snapshots from new chain states
     let mut seen_threads: HashSet<String> = HashSet::new();
@@ -427,7 +421,11 @@ fn rebuild_chain_delta(
                 let prev_last_event = std::fs::read_to_string(&from_cs_path)
                     .ok()
                     .and_then(|j| serde_json::from_str::<Value>(&j).ok())
-                    .and_then(|v| v.get("last_event_hash").and_then(|e| e.as_str()).map(String::from));
+                    .and_then(|v| {
+                        v.get("last_event_hash")
+                            .and_then(|e| e.as_str())
+                            .map(String::from)
+                    });
 
                 if let Some(last_event) = cs_value.get("last_event_hash").and_then(|v| v.as_str()) {
                     report.events = walk_and_project_events_from(
@@ -490,7 +488,10 @@ fn walk_and_project_events_from(
         };
 
         // Only project durable events
-        let durability = value.get("durability").and_then(|v| v.as_str()).unwrap_or("");
+        let durability = value
+            .get("durability")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if durability == "durable" {
             if let Ok(event) = serde_json::from_value::<ThreadEvent>(value.clone()) {
                 project_event(projection, &event)?;
@@ -519,7 +520,13 @@ mod tests {
     use ryeos_tracing::test as trace_test;
 
     fn make_hash(suffix: &str) -> String {
-        format!("{:064}", suffix.as_bytes().iter().fold(0u64, |a, &b| a.wrapping_add(b as u64)))
+        format!(
+            "{:064}",
+            suffix
+                .as_bytes()
+                .iter()
+                .fold(0u64, |a, &b| a.wrapping_add(b as u64))
+        )
     }
 
     fn write_object(cas_root: &Path, hash: &str, value: &Value) {
@@ -532,7 +539,10 @@ mod tests {
     }
 
     fn write_signed_head(refs_root: &Path, chain_root_id: &str, target_hash: &str) {
-        let head_path = refs_root.join("generic/chains").join(chain_root_id).join("head");
+        let head_path = refs_root
+            .join("generic/chains")
+            .join(chain_root_id)
+            .join("head");
         std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
         let ref_value = serde_json::json!({
             "schema": 1, "kind": "signed_ref",
@@ -606,7 +616,14 @@ mod tests {
         })
     }
 
-    fn make_event_json(chain_root_id: &str, thread_id: &str, chain_seq: u64, thread_seq: u64, prev_chain: Option<&str>, event_type: &str) -> Value {
+    fn make_event_json(
+        chain_root_id: &str,
+        thread_id: &str,
+        chain_seq: u64,
+        thread_seq: u64,
+        prev_chain: Option<&str>,
+        event_type: &str,
+    ) -> Value {
         serde_json::json!({
             "kind": "thread_event",
             "schema": 1,
@@ -785,9 +802,11 @@ mod tests {
         let cs_hash = make_hash("cs");
         let snap = make_snapshot_json("T-root", "T-root", "created");
         let cs = make_chain_state(
-            "T-root", None,
+            "T-root",
+            None,
             vec![("T-root", &snap_hash, None, 0, "created")],
-            None, 0,
+            None,
+            0,
         );
 
         write_object(&cas_root, &snap_hash, &snap);
@@ -829,14 +848,18 @@ mod tests {
         let event = make_event_json("T-root", "T-root", 1, 1, None, "thread_started");
 
         let cs1 = make_chain_state(
-            "T-root", None,
+            "T-root",
+            None,
             vec![("T-root", &snap1_hash, None, 0, "created")],
-            None, 0,
+            None,
+            0,
         );
         let cs2 = make_chain_state(
-            "T-root", Some(&cs1_hash),
+            "T-root",
+            Some(&cs1_hash),
             vec![("T-root", &snap2_hash, Some(&event_hash), 1, "running")],
-            Some(&event_hash), 1,
+            Some(&event_hash),
+            1,
         );
 
         write_object(&cas_root, &snap1_hash, &snap1);
@@ -907,7 +930,14 @@ mod tests {
         });
 
         let span = trace_test::find_span(&spans, "state:rebuild");
-        assert!(span.is_some(), "expected state:rebuild span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected state:rebuild span, got: {:?}",
+            spans
+                .iter()
+                .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -923,6 +953,13 @@ mod tests {
         });
 
         let span = trace_test::find_span(&spans, "state:catch_up");
-        assert!(span.is_some(), "expected state:catch_up span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected state:catch_up span, got: {:?}",
+            spans
+                .iter()
+                .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
+                .collect::<Vec<_>>()
+        );
     }
 }

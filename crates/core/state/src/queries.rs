@@ -176,19 +176,17 @@ const THREAD_COLUMNS: &str = r#"
 "#;
 
 pub fn get_thread(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Option<ThreadRow>> {
-    let sql = &format!(
-        "SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id = ?"
-    );
-    let mut stmt = db
-        .connection()
-        .prepare(sql)
-        .context("prepare get_thread")?;
+    let sql = &format!("SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id = ?");
+    let mut stmt = db.connection().prepare(sql).context("prepare get_thread")?;
     stmt.query_row([thread_id], ThreadRow::from_row)
         .optional()
         .context("query get_thread")
 }
 
-pub fn list_threads_by_chain(db: &ProjectionDb, chain_root_id: &str) -> anyhow::Result<Vec<ThreadRow>> {
+pub fn list_threads_by_chain(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+) -> anyhow::Result<Vec<ThreadRow>> {
     let sql = &format!(
         "SELECT {THREAD_COLUMNS} FROM threads WHERE chain_root_id = ? ORDER BY created_at"
     );
@@ -202,7 +200,10 @@ pub fn list_threads_by_chain(db: &ProjectionDb, chain_root_id: &str) -> anyhow::
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-pub fn list_threads_by_status(db: &ProjectionDb, statuses: &[&str]) -> anyhow::Result<Vec<ThreadRow>> {
+pub fn list_threads_by_status(
+    db: &ProjectionDb,
+    statuses: &[&str],
+) -> anyhow::Result<Vec<ThreadRow>> {
     if statuses.is_empty() {
         return Ok(vec![]);
     }
@@ -226,9 +227,7 @@ pub fn list_threads_by_status(db: &ProjectionDb, statuses: &[&str]) -> anyhow::R
 }
 
 pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<ThreadRow>> {
-    let sql = &format!(
-        "SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?"
-    );
+    let sql = &format!("SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?");
     let mut stmt = db
         .connection()
         .prepare(sql)
@@ -301,7 +300,10 @@ pub fn active_thread_count(db: &ProjectionDb) -> anyhow::Result<i64> {
     Ok(count)
 }
 
-pub fn get_thread_result(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Option<ThreadResultRow>> {
+pub fn get_thread_result(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<ThreadResultRow>> {
     let mut stmt = db
         .connection()
         .prepare(
@@ -314,7 +316,10 @@ pub fn get_thread_result(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<O
         .context("query get_thread_result")
 }
 
-pub fn list_thread_artifacts(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<ArtifactRow>> {
+pub fn list_thread_artifacts(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Vec<ArtifactRow>> {
     let mut stmt = db
         .connection()
         .prepare(
@@ -345,7 +350,10 @@ pub fn list_thread_children(db: &ProjectionDb, parent_id: &str) -> anyhow::Resul
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-pub fn list_thread_edges(db: &ProjectionDb, chain_root_id: &str) -> anyhow::Result<Vec<ThreadEdgeRow>> {
+pub fn list_thread_edges(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+) -> anyhow::Result<Vec<ThreadEdgeRow>> {
     let mut stmt = db
         .connection()
         .prepare(
@@ -372,7 +380,8 @@ pub fn replay_events(
                 prev_thread_event_hash, payload \
          FROM events WHERE chain_root_id = ?",
     );
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(chain_root_id.to_string())];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(chain_root_id.to_string())];
 
     if let Some(tid) = thread_id {
         sql.push_str(" AND thread_id = ?");
@@ -426,7 +435,12 @@ mod tests {
         ProjectionDb::open(&path).unwrap()
     }
 
-    fn insert_thread(db: &ProjectionDb, thread_id: &str, chain_root_id: &str, status: ThreadStatus) {
+    fn insert_thread(
+        db: &ProjectionDb,
+        thread_id: &str,
+        chain_root_id: &str,
+        status: ThreadStatus,
+    ) {
         let snapshot = ThreadSnapshotBuilder::new(
             thread_id,
             chain_root_id,
@@ -526,10 +540,16 @@ mod tests {
         insert_thread(&db, "T-child1", "chain-A", ThreadStatus::Created);
         insert_thread(&db, "T-child2", "chain-A", ThreadStatus::Created);
 
-        project_thread_edge(&db, "chain-A", "T-parent", "T-child1", Some(1), Some("spawn"))
-            .unwrap();
-        project_thread_edge(&db, "chain-A", "T-parent", "T-child2", Some(2), None)
-            .unwrap();
+        project_thread_edge(
+            &db,
+            "chain-A",
+            "T-parent",
+            "T-child1",
+            Some(1),
+            Some("spawn"),
+        )
+        .unwrap();
+        project_thread_edge(&db, "chain-A", "T-parent", "T-child2", Some(2), None).unwrap();
 
         let children = list_thread_children(&db, "T-parent").unwrap();
         assert_eq!(children.len(), 2);
@@ -541,10 +561,8 @@ mod tests {
     #[test]
     fn list_thread_edges_by_chain() {
         let db = test_db();
-        project_thread_edge(&db, "chain-A", "T-p", "T-c1", Some(1), Some("reason"))
-            .unwrap();
-        project_thread_edge(&db, "chain-A", "T-p", "T-c2", None, None)
-            .unwrap();
+        project_thread_edge(&db, "chain-A", "T-p", "T-c1", Some(1), Some("reason")).unwrap();
+        project_thread_edge(&db, "chain-A", "T-p", "T-c2", None, None).unwrap();
 
         let edges = list_thread_edges(&db, "chain-A").unwrap();
         assert_eq!(edges.len(), 2);

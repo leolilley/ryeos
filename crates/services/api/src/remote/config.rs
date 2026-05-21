@@ -78,7 +78,10 @@ pub fn load_remotes(system_space_dir: &Path) -> Result<HashMap<String, RemoteCon
 }
 
 /// Save remotes config to disk.
-pub fn save_remotes(system_space_dir: &Path, remotes: &HashMap<String, RemoteConfig>) -> Result<()> {
+pub fn save_remotes(
+    system_space_dir: &Path,
+    remotes: &HashMap<String, RemoteConfig>,
+) -> Result<()> {
     let path = system_space_dir.join(REMOTES_CONFIG_RELATIVE);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -108,9 +111,12 @@ pub fn canonical_local_project_path(project_path: &Path) -> Result<PathBuf> {
             project_path.display()
         );
     }
-    project_path
-        .canonicalize()
-        .with_context(|| format!("cannot canonicalize project '{}'; ensure it exists", project_path.display()))
+    project_path.canonicalize().with_context(|| {
+        format!(
+            "cannot canonicalize project '{}'; ensure it exists",
+            project_path.display()
+        )
+    })
 }
 
 /// Resolve a configured local->remote project binding.
@@ -154,16 +160,15 @@ pub fn validate_remote_project_path(remote_project_path: &str) -> Result<()> {
 
 /// Validate that a URL uses HTTPS or is a loopback address.
 pub fn validate_url(url: &str) -> Result<()> {
-    let parsed: url::Url = url.parse()
+    let parsed: url::Url = url
+        .parse()
         .with_context(|| format!("invalid URL: {}", url))?;
 
     let scheme = parsed.scheme();
     if scheme != "https" {
         let host = parsed.host_str().unwrap_or("");
-        let is_loopback = host == "localhost"
-            || host == "127.0.0.1"
-            || host == "::1"
-            || host == "[::1]";
+        let is_loopback =
+            host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
         if !is_loopback {
             anyhow::bail!(
                 "remote URL must use HTTPS (got '{}'). Loopback addresses are allowed without TLS.",
@@ -198,14 +203,19 @@ mod tests {
     fn roundtrip() {
         let tmpdir = tempfile::tempdir().unwrap();
         let mut remotes = HashMap::new();
-        remotes.insert("default".into(), RemoteConfig {
-            name: "default".into(),
-            url: "https://example.com".into(),
-            principal_id: "fp:abc123".into(),
-            vault_fingerprint: "sha256:def456".into(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![".git/".into(), "target/".into()] },
-            project_bindings: HashMap::new(),
-        });
+        remotes.insert(
+            "default".into(),
+            RemoteConfig {
+                name: "default".into(),
+                url: "https://example.com".into(),
+                principal_id: "fp:abc123".into(),
+                vault_fingerprint: "sha256:def456".into(),
+                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
+                    patterns: vec![".git/".into(), "target/".into()],
+                },
+                project_bindings: HashMap::new(),
+            },
+        );
         save_remotes(tmpdir.path(), &remotes).unwrap();
         let loaded = load_remotes(tmpdir.path()).unwrap();
         assert_eq!(loaded.len(), 1);
@@ -221,15 +231,23 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join(".ai/config/remotes/remotes.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 remotes:
   bare:
     name: bare
     url: https://example.com
     principal_id: fp:abc
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let result = load_remotes(tmpdir.path());
-        assert!(result.is_err(), "should fail on missing required fields, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "should fail on missing required fields, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -240,20 +258,28 @@ remotes:
         let local_key = local.canonicalize().unwrap().to_string_lossy().to_string();
 
         let mut bindings = HashMap::new();
-        bindings.insert(local_key.clone(), RemoteProjectBinding {
-            remote_project_path: "/data/projects/example".into(),
-            sync_scope: ProjectSyncScope::AiOnly,
-        });
+        bindings.insert(
+            local_key.clone(),
+            RemoteProjectBinding {
+                remote_project_path: "/data/projects/example".into(),
+                sync_scope: ProjectSyncScope::AiOnly,
+            },
+        );
 
         let mut remotes = HashMap::new();
-        remotes.insert("railway".into(), RemoteConfig {
-            name: "railway".into(),
-            url: "https://example.com".into(),
-            principal_id: "fp:abc123".into(),
-            vault_fingerprint: "sha256:def456".into(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![".git/".into()] },
-            project_bindings: bindings,
-        });
+        remotes.insert(
+            "railway".into(),
+            RemoteConfig {
+                name: "railway".into(),
+                url: "https://example.com".into(),
+                principal_id: "fp:abc123".into(),
+                vault_fingerprint: "sha256:def456".into(),
+                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
+                    patterns: vec![".git/".into()],
+                },
+                project_bindings: bindings,
+            },
+        );
 
         save_remotes(tmpdir.path(), &remotes).unwrap();
         let loaded = load_remotes(tmpdir.path()).unwrap();

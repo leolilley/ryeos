@@ -8,15 +8,11 @@ use axum::response::{IntoResponse, Response};
 use crate::api_state::ApiState;
 use crate::routes::compile::RouteDispatchContext;
 use crate::routes::invocation::{
-    RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
-    InvocationCheck,
+    InvocationCheck, RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
 };
 use crate::routes::limits::RouteLimiter;
 
-pub async fn route_dispatcher(
-    State(api_state): State<ApiState>,
-    request: Request,
-) -> Response {
+pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Request) -> Response {
     let table = api_state.route_table.load_full();
     let app_state = (*api_state.app).clone();
     let webhook_dedupe = api_state.webhook_dedupe.clone();
@@ -40,10 +36,18 @@ pub async fn route_dispatcher(
     let _permit = match route.semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(tokio::sync::TryAcquireError::NoPermits) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"error": "too many concurrent requests"}))).into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"error": "too many concurrent requests"})),
+            )
+                .into_response();
         }
         Err(tokio::sync::TryAcquireError::Closed) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({"error": "route semaphore closed"}))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "route semaphore closed"})),
+            )
+                .into_response();
         }
     };
 
@@ -111,14 +115,20 @@ pub async fn route_dispatcher(
     let no_timeout = is_streaming && limiter.timeout == Duration::ZERO;
 
     if no_timeout {
-        match route_ref.response_mode.handle(&route_ref, route_dispatch_ctx).await {
+        match route_ref
+            .response_mode
+            .handle(&route_ref, route_dispatch_ctx)
+            .await
+        {
             Ok(resp) => resp,
             Err(e) => e.into_response(),
         }
     } else {
         let result = tokio::time::timeout(
             limiter.timeout,
-            route_ref.response_mode.handle(&route_ref, route_dispatch_ctx),
+            route_ref
+                .response_mode
+                .handle(&route_ref, route_dispatch_ctx),
         )
         .await;
 

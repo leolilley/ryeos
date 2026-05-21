@@ -52,8 +52,7 @@ fn main() {
         emit_frame(&StreamingChunk {
             seq: i,
             kind: StreamingChunkKind::Stdout,
-            data: Some(base64::engine::general_purpose::STANDARD
-                .encode(format!("chunk {i}\n"))),
+            data: Some(base64::engine::general_purpose::STANDARD.encode(format!("chunk {i}\n"))),
             exit_code: None,
             terminal: false,
         });
@@ -64,8 +63,7 @@ fn main() {
     emit_frame(&StreamingChunk {
         seq: 5,
         kind: StreamingChunkKind::Stderr,
-        data: Some(base64::engine::general_purpose::STANDARD
-            .encode("done\n")),
+        data: Some(base64::engine::general_purpose::STANDARD.encode("done\n")),
         exit_code: None,
         terminal: false,
     });

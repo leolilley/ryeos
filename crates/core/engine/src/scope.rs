@@ -86,10 +86,12 @@ mod tests {
 
     #[test]
     fn local_with_execute_among_others() {
-        assert!(
-            check_execution_scope(&local_principal(vec!["threads.read", "execute", "registry.read"]))
-                .is_ok()
-        );
+        assert!(check_execution_scope(&local_principal(vec![
+            "threads.read",
+            "execute",
+            "registry.read"
+        ]))
+        .is_ok());
     }
 
     #[test]
@@ -104,9 +106,8 @@ mod tests {
 
     #[test]
     fn local_with_wrong_scopes_denied() {
-        let err =
-            check_execution_scope(&local_principal(vec!["threads.read", "registry.read"]))
-                .unwrap_err();
+        let err = check_execution_scope(&local_principal(vec!["threads.read", "registry.read"]))
+            .unwrap_err();
         assert!(
             matches!(err, EngineError::InsufficientScope { .. }),
             "expected InsufficientScope, got: {err:?}"
@@ -134,8 +135,7 @@ mod tests {
 
     #[test]
     fn delegated_with_wrong_scopes_denied() {
-        let err =
-            check_execution_scope(&delegated_principal(vec!["registry.read"])).unwrap_err();
+        let err = check_execution_scope(&delegated_principal(vec!["registry.read"])).unwrap_err();
         assert!(
             matches!(err, EngineError::InsufficientScope { .. }),
             "expected InsufficientScope, got: {err:?}"

@@ -18,18 +18,50 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(out, "  ryeos [-p PROJECT] [--debug] <verb...> [args...]")?;
     writeln!(out)?;
     writeln!(out, "LOCAL COMMANDS (no daemon required):")?;
-    writeln!(out, "  {:<30} {}", "init", "Bootstrap operator keys and core bundle")?;
-    writeln!(out, "  {:<30} {}", "authorize-key", "Authorize a public key to call the daemon")?;
-    writeln!(out, "  {:<30} {}", "trust pin --from <trust.toml>", "Pin a publisher key from PUBLISHER_TRUST.toml")?;
-    writeln!(out, "  {:<30} {}", "publish <src>", "Sign and publish a bundle")?;
-    writeln!(out, "  {:<30} {}", "vault put --name K", "Add a secret to the sealed secret store")?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "init", "Bootstrap operator keys and core bundle"
+    )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "authorize-key", "Authorize a public key to call the daemon"
+    )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "trust pin --from <trust.toml>", "Pin a publisher key from PUBLISHER_TRUST.toml"
+    )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "publish <src>", "Sign and publish a bundle"
+    )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "vault put --name K", "Add a secret to the sealed secret store"
+    )?;
     writeln!(out, "  {:<30} {}", "vault list", "List sealed secret keys")?;
-    writeln!(out, "  {:<30} {}", "vault remove <K>...", "Remove sealed secret keys")?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "vault remove <K>...", "Remove sealed secret keys"
+    )?;
     writeln!(out, "  {:<30} {}", "vault rewrap", "Rotate vault keypair")?;
     writeln!(out)?;
     writeln!(out, "UNIVERSAL ESCAPE HATCH:")?;
-    writeln!(out, "  {:<30} {}", "execute <item_ref>", "Execute any canonical item ref directly")?;
-    writeln!(out, "  {:<30} {}", "  --input <file>", "  pass JSON parameters from file (or - for stdin)")?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "execute <item_ref>", "Execute any canonical item ref directly"
+    )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "  --input <file>", "  pass JSON parameters from file (or - for stdin)"
+    )?;
     writeln!(out)?;
 
     // ── Dynamic alias discovery from installed bundles ──
@@ -48,7 +80,10 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
             } else {
                 "(general)".to_string()
             };
-            groups.entry(prefix).or_default().push((tokens_str.clone(), description.clone()));
+            groups
+                .entry(prefix)
+                .or_default()
+                .push((tokens_str.clone(), description.clone()));
         }
 
         writeln!(out, "INSTALLED COMMANDS (from bundles):")?;
@@ -63,7 +98,11 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
         // Fallback: static list when no bundles are discovered
         writeln!(out, "DAEMON COMMANDS (require running daemon):")?;
         writeln!(out, "  {:<30} {}", "status", "Show daemon status")?;
-        writeln!(out, "  {:<30} {}", "identity public-key", "Show node public identity")?;
+        writeln!(
+            out,
+            "  {:<30} {}",
+            "identity public-key", "Show node public identity"
+        )?;
         writeln!(out, "  {:<30} {}", "sign", "Sign a bundle item")?;
         writeln!(out, "  {:<30} {}", "verify", "Verify a bundle item")?;
         writeln!(out, "  {:<30} {}", "fetch", "Fetch an item")?;
@@ -157,12 +196,7 @@ fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String
 fn parse_yaml_string_array(s: &str) -> Vec<String> {
     let s = s.trim_start_matches('[').trim_end_matches(']');
     s.split(',')
-        .map(|item| {
-            item.trim()
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string()
-        })
+        .map(|item| item.trim().trim_matches('"').trim_matches('\'').to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -218,8 +252,7 @@ pub async fn print_verb_help(
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
 
     // If the daemon resolved it, show the result
-    let pretty = serde_json::to_string_pretty(&payload)
-        .unwrap_or_else(|_| payload.to_string());
+    let pretty = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
     println!("{pretty}");
 
     Ok(())
@@ -236,23 +269,53 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(out, "USAGE: ryeos init [OPTIONS]")?;
             writeln!(out)?;
             writeln!(out, "OPTIONS:")?;
-            writeln!(out, "  --source <DIR>           Bundle source directory (default: /usr/share/ryeos)")?;
-            writeln!(out, "  --trust-file <FILE>      Additional publisher trust doc (repeatable)")?;
+            writeln!(
+                out,
+                "  --source <DIR>           Bundle source directory (default: /usr/share/ryeos)"
+            )?;
+            writeln!(
+                out,
+                "  --trust-file <FILE>      Additional publisher trust doc (repeatable)"
+            )?;
             writeln!(out, "  --system-space-dir <DIR> System space root")?;
             writeln!(out, "  --user-root <DIR>        User space root")?;
         }
         Some("authorize-key") => {
-            writeln!(out, "ryeos authorize-key — Authorize a public key to call the daemon")?;
+            writeln!(
+                out,
+                "ryeos authorize-key — Authorize a public key to call the daemon"
+            )?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos authorize-key --public-key <KEY> [OPTIONS]")?;
+            writeln!(
+                out,
+                "USAGE: ryeos authorize-key --public-key <KEY> [OPTIONS]"
+            )?;
             writeln!(out)?;
             writeln!(out, "OPTIONS:")?;
-            writeln!(out, "  --public-key <KEY>  Ed25519 public key in 'ed25519:<base64>' format (required)")?;
-            writeln!(out, "  --label <LABEL>     Human-readable label (default: cli-authorized)")?;
-            writeln!(out, "  --scopes <SCOPES>   Comma-separated capabilities in canonical form")?;
-            writeln!(out, "                      ryeos.<verb>.<kind>.<subject> (required)")?;
-            writeln!(out, "                      e.g. ryeos.execute.service.remote.admin")?;
-            writeln!(out, "  --allow-wildcard    Allow wildcard scope '*' (bootstrap only)")?;
+            writeln!(
+                out,
+                "  --public-key <KEY>  Ed25519 public key in 'ed25519:<base64>' format (required)"
+            )?;
+            writeln!(
+                out,
+                "  --label <LABEL>     Human-readable label (default: cli-authorized)"
+            )?;
+            writeln!(
+                out,
+                "  --scopes <SCOPES>   Comma-separated capabilities in canonical form"
+            )?;
+            writeln!(
+                out,
+                "                      ryeos.<verb>.<kind>.<subject> (required)"
+            )?;
+            writeln!(
+                out,
+                "                      e.g. ryeos.execute.service.remote.admin"
+            )?;
+            writeln!(
+                out,
+                "  --allow-wildcard    Allow wildcard scope '*' (bootstrap only)"
+            )?;
             writeln!(out, "  --system-space-dir  System space root")?;
         }
         Some("trust") => {
@@ -266,11 +329,26 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(out, "ryeos vault — Manage sealed secrets")?;
             writeln!(out)?;
             writeln!(out, "COMMANDS:")?;
-            writeln!(out, "  vault put --name <KEY>              Add a secret (reads value from stdin)")?;
-            writeln!(out, "  vault put --name <KEY> --value-string <VAL>  (insecure, for scripts)")?;
-            writeln!(out, "  vault list                           List sealed secret keys")?;
-            writeln!(out, "  vault remove <KEY>...                Remove sealed secret keys")?;
-            writeln!(out, "  vault rewrap                         Rotate vault keypair")?;
+            writeln!(
+                out,
+                "  vault put --name <KEY>              Add a secret (reads value from stdin)"
+            )?;
+            writeln!(
+                out,
+                "  vault put --name <KEY> --value-string <VAL>  (insecure, for scripts)"
+            )?;
+            writeln!(
+                out,
+                "  vault list                           List sealed secret keys"
+            )?;
+            writeln!(
+                out,
+                "  vault remove <KEY>...                Remove sealed secret keys"
+            )?;
+            writeln!(
+                out,
+                "  vault rewrap                         Rotate vault keypair"
+            )?;
         }
         Some("execute") => {
             writeln!(out, "ryeos execute — Universal escape hatch")?;
@@ -280,7 +358,10 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(out, "PARAMETER INPUT:")?;
             writeln!(out, "  --input <FILE>   Read JSON parameters from a file")?;
             writeln!(out, "  --input -        Read JSON parameters from stdin")?;
-            writeln!(out, "  --key value      Heuristic flag binding (hyphens normalised to underscores)")?;
+            writeln!(
+                out,
+                "  --key value      Heuristic flag binding (hyphens normalised to underscores)"
+            )?;
         }
         Some(other) => {
             writeln!(out, "no local help available for '{}'", other)?;

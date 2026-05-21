@@ -31,9 +31,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Validate that an object kind matches the expected value.
 pub fn validate_object_kind(kind: &str, expected: &str) -> anyhow::Result<()> {
     if kind != expected {
-        anyhow::bail!(
-            "object kind mismatch: expected '{expected}', got '{kind}'"
-        );
+        anyhow::bail!("object kind mismatch: expected '{expected}', got '{kind}'");
     }
     Ok(())
 }

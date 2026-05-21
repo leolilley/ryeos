@@ -20,10 +20,7 @@ pub enum RpcError {
     #[error("runtime.socket_path is required")]
     MissingSocketPath,
     #[error("response request_id {actual:?} did not match {expected}")]
-    InvalidResponseRequestId {
-        expected: u64,
-        actual: Option<u64>,
-    },
+    InvalidResponseRequestId { expected: u64, actual: Option<u64> },
     #[error("daemon closed the socket mid-frame")]
     ConnectionClosed,
     #[error("messagepack encode failed: {0}")]
@@ -134,11 +131,7 @@ impl ThreadLifecycleClient {
         }
     }
 
-    pub async fn attach_process(
-        &self,
-        thread_id: &str,
-        pid: u32,
-    ) -> Result<Value, RpcError> {
+    pub async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, RpcError> {
         self.rpc
             .request(
                 "threads.attach_process",
@@ -156,11 +149,7 @@ impl ThreadLifecycleClient {
             .await
     }
 
-    pub async fn finalize_thread(
-        &self,
-        thread_id: &str,
-        status: &str,
-    ) -> Result<Value, RpcError> {
+    pub async fn finalize_thread(&self, thread_id: &str, status: &str) -> Result<Value, RpcError> {
         self.rpc
             .request(
                 "threads.finalize",
@@ -171,10 +160,7 @@ impl ThreadLifecycleClient {
 
     pub async fn get_thread(&self, thread_id: &str) -> Result<Value, RpcError> {
         self.rpc
-            .request(
-                "threads.get",
-                serde_json::json!({"thread_id": thread_id}),
-            )
+            .request("threads.get", serde_json::json!({"thread_id": thread_id}))
             .await
     }
 
@@ -250,10 +236,7 @@ impl ThreadLifecycleClient {
 
     pub async fn replay_events(&self, thread_id: &str) -> Result<Value, RpcError> {
         self.rpc
-            .request(
-                "events.replay",
-                serde_json::json!({"thread_id": thread_id}),
-            )
+            .request("events.replay", serde_json::json!({"thread_id": thread_id}))
             .await
     }
 
@@ -275,10 +258,7 @@ impl ThreadLifecycleClient {
             .await
     }
 
-    pub async fn claim_commands(
-        &self,
-        thread_id: &str,
-    ) -> Result<Value, RpcError> {
+    pub async fn claim_commands(&self, thread_id: &str) -> Result<Value, RpcError> {
         self.rpc
             .request(
                 "commands.claim",
@@ -362,9 +342,7 @@ mod tests {
             let request: Value = rmp_serde::from_slice(&req_bytes).unwrap();
             let response = handler(request);
             let resp_bytes = rmp_serde::to_vec_named(&response).unwrap();
-            framing::send_frame(&mut stream, &resp_bytes)
-                .await
-                .unwrap();
+            framing::send_frame(&mut stream, &resp_bytes).await.unwrap();
         });
         (dir, socket_path, task)
     }
@@ -399,9 +377,7 @@ mod tests {
             .request("threads.get", serde_json::json!({}))
             .await
             .unwrap_err();
-        assert!(
-            matches!(err, RpcError::RequestFailed { ref code, .. } if code == "bad")
-        );
+        assert!(matches!(err, RpcError::RequestFailed { ref code, .. } if code == "bad"));
         task.await.unwrap();
     }
 

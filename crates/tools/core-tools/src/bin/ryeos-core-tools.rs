@@ -283,7 +283,8 @@ fn run_sign(
         let parsed: StdinSignParams = serde_json::from_value(read_stdin_json()?)?;
         (parsed.item_ref, parsed.project_path, parsed.source)
     } else {
-        let ir = item_ref.ok_or_else(|| anyhow::anyhow!("ITEM_REF required (or pass --stdin-json)"))?;
+        let ir =
+            item_ref.ok_or_else(|| anyhow::anyhow!("ITEM_REF required (or pass --stdin-json)"))?;
         (ir, project, source)
     };
 
@@ -317,7 +318,11 @@ fn default_source() -> String {
 
 fn resolve_system_space_dir(opt: Option<String>) -> anyhow::Result<std::path::PathBuf> {
     opt.map(std::path::PathBuf::from)
-        .or_else(|| std::env::var("RYEOS_SYSTEM_SPACE_DIR").ok().map(std::path::PathBuf::from))
+        .or_else(|| {
+            std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+        })
         .ok_or_else(|| anyhow::anyhow!("--system-space-dir or RYEOS_SYSTEM_SPACE_DIR required"))
 }
 
@@ -340,27 +345,29 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
                 std::io::stdin()
                     .read_to_string(&mut buf)
                     .map_err(|e| anyhow::anyhow!("failed to read secret from stdin: {e}"))?;
-                if buf.ends_with('\n') { buf.pop(); }
-                if buf.ends_with('\r') { buf.pop(); }
+                if buf.ends_with('\n') {
+                    buf.pop();
+                }
+                if buf.ends_with('\r') {
+                    buf.pop();
+                }
                 buf
             };
 
-            let report = ryeos_tools::actions::vault::run_put(
-                &ryeos_tools::actions::vault::PutOptions {
+            let report =
+                ryeos_tools::actions::vault::run_put(&ryeos_tools::actions::vault::PutOptions {
                     system_space_dir: ssd,
                     entries: vec![(name, value)],
-                },
-            )?;
+                })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         VaultCmd::List { system_space_dir } => {
             let ssd = resolve_system_space_dir(system_space_dir)?;
-            let report = ryeos_tools::actions::vault::run_list(
-                &ryeos_tools::actions::vault::ListOptions {
+            let report =
+                ryeos_tools::actions::vault::run_list(&ryeos_tools::actions::vault::ListOptions {
                     system_space_dir: ssd,
-                },
-            )?;
+                })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -398,14 +405,12 @@ fn run_authorize_client(
     label: String,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_tools::actions::authorize::{run_authorize_client as run, AuthorizeClientParams};
     use lillux::crypto::VerifyingKey;
+    use ryeos_tools::actions::authorize::{run_authorize_client as run, AuthorizeClientParams};
 
     let params = if stdin_json {
         let val = read_stdin_json()?;
-        let ssd = val["system_space_dir"]
-            .as_str()
-            .map(String::from);
+        let ssd = val["system_space_dir"].as_str().map(String::from);
         let pk = val["public_key"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("public_key required"))?
@@ -432,7 +437,9 @@ fn run_authorize_client(
         .decode(&pk_b64)
         .map_err(|e| anyhow::anyhow!("invalid base64 public key: {e}"))?;
     let verifying_key = VerifyingKey::from_bytes(
-        pk_bytes.as_slice().try_into()
+        pk_bytes
+            .as_slice()
+            .try_into()
             .map_err(|_| anyhow::anyhow!("public key must be 32 bytes (ed25519)"))?,
     )
     .map_err(|e| anyhow::anyhow!("invalid ed25519 public key: {e}"))?;
@@ -462,10 +469,13 @@ fn run_authorize_client(
         allow_wildcard: false, // core-tools is not the bootstrap path
     })?;
 
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "fingerprint": result.fingerprint,
-        "path": result.path.to_string_lossy(),
-    }))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "fingerprint": result.fingerprint,
+            "path": result.path.to_string_lossy(),
+        }))?
+    );
 
     Ok(())
 }

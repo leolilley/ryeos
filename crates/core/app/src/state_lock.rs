@@ -36,14 +36,12 @@ impl StateLock {
     pub fn acquire(lock_path: &Path) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("create state lock directory {}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create state lock directory {}", parent.display()))?;
         }
 
-        let file = File::create(lock_path).with_context(|| {
-            format!("create state lock file {}", lock_path.display())
-        })?;
+        let file = File::create(lock_path)
+            .with_context(|| format!("create state lock file {}", lock_path.display()))?;
 
         // Write our PID for diagnostics (who holds the lock)
         #[cfg(unix)]
@@ -54,9 +52,7 @@ impl StateLock {
 
         // Non-blocking exclusive lock
         match flock_exclusive_nb(&file) {
-            Ok(()) => Ok(StateLock {
-                _file: file,
-            }),
+            Ok(()) => Ok(StateLock { _file: file }),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // Another process holds the lock. Try to read its PID.
                 let holder_pid = fs::read_to_string(lock_path)
@@ -68,9 +64,7 @@ impl StateLock {
                     holder_pid
                 );
             }
-            Err(e) => Err(e).with_context(|| {
-                format!("acquire state lock {}", lock_path.display())
-            }),
+            Err(e) => Err(e).with_context(|| format!("acquire state lock {}", lock_path.display())),
         }
     }
 }
@@ -99,7 +93,10 @@ fn flock_exclusive_nb(file: &File) -> io::Result<()> {
 
 /// Return the default lock path for a given state directory.
 pub fn default_lock_path(system_space_dir: &Path) -> PathBuf {
-    system_space_dir.join(".ai").join("state").join("operator.lock")
+    system_space_dir
+        .join(".ai")
+        .join("state")
+        .join("operator.lock")
 }
 
 #[cfg(test)]
@@ -141,7 +138,10 @@ mod tests {
     #[test]
     fn default_lock_path_is_under_state() {
         let path = default_lock_path(Path::new("/var/lib/ryeosd"));
-        assert_eq!(path, PathBuf::from("/var/lib/crates/bin/daemon/.ai/state/operator.lock"));
+        assert_eq!(
+            path,
+            PathBuf::from("/var/lib/crates/bin/daemon/.ai/state/operator.lock")
+        );
     }
 
     #[test]

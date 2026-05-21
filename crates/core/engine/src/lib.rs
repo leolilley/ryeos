@@ -1,5 +1,6 @@
-pub mod canonical_ref;
 pub mod binary_resolver;
+pub mod boot_validation;
+pub mod canonical_ref;
 pub mod composers;
 pub mod contracts;
 pub mod delegation;
@@ -14,7 +15,6 @@ pub mod kind_registry;
 pub mod launch_envelope_types;
 pub mod lifecycle;
 pub mod parsers;
-pub mod boot_validation;
 pub mod plan_builder;
 pub mod protocol_vocabulary;
 pub mod protocols;

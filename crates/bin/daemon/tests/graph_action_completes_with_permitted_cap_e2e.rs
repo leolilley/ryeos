@@ -142,9 +142,8 @@ async fn graph_action_completes_with_permitted_cap() {
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeosd=debug,ryeos_graph_runtime=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeosd=debug,ryeos_graph_runtime=debug".into()),
         );
     })
     .await
@@ -159,37 +158,29 @@ async fn graph_action_completes_with_permitted_cap() {
         project.path().to_str().unwrap(),
         serde_json::json!({}),
     );
-    let (status, body) = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        post_fut,
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => panic!("post /execute failed: {e}"),
-        Err(_) => {
-            let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
-                "POST /execute timed out after 30s.\n\
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
+                    "POST /execute timed out after 30s.\n\
                  --- daemon stderr ---\n{stderr}"
-            );
-        }
-    };
+                );
+            }
+        };
 
     if status != reqwest::StatusCode::OK {
         let stderr = h.drain_stderr_nonblocking().await;
-        panic!(
-            "expected 200 OK; got {status}\nbody={body:#}\n--- daemon stderr ---\n{stderr}"
-        );
+        panic!("expected 200 OK; got {status}\nbody={body:#}\n--- daemon stderr ---\n{stderr}");
     }
 
     let result = match body.get("result") {
         Some(r) => r,
         None => {
             let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
-                "response missing `result`\nbody={body:#}\n--- daemon stderr ---\n{stderr}"
-            );
+            panic!("response missing `result`\nbody={body:#}\n--- daemon stderr ---\n{stderr}");
         }
     };
 
@@ -208,9 +199,12 @@ async fn graph_action_completes_with_permitted_cap() {
     //   body.result            ← RuntimeResult (success/status/result/outputs/warnings)
     //   body.result.result     ← GraphResult   (graph_id/state/result/steps/...)
     //   body.result.result.state.greeting  ← assigned via `assign: greeting: ${result.msg}`
-    let graph_result = result.get("result").and_then(|v| v.as_object()).unwrap_or_else(|| {
-        panic!("missing nested GraphResult under result.result; body={body:#}");
-    });
+    let graph_result = result
+        .get("result")
+        .and_then(|v| v.as_object())
+        .unwrap_or_else(|| {
+            panic!("missing nested GraphResult under result.result; body={body:#}");
+        });
     let greeting = graph_result
         .get("state")
         .and_then(|s| s.get("greeting"))
@@ -246,9 +240,8 @@ async fn graph_action_denied_without_permitted_cap() {
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeosd=debug,ryeos_graph_runtime=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeosd=debug,ryeos_graph_runtime=debug".into()),
         );
     })
     .await
@@ -263,22 +256,18 @@ async fn graph_action_denied_without_permitted_cap() {
         project.path().to_str().unwrap(),
         serde_json::json!({}),
     );
-    let (status, body) = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        post_fut,
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => panic!("post /execute failed: {e}"),
-        Err(_) => {
-            let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
-                "POST /execute timed out after 30s.\n\
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
+                    "POST /execute timed out after 30s.\n\
                  --- daemon stderr ---\n{stderr}"
-            );
-        }
-    };
+                );
+            }
+        };
 
     // HTTP 200 — the daemon returns the graph result envelope even on
     // internal cap denial. The error is inside the result, not an HTTP

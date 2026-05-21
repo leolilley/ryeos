@@ -114,18 +114,16 @@ fn validate_templates_in_string(
 ) -> Result<(), RouteConfigError> {
     let mut remaining = s;
     while let Some(start) = remaining.find("${") {
-        let end = remaining[start..]
-            .find('}')
-            .ok_or_else(|| {
-                let preview: String = remaining[start + 2..].chars().take(20).collect();
-                RouteConfigError::InvalidSourceConfig {
-                    id: route_id.into(),
-                    src: mode.into(),
-                    reason: format!(
-                        "unterminated '${{...}}' starting at '{preview}' in source_config value",
-                    ),
-                }
-            })?;
+        let end = remaining[start..].find('}').ok_or_else(|| {
+            let preview: String = remaining[start + 2..].chars().take(20).collect();
+            RouteConfigError::InvalidSourceConfig {
+                id: route_id.into(),
+                src: mode.into(),
+                reason: format!(
+                    "unterminated '${{...}}' starting at '{preview}' in source_config value",
+                ),
+            }
+        })?;
         let inner = &remaining[start + 2..start + end];
         if let Some(name) = inner.strip_prefix("path.") {
             if !declared.contains(name) {
@@ -173,11 +171,9 @@ fn try_interpolate_string(
 
     while let Some(start) = remaining.find("${") {
         result.push_str(&remaining[..start]);
-        let end = remaining[start..]
-            .find('}')
-            .ok_or_else(|| RouteDispatchError::Internal(format!(
-                "unterminated template in source_config: {s}"
-            )))?;
+        let end = remaining[start..].find('}').ok_or_else(|| {
+            RouteDispatchError::Internal(format!("unterminated template in source_config: {s}"))
+        })?;
         let inner = &remaining[start + 2..start + end];
         if let Some(name) = inner.strip_prefix("path.") {
             let value = captures.get(name).ok_or_else(|| {
@@ -235,7 +231,10 @@ mod tests {
         let config = serde_json::json!({"thread_id": "${path.unknown}"});
         let err = validate_path_templates(&config, &declared(), "r1", "json").unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("undeclared path capture 'unknown'"), "got: {msg}");
+        assert!(
+            msg.contains("undeclared path capture 'unknown'"),
+            "got: {msg}"
+        );
     }
 
     #[test]

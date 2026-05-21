@@ -54,9 +54,9 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
     // becomes an action node with no action — a no-op that masks
     // typos. Reject it.
     if node.node_type == NodeType::Action && node.action.is_none() && name != cfg.start {
-        result
-            .errors
-            .push(format!("node '{name}' has no 'action' and no explicit 'node_type' — this is ambiguous"));
+        result.errors.push(format!(
+            "node '{name}' has no 'action' and no explicit 'node_type' — this is ambiguous"
+        ));
     }
 
     match node.node_type {
@@ -75,9 +75,9 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             // variable. Without it, the variable defaults to "item"
             // silently — a typo in the key goes unnoticed.
             if node.r#as.is_none() {
-                result
-                    .errors
-                    .push(format!("foreach node '{name}' must declare 'as' for the iteration variable"));
+                result.errors.push(format!(
+                    "foreach node '{name}' must declare 'as' for the iteration variable"
+                ));
             }
         }
         NodeType::Gate => {
@@ -304,7 +304,10 @@ config:
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
         assert!(result.errors.is_empty());
-        assert!(result.warnings.iter().any(|w| w.contains("orphan") && w.contains("unreachable")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("orphan") && w.contains("unreachable")));
     }
 
     #[test]
@@ -325,7 +328,10 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
-        assert!(result.warnings.iter().any(|w| w.contains("undef_key") && w.contains("never assigned")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("undef_key") && w.contains("never assigned")));
     }
 
     #[test]
@@ -339,7 +345,10 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
-        assert!(result.errors.iter().any(|e| e.contains("config.nodes is empty")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("config.nodes is empty")));
     }
 
     #[test]
@@ -355,7 +364,10 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
-        assert!(result.errors.iter().any(|e| e.contains("nonexistent") && e.contains("does not exist")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("nonexistent") && e.contains("does not exist")));
     }
 
     // R-D: foreach nodes MUST declare `as`.
@@ -382,7 +394,10 @@ config:
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
         assert!(
-            result.errors.iter().any(|e| e.contains("iterate") && e.contains("must declare 'as'")),
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("iterate") && e.contains("must declare 'as'")),
             "expected error for foreach without 'as', got: {:?}",
             result.errors
         );
@@ -409,7 +424,10 @@ config:
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
         assert!(
-            result.errors.iter().any(|e| e.contains("check") && e.contains("conditional")),
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("check") && e.contains("conditional")),
             "expected error for gate with unconditional next, got: {:?}",
             result.errors
         );
@@ -437,7 +455,10 @@ config:
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
         assert!(
-            result.errors.iter().any(|e| e.contains("orphan") && e.contains("ambiguous")),
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("orphan") && e.contains("ambiguous")),
             "expected error for node with no action/type, got: {:?}",
             result.errors
         );

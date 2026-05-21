@@ -24,16 +24,16 @@ use std::time::SystemTime;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::contracts::{
-    EffectivePrincipal, ExecutionHints, PlanContext, PlanNode, Principal, ProjectContext,
-    PlanSubprocessSpec,
+    EffectivePrincipal, ExecutionHints, PlanContext, PlanNode, PlanSubprocessSpec, Principal,
+    ProjectContext,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
-use ryeos_runtime::CheckpointWriter;
 use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
+use ryeos_runtime::CheckpointWriter;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -91,8 +91,7 @@ description: "native_resume demo"
 
 fn build_engine_against_bundle() -> Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store =
-        TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -137,7 +136,12 @@ fn build_subprocess_spec(project_dir: &Path) -> PlanSubprocessSpec {
     let resolved = engine.resolve(&ctx, &item).expect("resolve");
     let verified = engine.verify(&ctx, resolved).expect("verify");
     let plan = engine
-        .build_plan(&ctx, &verified, &serde_json::Value::Null, &ctx.execution_hints)
+        .build_plan(
+            &ctx,
+            &verified,
+            &serde_json::Value::Null,
+            &ctx.execution_hints,
+        )
         .expect("plan builds");
 
     plan.nodes
@@ -219,7 +223,10 @@ fn checkpoint_writer_roundtrip_via_env() {
         .load_latest()
         .expect("load latest")
         .expect("at least one checkpoint persisted");
-    assert_eq!(latest["step"], 2, "load_latest should pick the newest write");
+    assert_eq!(
+        latest["step"], 2,
+        "load_latest should pick the newest write"
+    );
     assert_eq!(latest["data"], "beta");
 
     std::env::remove_var("RYEOS_CHECKPOINT_DIR");

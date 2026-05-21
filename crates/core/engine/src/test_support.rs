@@ -21,8 +21,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lillux::crypto::{DecodePublicKey, VerifyingKey};
 use base64::Engine as _;
+use lillux::crypto::{DecodePublicKey, VerifyingKey};
 
 use crate::handlers::HandlerRegistry;
 use crate::parsers::descriptor::ParserDescriptor;
@@ -62,8 +62,7 @@ pub fn platform_author_verifying_key() -> VerifyingKey {
     const PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
                        MCowBQYDK2VwAyEAARaVpY8d1iAKhKuLuDbEPZIpdRmb10H6QkuuXqNpZA4=\n\
                        -----END PUBLIC KEY-----\n";
-    VerifyingKey::from_public_key_pem(PEM)
-        .expect("platform-author public key PEM must decode")
+    VerifyingKey::from_public_key_pem(PEM).expect("platform-author public key PEM must decode")
 }
 
 /// Dev publisher verifying key (`741a8bc6...`) — the key used by

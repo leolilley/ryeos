@@ -45,12 +45,7 @@ pub struct SignedRef {
 
 impl SignedRef {
     /// Create a new signed ref (without signature).
-    pub fn new(
-        ref_path: String,
-        target_hash: String,
-        updated_at: String,
-        signer: String,
-    ) -> Self {
+    pub fn new(ref_path: String, target_hash: String, updated_at: String, signer: String) -> Self {
         Self {
             schema: SIGNED_REF_SCHEMA,
             kind: SIGNED_REF_KIND.to_string(),
@@ -152,10 +147,7 @@ pub fn write_signed_ref(
 /// This is the safe variant of [`read_signed_ref`] that also validates
 /// the cryptographic signature. Use this on all root-discovery paths
 /// where untrusted data could be tampered with.
-pub fn read_verified_ref(
-    path: &Path,
-    trust_store: &TrustStore,
-) -> anyhow::Result<SignedRef> {
+pub fn read_verified_ref(path: &Path, trust_store: &TrustStore) -> anyhow::Result<SignedRef> {
     let signed_ref = read_signed_ref(path)?;
     verify_signed_ref(&signed_ref, trust_store)?;
     Ok(signed_ref)
@@ -175,7 +167,10 @@ pub fn read_signed_ref(path: &Path) -> anyhow::Result<SignedRef> {
 ///
 /// The signature must be valid over the canonical JSON representation
 /// of the ref WITHOUT the signature field, signed by the signer's key.
-pub fn verify_signed_ref(signed_ref: &SignedRef, verifying_keys: &TrustStore) -> anyhow::Result<()> {
+pub fn verify_signed_ref(
+    signed_ref: &SignedRef,
+    verifying_keys: &TrustStore,
+) -> anyhow::Result<()> {
     signed_ref.validate()?;
 
     // Look up the signer's public key in the trust store
@@ -282,20 +277,32 @@ pub fn advance_project_head_ref(
     expected_current_hash: &str,
     signer: &dyn Signer,
 ) -> anyhow::Result<()> {
-    let current = read_project_head_ref(refs_root, principal_key, project_hash)?
-        .ok_or_else(|| anyhow!(
-            "no project head ref for principal/project {}/{}",
-            principal_key, project_hash
-        ))?;
+    let current =
+        read_project_head_ref(refs_root, principal_key, project_hash)?.ok_or_else(|| {
+            anyhow!(
+                "no project head ref for principal/project {}/{}",
+                principal_key,
+                project_hash
+            )
+        })?;
 
     if current != expected_current_hash {
         anyhow::bail!(
             "project head conflict for principal/project {}/{}: expected {}, got {}",
-            principal_key, project_hash, expected_current_hash, current
+            principal_key,
+            project_hash,
+            expected_current_hash,
+            current
         );
     }
 
-    write_project_head_ref(refs_root, principal_key, project_hash, new_snapshot_hash, signer)
+    write_project_head_ref(
+        refs_root,
+        principal_key,
+        project_hash,
+        new_snapshot_hash,
+        signer,
+    )
 }
 
 /// Canonical deployed-project storage key derived from the remote live

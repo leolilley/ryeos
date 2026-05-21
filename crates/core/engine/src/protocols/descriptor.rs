@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::protocol_vocabulary::{
-    CallbackChannel, EnvInjection, LifecycleMode, ProtocolCapabilities,
-    StdinShape, StdoutMode, StdoutShape,
+    CallbackChannel, EnvInjection, LifecycleMode, ProtocolCapabilities, StdinShape, StdoutMode,
+    StdoutShape,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

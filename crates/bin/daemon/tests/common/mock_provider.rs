@@ -48,7 +48,6 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-
 /// One canned LLM response. The mock pops these FIFO.
 #[derive(Debug, Clone)]
 pub enum MockResponse {
@@ -74,7 +73,11 @@ impl MockResponse {
                 },
                 "finish_reason": "stop",
             }),
-            MockResponse::ToolCall { id, name, arguments } => json!({
+            MockResponse::ToolCall {
+                id,
+                name,
+                arguments,
+            } => json!({
                 "message": {
                     "role": "assistant",
                     "content": null,
@@ -141,10 +144,9 @@ impl MockProvider {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let join = tokio::spawn(async move {
-            let server = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = shutdown_rx.await;
-                });
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
             let _ = server.await;
         });
 
@@ -248,7 +250,11 @@ fn sse_response(resp: MockResponse) -> Response {
             }),
             "stop",
         ),
-        MockResponse::ToolCall { id, name, arguments } => (
+        MockResponse::ToolCall {
+            id,
+            name,
+            arguments,
+        } => (
             json!({
                 "choices": [{
                     "index": 0,

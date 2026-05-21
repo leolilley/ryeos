@@ -44,12 +44,24 @@ impl Default for LimitValues {
     }
 }
 
-fn default_turns() -> u32 { 25 }
-fn default_tokens() -> u64 { 200_000 }
-fn default_spend() -> f64 { 2.0 }
-fn default_spawns() -> u32 { 10 }
-fn default_depth() -> u32 { 5 }
-fn default_duration() -> u64 { 300 }
+fn default_turns() -> u32 {
+    25
+}
+fn default_tokens() -> u64 {
+    200_000
+}
+fn default_spend() -> f64 {
+    2.0
+}
+fn default_spawns() -> u32 {
+    10
+}
+fn default_depth() -> u32 {
+    5
+}
+fn default_duration() -> u64 {
+    300
+}
 
 pub fn compute_effective_limits(
     item_requested: Option<&LimitValues>,
@@ -93,7 +105,11 @@ fn clamp<T: Ord>(value: T, cap: T) -> T {
 }
 
 fn clamp_f64(value: f64, cap: f64) -> f64 {
-    if value > cap { cap } else { value }
+    if value > cap {
+        cap
+    } else {
+        value
+    }
 }
 
 /// Load limits config from the project's `.ai/config/crates/core/runtime/limits.yaml`.
@@ -111,12 +127,8 @@ pub fn load_limits_config(project_root: &Path) -> anyhow::Result<Option<LimitsCo
         return Ok(None);
     }
 
-    let contents = std::fs::read_to_string(&config_path).with_context(|| {
-        format!(
-            "limits config: cannot read {}",
-            config_path.display()
-        )
-    })?;
+    let contents = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("limits config: cannot read {}", config_path.display()))?;
 
     let config: LimitsConfig = serde_yaml::from_str(&contents).with_context(|| {
         format!(
@@ -155,30 +167,58 @@ mod tests {
 
     #[test]
     fn compute_effective_uses_defaults_when_no_request() {
-        let defaults = LimitValues { turns: 20, ..Default::default() };
-        let caps = LimitValues { turns: 50, ..Default::default() };
+        let defaults = LimitValues {
+            turns: 20,
+            ..Default::default()
+        };
+        let caps = LimitValues {
+            turns: 50,
+            ..Default::default()
+        };
         let hard = compute_effective_limits(None, &defaults, &caps, None, 0);
         assert_eq!(hard.turns, 20);
     }
 
     #[test]
     fn compute_effective_clamps_against_caps() {
-        let requested = LimitValues { turns: 100, ..Default::default() };
-        let caps = LimitValues { turns: 30, ..Default::default() };
-        let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None, 0);
+        let requested = LimitValues {
+            turns: 100,
+            ..Default::default()
+        };
+        let caps = LimitValues {
+            turns: 30,
+            ..Default::default()
+        };
+        let hard =
+            compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None, 0);
         assert_eq!(hard.turns, 30);
     }
 
     #[test]
     fn compute_effective_parent_reduces() {
-        let parent = HardLimits { turns: 10, ..HardLimits::default() };
-        let hard = compute_effective_limits(None, &LimitValues::default(), &LimitValues::default(), Some(&parent), 0);
+        let parent = HardLimits {
+            turns: 10,
+            ..HardLimits::default()
+        };
+        let hard = compute_effective_limits(
+            None,
+            &LimitValues::default(),
+            &LimitValues::default(),
+            Some(&parent),
+            0,
+        );
         assert_eq!(hard.turns, 10);
     }
 
     #[test]
     fn compute_effective_depth_minimum_one() {
-        let hard = compute_effective_limits(None, &LimitValues::default(), &LimitValues::default(), None, 0);
+        let hard = compute_effective_limits(
+            None,
+            &LimitValues::default(),
+            &LimitValues::default(),
+            None,
+            0,
+        );
         assert_eq!(hard.depth, 1);
     }
 

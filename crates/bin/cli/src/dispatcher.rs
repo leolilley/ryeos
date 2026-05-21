@@ -74,13 +74,14 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         }
         let item_ref = &cli.rest[1];
         // Validate it parses as a canonical ref
-        let _canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|_| {
-            crate::error::CliConfigError::InvalidExecuteRef {
-                path: "<cli>".into(),
-                item_ref: item_ref.clone(),
-                detail: "not a valid canonical ref".into(),
-            }
-        })?;
+        let _canonical =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|_| {
+                crate::error::CliConfigError::InvalidExecuteRef {
+                    path: "<cli>".into(),
+                    item_ref: item_ref.clone(),
+                    detail: "not a valid canonical ref".into(),
+                }
+            })?;
 
         // Scan tail for --input <path> (mutually exclusive with flag-style binding)
         let tail = &cli.rest[2..];
@@ -158,12 +159,8 @@ async fn post_to_daemon(
 }
 
 fn print_result(payload: serde_json::Value) {
-    let result = payload
-        .get("result")
-        .cloned()
-        .unwrap_or(payload);
-    let pretty = serde_json::to_string_pretty(&result)
-        .unwrap_or_else(|_| result.to_string());
+    let result = payload.get("result").cloned().unwrap_or(payload);
+    let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     println!("{pretty}");
 }
 

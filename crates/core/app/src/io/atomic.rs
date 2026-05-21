@@ -42,8 +42,13 @@ pub fn atomic_write(target_path: &Path, content: &[u8]) -> Result<()> {
         }
     }
 
-    std::fs::rename(&tmp_path, target_path)
-        .with_context(|| format!("failed to rename {} → {}", tmp_path.display(), target_path.display()))?;
+    std::fs::rename(&tmp_path, target_path).with_context(|| {
+        format!(
+            "failed to rename {} → {}",
+            tmp_path.display(),
+            target_path.display()
+        )
+    })?;
 
     Ok(())
 }

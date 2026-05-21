@@ -104,17 +104,16 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &thread_auth_token,
     );
 
-    let provider_snapshot: ResolvedProviderSnapshot = serde_json::from_value(
-        envelope
-            .provider_snapshot
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!(
+    let provider_snapshot: ResolvedProviderSnapshot =
+        serde_json::from_value(envelope.provider_snapshot.clone().ok_or_else(|| {
+            anyhow::anyhow!(
                 "launch envelope missing provider_snapshot — the daemon must \
                  embed the resolved provider config in the envelope"
-            ))?
-    ).map_err(|e| anyhow::anyhow!(
-        "failed to deserialize provider_snapshot from envelope: {e}"
-    ))?;
+            )
+        })?)
+        .map_err(|e| {
+            anyhow::anyhow!("failed to deserialize provider_snapshot from envelope: {e}")
+        })?;
 
     let bootstrap_output = bootstrap::bootstrap(
         &bootstrap::BootstrapRoots {
@@ -138,15 +137,17 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let matched_profile = provider_snapshot.matched_profile.clone();
     let config_hash = provider_snapshot.config_hash.clone();
 
-    let harness = harness::Harness::new(&envelope.policy, envelope.request.depth, bootstrap_output.config.risk_policy.clone());
+    let harness = harness::Harness::new(
+        &envelope.policy,
+        envelope.request.depth,
+        bootstrap_output.config.risk_policy.clone(),
+    );
 
     // Wire SIGTERM → harness cancelled flag so runner can exit cleanly
     {
         let cancelled = harness.cancelled_flag();
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )
-        .context("failed to install SIGTERM handler")?;
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("failed to install SIGTERM handler")?;
         tokio::spawn(async move {
             sigterm.recv().await;
             cancelled.store(true, std::sync::atomic::Ordering::Relaxed);

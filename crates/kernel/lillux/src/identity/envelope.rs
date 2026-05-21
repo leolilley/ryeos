@@ -555,10 +555,7 @@ pub fn inspect_envelope(raw: &serde_json::Value) -> InspectResult {
 
     if let Some(bytes) = enc_bytes {
         if bytes != 32 {
-            warnings.push(format!(
-                "enc decoded to {} bytes, expected 32",
-                bytes
-            ));
+            warnings.push(format!("enc decoded to {} bytes, expected 32", bytes));
             well_formed = false;
         }
     }

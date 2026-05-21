@@ -12,9 +12,7 @@
 use std::sync::Arc;
 
 use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
-use ryeos_app::state_store::{
-    FinalizeThreadRecord, NewThreadRecord, StateStore,
-};
+use ryeos_app::state_store::{FinalizeThreadRecord, NewThreadRecord, StateStore};
 use ryeos_app::write_barrier::WriteBarrier;
 use tempfile::TempDir;
 
@@ -65,12 +63,7 @@ fn state_store_write_path_emits_state_spans() {
             .mark_thread_running("T-trace-1", None)
             .expect("mark_thread_running");
         store
-            .attach_thread_process(
-                "T-trace-1",
-                111,
-                222,
-                &RuntimeLaunchMetadata::default(),
-            )
+            .attach_thread_process("T-trace-1", 111, 222, &RuntimeLaunchMetadata::default())
             .expect("attach_thread_process");
         store
             .finalize_thread(

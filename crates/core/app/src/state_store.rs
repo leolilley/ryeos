@@ -6,19 +6,17 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use ryeos_state::objects::ThreadUsage;
-use ryeos_state::StateDb;
 use ryeos_state::chain::SnapshotUpdate;
-use ryeos_state::signer::Signer;
 use ryeos_state::objects::thread_snapshot::ThreadStatus;
 use ryeos_state::objects::ThreadSnapshot;
+use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
+use ryeos_state::signer::Signer;
+use ryeos_state::StateDb;
 
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
-pub use runtime_db::{
-    RuntimeInfo, CommandRecord, NewCommandRecord,
-};
+pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
@@ -212,7 +210,11 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
     }
 }
 
-fn convert_events(events: &[NewEventRecord], chain_root_id: &str, thread_id: &str) -> Vec<ryeos_state::objects::ThreadEvent> {
+fn convert_events(
+    events: &[NewEventRecord],
+    chain_root_id: &str,
+    thread_id: &str,
+) -> Vec<ryeos_state::objects::ThreadEvent> {
     let now = lillux::time::iso8601_now();
     events
         .iter()
@@ -239,7 +241,10 @@ fn convert_events(events: &[NewEventRecord], chain_root_id: &str, thread_id: &st
         .collect()
 }
 
-fn persisted_from_append(result: &ryeos_state::chain::AppendResult, events: &[NewEventRecord]) -> Vec<PersistedEventRecord> {
+fn persisted_from_append(
+    result: &ryeos_state::chain::AppendResult,
+    events: &[NewEventRecord],
+) -> Vec<PersistedEventRecord> {
     result
         .events
         .iter()
@@ -265,8 +270,7 @@ impl StateStore {
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&state_root)
-            .context("failed to create state_root directory")?;
+        std::fs::create_dir_all(&state_root).context("failed to create state_root directory")?;
 
         let state_db = StateDb::open(&state_root)?;
         let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
@@ -312,14 +316,17 @@ impl StateStore {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
-        self.inner.lock().map_err(|e| anyhow!("StateStore lock poisoned: {e}"))
+        self.inner
+            .lock()
+            .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))
     }
 
     /// Acquire a write permit from the write barrier.
     /// Fails if the daemon is quiescing for GC.
     fn acquire_write_permit(&self) -> Result<WritePermit> {
         let g = self.lock()?;
-        g.write_barrier.try_acquire()
+        g.write_barrier
+            .try_acquire()
             .map_err(|e| anyhow!("cannot acquire write permit: {e}"))
     }
 
@@ -333,10 +340,7 @@ impl StateStore {
             item_ref = %thread.item_ref,
         )
     )]
-    pub fn create_thread(
-        &self,
-        thread: &NewThreadRecord,
-    ) -> Result<Vec<PersistedEventRecord>> {
+    pub fn create_thread(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let snapshot = build_snapshot(thread);
@@ -366,7 +370,11 @@ impl StateStore {
             }),
         };
 
-        let te = convert_events(std::slice::from_ref(&create_event), &thread.chain_root_id, &thread.thread_id);
+        let te = convert_events(
+            std::slice::from_ref(&create_event),
+            &thread.chain_root_id,
+            &thread.thread_id,
+        );
         let result = g.state_db.append_events(
             &thread.chain_root_id,
             &thread.thread_id,
@@ -444,7 +452,11 @@ impl StateStore {
             payload: json!({}),
         };
 
-        let te = convert_events(std::slice::from_ref(&event), &thread_row.chain_root_id, thread_id);
+        let te = convert_events(
+            std::slice::from_ref(&event),
+            &thread_row.chain_root_id,
+            thread_id,
+        );
         let result = g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
@@ -488,8 +500,14 @@ impl StateStore {
         let mut facets = BTreeMap::new();
         if let Some(ref cost) = update.final_cost {
             facets.insert("cost.turns".to_string(), cost.turns.to_string());
-            facets.insert("cost.input_tokens".to_string(), cost.input_tokens.to_string());
-            facets.insert("cost.output_tokens".to_string(), cost.output_tokens.to_string());
+            facets.insert(
+                "cost.input_tokens".to_string(),
+                cost.input_tokens.to_string(),
+            );
+            facets.insert(
+                "cost.output_tokens".to_string(),
+                cost.output_tokens.to_string(),
+            );
             facets.insert("cost.spend".to_string(), cost.spend.to_string());
             if let Some(ref provider) = cost.provider {
                 facets.insert("cost.provider".to_string(), provider.clone());
@@ -501,7 +519,11 @@ impl StateStore {
             }
         }
 
-        let artifacts_json: Vec<Value> = update.artifacts.iter().map(|a| serde_json::to_value(a).unwrap()).collect();
+        let artifacts_json: Vec<Value> = update
+            .artifacts
+            .iter()
+            .map(|a| serde_json::to_value(a).unwrap())
+            .collect();
 
         let updated_snapshot = ThreadSnapshot {
             schema: ryeos_state::objects::SCHEMA_VERSION,
@@ -532,7 +554,9 @@ impl StateStore {
                     output_tokens: cost.output_tokens as u64,
                     spend_usd: cost.spend,
                     spawns_used: 0, // not tracked in FinalCost
-                    started_at: thread_row.started_at.clone()
+                    started_at: thread_row
+                        .started_at
+                        .clone()
                         .unwrap_or_else(|| thread_row.created_at.clone()),
                     settled_at: now.clone(),
                     last_settled_turn_seq: cost.turns as u64,
@@ -620,7 +644,10 @@ impl StateStore {
             && source_row.status != "failed"
             && source_row.status != "completed"
         {
-            bail!("cannot continue thread in terminal status '{}'", source_row.status);
+            bail!(
+                "cannot continue thread in terminal status '{}'",
+                source_row.status
+            );
         }
 
         let now = lillux::time::iso8601_now();
@@ -683,7 +710,11 @@ impl StateStore {
             }),
         };
 
-        let ste = convert_events(std::slice::from_ref(&source_event), chain_root_id, source_thread_id);
+        let ste = convert_events(
+            std::slice::from_ref(&source_event),
+            chain_root_id,
+            source_thread_id,
+        );
         let source_result = g.state_db.append_events(
             chain_root_id,
             source_thread_id,
@@ -702,7 +733,11 @@ impl StateStore {
             }),
         };
 
-        let sste = convert_events(std::slice::from_ref(&successor_event), chain_root_id, &successor.thread_id);
+        let sste = convert_events(
+            std::slice::from_ref(&successor_event),
+            chain_root_id,
+            &successor.thread_id,
+        );
         let successor_result = g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
@@ -723,10 +758,10 @@ impl StateStore {
             None => return Ok(None),
         };
 
-            let runtime = g
-                .runtime_db
-                .get_runtime_info(thread_id)?
-                .unwrap_or_default();
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .unwrap_or_default();
 
         Ok(Some(ThreadDetail {
             thread_id: thread_row.thread_id,
@@ -754,13 +789,14 @@ impl StateStore {
         let result = match result_row {
             Some(row) => {
                 let result_val = match row.result {
-                    Some(bytes) => Some(serde_json::from_slice::<Value>(&bytes)
-                        .with_context(|| {
+                    Some(bytes) => {
+                        Some(serde_json::from_slice::<Value>(&bytes).with_context(|| {
                             format!(
                                 "malformed JSON in thread_results.result for thread_id {}",
                                 thread_id
                             )
-                        })?),
+                        })?)
+                    }
                     None => None,
                 };
                 Some(ThreadResultRecord {
@@ -781,14 +817,15 @@ impl StateStore {
         let mut records = Vec::with_capacity(artifact_rows.len());
         for (idx, row) in artifact_rows.into_iter().enumerate() {
             let metadata = match row.metadata {
-                Some(bytes) => Some(serde_json::from_slice::<Value>(&bytes)
-                    .with_context(|| {
+                Some(bytes) => {
+                    Some(serde_json::from_slice::<Value>(&bytes).with_context(|| {
                         format!(
                             "malformed JSON in thread_artifacts.metadata \
                              for artifact at index {idx} of thread_id {}",
                             thread_id
                         )
-                    })?),
+                    })?)
+                }
                 None => None,
             };
             records.push(ThreadArtifactRecord {
@@ -833,7 +870,11 @@ impl StateStore {
             }),
         };
 
-        let te = convert_events(std::slice::from_ref(&event), &thread_row.chain_root_id, thread_id);
+        let te = convert_events(
+            std::slice::from_ref(&event),
+            &thread_row.chain_root_id,
+            thread_id,
+        );
         let result = g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
@@ -844,8 +885,9 @@ impl StateStore {
 
         let persisted = persisted_from_append(&result, &[event]);
 
-        let persisted_event = persisted.into_iter().next()
-            .ok_or_else(|| anyhow!("artifact_published event was not persisted for thread {thread_id}"))?;
+        let persisted_event = persisted.into_iter().next().ok_or_else(|| {
+            anyhow!("artifact_published event was not persisted for thread {thread_id}")
+        })?;
 
         let artifact_id = persisted_event.event_id;
 
@@ -892,11 +934,8 @@ impl StateStore {
         filter_principal: Option<&str>,
     ) -> Result<Vec<ThreadListItem>> {
         let g = self.lock()?;
-        let thread_rows = queries::list_threads_filtered(
-            g.state_db.projection(),
-            limit,
-            filter_principal,
-        )?;
+        let thread_rows =
+            queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
         Ok(thread_rows
             .into_iter()
             .map(|row| ThreadListItem {
@@ -1031,7 +1070,8 @@ impl StateStore {
 
     pub fn active_thread_count(&self) -> Result<i64> {
         let g = self.lock()?;
-        queries::active_thread_count(g.state_db.projection())}
+        queries::active_thread_count(g.state_db.projection())
+    }
 
     #[tracing::instrument(
         name = "state:attach_thread_process",
@@ -1095,13 +1135,9 @@ impl StateStore {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let te = convert_events(events, chain_root_id, thread_id);
-        let result = g.state_db.append_events(
-            chain_root_id,
-            thread_id,
-            te,
-            vec![],
-            g.signer.as_ref(),
-        )?;
+        let result =
+            g.state_db
+                .append_events(chain_root_id, thread_id, te, vec![], g.signer.as_ref())?;
         Ok(persisted_from_append(&result, events))
     }
 
@@ -1113,17 +1149,22 @@ impl StateStore {
         limit: usize,
     ) -> Result<Vec<PersistedEventRecord>> {
         let g = self.lock()?;
-        let event_rows = queries::replay_events(g.state_db.projection(), chain_root_id, thread_id, after_seq, limit)?;
+        let event_rows = queries::replay_events(
+            g.state_db.projection(),
+            chain_root_id,
+            thread_id,
+            after_seq,
+            limit,
+        )?;
         event_rows
             .into_iter()
             .map(|row| {
-                let payload: Value = serde_json::from_slice(&row.payload)
-                    .with_context(|| {
-                        format!(
-                            "malformed JSON payload for event {} (chain_seq {})",
-                            row.event_id, row.chain_seq
-                        )
-                    })?;
+                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
+                    format!(
+                        "malformed JSON payload for event {} (chain_seq {})",
+                        row.event_id, row.chain_seq
+                    )
+                })?;
                 Ok(PersistedEventRecord {
                     event_id: row.event_id,
                     chain_root_id: row.chain_root_id,
@@ -1139,18 +1180,12 @@ impl StateStore {
             .collect::<Result<Vec<_>>>()
     }
 
-    pub fn submit_command(
-        &self,
-        cmd: &NewCommandRecord,
-    ) -> Result<CommandRecord> {
+    pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
         let g = self.lock()?;
         g.runtime_db.submit_command(cmd)
     }
 
-    pub fn claim_commands(
-        &self,
-        thread_id: &str,
-    ) -> Result<Vec<CommandRecord>> {
+    pub fn claim_commands(&self, thread_id: &str) -> Result<Vec<CommandRecord>> {
         let g = self.lock()?;
         g.runtime_db.claim_commands(thread_id)
     }

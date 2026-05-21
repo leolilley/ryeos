@@ -167,9 +167,7 @@ pub fn resolve_bundle_binary_ref(
     let manifest_value = cas
         .get_object(&manifest_hash)
         .map_err(|e| {
-            EngineError::Internal(format!(
-                "CAS read error for manifest {manifest_hash}: {e}"
-            ))
+            EngineError::Internal(format!("CAS read error for manifest {manifest_hash}: {e}"))
         })?
         .ok_or_else(|| EngineError::BinManifestMissing {
             bundle_root: bundle_root.display().to_string(),
@@ -185,12 +183,13 @@ pub fn resolve_bundle_binary_ref(
         })
         .unwrap_or_default();
 
-    let item_source_hash = item_source_hashes
-        .get(&item_ref)
-        .ok_or_else(|| EngineError::BinNotInManifest {
-            bin: bin_name.clone(),
-            triple: triple.to_string(),
-        })?;
+    let item_source_hash =
+        item_source_hashes
+            .get(&item_ref)
+            .ok_or_else(|| EngineError::BinNotInManifest {
+                bin: bin_name.clone(),
+                triple: triple.to_string(),
+            })?;
 
     let item_source = cas
         .get_object(item_source_hash)
@@ -212,10 +211,7 @@ pub fn resolve_bundle_binary_ref(
         .to_string();
 
     let bin_bytes = std::fs::read(&bin_path).map_err(|e| {
-        EngineError::Internal(format!(
-            "failed to read binary {}: {e}",
-            bin_path.display()
-        ))
+        EngineError::Internal(format!("failed to read binary {}: {e}", bin_path.display()))
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bin_bytes);
@@ -229,8 +225,11 @@ pub fn resolve_bundle_binary_ref(
         });
     }
 
-    let (trust_class, fingerprint) =
-        crate::executor_resolution::verify_executor_trust(&item_source, trust_store_has_fingerprint, root_trust_class);
+    let (trust_class, fingerprint) = crate::executor_resolution::verify_executor_trust(
+        &item_source,
+        trust_store_has_fingerprint,
+        root_trust_class,
+    );
 
     if !is_dispatchable_trust_class(trust_class) {
         return Err(EngineError::BinUntrusted {
@@ -276,11 +275,8 @@ mod tests {
         let item_source = json!({
             "signature_info": { "fingerprint": "sys-fp" }
         });
-        let (tc, fp) = verify_executor_trust(
-            &item_source,
-            |f| f == "sys-fp",
-            TrustClass::TrustedSystem,
-        );
+        let (tc, fp) =
+            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedSystem);
         assert_eq!(tc, TrustClass::TrustedSystem);
         assert_eq!(fp.as_deref(), Some("sys-fp"));
         assert!(is_dispatchable_trust_class(tc));
@@ -300,11 +296,7 @@ mod tests {
         let item_source = json!({
             "signature_info": { "fingerprint": "user-fp" }
         });
-        let (tc, fp) = verify_executor_trust(
-            &item_source,
-            |_| false,
-            TrustClass::TrustedSystem,
-        );
+        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedSystem);
         assert_eq!(tc, TrustClass::UntrustedUserSpace);
         assert_eq!(fp.as_deref(), Some("user-fp"));
         assert!(!is_dispatchable_trust_class(tc));
@@ -322,11 +314,8 @@ mod tests {
         let item_source = json!({
             "signature_info": { "fingerprint": "sys-fp" }
         });
-        let (tc, fp) = verify_executor_trust(
-            &item_source,
-            |f| f == "sys-fp",
-            TrustClass::TrustedUser,
-        );
+        let (tc, fp) =
+            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedUser);
         assert_eq!(tc, TrustClass::TrustedUser);
         assert_eq!(fp.as_deref(), Some("sys-fp"));
         assert!(is_dispatchable_trust_class(tc));
@@ -339,11 +328,7 @@ mod tests {
         let item_source = json!({
             "signature_info": { "fingerprint": "stranger-fp" }
         });
-        let (tc, fp) = verify_executor_trust(
-            &item_source,
-            |_| false,
-            TrustClass::TrustedUser,
-        );
+        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedUser);
         assert_eq!(tc, TrustClass::UntrustedUserSpace);
         assert_eq!(fp.as_deref(), Some("stranger-fp"));
         assert!(!is_dispatchable_trust_class(tc));

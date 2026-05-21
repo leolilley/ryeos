@@ -62,9 +62,9 @@ use ryeos_engine::roots;
 // `ryeos vault {put,list,remove,rewrap}` verbs without a circular
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
-pub use ryeos_vault::policy::{validate_key_name, validate_decrypted_keys, BLOCKED_NAMES};
-pub use ryeos_vault::sealed::write_sealed_secrets;
 pub use ryeos_vault::paths::default_sealed_store_path;
+pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
+pub use ryeos_vault::sealed::write_sealed_secrets;
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
@@ -178,8 +178,6 @@ pub fn dotenv_search_dirs(project_path: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
-
-
 /// Stub vault — used only when the daemon is constructed for a unit
 /// test that doesn't want to depend on the operator's filesystem.
 /// Always returns an empty map.
@@ -245,7 +243,10 @@ impl SealedEnvelopeVault {
             .join("private_key.pem");
         let secret_key = lillux::vault::read_secret_key(&secret_path)
             .map_err(|e| anyhow!("vault: load secret key {}: {e:#}", secret_path.display()))?;
-        Ok(Self::new(default_sealed_store_path(system_space_dir), secret_key))
+        Ok(Self::new(
+            default_sealed_store_path(system_space_dir),
+            secret_key,
+        ))
     }
 
     pub fn store_path(&self) -> &Path {
@@ -277,11 +278,8 @@ impl SealedEnvelopeVault {
             .map_err(|e| anyhow!("vault: open envelope: {e:#}"))?;
         let plaintext_str = std::str::from_utf8(&plaintext)
             .map_err(|e| anyhow!("vault: decrypted plaintext is not UTF-8: {e}"))?;
-        let map: HashMap<String, String> = toml::from_str(plaintext_str).map_err(|e| {
-            anyhow!(
-                "vault: decrypted plaintext is not a valid TOML map: {e}"
-            )
-        })?;
+        let map: HashMap<String, String> = toml::from_str(plaintext_str)
+            .map_err(|e| anyhow!("vault: decrypted plaintext is not a valid TOML map: {e}"))?;
         validate_decrypted_keys(&map, &self.store_path)?;
         Ok(map)
     }
@@ -332,9 +330,7 @@ impl NodeVault for SealedEnvelopeVault {
     fn delete_secret(&self, _principal: &str, name: &str) -> Result<bool> {
         // Validate key name before attempting delete
         validate_key_name(name)?;
-        self.read_modify_write(|map| {
-            Ok(map.remove(name).is_some())
-        })
+        self.read_modify_write(|map| Ok(map.remove(name).is_some()))
     }
 }
 
@@ -428,7 +424,10 @@ mod tests {
         let required = vec!["FOO".to_string(), "MISSING_KEY".to_string()];
         let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("MISSING_KEY"), "expected MISSING_KEY in error: {msg}");
+        assert!(
+            msg.contains("MISSING_KEY"),
+            "expected MISSING_KEY in error: {msg}"
+        );
         assert!(
             msg.contains("missing declared secret"),
             "expected scoping note in error: {msg}"
@@ -439,10 +438,8 @@ mod tests {
 
     #[test]
     fn sealed_vault_missing_store_returns_empty() {
-        let tmp = std::env::temp_dir().join(format!(
-            "ryeosd-sealed-missing-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("ryeosd-sealed-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let sk = lillux::vault::VaultSecretKey::generate();
         let v = SealedEnvelopeVault::new(tmp.join("store.enc"), sk);
@@ -552,10 +549,7 @@ mod tests {
         lillux::vault::write_secret_key(&key_path, &sk).unwrap();
 
         let v = SealedEnvelopeVault::load(state).unwrap();
-        assert_eq!(
-            v.public_key().fingerprint(),
-            sk.public_key().fingerprint()
-        );
+        assert_eq!(v.public_key().fingerprint(), sk.public_key().fingerprint());
         assert_eq!(v.store_path(), default_sealed_store_path(state));
     }
 
@@ -608,8 +602,7 @@ mod tests {
         let user = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::write(user.path().join(".env"), "API_KEY=user-default\n").unwrap();
-        std::fs::write(project.path().join(".env"), "API_KEY=project-override\n")
-            .unwrap();
+        std::fs::write(project.path().join(".env"), "API_KEY=project-override\n").unwrap();
 
         let v = FixedVault(HashMap::new());
         let required = vec!["API_KEY".to_string()];
@@ -740,12 +733,18 @@ mod tests {
         // Hyphens are not allowed (only [A-Za-z0-9_])
         let err = v.set_secret("op", "my-key", "val").unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("key name"), "expected key name error, got: {msg}");
+        assert!(
+            msg.contains("key name"),
+            "expected key name error, got: {msg}"
+        );
 
         // Blocked name
         let err = v.set_secret("op", "PATH", "/evil").unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("blocked"), "expected blocked error, got: {msg}");
+        assert!(
+            msg.contains("blocked"),
+            "expected blocked error, got: {msg}"
+        );
 
         // Empty name
         let err = v.set_secret("op", "", "val").unwrap_err();
@@ -762,7 +761,10 @@ mod tests {
 
         let err = v.delete_secret("op", "bad-key").unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("key name"), "expected key name error, got: {msg}");
+        assert!(
+            msg.contains("key name"),
+            "expected key name error, got: {msg}"
+        );
     }
 
     #[test]
@@ -793,9 +795,13 @@ mod tests {
         let vault = SealedEnvelopeVault::new(store_path, sk);
 
         // Simulate vault_set("API_KEY", "sk-secret-123")
-        vault.set_secret("caller", "API_KEY", "sk-secret-123").unwrap();
+        vault
+            .set_secret("caller", "API_KEY", "sk-secret-123")
+            .unwrap();
         // Simulate vault_set("DB_URL", "postgres://localhost/db")
-        vault.set_secret("caller", "DB_URL", "postgres://localhost/db").unwrap();
+        vault
+            .set_secret("caller", "DB_URL", "postgres://localhost/db")
+            .unwrap();
 
         // Simulate vault_list
         let mut keys = vault.list_keys("caller").unwrap();

@@ -211,11 +211,7 @@ impl EngineCache {
     ///
     /// `build_fn` returns `Ok((engine, user_temp_guard))` on success.
     /// On error, the slot is removed so a future caller can retry.
-    pub fn get_or_insert_with<F, E>(
-        &self,
-        key: CacheKey,
-        build_fn: F,
-    ) -> Result<Arc<Engine>, E>
+    pub fn get_or_insert_with<F, E>(&self, key: CacheKey, build_fn: F) -> Result<Arc<Engine>, E>
     where
         F: FnOnce() -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), E>,
         E: From<BuildWaitError> + std::fmt::Display,
@@ -322,7 +318,9 @@ impl EngineCache {
         // Clone the result so multiple waiters can all read it.
         match result.as_ref().unwrap() {
             Ok(engine) => Ok(engine.clone()),
-            Err(e) => Err(E::from(BuildWaitError { message: e.message.clone() })),
+            Err(e) => Err(E::from(BuildWaitError {
+                message: e.message.clone(),
+            })),
         }
     }
 
@@ -497,7 +495,10 @@ mod tests {
 
         let hit1 = cache.get(&key).expect("first hit");
         let hit2 = cache.get(&key).expect("second hit");
-        assert!(Arc::ptr_eq(&hit1, &hit2), "same cache entry returns same Arc");
+        assert!(
+            Arc::ptr_eq(&hit1, &hit2),
+            "same cache entry returns same Arc"
+        );
         assert!(Arc::ptr_eq(&hit1, &eng), "cache returns the original Arc");
     }
 
@@ -524,7 +525,11 @@ mod tests {
         // Insert a second entry — key1's engine has strong_count > 1
         // so it should NOT be evicted.
         cache.insert_for_test(key2.clone(), eng2.clone(), None);
-        assert_eq!(cache.len(), 2, "cache should be over-capacity, not evict in-use entry");
+        assert_eq!(
+            cache.len(),
+            2,
+            "cache should be over-capacity, not evict in-use entry"
+        );
 
         // key1 is still accessible
         let hit1_again = cache.get(&key1).expect("key1 still in cache");
@@ -567,7 +572,9 @@ mod tests {
 
         // get() triggers sweep_idle_locked internally.
         // The entry should NOT be evicted because strong_count > 1.
-        let hit = cache.get(&key).expect("in-use entry should survive idle sweep");
+        let hit = cache
+            .get(&key)
+            .expect("in-use entry should survive idle sweep");
         assert!(Arc::ptr_eq(&hit, &eng));
     }
 
@@ -589,7 +596,10 @@ mod tests {
 
         // get() triggers sweep. The entry has strong_count == 1 (cache only)
         // and is past idle — should be evicted, resulting in a miss.
-        assert!(cache.get(&key).is_none(), "idle entry with no external refs should be evicted");
+        assert!(
+            cache.get(&key).is_none(),
+            "idle entry with no external refs should be evicted"
+        );
     }
 
     #[test]
@@ -599,7 +609,10 @@ mod tests {
             idle_threshold: Duration::from_secs(9999),
         });
         // Insert at generation 0.
-        let key_gen0 = CacheKey { system_install_generation: 0, snapshot_hash: "snap-1".into() };
+        let key_gen0 = CacheKey {
+            system_install_generation: 0,
+            snapshot_hash: "snap-1".into(),
+        };
         let eng = minimal_engine();
         cache.insert_for_test(key_gen0.clone(), eng, None);
         assert!(cache.get(&key_gen0).is_some());
@@ -610,10 +623,16 @@ mod tests {
 
         // Old key should still be in cache (it's just a key mismatch
         // for new requests, not an active eviction).
-        assert!(cache.get(&key_gen0).is_some(), "old entry still physically present");
+        assert!(
+            cache.get(&key_gen0).is_some(),
+            "old entry still physically present"
+        );
 
         // New key (gen 1) should miss.
-        let key_gen1 = CacheKey { system_install_generation: 1, snapshot_hash: "snap-1".into() };
+        let key_gen1 = CacheKey {
+            system_install_generation: 1,
+            snapshot_hash: "snap-1".into(),
+        };
         assert!(cache.get(&key_gen1).is_none(), "new generation should miss");
     }
 
@@ -653,7 +672,10 @@ mod tests {
         );
 
         // User dir must still exist while the cache holds the entry.
-        assert!(user_path.join("overlay.dat").exists(), "user dir must exist while cached");
+        assert!(
+            user_path.join("overlay.dat").exists(),
+            "user dir must exist while cached"
+        );
 
         // Evict by inserting a second entry (capacity=1).
         let key2 = dummy_key("snap-B");
@@ -707,10 +729,9 @@ mod tests {
         let key = dummy_key("snap-build");
         let eng = minimal_engine();
         let eng_clone = eng.clone();
-        let result = cache.get_or_insert_with::<_, BuildWaitError>(
-            key.clone(),
-            || Ok((eng_clone, None)),
-        ).unwrap();
+        let result = cache
+            .get_or_insert_with::<_, BuildWaitError>(key.clone(), || Ok((eng_clone, None)))
+            .unwrap();
         assert!(Arc::ptr_eq(&result, &eng));
         assert_eq!(cache.len(), 1);
     }
@@ -726,15 +747,20 @@ mod tests {
         cache.insert_for_test(key.clone(), eng.clone(), None);
 
         let called = std::sync::atomic::AtomicBool::new(false);
-        let result = cache.get_or_insert_with::<_, BuildWaitError>(
-            key,
-            || {
+        let result = cache
+            .get_or_insert_with::<_, BuildWaitError>(key, || {
                 called.store(true, Ordering::SeqCst);
                 Ok((minimal_engine(), None))
-            },
-        ).unwrap();
-        assert!(Arc::ptr_eq(&result, &eng), "must return cached, not rebuild");
-        assert!(!called.load(Ordering::SeqCst), "build_fn must not be called on hit");
+            })
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&result, &eng),
+            "must return cached, not rebuild"
+        );
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "build_fn must not be called on hit"
+        );
     }
 
     #[test]
@@ -774,7 +800,10 @@ mod tests {
 
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let build_calls = build_count.load(Ordering::SeqCst);
-        assert_eq!(build_calls, 1, "build_fn must be called exactly once, got {build_calls}");
+        assert_eq!(
+            build_calls, 1,
+            "build_fn must be called exactly once, got {build_calls}"
+        );
         for r in &results {
             assert!(Arc::ptr_eq(r, &eng), "all callers must get the same Arc");
         }
@@ -828,24 +857,22 @@ mod tests {
         let attempt = std::sync::atomic::AtomicUsize::new(0);
 
         // First call fails.
-        let err = cache.get_or_insert_with::<_, BuildWaitError>(
-            key.clone(),
-            || {
-                attempt.fetch_add(1, Ordering::SeqCst);
-                Err(BuildWaitError { message: "intentional".into() })
-            },
-        );
+        let err = cache.get_or_insert_with::<_, BuildWaitError>(key.clone(), || {
+            attempt.fetch_add(1, Ordering::SeqCst);
+            Err(BuildWaitError {
+                message: "intentional".into(),
+            })
+        });
         assert!(err.is_err());
 
         // Second call succeeds.
         let eng = minimal_engine();
-        let result = cache.get_or_insert_with::<_, BuildWaitError>(
-            key.clone(),
-            || {
+        let result = cache
+            .get_or_insert_with::<_, BuildWaitError>(key.clone(), || {
                 attempt.fetch_add(1, Ordering::SeqCst);
                 Ok((eng.clone(), None))
-            },
-        ).unwrap();
+            })
+            .unwrap();
         assert_eq!(attempt.load(Ordering::SeqCst), 2);
         assert!(Arc::ptr_eq(&result, &eng));
     }
@@ -940,12 +967,16 @@ mod tests {
         let waiter_err = waiter_res.unwrap_err();
 
         assert!(
-            builder_err.message.contains("SENTINEL-DETAIL-checkout-snap-not-in-cas"),
+            builder_err
+                .message
+                .contains("SENTINEL-DETAIL-checkout-snap-not-in-cas"),
             "builder must see its own message; got: {}",
             builder_err.message
         );
         assert!(
-            waiter_err.message.contains("SENTINEL-DETAIL-checkout-snap-not-in-cas"),
+            waiter_err
+                .message
+                .contains("SENTINEL-DETAIL-checkout-snap-not-in-cas"),
             "waiter must see the builder's detail, not a generic 'build failed'; got: {}",
             waiter_err.message
         );
@@ -996,7 +1027,9 @@ mod tests {
         drop(engine);
 
         cache.insert_for_test(dummy_key("pressure"), minimal_engine(), None);
-        let hit = cache.get(&key).expect("callback-held entry survives eviction pressure");
+        let hit = cache
+            .get(&key)
+            .expect("callback-held entry survives eviction pressure");
         assert!(Arc::ptr_eq(&hit, provenance.request_engine()));
     }
 
@@ -1046,7 +1079,9 @@ mod tests {
             None,
         );
 
-        let hit = cache.get(&old_key).expect("old engine pinned by callback survives generation bump");
+        let hit = cache
+            .get(&old_key)
+            .expect("old engine pinned by callback survives generation bump");
         assert!(Arc::ptr_eq(&hit, provenance.request_engine()));
     }
 }

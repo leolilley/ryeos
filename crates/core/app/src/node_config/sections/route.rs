@@ -64,7 +64,10 @@ mod tests {
         let mut body = valid_body();
         body["unknown_field"] = serde_json::json!("oops");
         let result = section.parse("r1", &body);
-        assert!(result.is_err(), "expected error for unknown top-level field");
+        assert!(
+            result.is_err(),
+            "expected error for unknown top-level field"
+        );
         let msg = format!("{:#}", result.unwrap_err());
         assert!(msg.contains("unknown field"), "got: {msg}");
     }
@@ -80,7 +83,10 @@ mod tests {
             "bogus_limit": 42
         });
         let result = section.parse("r1", &body);
-        assert!(result.is_err(), "expected error for unknown field in limits");
+        assert!(
+            result.is_err(),
+            "expected error for unknown field in limits"
+        );
         let msg = format!("{:#}", result.unwrap_err());
         assert!(msg.contains("unknown field"), "got: {msg}");
     }
@@ -91,7 +97,10 @@ mod tests {
         let mut body = valid_body();
         body["response"]["bogus_response_field"] = serde_json::json!("nope");
         let result = section.parse("r1", &body);
-        assert!(result.is_err(), "expected error for unknown field in response");
+        assert!(
+            result.is_err(),
+            "expected error for unknown field in response"
+        );
         let msg = format!("{:#}", result.unwrap_err());
         assert!(msg.contains("unknown field"), "got: {msg}");
     }

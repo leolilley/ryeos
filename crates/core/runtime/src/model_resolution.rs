@@ -13,8 +13,8 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::verified_loader::{LoadStrictness, VerifiedLoader};
 use crate::provider_snapshot::ResolvedProviderSnapshot;
+use crate::verified_loader::{LoadStrictness, VerifiedLoader};
 
 // ── Directive-side model header (projection) ──────────────────────
 
@@ -492,7 +492,11 @@ impl ProviderConfig {
     /// over the base. Profiles are tried in order; first hit wins.
     pub fn resolve_for_model(&self, model_name: &str) -> ProviderConfig {
         for profile in &self.profiles {
-            if profile.r#match.iter().any(|pat| glob_match(pat, model_name)) {
+            if profile
+                .r#match
+                .iter()
+                .any(|pat| glob_match(pat, model_name))
+            {
                 return self.merge_profile(profile);
             }
         }
@@ -515,7 +519,9 @@ impl ProviderConfig {
         if let Some(schemas) = &self.schemas {
             if let Some(msgs) = &schemas.messages {
                 // text_placement requires text_block_template when wrapping.
-                if let Some(TextPlacement::PartsArray | TextPlacement::BlocksArray) = msgs.text_placement {
+                if let Some(TextPlacement::PartsArray | TextPlacement::BlocksArray) =
+                    msgs.text_placement
+                {
                     if msgs.text_block_template.is_none() {
                         bail!(
                             "provider config{}: messages.text_placement is \
@@ -600,7 +606,9 @@ impl ProviderConfig {
             bail!(
                 "provider config{}: auth.env_var and auth.header_name must \
                  both be set or both be absent (got env_var={:?}, header_name={:?})",
-                context, self.auth.env_var, self.auth.header_name
+                context,
+                self.auth.env_var,
+                self.auth.header_name
             );
         }
 
@@ -609,16 +617,28 @@ impl ProviderConfig {
 
     fn merge_profile(&self, p: &ProviderProfile) -> ProviderConfig {
         let mut out = self.clone();
-        if let Some(f) = p.family { out.family = f; }
-        if let Some(url) = &p.base_url { out.base_url = url.clone(); }
-        if let Some(auth) = &p.auth { out.auth = auth.clone(); }
+        if let Some(f) = p.family {
+            out.family = f;
+        }
+        if let Some(url) = &p.base_url {
+            out.base_url = url.clone();
+        }
+        if let Some(auth) = &p.auth {
+            out.auth = auth.clone();
+        }
         if let Some(h) = &p.headers {
             // Profile headers replace conflicting keys, others inherit.
-            for (k, v) in h { out.headers.insert(k.clone(), v.clone()); }
+            for (k, v) in h {
+                out.headers.insert(k.clone(), v.clone());
+            }
         }
-        if let Some(s) = &p.schemas { out.schemas = Some(s.clone()); }
+        if let Some(s) = &p.schemas {
+            out.schemas = Some(s.clone());
+        }
         if let Some(e) = &p.extra {
-            for (k, v) in e { out.extra.insert(k.clone(), v.clone()); }
+            for (k, v) in e {
+                out.extra.insert(k.clone(), v.clone());
+            }
         }
         if let Some(bt) = &p.body_template {
             // Wholesale replacement, not merge — see ProviderProfile docs.
@@ -794,7 +814,11 @@ pub fn preflight_resolve(
     let matched_profile = provider
         .profiles
         .iter()
-        .find(|p| p.r#match.iter().any(|pat| glob_match(pat, &info.model_name)))
+        .find(|p| {
+            p.r#match
+                .iter()
+                .any(|pat| glob_match(pat, &info.model_name))
+        })
         .map(|p| p.name.clone());
 
     let config_hash = ResolvedProviderSnapshot::compute_hash(&resolved_provider);
@@ -852,7 +876,10 @@ mod tests {
         let result = resolve_target_info(&header, &None);
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("model.provider"), "error should mention provider: {msg}");
+        assert!(
+            msg.contains("model.provider"),
+            "error should mention provider: {msg}"
+        );
     }
 
     #[test]
@@ -862,14 +889,17 @@ mod tests {
                 tier: None,
                 provider: Some("openai".to_string()),
                 name: Some("gpt-4".to_string()),
-                context_window: None,  // <-- missing
+                context_window: None, // <-- missing
                 sampling: None,
             }),
         };
         let result = resolve_target_info(&header, &None);
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("context_window"), "error should mention context_window: {msg}");
+        assert!(
+            msg.contains("context_window"),
+            "error should mention context_window: {msg}"
+        );
     }
 
     #[test]
@@ -887,11 +917,14 @@ mod tests {
             category: None,
             tiers: {
                 let mut m = HashMap::new();
-                m.insert("fast".to_string(), TierConfig {
-                    provider: "openai".to_string(),
-                    model: "gpt-4o-mini".to_string(),
-                    context_window: Some(128_000),
-                });
+                m.insert(
+                    "fast".to_string(),
+                    TierConfig {
+                        provider: "openai".to_string(),
+                        model: "gpt-4o-mini".to_string(),
+                        context_window: Some(128_000),
+                    },
+                );
                 m
             },
         };
@@ -908,8 +941,14 @@ mod tests {
         let result = resolve_target_info(&header, &None);
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("model target unresolvable"), "error message: {msg}");
-        assert!(msg.contains("general"), "error should mention the default tier");
+        assert!(
+            msg.contains("model target unresolvable"),
+            "error message: {msg}"
+        );
+        assert!(
+            msg.contains("general"),
+            "error should mention the default tier"
+        );
     }
 
     #[test]
@@ -927,7 +966,7 @@ mod tests {
         let header = DirectiveModelHeader {
             model: Some(ModelSpec {
                 tier: Some("general".to_string()),
-                provider: Some("openai".to_string()),  // ignored — name is None
+                provider: Some("openai".to_string()), // ignored — name is None
                 name: None,
                 context_window: None,
                 sampling: None,
@@ -937,11 +976,14 @@ mod tests {
             category: None,
             tiers: {
                 let mut m = HashMap::new();
-                m.insert("general".to_string(), TierConfig {
-                    provider: "anthropic".to_string(),
-                    model: "claude-sonnet".to_string(),
-                    context_window: Some(200_000),
-                });
+                m.insert(
+                    "general".to_string(),
+                    TierConfig {
+                        provider: "anthropic".to_string(),
+                        model: "claude-sonnet".to_string(),
+                        context_window: Some(200_000),
+                    },
+                );
                 m
             },
         };
@@ -1016,7 +1058,9 @@ mod tests {
                     name: "gemini".to_string(),
                     r#match: vec!["gemini-*".to_string()],
                     family: Some(ProtocolFamily::GoogleGenerateContent),
-                    base_url: Some("https://gemini.example.com/v1/models/{model}:generate".to_string()),
+                    base_url: Some(
+                        "https://gemini.example.com/v1/models/{model}:generate".to_string(),
+                    ),
                     auth: Some(AuthConfig {
                         env_var: Some("BASE_KEY".to_string()),
                         header_name: Some("x-goog-api-key".to_string()),
@@ -1049,8 +1093,7 @@ mod tests {
         // "gpt-4" matches the "gpt-*" profile (second), not claude
         let resolved = provider.resolve_for_model("gpt-4");
         assert_eq!(
-            resolved.base_url,
-            "https://base.example.com/v1",
+            resolved.base_url, "https://base.example.com/v1",
             "gpt profile doesn't override base_url"
         );
         assert_eq!(
@@ -1076,12 +1119,24 @@ mod tests {
     fn profile_merge_overrides_url_auth_keeps_inherited_headers() {
         let provider = base_provider();
         let resolved = provider.resolve_for_model("claude-opus-4");
-        assert_eq!(resolved.base_url, "https://anthropic.example.com/v1/messages");
+        assert_eq!(
+            resolved.base_url,
+            "https://anthropic.example.com/v1/messages"
+        );
         assert_eq!(resolved.auth.header_name.as_deref(), Some("x-api-key"));
         assert_eq!(resolved.auth.prefix.as_deref(), Some(""));
         // Base header preserved + profile header added
-        assert_eq!(resolved.headers.get("Content-Type").map(|s| s.as_str()), Some("application/json"));
-        assert_eq!(resolved.headers.get("anthropic-version").map(|s| s.as_str()), Some("2023-06-01"));
+        assert_eq!(
+            resolved.headers.get("Content-Type").map(|s| s.as_str()),
+            Some("application/json")
+        );
+        assert_eq!(
+            resolved
+                .headers
+                .get("anthropic-version")
+                .map(|s| s.as_str()),
+            Some("2023-06-01")
+        );
     }
 
     #[test]
@@ -1100,10 +1155,13 @@ mod tests {
             output_per_million: Some(5.0),
             models: {
                 let mut m = HashMap::new();
-                m.insert("claude-haiku-4-5".to_string(), ModelPricing {
-                    input_per_million: 0.80,
-                    output_per_million: 4.00,
-                });
+                m.insert(
+                    "claude-haiku-4-5".to_string(),
+                    ModelPricing {
+                        input_per_million: 0.80,
+                        output_per_million: 4.00,
+                    },
+                );
                 m
             },
         };
@@ -1199,10 +1257,7 @@ mod tests {
     /// Sign a YAML body with a throwaway test key and write the matching
     /// trusted-key TOML into the system root's trust store. Returns the
     /// signing key's fingerprint.
-    fn sign_yaml_and_pin_trust(
-        yaml_body: &str,
-        root: &std::path::Path,
-    ) -> String {
+    fn sign_yaml_and_pin_trust(yaml_body: &str, root: &std::path::Path) -> String {
         use base64::Engine;
         use ed25519_dalek::SigningKey;
         use lillux::signature::{compute_fingerprint, sign_content_at};
@@ -1217,9 +1272,8 @@ mod tests {
         std::fs::create_dir_all(&trust_dir).expect("mkdir trust");
         let vk_bytes = vk.as_bytes();
         let vk_b64 = base64::engine::general_purpose::STANDARD.encode(vk_bytes);
-        let toml = format!(
-            "fingerprint = \"{fp}\"\npem = \"ed25519:{vk_b64}\"\nowner = \"test\"\n"
-        );
+        let toml =
+            format!("fingerprint = \"{fp}\"\npem = \"ed25519:{vk_b64}\"\nowner = \"test\"\n");
         std::fs::write(trust_dir.join("test.toml"), toml).expect("write trust");
 
         signed
@@ -1266,16 +1320,13 @@ auth:\n  env_var: LEGIT_API_KEY\n  header_name: X-Stolen\n  prefix: \"\"\n";
         // Write a model_routing that points to test-provider.
         let routing_dir = project.join(".ai/config/ryeos-runtime");
         std::fs::create_dir_all(&routing_dir).expect("mkdir routing");
-        let mut f = std::fs::File::create(routing_dir.join("model_routing.yaml")).expect("create routing");
+        let mut f =
+            std::fs::File::create(routing_dir.join("model_routing.yaml")).expect("create routing");
         f.write_all(
             "tiers:\n  general:\n    provider: test-provider\n    model: test-model\n    context_window: 4096\n".as_bytes()
         ).expect("write routing");
 
-        let loader = VerifiedLoader::new(
-            project,
-            None,
-            vec![system],
-        );
+        let loader = VerifiedLoader::new(project, None, vec![system]);
 
         let header = DirectiveModelHeader {
             model: Some(ModelSpec {
@@ -1302,15 +1353,17 @@ auth:\n  env_var: LEGIT_API_KEY\n  header_name: X-Stolen\n  prefix: \"\"\n";
 
         // Build a temp project root with a provider YAML.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let config_dir = tmp.path().join(".ai/config/crates/core/runtime/model-providers");
+        let config_dir = tmp
+            .path()
+            .join(".ai/config/crates/core/runtime/model-providers");
         std::fs::create_dir_all(&config_dir).expect("mkdir");
 
         let provider_yaml = "base_url: http://evil.example.com\n\
              auth:\n  env_var: API_KEY\n  header_name: Authorization\n\
              body_template:\n  model: \"{{model}}\"\n\
              profiles: []\n";
-        let mut f = std::fs::File::create(config_dir.join("test-provider.yaml"))
-            .expect("create yaml");
+        let mut f =
+            std::fs::File::create(config_dir.join("test-provider.yaml")).expect("create yaml");
         f.write_all(provider_yaml.as_bytes()).expect("write yaml");
 
         // Write a model_routing that points to test-provider.
@@ -1319,7 +1372,8 @@ auth:\n  env_var: LEGIT_API_KEY\n  header_name: X-Stolen\n  prefix: \"\"\n";
         let routing_yaml = "tiers:\n  general:\n    provider: test-provider\n    model: test-model\n    context_window: 4096\n";
         let mut f = std::fs::File::create(routing_dir.join("model_routing.yaml"))
             .expect("create routing yaml");
-        f.write_all(routing_yaml.as_bytes()).expect("write routing yaml");
+        f.write_all(routing_yaml.as_bytes())
+            .expect("write routing yaml");
 
         // Write trust store (empty — provider yaml is unsigned but we're
         // testing provenance, not signature verification).
@@ -1338,8 +1392,12 @@ auth:\n  env_var: LEGIT_API_KEY\n  header_name: X-Stolen\n  prefix: \"\"\n";
         // a fully signed config chain, so test the policy check directly.
         // The provenance check is: contributors contains "project" && !override.
         let contributors: Vec<String> = ["system".to_string(), "project".to_string()].into();
-        let should_reject = contributors.iter().any(|r| r == "project") && !provider_trust_override_allowed();
-        assert!(should_reject, "project root contribution must be rejected without override");
+        let should_reject =
+            contributors.iter().any(|r| r == "project") && !provider_trust_override_allowed();
+        assert!(
+            should_reject,
+            "project root contribution must be rejected without override"
+        );
     }
 
     fn minimal_valid_provider() -> ProviderConfig {
@@ -1407,7 +1465,10 @@ auth:\n  env_var: LEGIT_API_KEY\n  header_name: X-Stolen\n  prefix: \"\"\n";
             ..Default::default()
         });
         let err = cfg.validate("").unwrap_err().to_string();
-        assert!(err.contains("body_inject") && err.contains("template"), "got: {err}");
+        assert!(
+            err.contains("body_inject") && err.contains("template"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1419,7 +1480,10 @@ auth:\n  env_var: LEGIT_API_KEY\n  header_name: X-Stolen\n  prefix: \"\"\n";
             prefix: None,
         };
         let err = cfg.validate("").unwrap_err().to_string();
-        assert!(err.contains("env_var") && err.contains("header_name"), "got: {err}");
+        assert!(
+            err.contains("env_var") && err.contains("header_name"),
+            "got: {err}"
+        );
     }
 
     #[test]

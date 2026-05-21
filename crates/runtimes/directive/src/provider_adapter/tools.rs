@@ -2,10 +2,7 @@ use serde_json::{json, Value};
 
 use crate::directive::{ToolSchema, ToolSchemaConfig};
 
-pub fn serialize_tools(
-    tools: &[ToolSchema],
-    tool_schema: &Option<ToolSchemaConfig>,
-) -> Value {
+pub fn serialize_tools(tools: &[ToolSchema], tool_schema: &Option<ToolSchemaConfig>) -> Value {
     match tool_schema {
         Some(ts) => serialize_with_template(tools, ts),
         None => serialize_openai_default(tools),
@@ -171,19 +168,13 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["type"], "function");
         assert_eq!(arr[0]["function"]["name"], "bash");
+        assert_eq!(arr[0]["function"]["description"], "Run a bash command");
+        assert_eq!(arr[0]["function"]["parameters"]["type"], "object");
+        assert_eq!(arr[1]["function"]["name"], "read_file");
         assert_eq!(
-            arr[0]["function"]["description"],
-            "Run a bash command"
+            arr[1]["function"]["parameters"]["type"], "object",
+            "tools without input_schema should get empty-object default, not null"
         );
-        assert_eq!(
-            arr[0]["function"]["parameters"]["type"],
-            "object"
-        );
-    assert_eq!(arr[1]["function"]["name"], "read_file");
-    assert_eq!(
-        arr[1]["function"]["parameters"]["type"], "object",
-        "tools without input_schema should get empty-object default, not null"
-    );
     }
 
     #[test]
@@ -266,7 +257,11 @@ mod tests {
         }];
         let caps = vec!["ryeos.execute.tool.apps/tv-tracker/api/*".to_string()];
         let filtered = filter_tools_by_caps(&tools, &caps);
-        assert_eq!(filtered.len(), 1, "tool with canonical-ref item_id must match daemon cap format");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "tool with canonical-ref item_id must match daemon cap format"
+        );
     }
 
     #[test]
@@ -306,7 +301,11 @@ mod tests {
         let result = serialize_tools(&tools, &Some(cfg));
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 1, "list_wrap collapses tools into one element");
-        let decls = arr[0].get("functionDeclarations").unwrap().as_array().unwrap();
+        let decls = arr[0]
+            .get("functionDeclarations")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(decls.len(), 2);
         assert_eq!(decls[0]["name"], "bash");
         assert_eq!(decls[0]["parameters"]["type"], "object");
@@ -332,7 +331,10 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"], "bash");
         assert!(arr[0].get("input_schema").is_some());
-        assert!(arr[0].get("type").is_none(), "no function wrapper for anthropic");
+        assert!(
+            arr[0].get("type").is_none(),
+            "no function wrapper for anthropic"
+        );
     }
 
     #[test]
@@ -370,8 +372,12 @@ mod tests {
             list_wrap: Some("functionDeclarations".to_string()),
         };
         let result = serialize_tools(&[], &Some(cfg));
-        assert_eq!(result, json!([]),
+        assert_eq!(
+            result,
+            json!([]),
             "empty tools must serialize as `[]` regardless of list_wrap; \
-             got: {}", result);
+             got: {}",
+            result
+        );
     }
 }

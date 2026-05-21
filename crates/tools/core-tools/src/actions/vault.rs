@@ -116,9 +116,8 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
 
 pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
     let key_path = default_vault_secret_key_path(&opts.system_space_dir);
-    let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
-        format!("read vault secret key {}", key_path.display())
-    })?;
+    let sk = lillux::vault::read_secret_key(&key_path)
+        .with_context(|| format!("read vault secret key {}", key_path.display()))?;
     let store_path = default_sealed_store_path(&opts.system_space_dir);
     let current = read_sealed_secrets(&store_path, &sk)?;
     let mut keys: Vec<String> = current.keys().cloned().collect();
@@ -131,9 +130,8 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
         bail!("ryeos vault remove: at least one KEY required");
     }
     let key_path = default_vault_secret_key_path(&opts.system_space_dir);
-    let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
-        format!("read vault secret key {}", key_path.display())
-    })?;
+    let sk = lillux::vault::read_secret_key(&key_path)
+        .with_context(|| format!("read vault secret key {}", key_path.display()))?;
     let pk = sk.public_key();
     let store_path = default_sealed_store_path(&opts.system_space_dir);
 
@@ -163,9 +161,8 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
     let pub_path = default_vault_public_key_path(&opts.system_space_dir);
     let store_path = default_sealed_store_path(&opts.system_space_dir);
 
-    let old_sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
-        format!("read vault secret key {}", key_path.display())
-    })?;
+    let old_sk = lillux::vault::read_secret_key(&key_path)
+        .with_context(|| format!("read vault secret key {}", key_path.display()))?;
     let old_fingerprint = old_sk.public_key().fingerprint();
 
     let plaintext = read_sealed_secrets(&store_path, &old_sk)?;
@@ -196,13 +193,27 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
         return Err(e);
     }
 
-    std::fs::rename(&new_key_path, &key_path)
-        .with_context(|| format!("rename {} -> {}", new_key_path.display(), key_path.display()))?;
-    std::fs::rename(&new_pub_path, &pub_path)
-        .with_context(|| format!("rename {} -> {}", new_pub_path.display(), pub_path.display()))?;
+    std::fs::rename(&new_key_path, &key_path).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            new_key_path.display(),
+            key_path.display()
+        )
+    })?;
+    std::fs::rename(&new_pub_path, &pub_path).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            new_pub_path.display(),
+            pub_path.display()
+        )
+    })?;
     if rewrap_store {
         std::fs::rename(&new_store_path, &store_path).with_context(|| {
-            format!("rename {} -> {}", new_store_path.display(), store_path.display())
+            format!(
+                "rename {} -> {}",
+                new_store_path.display(),
+                store_path.display()
+            )
         })?;
     }
 
@@ -428,10 +439,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(report.keys_rewrapped, 0);
-        assert_ne!(
-            report.new_fingerprint,
-            old_sk.public_key().fingerprint()
-        );
+        assert_ne!(report.new_fingerprint, old_sk.public_key().fingerprint());
     }
 
     #[test]

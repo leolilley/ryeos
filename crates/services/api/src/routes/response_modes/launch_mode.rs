@@ -164,25 +164,26 @@ impl ResponseMode for LaunchMode {
         // here; whether the kind is root-executable is decided by
         // the engine's kind-schema registry inside
         // `dispatch::dispatch`.
-        let item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&cfg.item_ref).map_err(|e| {
-            RouteConfigError::InvalidResponseSpec {
-                id: raw.id.clone(),
-                mode: "launch".into(),
-                reason: format!(
-                    "source_config.item_ref '{}' is not a valid canonical ref: {e}",
-                    cfg.item_ref
-                ),
-            }
-        })?;
-
-        let project_path =
-            crate::routes::abs_path::AbsolutePathBuf::try_from_str(&cfg.project_path).map_err(
-                |e| RouteConfigError::InvalidResponseSpec {
+        let item_ref =
+            crate::routes::parsed_ref::ParsedItemRef::parse(&cfg.item_ref).map_err(|e| {
+                RouteConfigError::InvalidResponseSpec {
                     id: raw.id.clone(),
                     mode: "launch".into(),
-                    reason: format!("source_config.{}", e),
-                },
-            )?;
+                    reason: format!(
+                        "source_config.item_ref '{}' is not a valid canonical ref: {e}",
+                        cfg.item_ref
+                    ),
+                }
+            })?;
+
+        let project_path = crate::routes::abs_path::AbsolutePathBuf::try_from_str(
+            &cfg.project_path,
+        )
+        .map_err(|e| RouteConfigError::InvalidResponseSpec {
+            id: raw.id.clone(),
+            mode: "launch".into(),
+            reason: format!("source_config.{}", e),
+        })?;
 
         Ok(Arc::new(CompiledLaunchMode {
             item_ref,
@@ -210,9 +211,8 @@ impl CompiledResponseMode for CompiledLaunchMode {
     ) -> Result<axum::response::Response, RouteDispatchError> {
         // Parse body per declared shape.
         let body_value: Value = match self.body {
-            RawRequestBody::Json => serde_json::from_slice(&ctx.body_raw).map_err(|e| {
-                RouteDispatchError::BadRequest(format!("invalid JSON body: {e}"))
-            })?,
+            RawRequestBody::Json => serde_json::from_slice(&ctx.body_raw)
+                .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?,
             RawRequestBody::Text => {
                 let s = std::str::from_utf8(&ctx.body_raw).map_err(|e| {
                     RouteDispatchError::BadRequest(format!("body is not valid UTF-8: {e}"))
@@ -230,9 +230,7 @@ impl CompiledResponseMode for CompiledLaunchMode {
         let received_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .map_err(|e| {
-                RouteDispatchError::Internal(format!("system clock failure: {e}"))
-            })?;
+            .map_err(|e| RouteDispatchError::Internal(format!("system clock failure: {e}")))?;
 
         // Build the launch envelope.
         let envelope = build_launch_envelope(
@@ -327,7 +325,10 @@ fn build_launch_envelope(
         meta.insert("delivery_id".into(), Value::String(delivery_id.into()));
     }
     meta.insert("headers".into(), Value::Object(headers));
-    meta.insert("verifier".into(), Value::String(principal.verifier_key.into()));
+    meta.insert(
+        "verifier".into(),
+        Value::String(principal.verifier_key.into()),
+    );
     meta.insert("principal_id".into(), Value::String(principal.id.clone()));
     meta.insert("route_id".into(), Value::String(route_id.into()));
     meta.insert(
@@ -345,7 +346,9 @@ fn build_launch_envelope(
 mod tests {
     use super::*;
     use crate::routes::invocation::RoutePrincipal;
-    use ryeos_app::route_raw::{RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
+    use ryeos_app::route_raw::{
+        RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec,
+    };
 
     fn make_raw(id: &str) -> RawRouteSpec {
         RawRouteSpec {
@@ -376,12 +379,12 @@ mod tests {
         }
     }
 
-    fn ctx() {}
-
     #[test]
     fn compile_succeeds_on_valid_route() {
         let raw = make_raw("r1");
-        let _ = LaunchMode::default().compile(&raw).expect("valid launch route compiles");
+        let _ = LaunchMode::default()
+            .compile(&raw)
+            .expect("valid launch route compiles");
     }
 
     #[test]
@@ -396,7 +399,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must not have a top-level 'execute'"), "got: {msg}");
+        assert!(
+            msg.contains("must not have a top-level 'execute'"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -408,7 +414,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must not declare a streaming `response.source`"), "got: {msg}");
+        assert!(
+            msg.contains("must not declare a streaming `response.source`"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -432,7 +441,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("requires request.body = json | text"), "got: {msg}");
+        assert!(
+            msg.contains("requires request.body = json | text"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -444,14 +456,19 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("requires request.body = json | text"), "got: {msg}");
+        assert!(
+            msg.contains("requires request.body = json | text"),
+            "got: {msg}"
+        );
     }
 
     #[test]
     fn compile_accepts_body_text() {
         let mut raw = make_raw("r1");
         raw.request.body = RawRequestBody::Text;
-        let _ = LaunchMode::default().compile(&raw).expect("text body must be accepted");
+        let _ = LaunchMode::default()
+            .compile(&raw)
+            .expect("text body must be accepted");
     }
 
     #[test]
@@ -463,7 +480,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("requires response.source_config"), "got: {msg}");
+        assert!(
+            msg.contains("requires response.source_config"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -516,7 +536,12 @@ mod tests {
                 "project_path": "/opt/p",
             });
             let r = LaunchMode::default().compile(&raw);
-            assert!(r.is_ok(), "ref '{}' should compile, got: {:?}", ref_str, r.err());
+            assert!(
+                r.is_ok(),
+                "ref '{}' should compile, got: {:?}",
+                ref_str,
+                r.err()
+            );
         }
     }
 

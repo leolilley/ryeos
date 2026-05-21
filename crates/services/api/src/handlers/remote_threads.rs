@@ -5,10 +5,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::remote::client::RemoteClient;
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
+use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 use super::default_list_limit;
 
@@ -21,7 +21,9 @@ pub struct Request {
     pub limit: usize,
 }
 
-fn default_remote() -> String { "default".to_string() }
+fn default_remote() -> String {
+    "default".to_string()
+}
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let client = RemoteClient::from_named_remote(&state, &req.remote)?;

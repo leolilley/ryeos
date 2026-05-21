@@ -5,10 +5,10 @@
 
 use anyhow::Result;
 
-use super::db::SchedulerDb;
-use super::types::{FireRecord, PendingFire, ScheduleSpecRecord};
 use super::crontab::compute_next_fire;
+use super::db::SchedulerDb;
 use super::projection;
+use super::types::{FireRecord, PendingFire, ScheduleSpecRecord};
 use crate::SchedulerContext;
 
 /// All four misfire policies.
@@ -35,18 +35,16 @@ fn parse_misfire_policy(raw: &str) -> MisfirePolicy {
     match raw {
         "skip" => MisfirePolicy::Skip,
         "fire_once_now" => MisfirePolicy::FireOnceNow,
-        s if s.starts_with("catch_up_bounded:") => {
-            s.strip_prefix("catch_up_bounded:")
-                .and_then(|n| n.parse().ok())
-                .map(MisfirePolicy::CatchUpBounded)
-                .unwrap_or(MisfirePolicy::Skip)
-        }
-        s if s.starts_with("catch_up_within_secs:") => {
-            s.strip_prefix("catch_up_within_secs:")
-                .and_then(|n| n.parse().ok())
-                .map(MisfirePolicy::CatchUpWithinSecs)
-                .unwrap_or(MisfirePolicy::Skip)
-        }
+        s if s.starts_with("catch_up_bounded:") => s
+            .strip_prefix("catch_up_bounded:")
+            .and_then(|n| n.parse().ok())
+            .map(MisfirePolicy::CatchUpBounded)
+            .unwrap_or(MisfirePolicy::Skip),
+        s if s.starts_with("catch_up_within_secs:") => s
+            .strip_prefix("catch_up_within_secs:")
+            .and_then(|n| n.parse().ok())
+            .map(MisfirePolicy::CatchUpWithinSecs)
+            .unwrap_or(MisfirePolicy::Skip),
         _ => MisfirePolicy::Skip,
     }
 }
@@ -68,8 +66,11 @@ pub fn detect_misfires(
 
     loop {
         let next = compute_next_fire(
-            &spec.schedule_type, &spec.expression, &spec.timezone,
-            cursor, Some(cursor),
+            &spec.schedule_type,
+            &spec.expression,
+            &spec.timezone,
+            cursor,
+            Some(cursor),
         )?;
 
         match next {
@@ -184,11 +185,14 @@ pub async fn evaluate_misfires<Ctx: SchedulerContext>(
                 let fid = super::types::fire_id(&spec.schedule_id, scheduled_at);
                 record_skip(ctx, &fid, spec, scheduled_at, "misfire_skipped_bounded").await;
             }
-            to_fire.into_iter().map(|scheduled_at| PendingFire {
-                fire_id: super::types::fire_id(&spec.schedule_id, scheduled_at),
-                scheduled_at,
-                reason: "misfire_catch_up",
-            }).collect()
+            to_fire
+                .into_iter()
+                .map(|scheduled_at| PendingFire {
+                    fire_id: super::types::fire_id(&spec.schedule_id, scheduled_at),
+                    scheduled_at,
+                    reason: "misfire_catch_up",
+                })
+                .collect()
         }
 
         MisfirePolicy::CatchUpWithinSecs(window_secs) => {
@@ -211,11 +215,14 @@ pub async fn evaluate_misfires<Ctx: SchedulerContext>(
                     record_skip(ctx, &fid, spec, scheduled_at, "misfire_skipped_window").await;
                 }
             }
-            to_fire.into_iter().map(|scheduled_at| PendingFire {
-                fire_id: super::types::fire_id(&spec.schedule_id, scheduled_at),
-                scheduled_at,
-                reason: "misfire_catch_up",
-            }).collect()
+            to_fire
+                .into_iter()
+                .map(|scheduled_at| PendingFire {
+                    fire_id: super::types::fire_id(&spec.schedule_id, scheduled_at),
+                    scheduled_at,
+                    reason: "misfire_catch_up",
+                })
+                .collect()
         }
     }
 }
@@ -252,9 +259,13 @@ async fn record_skip<Ctx: SchedulerContext>(
         "skipped_reason": reason,
         "signer_fingerprint": spec.signer_fingerprint,
     });
-    let fires_path = ctx.system_space_dir().join(ryeos_engine::AI_DIR)
-        .join("state").join("schedules")
-        .join(&spec.schedule_id).join("fires.jsonl");
+    let fires_path = ctx
+        .system_space_dir()
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("schedules")
+        .join(&spec.schedule_id)
+        .join("fires.jsonl");
 
     {
         let db = ctx.scheduler_db();
@@ -311,13 +322,19 @@ mod tests {
     #[test]
     fn resolve_catch_up_bounded() {
         let spec = make_spec("catch_up_bounded:5", "cron");
-        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::CatchUpBounded(5));
+        assert_eq!(
+            resolve_misfire_policy(&spec),
+            MisfirePolicy::CatchUpBounded(5)
+        );
     }
 
     #[test]
     fn resolve_catch_up_within_secs() {
         let spec = make_spec("catch_up_within_secs:300", "cron");
-        assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::CatchUpWithinSecs(300));
+        assert_eq!(
+            resolve_misfire_policy(&spec),
+            MisfirePolicy::CatchUpWithinSecs(300)
+        );
     }
 
     #[test]

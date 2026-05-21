@@ -8,11 +8,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use crate::handler_error::HandlerError;
 use crate::handler_context::HandlerContext;
+use crate::handler_error::HandlerError;
+use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,7 +20,11 @@ pub struct Request {
     pub thread_id: String,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
     // Ownership check against the chain root thread.
     let root = state
         .state_store
@@ -34,10 +38,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         None => return Err(HandlerError::NotFound),
     }
 
-    match state.threads.get_chain(&req.thread_id)
+    match state
+        .threads
+        .get_chain(&req.thread_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?
     {
-        Some(chain) => serde_json::to_value(chain).map_err(|e| HandlerError::Internal(e.to_string())),
+        Some(chain) => {
+            serde_json::to_value(chain).map_err(|e| HandlerError::Internal(e.to_string()))
+        }
         None => Ok(Value::Null),
     }
 }

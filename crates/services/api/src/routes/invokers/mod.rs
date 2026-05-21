@@ -35,7 +35,9 @@ pub fn compile_auth_invoker(
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
     match auth_key {
         "none" => Ok(Arc::new(none_invocation::CompiledNoneVerifier)),
-        "ryeos_signed" => Ok(Arc::new(ryeos_signed_invocation::CompiledRyeosSignedVerifier)),
+        "ryeos_signed" => Ok(Arc::new(
+            ryeos_signed_invocation::CompiledRyeosSignedVerifier,
+        )),
         "hmac" => {
             let config = auth_config.ok_or_else(|| RouteConfigError::InvalidSourceConfig {
                 id: route_id.into(),
@@ -109,9 +111,7 @@ fn compile_service_invoker_inner(
             ),
         })?;
 
-    if descriptor.availability
-        == ryeos_executor::executor::ServiceAvailability::OfflineOnly
-    {
+    if descriptor.availability == ryeos_executor::executor::ServiceAvailability::OfflineOnly {
         return Err(RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
             src: source_ref.into(),
@@ -260,5 +260,4 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("no service descriptor found"), "got: {msg}");
     }
-
 }

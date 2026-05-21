@@ -28,29 +28,18 @@ pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
     let bundle_roots = discover_bundle_roots();
     let system_roots = roots::system_roots(&bundle_roots);
 
-    let trust_store = TrustStore::load_three_tier(
-        project_path,
-        user_root.as_deref(),
-        &system_roots,
-    )
-    .with_context(|| "load trust store")?;
+    let trust_store =
+        TrustStore::load_three_tier(project_path, user_root.as_deref(), &system_roots)
+            .with_context(|| "load trust store")?;
 
     let kinds = build_kind_registry(&system_roots, &trust_store)?;
-    let parsers = build_parser_dispatcher(
-        &system_roots,
-        user_root.as_deref(),
-        &kinds,
-        &trust_store,
-    )?;
+    let parsers =
+        build_parser_dispatcher(&system_roots, user_root.as_deref(), &kinds, &trust_store)?;
 
-    Ok(Engine::new(kinds, parsers, user_root, system_roots)
-        .with_trust_store(trust_store))
+    Ok(Engine::new(kinds, parsers, user_root, system_roots).with_trust_store(trust_store))
 }
 
-fn build_kind_registry(
-    system_roots: &[PathBuf],
-    trust_store: &TrustStore,
-) -> Result<KindRegistry> {
+fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
     let mut search = Vec::new();
     for r in system_roots {
         let p = r.join(".ai").join("node").join("engine").join("kinds");
@@ -70,11 +59,19 @@ fn build_parser_dispatcher(
     let mut search: Vec<PathBuf> = system_roots.to_vec();
     let mut tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = system_roots
         .iter()
-        .map(|r| (r.clone(), ryeos_engine::resolution::TrustClass::TrustedSystem))
+        .map(|r| {
+            (
+                r.clone(),
+                ryeos_engine::resolution::TrustClass::TrustedSystem,
+            )
+        })
         .collect();
     if let Some(u) = user_root {
         search.push(u.to_path_buf());
-        tagged_search.push((u.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser));
+        tagged_search.push((
+            u.to_path_buf(),
+            ryeos_engine::resolution::TrustClass::TrustedUser,
+        ));
     }
     let (parser_tools, _) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;

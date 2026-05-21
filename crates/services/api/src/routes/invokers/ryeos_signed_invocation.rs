@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContract, RouteInvocationContext,
+    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
     RouteInvocationOutput, RouteInvocationResult, RoutePrincipal,
 };
 

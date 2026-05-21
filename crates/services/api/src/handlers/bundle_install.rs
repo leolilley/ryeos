@@ -14,12 +14,12 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use ryeos_engine::roots;
 use ryeos_bundle::preflight::preflight_verify_bundle;
+use ryeos_engine::roots;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,10 +32,7 @@ pub struct Request {
 
 pub fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 64 {
-        bail!(
-            "invalid bundle name '{}': must be 1–64 characters",
-            name
-        );
+        bail!("invalid bundle name '{}': must be 1–64 characters", name);
     }
     if !name
         .chars()
@@ -85,12 +82,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     )
     .context("preflight verification refused install")?;
 
-    fs::create_dir_all(&bundles_root).with_context(|| {
-        format!(
-            "failed to create bundles root {}",
-            bundles_root.display()
-        )
-    })?;
+    fs::create_dir_all(&bundles_root)
+        .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
     copy_dir_recursive(&req.source_path, &target).with_context(|| {
         format!(
@@ -133,11 +126,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)
-        .with_context(|| format!("failed to create {}", dst.display()))?;
-    for entry in fs::read_dir(src)
-        .with_context(|| format!("failed to read {}", src.display()))?
-    {
+    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("failed to read {}", src.display()))? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let from = entry.path();
@@ -155,8 +145,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
                 bail!("symlinks unsupported on this platform: {}", from.display());
             }
         } else {
-            fs::copy(&from, &to)
-                .with_context(|| format!("failed to copy {} -> {}", from.display(), to.display()))?;
+            fs::copy(&from, &to).with_context(|| {
+                format!("failed to copy {} -> {}", from.display(), to.display())
+            })?;
         }
     }
     Ok(())

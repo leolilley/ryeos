@@ -14,13 +14,13 @@ use anyhow::{Context, Result};
 use ryeos_engine::boot_validation::{validate_boot, validate_protocol_builder};
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::engine::Engine;
-use ryeos_engine::runtime::HostEnvBindings;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::protocols::ProtocolRegistry;
 use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::roots;
+use ryeos_engine::runtime::HostEnvBindings;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
 
@@ -111,14 +111,18 @@ pub fn build_engine_for_roots(
     let mut schema_roots = Vec::new();
 
     for root in &system_roots {
-        let kinds_dir = root.join(ryeos_engine::AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
+        let kinds_dir = root
+            .join(ryeos_engine::AI_DIR)
+            .join(ryeos_engine::KIND_SCHEMAS_DIR);
         if kinds_dir.is_dir() {
             schema_roots.push(kinds_dir);
         }
     }
 
     if let Some(ref ur) = user_root {
-        let user_kinds = ur.join(ryeos_engine::AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
+        let user_kinds = ur
+            .join(ryeos_engine::AI_DIR)
+            .join(ryeos_engine::KIND_SCHEMAS_DIR);
         if user_kinds.is_dir() {
             schema_roots.push(user_kinds);
         }
@@ -131,38 +135,36 @@ pub fn build_engine_for_roots(
     //    schema verification requires the trust store. Both use raw
     //    filesystem scanning (no item resolution dependency), so there
     //    is no bootstrap cycle.
-    let trust_store = match TrustStore::load_three_tier(
-        project_root,
-        user_root.as_deref(),
-        &system_roots,
-    ) {
-        Ok(mut store) => {
-            tracing::info!(count = store.len(), "loaded operator trust store");
-            if let Some(overlay) = trust_overlay {
-                // Caller-scoped overlay: pins the caller trusts but the
-                // remote does not — never written to the remote's
-                // persistent trust dir. The overlay lives for this
-                // engine's lifetime only.
-                let added = store.extend_from(overlay);
-                tracing::info!(
-                    overlay_added = added,
-                    total = store.len(),
-                    "applied per-request trust overlay"
-                );
+    let trust_store =
+        match TrustStore::load_three_tier(project_root, user_root.as_deref(), &system_roots) {
+            Ok(mut store) => {
+                tracing::info!(count = store.len(), "loaded operator trust store");
+                if let Some(overlay) = trust_overlay {
+                    // Caller-scoped overlay: pins the caller trusts but the
+                    // remote does not — never written to the remote's
+                    // persistent trust dir. The overlay lives for this
+                    // engine's lifetime only.
+                    let added = store.extend_from(overlay);
+                    tracing::info!(
+                        overlay_added = added,
+                        total = store.len(),
+                        "applied per-request trust overlay"
+                    );
+                }
+                store
             }
-            store
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "failed to load trust store");
-            anyhow::bail!("failed to load trust store: {err}");
-        }
-    };
+            Err(err) => {
+                tracing::error!(error = %err, "failed to load trust store");
+                anyhow::bail!("failed to load trust store: {err}");
+            }
+        };
 
     // 5. Load kind registry from filesystem (requires trust store for verification)
     let kinds = if schema_roots.is_empty() {
         anyhow::bail!("no kind schema roots found; set system_space_dir or RYEOS_SYSTEM_SPACE_DIR to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
     } else {
-        KindRegistry::load_base(&schema_roots, &trust_store).context("failed to load kind schemas")?
+        KindRegistry::load_base(&schema_roots, &trust_store)
+            .context("failed to load kind schemas")?
     };
 
     if !kinds.is_empty() {
@@ -208,11 +210,8 @@ pub fn build_engine_for_roots(
         )
         .collect();
 
-    let handler_registry = HandlerRegistry::load_base(
-        &tagged_roots,
-        &trust_store,
-    )
-    .context("failed to load handler descriptors from bundle roots")?;
+    let handler_registry = HandlerRegistry::load_base(&tagged_roots, &trust_store)
+        .context("failed to load handler descriptors from bundle roots")?;
     tracing::info!(
         count = handler_registry.iter().count(),
         "loaded handler descriptors"
@@ -223,11 +222,8 @@ pub fn build_engine_for_roots(
     //     failure: dispatch routes through protocol descriptors for
     //     subprocess wire contracts, and silently degrading to an empty
     //     registry produces confusing errors downstream.
-    let protocol_registry = ProtocolRegistry::load_base(
-        &tagged_roots,
-        &trust_store,
-    )
-    .context("failed to load protocol descriptors from bundle roots")?;
+    let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, &trust_store)
+        .context("failed to load protocol descriptors from bundle roots")?;
     tracing::info!(
         count = protocol_registry.iter().count(),
         "loaded protocol descriptors"
@@ -321,9 +317,8 @@ fn load_host_env_passthrough_allowlist() -> Result<HostEnvBindings> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect();
-    let bindings = HostEnvBindings::from_allowlist(names).map_err(|e| {
-        anyhow::anyhow!("invalid RYEOS_TOOL_ENV_PASSTHROUGH configuration: {e}")
-    })?;
+    let bindings = HostEnvBindings::from_allowlist(names)
+        .map_err(|e| anyhow::anyhow!("invalid RYEOS_TOOL_ENV_PASSTHROUGH configuration: {e}"))?;
     let allowed_names: Vec<&str> = bindings.allowed.iter().map(String::as_str).collect();
     tracing::info!(
         count = bindings.allowed.len(),
@@ -335,10 +330,7 @@ fn load_host_env_passthrough_allowlist() -> Result<HostEnvBindings> {
 
 /// Walk every kind schema's terminator and verify that `Subprocess`
 /// terminators' `protocol_ref` values resolve in the protocol registry.
-fn validate_terminator_refs(
-    kinds: &KindRegistry,
-    protocols: &ProtocolRegistry,
-) -> Result<()> {
+fn validate_terminator_refs(kinds: &KindRegistry, protocols: &ProtocolRegistry) -> Result<()> {
     for kind_name in kinds.kinds() {
         if let Some(schema) = kinds.get(kind_name) {
             if let Some(exec) = &schema.execution {
@@ -355,4 +347,3 @@ fn validate_terminator_refs(
     }
     Ok(())
 }
-

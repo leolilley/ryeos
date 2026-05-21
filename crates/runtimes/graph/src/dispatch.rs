@@ -23,19 +23,24 @@ pub async fn dispatch_action(
 
     if let Some(ctx) = exec_ctx {
         let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
-        let thread = action.get("thread").and_then(|v| v.as_str()).unwrap_or("inline");
+        let thread = action
+            .get("thread")
+            .and_then(|v| v.as_str())
+            .unwrap_or("inline");
         // Inject parent context for child-spawning executes only
-        if item_id.starts_with("directive:") || item_id.starts_with("graph:") || thread != "inline" {
+        if item_id.starts_with("directive:") || item_id.starts_with("graph:") || thread != "inline"
+        {
             inject_parent_context(&mut action, ctx);
         }
     }
 
-    let item_id = action.get("item_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
     tracing::Span::current().record("tool_name", item_id);
     let params = action.get("params").cloned().unwrap_or(json!({}));
-    let thread = action.get("thread").and_then(|v| v.as_str()).unwrap_or("inline");
+    let thread = action
+        .get("thread")
+        .and_then(|v| v.as_str())
+        .unwrap_or("inline");
 
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
@@ -47,7 +52,9 @@ pub async fn dispatch_action(
         },
     };
 
-    let response = client.dispatch_action(request).await
+    let response = client
+        .dispatch_action(request)
+        .await
         .map_err(|e| anyhow::anyhow!("dispatch failed: {e}"))?;
 
     // The typed callback contract puts the leaf-dispatcher value in
@@ -101,13 +108,16 @@ fn unwrap_execute_envelope(value: Value) -> Value {
 }
 
 fn inject_parent_context(action: &mut Value, ctx: &ExecutionContext) {
-    let Some(map) = action.as_object_mut() else { return; };
+    let Some(map) = action.as_object_mut() else {
+        return;
+    };
 
     // Ensure params exists as an object
     if !map.contains_key("params") || !map["params"].is_object() {
         map.insert("params".into(), json!({}));
     }
-    let params = map.get_mut("params")
+    let params = map
+        .get_mut("params")
         .and_then(Value::as_object_mut)
         .unwrap();
 
@@ -136,15 +146,15 @@ fn follow_continuation<'a>(
         // Typed callback contract: continuation IDs live at the leaf
         // result's top level. The legacy `.data.continuation_id`
         // sidechannel is gone — there is one source of truth here.
-        let continuation_id = result
-            .get("continuation_id")
-            .and_then(|v| v.as_str());
+        let continuation_id = result.get("continuation_id").and_then(|v| v.as_str());
 
         let Some(cont_id) = continuation_id else {
             return Ok(result.clone());
         };
 
-        let thread_result = client.get_thread_by_id(cont_id).await
+        let thread_result = client
+            .get_thread_by_id(cont_id)
+            .await
             .map_err(|e| anyhow::anyhow!("continuation thread lookup failed: {e}"))?;
 
         let thread_status = thread_result
@@ -164,10 +174,12 @@ fn follow_continuation<'a>(
                 .get("thread")
                 .and_then(|t| t.get("successor_thread_id"))
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!(
-                    "continued thread {cont_id} missing thread.successor_thread_id \
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "continued thread {cont_id} missing thread.successor_thread_id \
                      in get_thread response — daemon contract violation"
-                ))?;
+                    )
+                })?;
 
             // Recurse with a leaf-shaped value: continuation IDs live
             // at the leaf's top level under the typed callback contract.
@@ -179,13 +191,12 @@ fn follow_continuation<'a>(
         // returning the whole `{thread, result, ...}` wrapper —
         // `runtime.get_thread` always carries `result` for non-continued
         // threads, and a missing field is a daemon contract violation.
-        let terminal_result = thread_result
-            .get("result")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!(
+        let terminal_result = thread_result.get("result").cloned().ok_or_else(|| {
+            anyhow::anyhow!(
                 "thread {cont_id} status={thread_status:?} missing top-level \
                  `result` field in get_thread response — daemon contract violation"
-            ))?;
+            )
+        })?;
 
         Ok(terminal_result)
     })
@@ -198,7 +209,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn make_mock_client(results: Vec<Value>) -> CallbackClient {
-        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(MockClient::new(results));
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+            Arc::new(MockClient::new(results));
         CallbackClient::from_inner(inner, "T-test", "/project", "tat-test")
     }
 
@@ -208,13 +220,18 @@ mod tests {
 
     impl MockClient {
         fn new(results: Vec<Value>) -> Self {
-            Self { results: Mutex::new(results) }
+            Self {
+                results: Mutex::new(results),
+            }
         }
     }
 
     #[async_trait::async_trait]
     impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
-        async fn dispatch_action(&self, _request: DispatchActionRequest) -> Result<Value, CallbackError> {
+        async fn dispatch_action(
+            &self,
+            _request: DispatchActionRequest,
+        ) -> Result<Value, CallbackError> {
             let mut results = self.results.lock().unwrap();
             // Strict typed contract: wrap leaf in `{thread, result}`.
             if results.is_empty() {
@@ -223,20 +240,55 @@ mod tests {
                 Ok(json!({"thread": {}, "result": results.remove(0)}))
             }
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_thread(&self, id: &str) -> Result<Value, CallbackError> {
-            Ok(json!({"thread": {"status": "continued", "successor_thread_id": "cont-next", "id": id}}))
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, id: &str) -> Result<Value, CallbackError> {
+            Ok(
+                json!({"thread": {"status": "continued", "successor_thread_id": "cont-next", "id": id}}),
+            )
+        }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
     }
 
     #[test]
@@ -261,9 +313,14 @@ mod tests {
         // chain runs to depth 20 and then returns the leaf as-is.
         let client = make_mock_client(vec![json!({"continuation_id": "cont-1"})]);
         let action = json!({"item_id": "tool:test/deep"});
-        let result = dispatch_action(&client, &action, "t-1", "/tmp/test", None).await.unwrap();
+        let result = dispatch_action(&client, &action, "t-1", "/tmp/test", None)
+            .await
+            .unwrap();
         assert!(
-            result.get("continuation_id").and_then(|v| v.as_str()).is_some(),
+            result
+                .get("continuation_id")
+                .and_then(|v| v.as_str())
+                .is_some(),
             "expected leaf continuation_id at top level after max-depth abort, got: {result}"
         );
     }

@@ -62,8 +62,7 @@ pub fn append_event(state_root: &Path, event: &GcEvent) -> Result<()> {
     let log_dir = state_root.join("logs");
     let log_path = log_dir.join("gc.jsonl");
 
-    fs::create_dir_all(&log_dir)
-        .context("failed to create GC log directory")?;
+    fs::create_dir_all(&log_dir).context("failed to create GC log directory")?;
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -71,11 +70,9 @@ pub fn append_event(state_root: &Path, event: &GcEvent) -> Result<()> {
         .open(&log_path)
         .context("failed to open GC event log")?;
 
-    let line = serde_json::to_string(event)
-        .context("failed to serialize GC event")?;
+    let line = serde_json::to_string(event).context("failed to serialize GC event")?;
 
-    writeln!(file, "{}", line)
-        .context("failed to write GC event")?;
+    writeln!(file, "{}", line).context("failed to write GC event")?;
 
     Ok(())
 }

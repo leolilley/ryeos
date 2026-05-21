@@ -67,43 +67,183 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "schedule_specs",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "schedule_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "item_ref", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "params", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "schedule_type", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "expression", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "timezone", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "misfire_policy", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "overlap_policy", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "enabled", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "project_root", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "signer_fingerprint", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "spec_hash", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "registered_at", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "requester_fingerprint", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "capabilities", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "schedule_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "item_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "params",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "schedule_type",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "expression",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "timezone",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "misfire_policy",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "overlap_policy",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "enabled",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_root",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "signer_fingerprint",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spec_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "registered_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "requester_fingerprint",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "capabilities",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
                 name: "schedule_fires",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "fire_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "schedule_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "scheduled_at", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "fired_at", col_type: "INTEGER", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "completed_at", col_type: "INTEGER", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "status", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "trigger_reason", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "outcome", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "signer_fingerprint", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec {
+                        name: "fire_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "schedule_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "scheduled_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "fired_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completed_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "status",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "trigger_reason",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "outcome",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "signer_fingerprint",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
         ],
         indexes: &[
-            sqlite_schema::IndexSpec { name: "idx_fires_schedule_id", table: "schedule_fires", columns: &["schedule_id"], unique: false },
-            sqlite_schema::IndexSpec { name: "idx_fires_status", table: "schedule_fires", columns: &["status"], unique: false },
-            sqlite_schema::IndexSpec { name: "idx_fires_schedule_scheduled", table: "schedule_fires", columns: &["schedule_id", "scheduled_at"], unique: false },
+            sqlite_schema::IndexSpec {
+                name: "idx_fires_schedule_id",
+                table: "schedule_fires",
+                columns: &["schedule_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_fires_status",
+                table: "schedule_fires",
+                columns: &["status"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_fires_schedule_scheduled",
+                table: "schedule_fires",
+                columns: &["schedule_id", "scheduled_at"],
+                unique: false,
+            },
         ],
     }
 }
@@ -117,8 +257,9 @@ pub struct SchedulerDb {
 impl SchedulerDb {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create scheduler db dir {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create scheduler db dir {}", parent.display())
+            })?;
         }
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open scheduler db {}", path.display()))?;
@@ -129,29 +270,35 @@ impl SchedulerDb {
         } else {
             sqlite_schema::assert_owned(&conn, &spec, path)?;
         }
-        Ok(Self { inner: std::sync::Mutex::new(conn) })
+        Ok(Self {
+            inner: std::sync::Mutex::new(conn),
+        })
     }
 
     /// Open an in-memory database (for standalone mode and tests where
     /// the scheduler is not actively running).
     pub fn new_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .context("failed to open in-memory scheduler db")?;
+        let conn = Connection::open_in_memory().context("failed to open in-memory scheduler db")?;
         let spec = scheduler_schema_spec();
         sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, Path::new(":memory:"))?;
-        Ok(Self { inner: std::sync::Mutex::new(conn) })
+        Ok(Self {
+            inner: std::sync::Mutex::new(conn),
+        })
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.inner.lock().map_err(|e| anyhow!("scheduler db lock poisoned: {}", e))
+        self.inner
+            .lock()
+            .map_err(|e| anyhow!("scheduler db lock poisoned: {}", e))
     }
 
     // ── schedule_specs ──────────────────────────────────────────
 
     pub fn upsert_spec(&self, rec: &ScheduleSpecRecord) -> Result<()> {
         let capabilities_json = serde_json::to_string(&rec.capabilities)?;
-        self.lock()?.execute(
-            "INSERT INTO schedule_specs
+        self.lock()?
+            .execute(
+                "INSERT INTO schedule_specs
                 (schedule_id, item_ref, params, schedule_type, expression,
                  timezone, misfire_policy, overlap_policy, enabled,
                  project_root, signer_fingerprint, spec_hash, registered_at,
@@ -166,15 +313,25 @@ impl SchedulerDb {
                 spec_hash=excluded.spec_hash, registered_at=excluded.registered_at,
                 requester_fingerprint=excluded.requester_fingerprint,
                 capabilities=excluded.capabilities",
-            params![
-                rec.schedule_id, rec.item_ref, rec.params,
-                rec.schedule_type, rec.expression, rec.timezone,
-                rec.misfire_policy, rec.overlap_policy, rec.enabled as i32,
-                rec.project_root, rec.signer_fingerprint, rec.spec_hash,
-                rec.registered_at, rec.requester_fingerprint, capabilities_json,
-            ],
-        )
-        .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
+                params![
+                    rec.schedule_id,
+                    rec.item_ref,
+                    rec.params,
+                    rec.schedule_type,
+                    rec.expression,
+                    rec.timezone,
+                    rec.misfire_policy,
+                    rec.overlap_policy,
+                    rec.enabled as i32,
+                    rec.project_root,
+                    rec.signer_fingerprint,
+                    rec.spec_hash,
+                    rec.registered_at,
+                    rec.requester_fingerprint,
+                    capabilities_json,
+                ],
+            )
+            .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
         Ok(())
     }
 
@@ -217,13 +374,19 @@ impl SchedulerDb {
         Ok(out)
     }
 
-    pub fn list_specs(&self, enabled_only: bool, schedule_type: Option<&str>) -> Result<Vec<ScheduleSpecRecord>> {
+    pub fn list_specs(
+        &self,
+        enabled_only: bool,
+        schedule_type: Option<&str>,
+    ) -> Result<Vec<ScheduleSpecRecord>> {
         let sel = "SELECT schedule_id, item_ref, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
                           project_root, signer_fingerprint, spec_hash, registered_at,
                           requester_fingerprint, capabilities";
         let sql = match (enabled_only, schedule_type) {
-            (true, Some(_)) => format!("{sel} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?"),
+            (true, Some(_)) => {
+                format!("{sel} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?")
+            }
             (true, None) => format!("{sel} FROM schedule_specs WHERE enabled = 1"),
             (false, Some(_)) => format!("{sel} FROM schedule_specs WHERE schedule_type = ?"),
             (false, None) => format!("{sel} FROM schedule_specs"),
@@ -297,9 +460,19 @@ impl SchedulerDb {
             let n = self.lock()?.execute("DELETE FROM schedule_specs", [])?;
             return Ok(n);
         }
-        let placeholders: Vec<String> = live_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
-        let sql = format!("DELETE FROM schedule_specs WHERE schedule_id NOT IN ({})", placeholders.join(","));
-        let params: Vec<&dyn rusqlite::ToSql> = live_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let placeholders: Vec<String> = live_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "DELETE FROM schedule_specs WHERE schedule_id NOT IN ({})",
+            placeholders.join(",")
+        );
+        let params: Vec<&dyn rusqlite::ToSql> = live_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
         let n = self.lock()?.execute(&sql, params.as_slice())?;
         Ok(n)
     }
@@ -307,8 +480,9 @@ impl SchedulerDb {
     // ── schedule_fires ──────────────────────────────────────────
 
     pub fn upsert_fire(&self, rec: &FireRecord) -> Result<()> {
-        self.lock()?.execute(
-            "INSERT INTO schedule_fires
+        self.lock()?
+            .execute(
+                "INSERT INTO schedule_fires
                 (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                  status, trigger_reason, outcome, signer_fingerprint)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
@@ -320,31 +494,47 @@ impl SchedulerDb {
                 outcome=COALESCE(excluded.outcome, outcome),
                 trigger_reason=excluded.trigger_reason,
                 signer_fingerprint=COALESCE(excluded.signer_fingerprint, signer_fingerprint)",
-            params![
-                rec.fire_id, rec.schedule_id, rec.scheduled_at,
-                rec.fired_at, rec.completed_at, rec.thread_id, rec.status,
-                rec.trigger_reason, rec.outcome, rec.signer_fingerprint,
-            ],
-        )
-        .with_context(|| format!("upsert_fire failed for {}", rec.fire_id))?;
+                params![
+                    rec.fire_id,
+                    rec.schedule_id,
+                    rec.scheduled_at,
+                    rec.fired_at,
+                    rec.completed_at,
+                    rec.thread_id,
+                    rec.status,
+                    rec.trigger_reason,
+                    rec.outcome,
+                    rec.signer_fingerprint,
+                ],
+            )
+            .with_context(|| format!("upsert_fire failed for {}", rec.fire_id))?;
         Ok(())
     }
 
     /// Atomic claim: INSERT if absent. Returns true if the insert succeeded
     /// (fire was claimed), false if it already existed.
     pub fn claim_fire(&self, rec: &FireRecord) -> Result<bool> {
-        let changed = self.lock()?.execute(
-            "INSERT OR IGNORE INTO schedule_fires
+        let changed = self
+            .lock()?
+            .execute(
+                "INSERT OR IGNORE INTO schedule_fires
                 (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                  status, trigger_reason, outcome, signer_fingerprint)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![
-                rec.fire_id, rec.schedule_id, rec.scheduled_at,
-                rec.fired_at, rec.completed_at, rec.thread_id, rec.status,
-                rec.trigger_reason, rec.outcome, rec.signer_fingerprint,
-            ],
-        )
-        .with_context(|| format!("claim_fire failed for {}", rec.fire_id))?;
+                params![
+                    rec.fire_id,
+                    rec.schedule_id,
+                    rec.scheduled_at,
+                    rec.fired_at,
+                    rec.completed_at,
+                    rec.thread_id,
+                    rec.status,
+                    rec.trigger_reason,
+                    rec.outcome,
+                    rec.signer_fingerprint,
+                ],
+            )
+            .with_context(|| format!("claim_fire failed for {}", rec.fire_id))?;
         Ok(changed > 0)
     }
 
@@ -356,21 +546,27 @@ impl SchedulerDb {
         let conn = self.lock()?;
 
         // Check if the fire exists and is in dispatched state with no thread
-        let is_reclaimable: bool = conn.query_row(
-            "SELECT status = 'dispatched' AND thread_id IS NULL
+        let is_reclaimable: bool = conn
+            .query_row(
+                "SELECT status = 'dispatched' AND thread_id IS NULL
              FROM schedule_fires WHERE fire_id = ?1",
-            params![fire_id],
-            |row| row.get::<_, bool>(0),
-        ).optional()?.unwrap_or(false);
+                params![fire_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
 
         if !is_reclaimable {
             // Also check: dispatched with thread_id set, but thread may not exist.
             // For that case, we check if the fire exists at all with dispatched status.
-            let is_dispatched: bool = conn.query_row(
-                "SELECT status = 'dispatched' FROM schedule_fires WHERE fire_id = ?1",
-                params![fire_id],
-                |row| row.get::<_, bool>(0),
-            ).optional()?.unwrap_or(false);
+            let is_dispatched: bool = conn
+                .query_row(
+                    "SELECT status = 'dispatched' FROM schedule_fires WHERE fire_id = ?1",
+                    params![fire_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
 
             if !is_dispatched {
                 return Ok(false);
@@ -408,11 +604,12 @@ impl SchedulerDb {
     /// Get the set of existing fire_ids for a schedule. Used by misfire
     /// detection to batch-check which candidate fires already exist,
     /// avoiding N+1 individual get_fire() calls.
-    pub fn get_existing_fire_ids(&self, schedule_id: &str) -> Result<std::collections::HashSet<String>> {
+    pub fn get_existing_fire_ids(
+        &self,
+        schedule_id: &str,
+    ) -> Result<std::collections::HashSet<String>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT fire_id FROM schedule_fires WHERE schedule_id = ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT fire_id FROM schedule_fires WHERE schedule_id = ?1")?;
         let rows = stmt.query_map(params![schedule_id], |row| row.get::<_, String>(0))?;
         let mut ids = std::collections::HashSet::new();
         for row in rows {
@@ -424,11 +621,18 @@ impl SchedulerDb {
 
     /// Batch-get last fire for multiple schedules. Returns a map from
     /// schedule_id → FireRecord. Used by scheduler_list to avoid N+1 queries.
-    pub fn get_last_fires_batch(&self, schedule_ids: &[String]) -> Result<std::collections::HashMap<String, FireRecord>> {
+    pub fn get_last_fires_batch(
+        &self,
+        schedule_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, FireRecord>> {
         if schedule_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let placeholders: Vec<String> = schedule_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let placeholders: Vec<String> = schedule_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
         let sql = format!(
             "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
@@ -443,7 +647,10 @@ impl SchedulerDb {
         );
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = schedule_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = schedule_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
         let rows = stmt.query_map(params.as_slice(), |row| row_to_fire(row))?;
         let mut map = std::collections::HashMap::new();
         for row in rows {
@@ -576,21 +783,27 @@ impl SchedulerDb {
         };
 
         let sql = match status_filter {
-            Some(_) => "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
+            Some(_) => {
+                "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                                status, trigger_reason, outcome, signer_fingerprint
                         FROM schedule_fires
                         WHERE schedule_id = ?1 AND status = ?2
-                        ORDER BY scheduled_at DESC LIMIT ?3",
-            None => "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
+                        ORDER BY scheduled_at DESC LIMIT ?3"
+            }
+            None => {
+                "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                             status, trigger_reason, outcome, signer_fingerprint
                      FROM schedule_fires
                      WHERE schedule_id = ?1
-                     ORDER BY scheduled_at DESC LIMIT ?2",
+                     ORDER BY scheduled_at DESC LIMIT ?2"
+            }
         };
         let mut stmt = conn.prepare(sql)?;
         let fires: Vec<FireRecord> = if let Some(sf) = status_filter {
-            stmt.query_map(params![schedule_id, sf, limit as i64], |row| row_to_fire(row))?
-                .collect::<Result<Vec<_>, _>>()?
+            stmt.query_map(params![schedule_id, sf, limit as i64], |row| {
+                row_to_fire(row)
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         } else {
             stmt.query_map(params![schedule_id, limit as i64], |row| row_to_fire(row))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -603,8 +816,9 @@ impl SchedulerDb {
 
 fn row_to_spec(row: &rusqlite::Row<'_>) -> Result<ScheduleSpecRecord, rusqlite::Error> {
     let capabilities_json: String = row.get("capabilities")?;
-    let capabilities: Vec<String> = serde_json::from_str(&capabilities_json)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+    let capabilities: Vec<String> = serde_json::from_str(&capabilities_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
     Ok(ScheduleSpecRecord {
         schedule_id: row.get("schedule_id")?,
         item_ref: row.get("item_ref")?,
@@ -841,8 +1055,10 @@ mod tests {
     #[test]
     fn get_last_fire() {
         let db = test_db();
-        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
-        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("sched", 1000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched"))
+            .unwrap();
 
         let last = db.get_last_fire("sched").unwrap().unwrap();
         assert_eq!(last.scheduled_at, 2000);
@@ -857,9 +1073,12 @@ mod tests {
     #[test]
     fn get_inflight_fires() {
         let db = test_db();
-        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
-        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
-        db.upsert_fire(&make_fire("other", 3000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("sched", 1000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched"))
+            .unwrap();
+        db.upsert_fire(&make_fire("other", 3000, "dispatched"))
+            .unwrap();
 
         let inflight = db.get_inflight_fires().unwrap();
         assert_eq!(inflight.len(), 2);
@@ -868,9 +1087,12 @@ mod tests {
     #[test]
     fn get_inflight_for_schedule() {
         let db = test_db();
-        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
-        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
-        db.upsert_fire(&make_fire("other", 3000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("sched", 1000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched"))
+            .unwrap();
+        db.upsert_fire(&make_fire("other", 3000, "dispatched"))
+            .unwrap();
 
         let inflight = db.get_inflight_for_schedule("sched").unwrap().unwrap();
         assert_eq!(inflight.scheduled_at, 2000);
@@ -888,7 +1110,10 @@ mod tests {
         let fire = make_fire("sched", 1000, "dispatched");
         db.upsert_fire(&fire).unwrap();
 
-        let found = db.find_fire_by_thread(fire.thread_id.as_ref().unwrap()).unwrap().unwrap();
+        let found = db
+            .find_fire_by_thread(fire.thread_id.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(found.fire_id, "sched@1000");
     }
 
@@ -898,16 +1123,21 @@ mod tests {
         let fire = make_fire("sched", 1000, "completed");
         db.upsert_fire(&fire).unwrap();
 
-        let found = db.find_fire_by_thread(fire.thread_id.as_ref().unwrap()).unwrap();
+        let found = db
+            .find_fire_by_thread(fire.thread_id.as_ref().unwrap())
+            .unwrap();
         assert!(found.is_none());
     }
 
     #[test]
     fn delete_fires_for_schedule() {
         let db = test_db();
-        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
-        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
-        db.upsert_fire(&make_fire("other", 3000, "dispatched")).unwrap();
+        db.upsert_fire(&make_fire("sched", 1000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched"))
+            .unwrap();
+        db.upsert_fire(&make_fire("other", 3000, "dispatched"))
+            .unwrap();
 
         let removed = db.delete_fires_for_schedule("sched").unwrap();
         assert_eq!(removed, 2);
@@ -918,9 +1148,12 @@ mod tests {
     #[test]
     fn list_fires_with_status_filter() {
         let db = test_db();
-        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
-        db.upsert_fire(&make_fire("sched", 2000, "dispatched")).unwrap();
-        db.upsert_fire(&make_fire("sched", 3000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 1000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "dispatched"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 3000, "completed"))
+            .unwrap();
 
         let (fires, total) = db.list_fires("sched", Some("completed"), 10).unwrap();
         assert_eq!(total, 2);
@@ -930,9 +1163,12 @@ mod tests {
     #[test]
     fn list_fires_with_limit() {
         let db = test_db();
-        db.upsert_fire(&make_fire("sched", 1000, "completed")).unwrap();
-        db.upsert_fire(&make_fire("sched", 2000, "completed")).unwrap();
-        db.upsert_fire(&make_fire("sched", 3000, "completed")).unwrap();
+        db.upsert_fire(&make_fire("sched", 1000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 2000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 3000, "completed"))
+            .unwrap();
 
         let (fires, total) = db.list_fires("sched", None, 2).unwrap();
         assert_eq!(total, 3);
@@ -977,7 +1213,10 @@ mod tests {
         db.upsert_fire(&fire).unwrap();
 
         let reclaimed = db.reclaim_fire("sched@1000").unwrap();
-        assert!(reclaimed, "dispatched fire with no thread should be reclaimable");
+        assert!(
+            reclaimed,
+            "dispatched fire with no thread should be reclaimable"
+        );
     }
 
     #[test]
@@ -989,7 +1228,10 @@ mod tests {
         // Thread existence is checked by the caller (reconciler), not by reclaim_fire.
         // reclaim_fire just checks the fire's own DB state.
         let reclaimed = db.reclaim_fire("sched@1000").unwrap();
-        assert!(reclaimed, "dispatched fire should be reclaimable even with thread_id set");
+        assert!(
+            reclaimed,
+            "dispatched fire should be reclaimable even with thread_id set"
+        );
     }
 
     #[test]

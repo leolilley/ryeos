@@ -244,10 +244,7 @@ fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> bool {
 mod value_shape_tests {
     use super::*;
 
-    fn shape_mapping(
-        required: &[(&str, FieldType)],
-        optional: &[(&str, FieldType)],
-    ) -> ValueShape {
+    fn shape_mapping(required: &[(&str, FieldType)], optional: &[(&str, FieldType)]) -> ValueShape {
         ValueShape {
             root_type: ShapeType::Mapping,
             required: required
@@ -263,14 +260,30 @@ mod value_shape_tests {
 
     #[test]
     fn identical_shapes_pass() {
-        let a = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let a = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
         let b = a.clone();
         assert!(a.is_satisfied_by(&b).is_empty());
     }
 
     #[test]
     fn missing_required_field_detected() {
-        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let consumer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
         let producer = shape_mapping(&[], &[]);
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
@@ -286,10 +299,30 @@ mod value_shape_tests {
         // optional producer emission: the producer is allowed to
         // skip the field entirely. Reported as MissingRequiredField
         // with a hint that it was found as optional.
-        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
-        let producer = shape_mapping(&[], &[("body", FieldType::Single { prim: PrimType::String })]);
+        let consumer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
+        let producer = shape_mapping(
+            &[],
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+        );
         let v = consumer.is_satisfied_by(&producer);
-        assert_eq!(v.len(), 1, "expected one missing-required violation, got {v:?}");
+        assert_eq!(
+            v.len(),
+            1,
+            "expected one missing-required violation, got {v:?}"
+        );
         match &v[0] {
             ContractViolation::MissingRequiredField {
                 name,
@@ -299,7 +332,9 @@ mod value_shape_tests {
                 assert_eq!(name, "body");
                 assert_eq!(
                     produced_as_optional,
-                    &Some(FieldType::Single { prim: PrimType::String }),
+                    &Some(FieldType::Single {
+                        prim: PrimType::String
+                    }),
                     "hint should indicate the producer declared the field as optional"
                 );
             }
@@ -311,14 +346,38 @@ mod value_shape_tests {
     fn required_consumer_satisfied_by_required_producer() {
         // Sanity: identical required-on-both is fine. Used to be the
         // misleading "required satisfied by optional" test.
-        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
-        let producer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let consumer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
+        let producer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
         assert!(consumer.is_satisfied_by(&producer).is_empty());
     }
 
     #[test]
     fn missing_required_with_no_optional_hint() {
-        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let consumer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
         let producer = shape_mapping(&[], &[]);
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
@@ -337,8 +396,24 @@ mod value_shape_tests {
 
     #[test]
     fn type_mismatch_detected() {
-        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
-        let producer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Integer })], &[]);
+        let consumer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
+        let producer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::Integer,
+                },
+            )],
+            &[],
+        );
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
         assert!(matches!(v[0], ContractViolation::FieldTypeMismatch { .. }));
@@ -353,7 +428,12 @@ mod value_shape_tests {
             optional: Default::default(),
         };
         let producer_mapping = shape_mapping(
-            &[("body", FieldType::Single { prim: PrimType::String })],
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
             &[],
         );
         let producer_seq = ValueShape {
@@ -366,15 +446,51 @@ mod value_shape_tests {
             required: Default::default(),
             optional: Default::default(),
         };
-        assert!(consumer_root_any.is_satisfied_by(&producer_mapping).is_empty());
+        assert!(consumer_root_any
+            .is_satisfied_by(&producer_mapping)
+            .is_empty());
         assert!(consumer_root_any.is_satisfied_by(&producer_seq).is_empty());
-        assert!(consumer_root_any.is_satisfied_by(&producer_root_any).is_empty());
+        assert!(consumer_root_any
+            .is_satisfied_by(&producer_root_any)
+            .is_empty());
 
         // Consumer field-level Any: accepts any producer field type.
-        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Any })], &[]);
-        let producer_str = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
-        let producer_int = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Integer })], &[]);
-        let producer_any = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Any })], &[]);
+        let consumer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::Any,
+                },
+            )],
+            &[],
+        );
+        let producer_str = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
+        let producer_int = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::Integer,
+                },
+            )],
+            &[],
+        );
+        let producer_any = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::Any,
+                },
+            )],
+            &[],
+        );
         assert!(consumer.is_satisfied_by(&producer_str).is_empty());
         assert!(consumer.is_satisfied_by(&producer_int).is_empty());
         assert!(consumer.is_satisfied_by(&producer_any).is_empty());
@@ -383,7 +499,15 @@ mod value_shape_tests {
     #[test]
     fn producer_any_does_not_satisfy_specific_consumer() {
         // Specific consumer + producer Any at root → RootTypeMismatch.
-        let consumer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::String })], &[]);
+        let consumer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
         let producer_root_any = ValueShape {
             root_type: ShapeType::Any,
             required: Default::default(),
@@ -393,13 +517,24 @@ mod value_shape_tests {
         assert!(
             v.iter().any(|x| matches!(
                 x,
-                ContractViolation::RootTypeMismatch { needed: ShapeType::Mapping, produced: ShapeType::Any }
+                ContractViolation::RootTypeMismatch {
+                    needed: ShapeType::Mapping,
+                    produced: ShapeType::Any
+                }
             )),
             "producer ShapeType::Any must NOT satisfy a Mapping consumer; got {v:?}"
         );
 
         // Specific consumer field + producer Any field → FieldTypeMismatch.
-        let producer = shape_mapping(&[("body", FieldType::Single { prim: PrimType::Any })], &[]);
+        let producer = shape_mapping(
+            &[(
+                "body",
+                FieldType::Single {
+                    prim: PrimType::Any,
+                },
+            )],
+            &[],
+        );
         let v = consumer.is_satisfied_by(&producer);
         assert_eq!(v.len(), 1);
         assert!(
@@ -409,12 +544,18 @@ mod value_shape_tests {
 
         // Producer Any inside a union also rejected by specific consumer.
         let producer_union_any = shape_mapping(
-            &[("body", FieldType::Union { prims: vec![PrimType::String, PrimType::Any] })],
+            &[(
+                "body",
+                FieldType::Union {
+                    prims: vec![PrimType::String, PrimType::Any],
+                },
+            )],
             &[],
         );
         let v = consumer.is_satisfied_by(&producer_union_any);
         assert!(
-            v.iter().any(|x| matches!(x, ContractViolation::FieldTypeMismatch { .. })),
+            v.iter()
+                .any(|x| matches!(x, ContractViolation::FieldTypeMismatch { .. })),
             "producer union containing Any must be rejected; got {v:?}"
         );
     }
@@ -424,14 +565,39 @@ mod value_shape_tests {
         let consumer = shape_mapping(
             &[(
                 "extends",
-                FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
+                FieldType::Union {
+                    prims: vec![PrimType::String, PrimType::Null],
+                },
             )],
             &[],
         );
-        let producer_string =
-            shape_mapping(&[("extends", FieldType::Single { prim: PrimType::String })], &[]);
-        let producer_null = shape_mapping(&[("extends", FieldType::Single { prim: PrimType::Null })], &[]);
-        let producer_int = shape_mapping(&[("extends", FieldType::Single { prim: PrimType::Integer })], &[]);
+        let producer_string = shape_mapping(
+            &[(
+                "extends",
+                FieldType::Single {
+                    prim: PrimType::String,
+                },
+            )],
+            &[],
+        );
+        let producer_null = shape_mapping(
+            &[(
+                "extends",
+                FieldType::Single {
+                    prim: PrimType::Null,
+                },
+            )],
+            &[],
+        );
+        let producer_int = shape_mapping(
+            &[(
+                "extends",
+                FieldType::Single {
+                    prim: PrimType::Integer,
+                },
+            )],
+            &[],
+        );
         assert!(consumer.is_satisfied_by(&producer_string).is_empty());
         assert!(consumer.is_satisfied_by(&producer_null).is_empty());
         assert!(!consumer.is_satisfied_by(&producer_int).is_empty());
@@ -442,14 +608,18 @@ mod value_shape_tests {
         let consumer = shape_mapping(
             &[(
                 "x",
-                FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
+                FieldType::Union {
+                    prims: vec![PrimType::String, PrimType::Null],
+                },
             )],
             &[],
         );
         let producer = shape_mapping(
             &[(
                 "x",
-                FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
+                FieldType::Union {
+                    prims: vec![PrimType::String, PrimType::Null],
+                },
             )],
             &[],
         );
@@ -459,7 +629,9 @@ mod value_shape_tests {
         let producer_wider = shape_mapping(
             &[(
                 "x",
-                FieldType::Union { prims: vec![PrimType::String, PrimType::Null, PrimType::Integer] },
+                FieldType::Union {
+                    prims: vec![PrimType::String, PrimType::Null, PrimType::Integer],
+                },
             )],
             &[],
         );
@@ -488,9 +660,24 @@ mod value_shape_tests {
     fn all_violations_returned_not_bailing_on_first() {
         let consumer = shape_mapping(
             &[
-                ("a", FieldType::Single { prim: PrimType::String }),
-                ("b", FieldType::Single { prim: PrimType::String }),
-                ("c", FieldType::Single { prim: PrimType::String }),
+                (
+                    "a",
+                    FieldType::Single {
+                        prim: PrimType::String,
+                    },
+                ),
+                (
+                    "b",
+                    FieldType::Single {
+                        prim: PrimType::String,
+                    },
+                ),
+                (
+                    "c",
+                    FieldType::Single {
+                        prim: PrimType::String,
+                    },
+                ),
             ],
             &[],
         );
@@ -559,10 +746,7 @@ required:
   body: { type: union, prims: [] }
 ";
         let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
-        assert!(
-            format!("{err}").contains("empty union"),
-            "got: {err}"
-        );
+        assert!(format!("{err}").contains("empty union"), "got: {err}");
     }
 
     #[test]
@@ -573,10 +757,7 @@ optional:
   extends: { type: union, prims: [] }
 ";
         let err = serde_yaml::from_str::<ValueShape>(yaml).unwrap_err();
-        assert!(
-            format!("{err}").contains("empty union"),
-            "got: {err}"
-        );
+        assert!(format!("{err}").contains("empty union"), "got: {err}");
     }
 
     #[test]
@@ -596,11 +777,15 @@ optional:
         assert_eq!(shape.root_type, ShapeType::Mapping);
         assert_eq!(
             shape.required.get("body").unwrap(),
-            &FieldType::Single { prim: PrimType::String }
+            &FieldType::Single {
+                prim: PrimType::String
+            }
         );
         assert_eq!(
             shape.optional.get("extends").unwrap(),
-            &FieldType::Union { prims: vec![PrimType::String, PrimType::Null] }
+            &FieldType::Union {
+                prims: vec![PrimType::String, PrimType::Null]
+            }
         );
     }
 }
@@ -1218,5 +1403,3 @@ pub struct EventEnvelope {
     pub timestamp: String,
     pub sequence: i64,
 }
-
-

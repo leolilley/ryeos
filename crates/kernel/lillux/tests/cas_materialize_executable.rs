@@ -5,11 +5,7 @@ use std::path::PathBuf;
 
 /// Return a fresh temp dir path that the caller is responsible for cleaning up.
 fn tmp_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "lillux-test-{}-{}",
-        label,
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("lillux-test-{}-{}", label, std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create tmp dir");
     dir
@@ -35,11 +31,7 @@ fn roundtrip_preserves_exec_bits() {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = metadata.permissions().mode();
-        assert_eq!(
-            mode & 0o777,
-            0o755,
-            "expected mode 0o755, got {mode:#o}"
-        );
+        assert_eq!(mode & 0o777, 0o755, "expected mode 0o755, got {mode:#o}");
     }
 
     let _ = fs::remove_dir_all(&tmp);

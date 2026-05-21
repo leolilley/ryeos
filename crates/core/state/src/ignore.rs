@@ -76,10 +76,7 @@ impl IgnoreMatcher {
         }
 
         // Check file glob patterns against the filename
-        if let Some(filename) = rel_path
-            .rsplit(|c: char| c == '/' || c == '\\')
-            .next()
-        {
+        if let Some(filename) = rel_path.rsplit(|c: char| c == '/' || c == '\\').next() {
             for pattern in &self.file_patterns {
                 if pattern.matches(filename) {
                     return true;
@@ -111,7 +108,10 @@ pub fn builtin_patterns() -> Vec<&'static str> {
 /// Create an ignore matcher from the built-in patterns.
 pub fn matcher_from_builtins() -> IgnoreMatcher {
     let config = IgnoreConfig {
-        patterns: builtin_patterns().into_iter().map(|s| s.to_string()).collect(),
+        patterns: builtin_patterns()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
     IgnoreMatcher::from_config(&config).expect("built-in patterns must be valid")
 }

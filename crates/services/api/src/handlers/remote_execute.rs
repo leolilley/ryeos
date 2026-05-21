@@ -4,22 +4,22 @@
 //! local project, executes on the remote node, fetches results, and
 //! applies changes back to the local workspace.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use serde_json::Value;
 
+use crate::handler_error::{HandlerError, HandlerResult};
+use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
+use crate::remote::pull::{extract_snapshot_hash, pull_results, PullResultsError};
 use crate::remote::push::{push_project, PushResult};
-use crate::remote::pull::{pull_results, extract_snapshot_hash, PullResultsError};
-use crate::handler_error::{HandlerError, HandlerResult};
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use ryeos_app::state::AppState;
 use ryeos_app::ignore::IgnoreMatcher;
+use ryeos_app::state::AppState;
 use ryeos_executor::execution::project_source::ProjectPathSpec;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,8 +121,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                     )));
                 }
                 ryeos_state::project_sync::ProjectSyncScope::FullProject => {
-                    config::validate_remote_project_path(&binding.remote_project_path)
-                        .map_err(|e| HandlerError::BadRequest(format!("invalid remote project binding: {e:#}")))?;
+                    config::validate_remote_project_path(&binding.remote_project_path).map_err(
+                        |e| {
+                            HandlerError::BadRequest(format!(
+                                "invalid remote project binding: {e:#}"
+                            ))
+                        },
+                    )?;
                     project_path_for_ref = binding.remote_project_path.clone();
                 }
             }
@@ -134,23 +139,27 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?,
         None => {
             // No config at all — fetch inline and persist.
-            let fetched = client.get_ingest_ignore().await
-                .map_err(|e| HandlerError::Internal(format!(
+            let fetched = client.get_ingest_ignore().await.map_err(|e| {
+                HandlerError::Internal(format!(
                     "no remote config for '{}' and inline fetch failed: {e:#} \
                      — run `ryeos remote configure --remote {}` first",
                     req.remote, req.remote
-                )))?;
+                ))
+            })?;
             let _ = (|| -> Result<(), HandlerError> {
                 let mut remotes = config::load_remotes(&state.config.system_space_dir)
                     .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
-                remotes.insert(req.remote.clone(), config::RemoteConfig {
-                    name: req.remote.clone(),
-                    url: client.base_url().to_string(),
-                    principal_id: String::new(),
-                    vault_fingerprint: String::new(),
-                    ingest_ignore: fetched.clone(),
-                    project_bindings: HashMap::new(),
-                });
+                remotes.insert(
+                    req.remote.clone(),
+                    config::RemoteConfig {
+                        name: req.remote.clone(),
+                        url: client.base_url().to_string(),
+                        principal_id: String::new(),
+                        vault_fingerprint: String::new(),
+                        ingest_ignore: fetched.clone(),
+                        project_bindings: HashMap::new(),
+                    },
+                );
                 config::save_remotes(&state.config.system_space_dir, &remotes)
                     .map_err(|e| HandlerError::Internal(format!("save remotes: {e:#}")))?;
                 Ok(())
@@ -162,32 +171,34 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
 
     // 1. Push current local project (or skip if --no-project)
     let push_result = match abs_project_path {
-        Some(ref proj_path) => {
-            push_project(
-                &client,
-                &state,
-                proj_path,
-                &project_path_for_ref,
-                &remote_ignore,
-            )
-            .await
-            .map_err(|e| HandlerError::Internal(format!("push failed: {e:#}")))?
-        }
+        Some(ref proj_path) => push_project(
+            &client,
+            &state,
+            proj_path,
+            &project_path_for_ref,
+            &remote_ignore,
+        )
+        .await
+        .map_err(|e| HandlerError::Internal(format!("push failed: {e:#}")))?,
         None => {
             // --no-project mode: skip project ingest, but STILL push
             // user space. The whole point of --no-project is "run a
             // user-tier item (or pure tool) against my user space on
             // a remote node" — without the user manifest the remote
             // would resolve against its own user space, not mine.
-            let local_cas_root = state.config.system_space_dir
+            let local_cas_root = state
+                .config
+                .system_space_dir
                 .join(ryeos_engine::AI_DIR)
-                .join("state").join("objects");
+                .join("state")
+                .join("objects");
             let local_cas = lillux::cas::CasStore::new(local_cas_root);
 
             let empty_manifest = ryeos_state::objects::SourceManifest {
                 item_source_hashes: std::collections::HashMap::new(),
             };
-            let manifest_hash = local_cas.store_object(&empty_manifest.to_value())
+            let manifest_hash = local_cas
+                .store_object(&empty_manifest.to_value())
                 .map_err(|e| HandlerError::Internal(format!("store empty manifest: {e:#}")))?;
 
             let (user_manifest_hash, user_manifest) =
@@ -202,13 +213,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                 created_at: lillux::time::iso8601_now(),
                 source: "push-no-project".to_string(),
             };
-            let snapshot_hash = local_cas.store_object(&snapshot.to_value())
+            let snapshot_hash = local_cas
+                .store_object(&snapshot.to_value())
                 .map_err(|e| HandlerError::Internal(format!("store snapshot: {e:#}")))?;
 
             // Upload user manifest + items + blobs so the remote can
             // materialise the per-request engine overlay.
-            let mut all_hashes: Vec<String> =
-                vec![manifest_hash.clone(), snapshot_hash.clone()];
+            let mut all_hashes: Vec<String> = vec![manifest_hash.clone(), snapshot_hash.clone()];
             if let (Some(ref umh), Some(ref um)) = (&user_manifest_hash, &user_manifest) {
                 all_hashes.push(umh.clone());
                 for (_rel, obj_hash) in &um.item_source_hashes {
@@ -225,7 +236,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             all_hashes.sort();
             all_hashes.dedup();
 
-            let has_resp = client.objects_has(&all_hashes).await
+            let has_resp = client
+                .objects_has(&all_hashes)
+                .await
                 .map_err(|e| HandlerError::Internal(format!("objects_has: {e:#}")))?;
             let mut blobs = Vec::new();
             let mut objects = Vec::new();
@@ -239,11 +252,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                 }
             }
             if !blobs.is_empty() || !objects.is_empty() {
-                client.objects_put(&blobs, &objects).await
+                client
+                    .objects_put(&blobs, &objects)
+                    .await
                     .map_err(|e| HandlerError::Internal(format!("objects_put: {e:#}")))?;
             }
 
-            client.push_head(&project_path_for_ref, &snapshot_hash).await
+            client
+                .push_head(&project_path_for_ref, &snapshot_hash)
+                .await
                 .map_err(|e| HandlerError::Internal(format!("push_head failed: {e:#}")))?;
 
             PushResult {
@@ -271,11 +288,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         .map_err(|e| HandlerError::Internal(format!("remote execute failed: {e:#}")))?;
 
     // 3. Extract snapshot hash from remote result
-    let snapshot_hash = extract_snapshot_hash(&remote_result)
-        .ok_or_else(|| HandlerError::BadRequest(
+    let snapshot_hash = extract_snapshot_hash(&remote_result).ok_or_else(|| {
+        HandlerError::BadRequest(
             "remote execution completed but no snapshot_hash in result — \
-             async remote execute not supported in v1".into()
-        ))?;
+             async remote execute not supported in v1"
+                .into(),
+        )
+    })?;
 
     // 4. Pull results and apply to local workspace. pull_results
     //    handles --no-project mode (local_project_root = None) by
@@ -309,7 +328,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         }
         Err(PullResultsError::InvalidRemoteSnapshot(msg)) => {
             return Err(HandlerError::BadRequest(format!(
-                "invalid remote snapshot: {}", msg
+                "invalid remote snapshot: {}",
+                msg
             )));
         }
         Err(PullResultsError::UnrelatedSnapshot { pushed, result }) => {
@@ -322,7 +342,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             )));
         }
         Err(PullResultsError::Other(e)) => {
-            return Err(HandlerError::Internal(format!("pull results failed: {e:#}")));
+            return Err(HandlerError::Internal(format!(
+                "pull results failed: {e:#}"
+            )));
         }
     };
 

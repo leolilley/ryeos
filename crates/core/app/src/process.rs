@@ -158,19 +158,27 @@ pub fn hard_kill_process_group(pgid: i64) -> KillResult {
 /// Allowlist of env keys the daemon propagates to subprocesses.
 /// Plus declared secrets injected separately by the dispatch path.
 const SPAWN_ENV_ALLOWLIST: &[&str] = &[
-    "PATH",                  // libc/linker bootstrap
-    "HOME",                  // libc/lib lookup
-    "LANG", "LC_ALL", "LC_CTYPE",
+    "PATH", // libc/linker bootstrap
+    "HOME", // libc/lib lookup
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
     "TZ",
     "TMPDIR",
-    "USER_SPACE",            // root discovery (set by daemon)
+    "USER_SPACE",             // root discovery (set by daemon)
     "RYEOS_SYSTEM_SPACE_DIR", // root discovery (set by daemon)
-    "RUST_LOG", "RUST_BACKTRACE",
+    "RUST_LOG",
+    "RUST_BACKTRACE",
     "RYEOSD_TEST_STDERR_DIR",
     // Proxy + CA infrastructure — not secrets, needed for egress.
-    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
-    "https_proxy", "http_proxy", "no_proxy",
-    "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
 ];
 
 /// Build the env map for a daemon-spawned subprocess.
@@ -190,8 +198,7 @@ const SPAWN_ENV_ALLOWLIST: &[&str] = &[
 pub fn build_spawn_env(
     declared_secrets: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let mut env: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
+    let mut env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
 
     for k in SPAWN_ENV_ALLOWLIST {
         if let Some(v) = std::env::var_os(k) {
@@ -200,8 +207,8 @@ pub fn build_spawn_env(
     }
 
     // Daemon-resolved roots override whatever the parent env held.
-    let user_root = ryeos_engine::roots::user_root()
-        .context("resolve user root for subprocess env")?;
+    let user_root =
+        ryeos_engine::roots::user_root().context("resolve user root for subprocess env")?;
     env.insert("USER_SPACE".to_string(), user_root.display().to_string());
 
     for (k, v) in declared_secrets {
@@ -345,7 +352,11 @@ mod tests {
         );
         // Child terminated by signal (no clean exit code), and that
         // signal was SIGKILL — not SIGTERM.
-        assert!(status.code().is_none(), "expected signal exit, got {:?}", status);
+        assert!(
+            status.code().is_none(),
+            "expected signal exit, got {:?}",
+            status
+        );
         assert_eq!(
             status.signal(),
             Some(libc::SIGKILL),

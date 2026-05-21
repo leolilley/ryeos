@@ -64,8 +64,12 @@ pub mod vault_delete;
 pub mod vault_list;
 pub mod vault_set;
 
-pub(crate) fn default_list_limit() -> usize { 50 }
-pub(crate) fn default_replay_limit() -> usize { 200 }
+pub(crate) fn default_list_limit() -> usize {
+    50
+}
+pub(crate) fn default_replay_limit() -> usize {
+    200
+}
 
 pub const ALL: &[ServiceDescriptor] = &[
     health_status::DESCRIPTOR,

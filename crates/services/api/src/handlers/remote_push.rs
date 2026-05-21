@@ -7,13 +7,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
 use crate::remote::push::push_project;
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use ryeos_app::state::AppState;
 use ryeos_app::ignore::IgnoreMatcher;
+use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,22 +78,27 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
         None => {
             // No config at all — fetch inline and persist.
-            let fetched = client.get_ingest_ignore().await
-                .map_err(|e| anyhow::anyhow!(
+            let fetched = client.get_ingest_ignore().await.map_err(|e| {
+                anyhow::anyhow!(
                     "no remote config for '{}' and inline fetch failed: {e:#} \
                      — run `ryeos remote configure --remote {}` first",
-                    req.remote, req.remote
-                ))?;
+                    req.remote,
+                    req.remote
+                )
+            })?;
             let _ = (|| -> Result<()> {
                 let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
-                remotes.insert(req.remote.clone(), config::RemoteConfig {
-                    name: req.remote.clone(),
-                    url: client.base_url().to_string(),
-                    principal_id: String::new(), // partial — user should reconfigure
-                    vault_fingerprint: String::new(),
-                    ingest_ignore: fetched.clone(),
-                    project_bindings: HashMap::new(),
-                });
+                remotes.insert(
+                    req.remote.clone(),
+                    config::RemoteConfig {
+                        name: req.remote.clone(),
+                        url: client.base_url().to_string(),
+                        principal_id: String::new(), // partial — user should reconfigure
+                        vault_fingerprint: String::new(),
+                        ingest_ignore: fetched.clone(),
+                        project_bindings: HashMap::new(),
+                    },
+                );
                 config::save_remotes(&state.config.system_space_dir, &remotes)
             })();
             IgnoreMatcher::from_config(&fetched)?

@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use lillux::crypto::SigningKey;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDescriptor, ParserDispatcher};
-use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::resolution::run_resolution_pipeline;
 use ryeos_engine::test_support::load_live_handler_registry;
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
@@ -93,9 +93,7 @@ fn sign_yaml(yaml: &str) -> String {
     let mut yaml_owned = yaml.to_string();
     if is_kind_schema {
         if !yaml_owned.contains("composed_value_contract") {
-            yaml_owned.push_str(
-                "composed_value_contract:\n  root_type: mapping\n  required: {}\n",
-            );
+            yaml_owned.push_str("composed_value_contract:\n  root_type: mapping\n  required: {}\n");
         }
         if !yaml_owned.contains("composer:") {
             yaml_owned.push_str("composer: handler:ryeos/core/identity\n");
@@ -166,11 +164,7 @@ fn references_bfs_does_not_drop_edges_on_long_path_first() {
     write_signed_yaml(&nodes_dir.join("c.yaml"), "refs:\n  - node:d\n");
     write_signed_yaml(&nodes_dir.join("d.yaml"), "refs: []\n");
 
-    let roots = ResolutionRoots::from_flat(
-        Some(project_dir.join(".ai")),
-        None,
-        vec![],
-    );
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
     let _ = ItemSpace::Project;
 
     let parsers = dispatcher_for_yaml_and_markdown_directive();
@@ -178,8 +172,8 @@ fn references_bfs_does_not_drop_edges_on_long_path_first() {
     let item = CanonicalRef::parse("node:root").unwrap();
 
     let handlers = load_live_handler_registry();
-    let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
-        .expect("from_kinds must bind node kind");
+    let composers =
+        ComposerRegistry::from_kinds(&kinds, &handlers).expect("from_kinds must bind node kind");
     let output = run_resolution_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
         .expect("resolution pipeline succeeded");
 
@@ -189,11 +183,7 @@ fn references_bfs_does_not_drop_edges_on_long_path_first() {
         .map(|e| (e.from_ref.clone(), e.to_ref.clone()))
         .collect();
 
-    let has = |from: &str, to: &str| {
-        edges
-            .iter()
-            .any(|(f, t)| f == from && t == to)
-    };
+    let has = |from: &str, to: &str| edges.iter().any(|(f, t)| f == from && t == to);
 
     assert!(has("node:root", "node:a"), "missing root→a in {edges:?}");
     assert!(has("node:root", "node:b"), "missing root→b in {edges:?}");
@@ -272,7 +262,10 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
         .expect("pipeline must succeed for unsigned markdown directive");
 
     assert!(
-        output.root.raw_content.contains("# ryeos:signed:fake-not-a-real-sig"),
+        output
+            .root
+            .raw_content
+            .contains("# ryeos:signed:fake-not-a-real-sig"),
         "envelope-aware strip must NOT remove a `#`-prefixed line from a markdown body \
          (envelope is `<!-- ... -->`); raw_content = {:?}",
         output.root.raw_content
@@ -280,4 +273,3 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
     assert!(output.root.raw_content.contains("pre-marker"));
     assert!(output.root.raw_content.contains("post-marker"));
 }
-

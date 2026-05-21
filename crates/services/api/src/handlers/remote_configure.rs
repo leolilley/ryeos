@@ -5,11 +5,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,17 +33,20 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
     let vault_fp = pubkey.vault_fingerprint.clone();
-    remotes.insert(req.remote.clone(), config::RemoteConfig {
-        name: req.remote.clone(),
-        url: req.url.clone(),
-        principal_id: pubkey.principal_id.clone(),
-        vault_fingerprint: pubkey.vault_fingerprint,
-        ingest_ignore,
-        project_bindings: remotes
-            .get(&req.remote)
-            .map(|r| r.project_bindings.clone())
-            .unwrap_or_default(),
-    });
+    remotes.insert(
+        req.remote.clone(),
+        config::RemoteConfig {
+            name: req.remote.clone(),
+            url: req.url.clone(),
+            principal_id: pubkey.principal_id.clone(),
+            vault_fingerprint: pubkey.vault_fingerprint,
+            ingest_ignore,
+            project_bindings: remotes
+                .get(&req.remote)
+                .map(|r| r.project_bindings.clone())
+                .unwrap_or_default(),
+        },
+    );
     config::save_remotes(&state.config.system_space_dir, &remotes)?;
 
     Ok(serde_json::json!({

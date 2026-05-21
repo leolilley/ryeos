@@ -9,12 +9,14 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
 use crate::handler_error::HandlerError;
+use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
-fn default_limit() -> usize { 50 }
+fn default_limit() -> usize {
+    50
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,33 +28,41 @@ pub struct Request {
     pub status: Option<String>,
 }
 
-pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
-    let spec = state.scheduler_db.get_spec(&req.schedule_id)
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    let spec = state
+        .scheduler_db
+        .get_spec(&req.schedule_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
     ctx.require_owner(Some(spec.requester_fingerprint.as_str()))?;
 
     let limit = req.limit.clamp(1, 500);
-    let (fires, total) = state.scheduler_db.list_fires(
-        &req.schedule_id,
-        req.status.as_deref(),
-        limit,
-    ).map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let (fires, total) = state
+        .scheduler_db
+        .list_fires(&req.schedule_id, req.status.as_deref(), limit)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
-    let fire_entries: Vec<Value> = fires.iter().map(|f| {
-        serde_json::json!({
-            "fire_id": f.fire_id,
-            "schedule_id": f.schedule_id,
-            "scheduled_at": f.scheduled_at,
-            "fired_at": f.fired_at,
-            "thread_id": f.thread_id,
-            "status": f.status,
-            "trigger_reason": f.trigger_reason,
-            "outcome": f.outcome,
-            "signer_fingerprint": f.signer_fingerprint,
+    let fire_entries: Vec<Value> = fires
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "fire_id": f.fire_id,
+                "schedule_id": f.schedule_id,
+                "scheduled_at": f.scheduled_at,
+                "fired_at": f.fired_at,
+                "thread_id": f.thread_id,
+                "status": f.status,
+                "trigger_reason": f.trigger_reason,
+                "outcome": f.outcome,
+                "signer_fingerprint": f.signer_fingerprint,
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,

@@ -84,7 +84,10 @@ impl WriteBarrier {
                 })
             }
             QUIESCING | QUIESCED => {
-                tracing::trace!(state = state, "write permit denied — barrier quiescing/quiesced");
+                tracing::trace!(
+                    state = state,
+                    "write permit denied — barrier quiescing/quiesced"
+                );
                 bail!("write barrier is quiescing/quiesced, cannot acquire write permit");
             }
             _ => bail!("write barrier in unknown state: {state}"),
@@ -120,7 +123,8 @@ impl WriteBarrier {
                 self.inner.state.store(NORMAL, Ordering::SeqCst);
                 bail!(
                     "write barrier quiesce timed out after {:?} ({} writers still active)",
-                    timeout, writers
+                    timeout,
+                    writers
                 );
             }
 
@@ -234,9 +238,8 @@ mod tests {
 
             // Start quiesce in background
             let barrier_clone = barrier.clone();
-            let quiesce_handle = tokio::spawn(async move {
-                barrier_clone.quiesce(Duration::from_secs(5)).await
-            });
+            let quiesce_handle =
+                tokio::spawn(async move { barrier_clone.quiesce(Duration::from_secs(5)).await });
 
             // Give it a moment to start waiting
             tokio::time::sleep(Duration::from_millis(200)).await;

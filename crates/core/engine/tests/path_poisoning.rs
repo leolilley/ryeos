@@ -41,9 +41,8 @@ fn malicious_path_binary_not_resolved() {
         is_hash.clone(),
     );
 
-    let cas_objects: HashMap<String, serde_json::Value> = HashMap::from([
-        (is_hash.clone(), item_source),
-    ]);
+    let cas_objects: HashMap<String, serde_json::Value> =
+        HashMap::from([(is_hash.clone(), item_source)]);
 
     let resolved = resolve_native_executor(
         &manifest_hashes,
@@ -80,9 +79,8 @@ fn wrong_triple_not_found() {
         is_hash.clone(),
     );
 
-    let cas_objects: HashMap<String, serde_json::Value> = HashMap::from([
-        (is_hash.clone(), item_source),
-    ]);
+    let cas_objects: HashMap<String, serde_json::Value> =
+        HashMap::from([(is_hash.clone(), item_source)]);
 
     let err = resolve_native_executor(
         &manifest_hashes,

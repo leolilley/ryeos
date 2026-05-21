@@ -41,7 +41,9 @@ pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        let schema = kinds_dir.join(&name).join(format!("{name}.kind-schema.yaml"));
+        let schema = kinds_dir
+            .join(&name)
+            .join(format!("{name}.kind-schema.yaml"));
         if schema.exists() {
             kinds.push(name);
         }
@@ -108,13 +110,10 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<Bundl
     Ok(None)
 }
 
-pub fn validate_manifest_dependencies(
-    bundles: &[(String, PathBuf)],
-) -> Result<()> {
+pub fn validate_manifest_dependencies(bundles: &[(String, PathBuf)]) -> Result<()> {
     let manifests = parse_all_manifests(bundles)?;
 
-    let mut all_provides: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut all_provides: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (_, mf) in &manifests {
         if let Some(m) = mf {
             for k in &m.provides_kinds {
@@ -163,9 +162,7 @@ pub fn validate_manifest_dependencies(
 /// order for bundles without manifests or when no dependency information exists.
 ///
 /// Returns a topologically-sorted copy of `bundles`.
-pub fn sort_bundles_by_dependency(
-    bundles: &[(String, PathBuf)],
-) -> Result<Vec<(String, PathBuf)>> {
+pub fn sort_bundles_by_dependency(bundles: &[(String, PathBuf)]) -> Result<Vec<(String, PathBuf)>> {
     if bundles.len() <= 1 {
         return Ok(bundles.to_vec());
     }
@@ -178,7 +175,11 @@ pub fn sort_bundles_by_dependency(
     for (name, mf) in &manifests {
         match mf {
             Some(m) => {
-                bundle_deps.push((name.clone(), m.requires_kinds.clone(), m.provides_kinds.clone()));
+                bundle_deps.push((
+                    name.clone(),
+                    m.requires_kinds.clone(),
+                    m.provides_kinds.clone(),
+                ));
             }
             None => {
                 bundle_deps.push((name.clone(), Vec::new(), Vec::new()));
@@ -241,7 +242,11 @@ pub fn sort_bundles_by_dependency(
         // Cycle detected. This shouldn't happen with well-formed bundles.
         bail!(
             "circular dependency detected among bundles: {}",
-            bundle_deps.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+            bundle_deps
+                .iter()
+                .map(|(n, _, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -259,7 +264,9 @@ pub fn sort_bundles_by_dependency(
     Ok(result)
 }
 
-fn parse_all_manifests(bundles: &[(String, PathBuf)]) -> Result<Vec<(String, Option<BundleManifest>)>> {
+fn parse_all_manifests(
+    bundles: &[(String, PathBuf)],
+) -> Result<Vec<(String, Option<BundleManifest>)>> {
     let mut manifests: Vec<(String, Option<BundleManifest>)> = Vec::new();
     for (name, path) in bundles {
         let mf = parse_manifest(path, name)
@@ -652,6 +659,9 @@ version: "1.0"
 typo_field: oops
 "#;
         let result: Result<BundleManifestSource, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "unknown field in source should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown field in source should be rejected"
+        );
     }
 }

@@ -64,10 +64,7 @@ impl ItemSource {
                 .ok_or_else(|| anyhow::anyhow!("missing integrity"))?
                 .to_string(),
             signature_info: value.get("signature_info").cloned(),
-            mode: value
-                .get("mode")
-                .and_then(|v| v.as_u64())
-                .map(|m| m as u32),
+            mode: value.get("mode").and_then(|v| v.as_u64()).map(|m| m as u32),
         })
     }
 }

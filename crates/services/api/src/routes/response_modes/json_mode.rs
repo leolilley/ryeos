@@ -15,11 +15,13 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::route_error::{RouteConfigError, RouteDispatchError};
-use crate::routes::compile::{CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext};
+use crate::routes::compile::{
+    CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
+};
 use crate::routes::interpolation;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, InvocationCheck, RouteInvocationContext,
-    RouteInvocationOutput, RouteInvocationResult,
+    CompiledRouteInvocation, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
+    RouteInvocationResult,
 };
 use ryeos_app::route_raw::RawRouteSpec;
 
@@ -78,9 +80,7 @@ impl ResponseMode for JsonMode {
         })?;
 
         // Compile the invoker via the universal canonical-ref compiler.
-        let invoker = crate::routes::invokers::compile_canonical_ref_invoker(
-            source_str, &raw.id,
-        )?;
+        let invoker = crate::routes::invokers::compile_canonical_ref_invoker(source_str, &raw.id)?;
 
         // Non-service sources require typed { project_path, parameters } config.
         let parsed_kind = crate::routes::parsed_ref::ParsedItemRef::parse(source_str)
@@ -294,7 +294,11 @@ mod tests {
             serde_json::json!({ "project_path": "/tmp/test", "parameters": {} }),
         );
         let result = mode.compile(&raw);
-        assert!(result.is_ok(), "tool: with project_path should be accepted, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "tool: with project_path should be accepted, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -306,7 +310,11 @@ mod tests {
             serde_json::json!({ "project_path": "/tmp/test", "parameters": { "input": "val" } }),
         );
         let result = mode.compile(&raw);
-        assert!(result.is_ok(), "directive: with project_path should be accepted, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "directive: with project_path should be accepted, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -318,7 +326,11 @@ mod tests {
             serde_json::json!({ "project_path": "/tmp/test", "parameters": {} }),
         );
         let result = mode.compile(&raw);
-        assert!(result.is_ok(), "graph: with project_path should be accepted, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "graph: with project_path should be accepted, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -341,11 +353,7 @@ mod tests {
     #[test]
     fn compile_rejects_directive_with_null_source_config() {
         let mode = JsonMode;
-        let raw = make_raw(
-            "/test",
-            Some("directive:my/agent"),
-            serde_json::Value::Null,
-        );
+        let raw = make_raw("/test", Some("directive:my/agent"), serde_json::Value::Null);
         let result = mode.compile(&raw);
         let err = match result {
             Err(e) => e,
@@ -422,12 +430,17 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must not set static-mode fields"), "got: {msg}");
+        assert!(
+            msg.contains("must not set static-mode fields"),
+            "got: {msg}"
+        );
     }
 
     #[test]
     fn compile_rejects_execute_block() {
-        use ryeos_app::route_raw::{RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
+        use ryeos_app::route_raw::{
+            RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec,
+        };
         let mode = JsonMode;
         let raw = RawRouteSpec {
             section: "routes".into(),
@@ -461,7 +474,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must not have a top-level 'execute' block"), "got: {msg}");
+        assert!(
+            msg.contains("must not have a top-level 'execute' block"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -478,7 +494,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("undeclared path capture 'unknown'"), "got: {msg}");
+        assert!(
+            msg.contains("undeclared path capture 'unknown'"),
+            "got: {msg}"
+        );
     }
 
     #[test]

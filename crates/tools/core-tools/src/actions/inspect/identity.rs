@@ -39,6 +39,7 @@ pub fn run_identity(params: IdentityParams) -> Result<Value> {
             identity_path.display()
         )
     })?;
-    let doc: Value = serde_json::from_slice(&data).context("failed to parse public identity document")?;
+    let doc: Value =
+        serde_json::from_slice(&data).context("failed to parse public identity document")?;
     Ok(doc)
 }

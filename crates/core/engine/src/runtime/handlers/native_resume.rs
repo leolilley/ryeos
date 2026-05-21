@@ -100,19 +100,17 @@ impl RuntimeHandler for NativeResumeHandler {
             Value::Bool(false) => {
                 return Err(EngineError::InvalidRuntimeConfig {
                     path: intermediate.source_path.display().to_string(),
-                    reason:
-                        "`native_resume: false` is not supported — omit the block to disable"
-                            .to_string(),
+                    reason: "`native_resume: false` is not supported — omit the block to disable"
+                        .to_string(),
                 });
             }
             other => {
-                let rich: RichForm =
-                    serde_json::from_value(other.clone()).map_err(|e| {
-                        EngineError::InvalidRuntimeConfig {
-                            path: intermediate.source_path.display().to_string(),
-                            reason: format!("invalid native_resume block: {e}"),
-                        }
-                    })?;
+                let rich: RichForm = serde_json::from_value(other.clone()).map_err(|e| {
+                    EngineError::InvalidRuntimeConfig {
+                        path: intermediate.source_path.display().to_string(),
+                        reason: format!("invalid native_resume block: {e}"),
+                    }
+                })?;
                 NativeResumeSpec {
                     checkpoint_interval_secs: rich.checkpoint_interval_secs,
                     max_auto_resume_attempts: rich.max_auto_resume_attempts,
@@ -184,8 +182,14 @@ mod tests {
     fn bool_true_uses_defaults() {
         let overrides = run(json!(true)).unwrap();
         let spec = overrides.execution.native_resume.unwrap();
-        assert_eq!(spec.checkpoint_interval_secs, DEFAULT_CHECKPOINT_INTERVAL_SECS);
-        assert_eq!(spec.max_auto_resume_attempts, DEFAULT_MAX_AUTO_RESUME_ATTEMPTS);
+        assert_eq!(
+            spec.checkpoint_interval_secs,
+            DEFAULT_CHECKPOINT_INTERVAL_SECS
+        );
+        assert_eq!(
+            spec.max_auto_resume_attempts,
+            DEFAULT_MAX_AUTO_RESUME_ATTEMPTS
+        );
     }
 
     #[test]
@@ -215,7 +219,10 @@ mod tests {
     fn rich_form_partial_uses_defaults_for_missing_fields() {
         let overrides = run(json!({"max_auto_resume_attempts": 5})).unwrap();
         let spec = overrides.execution.native_resume.unwrap();
-        assert_eq!(spec.checkpoint_interval_secs, DEFAULT_CHECKPOINT_INTERVAL_SECS);
+        assert_eq!(
+            spec.checkpoint_interval_secs,
+            DEFAULT_CHECKPOINT_INTERVAL_SECS
+        );
         assert_eq!(spec.max_auto_resume_attempts, 5);
     }
 

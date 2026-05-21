@@ -35,10 +35,7 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    pub fn new(
-        tools: Vec<ToolSchema>,
-        effective_caps: Vec<String>,
-    ) -> Self {
+    pub fn new(tools: Vec<ToolSchema>, effective_caps: Vec<String>) -> Self {
         Self {
             tools,
             effective_caps,
@@ -46,12 +43,19 @@ impl Dispatcher {
     }
 
     #[tracing::instrument(name = "tool:resolve", skip(self, raw_args), fields(tool_name = %tool_name))]
-    pub fn resolve(&self, tool_name: &str, raw_args: &str, call_id: Option<String>) -> Result<ToolDispatchResult, String> {
+    pub fn resolve(
+        &self,
+        tool_name: &str,
+        raw_args: &str,
+        call_id: Option<String>,
+    ) -> Result<ToolDispatchResult, String> {
         // directive_return is a lifecycle signal, not a tool — the
         // runner intercepts it by name before reaching this path.
         // If we see it here, the runner bypass was missed.
         if tool_name == "directive_return" {
-            return Err("directive_return is a lifecycle signal, not a dispatchable tool".to_string());
+            return Err(
+                "directive_return is a lifecycle signal, not a dispatchable tool".to_string(),
+            );
         }
 
         // Typed-fail-loud per remediation: malformed tool-call args
@@ -155,7 +159,13 @@ mod tests {
     #[test]
     fn resolve_passes_call_id() {
         let d = make_dispatcher(vec!["ryeos.execute.tool.*".to_string()]);
-        let result = d.resolve("read_file", r#"{"path": "/tmp"}"#, Some("call_42".to_string())).unwrap();
+        let result = d
+            .resolve(
+                "read_file",
+                r#"{"path": "/tmp"}"#,
+                Some("call_42".to_string()),
+            )
+            .unwrap();
         assert_eq!(result.call_id.as_deref(), Some("call_42"));
     }
 
@@ -165,7 +175,8 @@ mod tests {
         // dispatcher must refuse it so the runner is forced to
         // intercept by name.
         let d = make_dispatcher(vec![]);
-        let err = d.resolve("directive_return", r#"{"answer": "42"}"#, None)
+        let err = d
+            .resolve("directive_return", r#"{"answer": "42"}"#, None)
             .unwrap_err();
         assert!(
             err.contains("lifecycle signal"),
@@ -188,8 +199,14 @@ mod tests {
     #[test]
     fn classify_dispatch_correct() {
         assert_eq!(classify_dispatch("tool:read_file"), DispatchKind::Tool);
-        assert_eq!(classify_dispatch("directive:my/work"), DispatchKind::DirectiveChild);
-        assert_eq!(classify_dispatch("graph:my/graph"), DispatchKind::GraphChild);
+        assert_eq!(
+            classify_dispatch("directive:my/work"),
+            DispatchKind::DirectiveChild
+        );
+        assert_eq!(
+            classify_dispatch("graph:my/graph"),
+            DispatchKind::GraphChild
+        );
     }
 
     // ── Trace-capture tests ──────────────────────────────────────
@@ -202,11 +219,21 @@ mod tests {
         });
 
         let span = trace_test::find_span(&spans, "tool:resolve");
-        assert!(span.is_some(), "expected tool:resolve span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected tool:resolve span, got: {:?}",
+            spans
+                .iter()
+                .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
+                .collect::<Vec<_>>()
+        );
 
         let span = span.unwrap();
         let field_val = |name: &str| -> Option<&str> {
-            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+            span.fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
         };
         assert_eq!(field_val("tool_name"), Some("read_file"));
     }

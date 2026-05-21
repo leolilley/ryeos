@@ -40,16 +40,14 @@ pub struct EnvInjection {
 }
 
 pub const RESERVED_ENV_NAMES: &[&str] = &[
-    "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
-    "PWD", "OLDPWD",
+    "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "PWD",
+    "OLDPWD",
     // LD_* prefix matched by starts_with("LD_")
     // RUST_* prefix matched by starts_with("RUST_")
 ];
 
 pub fn is_reserved_env_name(name: &str) -> bool {
-    RESERVED_ENV_NAMES.contains(&name)
-        || name.starts_with("LD_")
-        || name.starts_with("RUST_")
+    RESERVED_ENV_NAMES.contains(&name) || name.starts_with("LD_") || name.starts_with("RUST_")
 }
 
 pub fn produce_env_value(
@@ -61,13 +59,11 @@ pub fn produce_env_value(
         EnvInjectionSource::ProjectPath => Ok(request.project_path.to_string_lossy().to_string()),
         EnvInjectionSource::ActingPrincipal => Ok(request.acting_principal.clone()),
         EnvInjectionSource::CasRoot => Ok(request.cas_root.to_string_lossy().to_string()),
-        EnvInjectionSource::CallbackTokenUrl => {
-            request.callback_token.clone().ok_or_else(|| {
-                EngineError::Internal(
-                    "callback_token_url requested but no callback_token available".into(),
-                )
-            })
-        }
+        EnvInjectionSource::CallbackTokenUrl => request.callback_token.clone().ok_or_else(|| {
+            EngineError::Internal(
+                "callback_token_url requested but no callback_token available".into(),
+            )
+        }),
         EnvInjectionSource::CallbackSocketPath => {
             request.callback_socket_path.clone().ok_or_else(|| {
                 EngineError::Internal(
@@ -75,28 +71,20 @@ pub fn produce_env_value(
                 )
             })
         }
-        EnvInjectionSource::CallbackToken => {
-            request.callback_token.clone().ok_or_else(|| {
-                EngineError::Internal(
-                    "callback_token requested but no callback_token available".into(),
-                )
-            })
+        EnvInjectionSource::CallbackToken => request.callback_token.clone().ok_or_else(|| {
+            EngineError::Internal("callback_token requested but no callback_token available".into())
+        }),
+        EnvInjectionSource::VaultHandle => request.vault_handle.clone().ok_or_else(|| {
+            EngineError::Internal("vault_handle requested but no vault_handle available".into())
+        }),
+        EnvInjectionSource::SystemSpaceDir => {
+            Ok(request.system_space_dir.to_string_lossy().to_string())
         }
-        EnvInjectionSource::VaultHandle => {
-            request.vault_handle.clone().ok_or_else(|| {
-                EngineError::Internal(
-                    "vault_handle requested but no vault_handle available".into(),
-                )
-            })
-        }
-        EnvInjectionSource::SystemSpaceDir => Ok(request.system_space_dir.to_string_lossy().to_string()),
-        EnvInjectionSource::ThreadAuthToken => {
-            request.thread_auth_token.clone().ok_or_else(|| {
-                EngineError::Internal(
-                    "thread_auth_token requested but no thread_auth_token available".into(),
-                )
-            })
-        }
+        EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.clone().ok_or_else(|| {
+            EngineError::Internal(
+                "thread_auth_token requested but no thread_auth_token available".into(),
+            )
+        }),
     }
 }
 

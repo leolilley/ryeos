@@ -10,9 +10,7 @@ pub async fn send_frame(
     stream.write_all(payload).await
 }
 
-pub async fn recv_frame(
-    stream: &mut (impl AsyncReadExt + Unpin),
-) -> std::io::Result<Vec<u8>> {
+pub async fn recv_frame(stream: &mut (impl AsyncReadExt + Unpin)) -> std::io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;

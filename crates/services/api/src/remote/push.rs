@@ -51,14 +51,22 @@ pub async fn push_project_ai_only(
     let system_space_dir = &state.config.system_space_dir;
     refuse_walking_root(local_project_path, system_space_dir)?;
 
-    let local_cas_root = system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects");
+    let local_cas_root = system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("objects");
     let local_cas = CasStore::new(local_cas_root);
 
     let mut items: HashMap<String, String> = HashMap::new();
     ingest_project_ai_for_push(&local_cas, local_project_path, &mut items)?;
 
-    let manifest = SourceManifest { item_source_hashes: items };
-    ryeos_state::project_sync::validate_project_manifest_paths(&manifest, ProjectSyncScope::AiOnly)?;
+    let manifest = SourceManifest {
+        item_source_hashes: items,
+    };
+    ryeos_state::project_sync::validate_project_manifest_paths(
+        &manifest,
+        ProjectSyncScope::AiOnly,
+    )?;
     let manifest_hash = local_cas.store_object(&manifest.to_value())?;
 
     let snapshot = ryeos_state::objects::ProjectSnapshot {
@@ -71,10 +79,19 @@ pub async fn push_project_ai_only(
     };
     let snapshot_hash = local_cas.store_object(&snapshot.to_value())?;
 
-    let all_hashes = collect_snapshot_hashes(&local_cas, &manifest, None, None, &manifest_hash, &snapshot_hash);
+    let all_hashes = collect_snapshot_hashes(
+        &local_cas,
+        &manifest,
+        None,
+        None,
+        &manifest_hash,
+        &snapshot_hash,
+    );
     let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes).await?;
 
-    client.push_head(remote_project_path_for_ref, &snapshot_hash).await?;
+    client
+        .push_head(remote_project_path_for_ref, &snapshot_hash)
+        .await?;
 
     let manifest_entries = manifest.item_source_hashes.len();
     Ok(PushResult {
@@ -121,14 +138,26 @@ pub async fn push_project(
     refuse_walking_root(project_path, system_space_dir)?;
 
     // 1. Ingest project directory into local CAS using remote's ignore rules.
-    let local_cas_root = system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects");
+    let local_cas_root = system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("objects");
     let local_cas = CasStore::new(local_cas_root.clone());
 
     let mut items: HashMap<String, String> = HashMap::new();
-    ingest_for_push(&local_cas, &local_cas_root, project_path, project_path, &mut items, remote_ignore)?;
+    ingest_for_push(
+        &local_cas,
+        &local_cas_root,
+        project_path,
+        project_path,
+        &mut items,
+        remote_ignore,
+    )?;
 
     // 2. Build project manifest
-    let manifest = SourceManifest { item_source_hashes: items };
+    let manifest = SourceManifest {
+        item_source_hashes: items,
+    };
     let manifest_hash = local_cas.store_object(&manifest.to_value())?;
 
     // 2b. Build user-space manifest (separate from project manifest).
@@ -162,7 +191,9 @@ pub async fn push_project(
     let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes).await?;
 
     // 7. Call push-head
-    client.push_head(project_path_for_ref, &snapshot_hash).await?;
+    client
+        .push_head(project_path_for_ref, &snapshot_hash)
+        .await?;
 
     let manifest_entries = manifest.item_source_hashes.len();
     Ok(PushResult {
@@ -200,7 +231,11 @@ fn collect_snapshot_hashes(
     all_hashes
 }
 
-fn collect_manifest_hashes(cas: &CasStore, manifest: &SourceManifest, all_hashes: &mut Vec<String>) {
+fn collect_manifest_hashes(
+    cas: &CasStore,
+    manifest: &SourceManifest,
+    all_hashes: &mut Vec<String>,
+) {
     for obj_hash in manifest.item_source_hashes.values() {
         all_hashes.push(obj_hash.clone());
         if let Ok(Some(item_obj)) = cas.get_object(obj_hash) {
@@ -385,7 +420,9 @@ pub(crate) fn ingest_user_space_for_push(
         return Ok((None, None));
     }
 
-    let manifest = SourceManifest { item_source_hashes: items };
+    let manifest = SourceManifest {
+        item_source_hashes: items,
+    };
     let manifest_hash = cas.store_object(&manifest.to_value())?;
     Ok((Some(manifest_hash), Some(manifest)))
 }
@@ -404,7 +441,9 @@ fn ingest_project_ai_for_push(
                 tracing::warn!(path = %abs.display(), "skipping symlinked project AI sync root");
                 continue;
             }
-            Ok(md) if md.is_dir() => ingest_project_ai_dir_for_push(cas, project_root, &abs, items)?,
+            Ok(md) if md.is_dir() => {
+                ingest_project_ai_dir_for_push(cas, project_root, &abs, items)?
+            }
             _ => continue,
         }
     }
@@ -776,8 +815,11 @@ mod ingest_symlink_tests {
 
         // Symlink under directives/ pointing at the outside file.
         #[cfg(unix)]
-        std::os::unix::fs::symlink(outside.path().join("secret"), directives_dir.join("exfil.md"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            directives_dir.join("exfil.md"),
+        )
+        .unwrap();
         #[cfg(not(unix))]
         {
             // Symlink support is Unix-only in practice for this test;
@@ -833,7 +875,9 @@ mod ingest_symlink_tests {
 
         // Nothing from the symlinked dir should appear.
         assert!(
-            !items.keys().any(|k| k.contains("leaked.txt") || k.contains("leaky-dir")),
+            !items
+                .keys()
+                .any(|k| k.contains("leaked.txt") || k.contains("leaky-dir")),
             "symlinked directory must be skipped, got keys: {:?}",
             items.keys().collect::<Vec<_>>()
         );
@@ -920,8 +964,14 @@ mod ingest_symlink_tests {
         ingest_project_ai_for_push(&cas, project.path(), &mut items).unwrap();
 
         assert!(items.contains_key(".ai/directives/ok.md"));
-        assert!(!items.keys().any(|k| k.contains("runtime.sqlite3")), "state must not be ingested: {items:?}");
-        assert!(!items.keys().any(|k| k.starts_with("src/")), "app code must not be ingested: {items:?}");
+        assert!(
+            !items.keys().any(|k| k.contains("runtime.sqlite3")),
+            "state must not be ingested: {items:?}"
+        );
+        assert!(
+            !items.keys().any(|k| k.starts_with("src/")),
+            "app code must not be ingested: {items:?}"
+        );
     }
 
     #[test]

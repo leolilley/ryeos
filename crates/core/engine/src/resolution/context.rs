@@ -22,8 +22,8 @@ use crate::trust::TrustStore;
 use super::alias::AliasResolver;
 use super::decl::ResolutionStepDecl;
 use super::types::{
-    execution_trust, ResolutionEdge, ResolutionError, ResolutionOutput,
-    ResolutionStepName, ResolvedAncestor, TrustClass,
+    execution_trust, ResolutionEdge, ResolutionError, ResolutionOutput, ResolutionStepName,
+    ResolvedAncestor, TrustClass,
 };
 
 /// Result of loading an item: identity / trust / raw bytes (as a
@@ -180,8 +180,7 @@ impl<'a> ResolutionContext<'a> {
         composers: &crate::composers::ComposerRegistry,
         kind: &str,
     ) -> Result<ResolutionOutput, ResolutionError> {
-        let executor_trust_class =
-            execution_trust(self.root_ancestor.trust_class, &self.ancestors);
+        let executor_trust_class = execution_trust(self.root_ancestor.trust_class, &self.ancestors);
 
         let composed = composers.compose(
             kind,
@@ -266,12 +265,13 @@ pub(crate) fn load_item_at(
             reason: format!("unknown kind: {}", ref_.kind),
         })?;
 
-    let result = crate::item_resolution::resolve_item_full(roots, kind_schema, ref_).map_err(
-        |_| ResolutionError::MissingItem {
-            item_ref: ref_.to_string(),
-            referenced_by: referenced_by.to_string(),
-        },
-    )?;
+    let result =
+        crate::item_resolution::resolve_item_full(roots, kind_schema, ref_).map_err(|_| {
+            ResolutionError::MissingItem {
+                item_ref: ref_.to_string(),
+                referenced_by: referenced_by.to_string(),
+            }
+        })?;
 
     let content =
         std::fs::read_to_string(&result.winner_path).map_err(|e| ResolutionError::StepFailed {
@@ -339,12 +339,10 @@ pub(crate) fn load_item_at(
         &result.winner_ai_root,
         &result.winner_path,
     )
-    .map_err(
-        |source| ResolutionError::MetadataAnchoringFailed {
-            item_ref: ref_.to_string(),
-            source: Box::new(source),
-        },
-    )?;
+    .map_err(|source| ResolutionError::MetadataAnchoringFailed {
+        item_ref: ref_.to_string(),
+        source: Box::new(source),
+    })?;
 
     // Strip the signature line so the envelope ships clean bytes —
     // runtimes don't need (or trust) the daemon-stripped signature.

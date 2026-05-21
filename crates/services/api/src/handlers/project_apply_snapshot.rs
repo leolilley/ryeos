@@ -34,10 +34,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let canonical_project_path = project_path.to_string_lossy().to_string();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
     let apply_lock = project_apply_lock(&project_hash);
-    let _apply_guard = apply_lock
-        .lock()
-        .map_err(|_| anyhow!("project apply lock poisoned for '{}'", canonical_project_path))?;
-    let _permit = state.write_barrier.try_acquire()
+    let _apply_guard = apply_lock.lock().map_err(|_| {
+        anyhow!(
+            "project apply lock poisoned for '{}'",
+            canonical_project_path
+        )
+    })?;
+    let _permit = state
+        .write_barrier
+        .try_acquire()
         .map_err(|e| anyhow!("cannot acquire CAS write permit: {e}"))?;
 
     let cas_root = state.state_store.cas_root()?;
@@ -45,7 +50,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let cas = CasStore::new(cas_root);
 
     let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint);
-    let pushed_head = ryeos_state::refs::read_project_head_ref(&refs_root, principal_key, &project_hash)?;
+    let pushed_head =
+        ryeos_state::refs::read_project_head_ref(&refs_root, principal_key, &project_hash)?;
     if pushed_head.as_deref() != Some(req.snapshot_hash.as_str()) {
         anyhow::bail!(
             "project.apply-snapshot refused: caller's staged HEAD for project '{}' is {:?}, not requested snapshot {}",
@@ -71,9 +77,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let manifest_obj = cas
         .get_object(&snapshot.project_manifest_hash)?
-        .ok_or_else(|| anyhow!("manifest {} not found in CAS", snapshot.project_manifest_hash))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "manifest {} not found in CAS",
+                snapshot.project_manifest_hash
+            )
+        })?;
     let manifest = SourceManifest::from_value(&manifest_obj)?;
-    ryeos_state::project_sync::validate_project_manifest_paths(&manifest, ProjectSyncScope::AiOnly)?;
+    ryeos_state::project_sync::validate_project_manifest_paths(
+        &manifest,
+        ProjectSyncScope::AiOnly,
+    )?;
 
     let current_ref = ryeos_state::refs::read_deployed_project_ref(&refs_root, &project_hash)?;
     let previous_deployed_hash = current_ref.as_ref().map(|r| r.target_hash.clone());
@@ -100,7 +114,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let staging_root = unique_staging_root(&project_path);
     if staging_root.exists() {
-        fs::remove_dir_all(&staging_root).with_context(|| format!("remove stale staging dir {}", staging_root.display()))?;
+        fs::remove_dir_all(&staging_root)
+            .with_context(|| format!("remove stale staging dir {}", staging_root.display()))?;
     }
     fs::create_dir_all(&staging_root)
         .with_context(|| format!("create staging dir {}", staging_root.display()))?;
@@ -161,9 +176,12 @@ fn canonical_existing_project_path(project_path: &str) -> Result<PathBuf> {
     if !path.is_absolute() {
         anyhow::bail!("project_path '{}' is not absolute", project_path);
     }
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("cannot canonicalize project_path '{}'; ensure it exists", project_path))?;
+    let canonical = path.canonicalize().with_context(|| {
+        format!(
+            "cannot canonicalize project_path '{}'; ensure it exists",
+            project_path
+        )
+    })?;
     if !canonical.is_dir() {
         anyhow::bail!("project_path '{}' is not a directory", canonical.display());
     }
@@ -182,14 +200,25 @@ fn materialize_manifest_to_staging(
 ) -> Result<usize> {
     let mut count = 0usize;
     for (rel_path, item_hash) in &manifest.item_source_hashes {
-        ryeos_state::project_sync::validate_project_manifest_path(rel_path, ProjectSyncScope::AiOnly)?;
-        let item_obj = cas
-            .get_object(item_hash)?
-            .ok_or_else(|| anyhow!("item source object {} for '{}' not found", item_hash, rel_path))?;
+        ryeos_state::project_sync::validate_project_manifest_path(
+            rel_path,
+            ProjectSyncScope::AiOnly,
+        )?;
+        let item_obj = cas.get_object(item_hash)?.ok_or_else(|| {
+            anyhow!(
+                "item source object {} for '{}' not found",
+                item_hash,
+                rel_path
+            )
+        })?;
         let item = ItemSource::from_value(&item_obj)?;
-        let blob = cas
-            .get_blob(&item.content_blob_hash)?
-            .ok_or_else(|| anyhow!("blob {} for '{}' not found", item.content_blob_hash, rel_path))?;
+        let blob = cas.get_blob(&item.content_blob_hash)?.ok_or_else(|| {
+            anyhow!(
+                "blob {} for '{}' not found",
+                item.content_blob_hash,
+                rel_path
+            )
+        })?;
         if lillux::cas::sha256_hex(&blob) != item.integrity {
             anyhow::bail!("integrity mismatch for '{}'", rel_path);
         }
@@ -264,10 +293,18 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
                 fs::rename(&staged, &dest)
                     .with_context(|| format!("install managed root {}", dest.display()))?;
                 report.roots_replaced += 1;
-                swaps.push(RootSwap { dest, backup, installed: true });
+                swaps.push(RootSwap {
+                    dest,
+                    backup,
+                    installed: true,
+                });
             } else {
                 report.roots_deleted += usize::from(backup.is_some());
-                swaps.push(RootSwap { dest, backup, installed: false });
+                swaps.push(RootSwap {
+                    dest,
+                    backup,
+                    installed: false,
+                });
             }
         }
         Ok(())
@@ -314,7 +351,11 @@ fn reject_symlinked_existing_path(project_path: &Path, rel_root: &str) -> Result
         current.push(component);
         match fs::symlink_metadata(&current) {
             Ok(md) if md.file_type().is_symlink() => {
-                anyhow::bail!("managed root path '{}' contains symlink '{}'; refusing apply", rel_root, current.display());
+                anyhow::bail!(
+                    "managed root path '{}' contains symlink '{}'; refusing apply",
+                    rel_root,
+                    current.display()
+                );
             }
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
@@ -380,7 +421,10 @@ mod tests {
         assert!(project.path().join(".ai/directives/new.md").exists());
         assert!(!project.path().join(".ai/directives/old.md").exists());
         assert!(!project.path().join(".ai/tools").exists());
-        assert_eq!(std::fs::read_to_string(project.path().join("src/index.ts")).unwrap(), "app");
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("src/index.ts")).unwrap(),
+            "app"
+        );
     }
 
     #[test]
@@ -399,7 +443,8 @@ mod tests {
         std::fs::create_dir_all(staging.path().join(".ai/directives")).unwrap();
         std::fs::write(staging.path().join(".ai/directives/new.md"), "new").unwrap();
 
-        let err = replace_managed_roots(project.path(), staging.path()).expect_err("symlink root must be rejected");
+        let err = replace_managed_roots(project.path(), staging.path())
+            .expect_err("symlink root must be rejected");
         assert!(format!("{err:#}").contains("symlink"));
     }
 
@@ -426,7 +471,9 @@ mod tests {
         let item_hash = cas.store_object(&item.to_value()).unwrap();
         let mut map = HashMap::new();
         map.insert(".ai/tools/run.sh".to_string(), item_hash);
-        let manifest = SourceManifest { item_source_hashes: map };
+        let manifest = SourceManifest {
+            item_source_hashes: map,
+        };
         let staging = TempDir::new().unwrap();
 
         materialize_manifest_to_staging(&cas, &manifest, staging.path()).unwrap();

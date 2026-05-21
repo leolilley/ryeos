@@ -3,14 +3,17 @@ use std::time::Instant;
 use serde_json::{json, Value};
 
 use crate::budget::BudgetTracker;
-use ryeos_runtime::callback_client::CallbackClient;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig, StreamEvent, ToolSchema};
+use crate::directive::{
+    ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig, StreamEvent,
+    ToolSchema,
+};
 use crate::dispatcher::{DispatchKind, Dispatcher};
-use crate::harness::{HookAction, Harness};
-use ryeos_runtime::envelope::RuntimeResult;
+use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
 use crate::resume::ResumeState;
+use ryeos_runtime::callback_client::CallbackClient;
+use ryeos_runtime::envelope::RuntimeResult;
 
 #[derive(Debug)]
 pub enum State {
@@ -252,13 +255,17 @@ impl Runner {
         }
     }
 
-    pub fn from_resume(
-        resume: ResumeState,
-        mut config: RunnerConfig,
-    ) -> Self {
+    pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> Self {
         if let Some(ref usage) = resume.thread_usage {
-            config.harness.reseed(usage.completed_turns, usage.input_tokens + usage.output_tokens, usage.spend_usd, usage.spawns_used);
-            config.budget.reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd);
+            config.harness.reseed(
+                usage.completed_turns,
+                usage.input_tokens + usage.output_tokens,
+                usage.spend_usd,
+                usage.spawns_used,
+            );
+            config
+                .budget
+                .reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd);
         }
         config.messages = resume.messages;
         let mut runner = Self::new(config);
@@ -291,7 +298,9 @@ impl Runner {
             state = match state {
                 State::Init => {
                     if let Err(e) = self.callback.mark_running().await {
-                        state = State::Errored { error: format!("resume-critical callback mark_running failed: {e}") };
+                        state = State::Errored {
+                            error: format!("resume-critical callback mark_running failed: {e}"),
+                        };
                         continue;
                     }
                     State::CheckingLimits
@@ -321,12 +330,16 @@ impl Runner {
                     turn += 1;
 
                     if let Err(e) = self.callback.emit_turn_start(turn).await {
-                        state = State::Errored { error: format!("resume-critical callback emit_turn_start failed: {e}") };
+                        state = State::Errored {
+                            error: format!("resume-critical callback emit_turn_start failed: {e}"),
+                        };
                         continue;
                     }
 
                     if self.budget.is_exhausted() {
-                        state = State::Errored { error: "budget_exceeded".to_string() };
+                        state = State::Errored {
+                            error: "budget_exceeded".to_string(),
+                        };
                         continue;
                     }
 
@@ -339,7 +352,8 @@ impl Runner {
                         self.harness.effective_caps(),
                     );
                     // Map borrowed refs back to owned slice for the adapter.
-                    let mut visible_tools_owned: Vec<_> = visible_tools.into_iter().cloned().collect();
+                    let mut visible_tools_owned: Vec<_> =
+                        visible_tools.into_iter().cloned().collect();
                     // If the directive declared `outputs:`, synthesize a
                     // `directive_return` tool from them so the LLM has a
                     // first-class function to call when it has the answer.
@@ -392,24 +406,37 @@ impl Runner {
                             };
 
                             if let Err(e) = self.callback.emit_thread_usage(&proposed_usage).await {
-                                state = State::Errored { error: format!("resume-critical callback emit_thread_usage failed: {e}") };
+                                state = State::Errored {
+                                    error: format!(
+                                        "resume-critical callback emit_thread_usage failed: {e}"
+                                    ),
+                                };
                                 continue;
                             }
 
                             if let Some(ref usage) = resp.usage {
-                                self.harness.record_tokens(usage.input_tokens, usage.output_tokens);
+                                self.harness
+                                    .record_tokens(usage.input_tokens, usage.output_tokens);
                                 self.harness.record_spend(usd);
-                                self.budget.report(usage.input_tokens, usage.output_tokens, usd);
+                                self.budget
+                                    .report(usage.input_tokens, usage.output_tokens, usd);
                             }
                             self.messages.push(resp.message.clone());
-                            if let Err(e) = self.callback
+                            if let Err(e) = self
+                                .callback
                                 .emit_turn_complete(
                                     turn,
-                                    resp.usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)),
+                                    resp.usage
+                                        .as_ref()
+                                        .map(|u| (u.input_tokens, u.output_tokens)),
                                 )
                                 .await
                             {
-                                state = State::Errored { error: format!("resume-critical callback emit_turn_complete failed: {e}") };
+                                state = State::Errored {
+                                    error: format!(
+                                        "resume-critical callback emit_turn_complete failed: {e}"
+                                    ),
+                                };
                                 continue;
                             }
                             if let Some(ref reason) = resp.finish_reason {
@@ -465,10 +492,7 @@ impl Runner {
                             }
                             StreamEvent::ReasoningDelta(text) => {
                                 reasoning_count += 1;
-                                tracing::trace!(
-                                    len = text.len(),
-                                    "reasoning delta received"
-                                );
+                                tracing::trace!(len = text.len(), "reasoning delta received");
                             }
                             StreamEvent::Usage(update) => {
                                 // Mid-stream usage is informational — the
@@ -492,9 +516,7 @@ impl Runner {
                                     message = %message,
                                     "provider warning during streaming"
                                 );
-                                warnings.push(format!(
-                                    "provider warning: [{code}] {message}"
-                                ));
+                                warnings.push(format!("provider warning: [{code}] {message}"));
                             }
                         }
                     }
@@ -514,14 +536,11 @@ impl Runner {
                     let last = self.messages.last().cloned();
                     match last {
                         Some(msg) => {
-                            let has_tool_calls = msg
-                                .tool_calls
-                                .as_ref()
-                                .is_some_and(|tc| !tc.is_empty());
-                            let has_content = msg
-                                .content
-                                .as_ref()
-                                .is_some_and(|c| !c.is_null() && c.as_str().is_none_or(|s| !s.is_empty()));
+                            let has_tool_calls =
+                                msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
+                            let has_content = msg.content.as_ref().is_some_and(|c| {
+                                !c.is_null() && c.as_str().is_none_or(|s| !s.is_empty())
+                            });
 
                             if has_tool_calls {
                                 if let Some(ref tool_calls) = msg.tool_calls {
@@ -533,9 +552,7 @@ impl Runner {
                                     State::CheckingContinuation
                                 }
                             } else if has_content || msg.content.is_some() {
-                                let content = msg
-                                    .content
-                                    .unwrap_or(Value::Null);
+                                let content = msg.content.unwrap_or(Value::Null);
                                 State::Finalizing { result: content }
                             } else {
                                 State::CheckingContinuation
@@ -556,8 +573,20 @@ impl Runner {
                         State::CheckingContinuation
                     } else {
                         let tc = &pending[index];
-                        if let Err(e) = self.callback.emit_tool_dispatch(&tc.name, tc.id.as_deref(), self.harness.effective_caps()).await {
-                            state = State::Errored { error: format!("resume-critical callback emit_tool_dispatch failed: {e}") };
+                        if let Err(e) = self
+                            .callback
+                            .emit_tool_dispatch(
+                                &tc.name,
+                                tc.id.as_deref(),
+                                self.harness.effective_caps(),
+                            )
+                            .await
+                        {
+                            state = State::Errored {
+                                error: format!(
+                                    "resume-critical callback emit_tool_dispatch failed: {e}"
+                                ),
+                            };
                             continue;
                         }
 
@@ -585,7 +614,13 @@ impl Runner {
                     }
                 }
 
-                State::ProcessingToolResult { call_id, tool_name, raw_args, pending, index } => {
+                State::ProcessingToolResult {
+                    call_id,
+                    tool_name,
+                    raw_args,
+                    pending,
+                    index,
+                } => {
                     /// Tracks tool result metadata for SSE emission.
                     struct ToolResult {
                         tool: String,
@@ -595,7 +630,11 @@ impl Runner {
                         truncated_reason_override: Option<&'static str>,
                     }
 
-                    let tool_result: ToolResult = match self.dispatcher.resolve(&tool_name, &raw_args, Some(call_id.clone())) {
+                    let tool_result: ToolResult = match self.dispatcher.resolve(
+                        &tool_name,
+                        &raw_args,
+                        Some(call_id.clone()),
+                    ) {
                         Ok(dispatch_result) => {
                             // Record spawn for child executions (directive/graph)
                             match dispatch_result.dispatch_kind {
@@ -606,7 +645,8 @@ impl Runner {
                             }
 
                             // Risk assessment before dispatch
-                            let required_cap = format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
+                            let required_cap =
+                                format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
                             let risk = self.harness.assess(&required_cap);
                             if risk.blocked {
                                 tracing::warn!(
@@ -647,15 +687,21 @@ impl Runner {
                                     truncated_reason_override: Some("error_envelope"),
                                 }
                             } else {
-                                match self.callback.dispatch_action(ryeos_runtime::callback::DispatchActionRequest {
-                                    thread_id: self.thread_id.clone(),
-                                    project_path: self.callback.project_path().to_string(),
-                                    action: ryeos_runtime::callback::ActionPayload {
-                                        item_id: dispatch_result.canonical_ref.clone(),
-                                        params: dispatch_result.arguments.clone(),
-                                        thread: "inline".to_string(),
-                                    },
-                                }).await {
+                                match self
+                                    .callback
+                                    .dispatch_action(
+                                        ryeos_runtime::callback::DispatchActionRequest {
+                                            thread_id: self.thread_id.clone(),
+                                            project_path: self.callback.project_path().to_string(),
+                                            action: ryeos_runtime::callback::ActionPayload {
+                                                item_id: dispatch_result.canonical_ref.clone(),
+                                                params: dispatch_result.arguments.clone(),
+                                                thread: "inline".to_string(),
+                                            },
+                                        },
+                                    )
+                                    .await
+                                {
                                     Ok(response) => {
                                         // Model-visible bytes are ONLY the leaf
                                         // dispatcher's `result` — never the
@@ -666,13 +712,18 @@ impl Runner {
                                         // every tool-result message.
                                         let raw_bytes = serde_json::to_vec(&response.result)
                                             .unwrap_or_else(|e| {
-                                                tracing::warn!("failed to serialize dispatch result: {e}");
+                                                tracing::warn!(
+                                                    "failed to serialize dispatch result: {e}"
+                                                );
                                                 Vec::new()
                                             });
                                         let raw_size = raw_bytes.len() as u64;
-                                        let processed_bytes = self.result_guard.process_bytes(&raw_bytes);
-                                        let result_guard_truncated = processed_bytes.len() != raw_bytes.len();
-                                        let content = String::from_utf8_lossy(&processed_bytes).to_string();
+                                        let processed_bytes =
+                                            self.result_guard.process_bytes(&raw_bytes);
+                                        let result_guard_truncated =
+                                            processed_bytes.len() != raw_bytes.len();
+                                        let content =
+                                            String::from_utf8_lossy(&processed_bytes).to_string();
                                         ToolResult {
                                             tool: tool_name.clone(),
                                             content,
@@ -682,7 +733,11 @@ impl Runner {
                                         }
                                     }
                                     Err(e) => {
-                                        let body_str = serde_json::to_string(&json!({"error": e.to_string()})).unwrap_or_else(|_| "{\"error\":\"dispatch failed\"}".to_string());
+                                        let body_str =
+                                            serde_json::to_string(&json!({"error": e.to_string()}))
+                                                .unwrap_or_else(|_| {
+                                                    "{\"error\":\"dispatch failed\"}".to_string()
+                                                });
                                         ToolResult {
                                             tool: tool_name.clone(),
                                             raw_size: body_str.len() as u64,
@@ -695,7 +750,8 @@ impl Runner {
                             }
                         }
                         Err(e) => {
-                            let body_str = serde_json::to_string(&json!({"error": e})).unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string());
+                            let body_str = serde_json::to_string(&json!({"error": e}))
+                                .unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string());
                             ToolResult {
                                 tool: tool_name.clone(),
                                 raw_size: body_str.len() as u64,
@@ -707,7 +763,8 @@ impl Runner {
                     };
 
                     // Determine inline body and truncation flags
-                    let inline_capped = tool_result.content.len() > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
+                    let inline_capped = tool_result.content.len()
+                        > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
                     let body: Option<&str>;
                     let truncated: bool;
                     let truncated_reason: Option<&str>;
@@ -728,8 +785,21 @@ impl Runner {
                         truncated = false;
                         truncated_reason = None;
                     }
-                    if let Err(e) = self.callback.emit_tool_result(&call_id, &tool_result.tool, body, truncated, truncated_reason, tool_result.raw_size).await {
-                        state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
+                    if let Err(e) = self
+                        .callback
+                        .emit_tool_result(
+                            &call_id,
+                            &tool_result.tool,
+                            body,
+                            truncated,
+                            truncated_reason,
+                            tool_result.raw_size,
+                        )
+                        .await
+                    {
+                        state = State::Errored {
+                            error: format!("resume-critical callback emit_tool_result failed: {e}"),
+                        };
                         continue;
                     }
                     self.messages.push(ProviderMessage {
@@ -741,7 +811,10 @@ impl Runner {
 
                     let next_index = index + 1;
                     if next_index < pending.len() {
-                        State::DispatchingTools { pending, index: next_index }
+                        State::DispatchingTools {
+                            pending,
+                            index: next_index,
+                        }
                     } else {
                         // All tools processed — fire after_step hook
                         State::FiringHooks {
@@ -762,7 +835,8 @@ impl Runner {
                     //   3. Fire tool_call_result for chain visibility
                     //   4. Publish directive_outputs artifact
                     //   5. Finalize thread
-                    let tool_result_content = match crate::adapter::parse_tool_arguments(&raw_args) {
+                    let tool_result_content = match crate::adapter::parse_tool_arguments(&raw_args)
+                    {
                         Ok(args) => {
                             // Validate declared outputs
                             let mut validation_error = None;
@@ -779,25 +853,43 @@ impl Runner {
                             }
 
                             if let Some(err) = validation_error {
-                                serde_json::to_string(&json!({"error": err}))
-                                    .unwrap_or_else(|_| "{\"error\":\"output validation failed\"}".to_string())
+                                serde_json::to_string(&json!({"error": err})).unwrap_or_else(|_| {
+                                    "{\"error\":\"output validation failed\"}".to_string()
+                                })
                             } else {
                                 // Publish outputs as artifact (non-fatal)
                                 record_callback_warning(
                                     &mut warnings,
                                     "publish_artifact(directive_outputs)",
-                                    self.callback.publish_artifact(json!({
-                                        "artifact_type": "directive_outputs",
-                                        "uri": format!("thread://{}/outputs", self.thread_id),
-                                        "content": &args,
-                                    })).await,
+                                    self.callback
+                                        .publish_artifact(json!({
+                                            "artifact_type": "directive_outputs",
+                                            "uri": format!("thread://{}/outputs", self.thread_id),
+                                            "content": &args,
+                                        }))
+                                        .await,
                                 );
 
                                 // Fire tool_call_result for chain visibility
                                 let outputs_json = serde_json::to_string(&args).unwrap_or_default();
                                 let outputs_size = outputs_json.len() as u64;
-                                if let Err(e) = self.callback.emit_tool_result(&call_id, "directive_return", Some(&outputs_json), false, None, outputs_size).await {
-                                    state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
+                                if let Err(e) = self
+                                    .callback
+                                    .emit_tool_result(
+                                        &call_id,
+                                        "directive_return",
+                                        Some(&outputs_json),
+                                        false,
+                                        None,
+                                        outputs_size,
+                                    )
+                                    .await
+                                {
+                                    state = State::Errored {
+                                        error: format!(
+                                            "resume-critical callback emit_tool_result failed: {e}"
+                                        ),
+                                    };
                                     continue;
                                 }
 
@@ -828,8 +920,21 @@ impl Runner {
                     // push error as tool message, and let the LLM retry.
                     // (Non-fatal — the LLM can correct its outputs.)
                     let failure_size = tool_result_content.len() as u64;
-                    if let Err(e) = self.callback.emit_tool_result(&call_id, "directive_return", Some(&tool_result_content), false, Some("error_envelope"), failure_size).await {
-                        state = State::Errored { error: format!("resume-critical callback emit_tool_result failed: {e}") };
+                    if let Err(e) = self
+                        .callback
+                        .emit_tool_result(
+                            &call_id,
+                            "directive_return",
+                            Some(&tool_result_content),
+                            false,
+                            Some("error_envelope"),
+                            failure_size,
+                        )
+                        .await
+                    {
+                        state = State::Errored {
+                            error: format!("resume-critical callback emit_tool_result failed: {e}"),
+                        };
                         continue;
                     }
                     self.messages.push(ProviderMessage {
@@ -841,39 +946,46 @@ impl Runner {
                     State::CheckingContinuation
                 }
 
-                State::FiringHooks { event, context, resume_to } => {
+                State::FiringHooks {
+                    event,
+                    context,
+                    resume_to,
+                } => {
                     let callback = self.callback.clone();
                     let thread_id = self.thread_id.clone();
                     let project_path = self.callback.project_path().to_string();
 
-                    let dispatcher: ryeos_runtime::hooks_eval::HookDispatcher = Box::new(
-                        move |action, proj| {
+                    let dispatcher: ryeos_runtime::hooks_eval::HookDispatcher =
+                        Box::new(move |action, proj| {
                             let cb = callback.clone();
                             let tid = thread_id.clone();
                             Box::pin(async move {
                                 let payload: ryeos_runtime::callback::ActionPayload =
-                                    serde_json::from_value(action)
-                                    .map_err(|e| ryeos_runtime::callback::CallbackError::Transport(
-                                        anyhow::anyhow!("invalid hook action: {}", e)
-                                    ))?;
-                                let response = cb.dispatch_action(
-                                    ryeos_runtime::callback::DispatchActionRequest {
-                                        thread_id: tid,
-                                        project_path: proj,
-                                        action: payload,
-                                    },
-                                )
-                                .await
-                                .map_err(|e| ryeos_runtime::callback::CallbackError::Transport(
-                                    anyhow::anyhow!("{}", e),
-                                ))?;
+                                    serde_json::from_value(action).map_err(|e| {
+                                        ryeos_runtime::callback::CallbackError::Transport(
+                                            anyhow::anyhow!("invalid hook action: {}", e),
+                                        )
+                                    })?;
+                                let response = cb
+                                    .dispatch_action(
+                                        ryeos_runtime::callback::DispatchActionRequest {
+                                            thread_id: tid,
+                                            project_path: proj,
+                                            action: payload,
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        ryeos_runtime::callback::CallbackError::Transport(
+                                            anyhow::anyhow!("{}", e),
+                                        )
+                                    })?;
                                 // Hooks run on the leaf result only —
                                 // the parent-thread snapshot has no
                                 // bearing on hook control flow.
                                 Ok(response.result)
                             })
-                        }
-                    );
+                        });
 
                     let hook_result = match ryeos_runtime::hooks_eval::run_hooks(
                         &event,
@@ -881,7 +993,9 @@ impl Runner {
                         &self.hooks,
                         &project_path,
                         &dispatcher,
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::warn!(hook_event = %event, "hook evaluation error, skipping: {e}");
@@ -932,7 +1046,9 @@ impl Runner {
 
                 State::CheckingContinuation => {
                     let threshold = self.continuation.threshold();
-                    let estimated = self.continuation.estimate_total_tokens(&self.messages, Some(&self.budget.cost()));
+                    let estimated = self
+                        .continuation
+                        .estimate_total_tokens(&self.messages, Some(&self.budget.cost()));
                     tracing::info!(estimated, threshold, "checking continuation");
                     if self
                         .continuation
@@ -971,7 +1087,9 @@ impl Runner {
                             success: false,
                             status: "errored".to_string(),
                             thread_id: self.thread_id.clone(),
-                            result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
+                            result: Some(json!(format!(
+                                "resume-critical callback finalize_thread failed: {e}"
+                            ))),
                             outputs: json!({}),
                             cost: Some(self.budget.cost()),
                             warnings: Vec::new(),
@@ -1011,7 +1129,9 @@ impl Runner {
                     );
                     if let Err(e) = self.callback.finalize_thread("failed").await {
                         // Finalize failed — surface in the error result
-                        warnings.push(format!("resume-critical callback finalize_thread(failed) also failed: {e}"));
+                        warnings.push(format!(
+                            "resume-critical callback finalize_thread(failed) also failed: {e}"
+                        ));
                     }
                     let runtime_result = RuntimeResult {
                         success: false,
@@ -1059,10 +1179,7 @@ impl Runner {
     /// `RuntimeResult`. Caller MUST invoke this on every terminal
     /// branch so callback drift is surfaced; a missed call would
     /// silently drop everything `record_callback_warning` recorded.
-    fn attach_warnings(
-        mut result: RuntimeResult,
-        warnings: &mut Vec<String>,
-    ) -> RuntimeResult {
+    fn attach_warnings(mut result: RuntimeResult, warnings: &mut Vec<String>) -> RuntimeResult {
         result.warnings = std::mem::take(warnings);
         result
     }
@@ -1098,11 +1215,11 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::callback_client::CallbackClient;
     use crate::directive::PricingConfig;
-    use ryeos_runtime::model_resolution::ModelPricing;
     use crate::harness::Harness;
+    use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
+    use ryeos_runtime::model_resolution::ModelPricing;
     use std::path::PathBuf;
 
     fn make_callback_env() -> EnvelopeCallback {

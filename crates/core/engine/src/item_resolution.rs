@@ -359,9 +359,9 @@ pub fn content_hash(content: &str) -> String {
 mod tests {
     use super::*;
     use crate::kind_registry::ExtensionSpec;
+    use ryeos_tracing::test as trace_test;
     use std::fs;
     use std::path::Path;
-    use ryeos_tracing::test as trace_test;
 
     fn make_kind_schema(directory: &str, extensions: Vec<(&str, &str)>) -> KindSchema {
         KindSchema {
@@ -434,11 +434,7 @@ mod tests {
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
 
         // When only project has it (system root empty), project wins
-        let roots = ResolutionRoots::from_flat(
-            Some(project_root.clone()),
-            None,
-            vec![system_root],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_root.clone()), None, vec![system_root]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (_path, space, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -455,11 +451,7 @@ mod tests {
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
 
-        let roots = ResolutionRoots::from_flat(
-            Some(project_root),
-            None,
-            vec![system_root.clone()],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_root), None, vec![system_root.clone()]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -474,11 +466,7 @@ mod tests {
 
         write_item(&user_root, "tools", "my_tool", ".py", "# user");
 
-        let roots = ResolutionRoots::from_flat(
-            None,
-            Some(user_root.clone()),
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(None, Some(user_root.clone()), vec![]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -493,11 +481,7 @@ mod tests {
 
         write_item(&system_root, "directives", "init", ".md", "# system");
 
-        let roots = ResolutionRoots::from_flat(
-            None,
-            None,
-            vec![system_root.clone()],
-        );
+        let roots = ResolutionRoots::from_flat(None, None, vec![system_root.clone()]);
         let ref_ = CanonicalRef::parse("directive:init").unwrap();
 
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -514,11 +498,7 @@ mod tests {
         write_item(&project_root, "tools", "my_tool", ".py", "# python");
         write_item(&project_root, "tools", "my_tool", ".yaml", "name: yaml");
 
-        let roots = ResolutionRoots::from_flat(
-            Some(project_root),
-            None,
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_root), None, vec![]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, _, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -531,11 +511,7 @@ mod tests {
         let project_root = tempdir();
         let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
 
-        let roots = ResolutionRoots::from_flat(
-            Some(project_root),
-            None,
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_root), None, vec![]);
         let ref_ = CanonicalRef::parse("tool:nonexistent").unwrap();
 
         let err = resolve_item(&roots, &schema, &ref_).unwrap_err();
@@ -562,11 +538,8 @@ mod tests {
         write_item(&user_root, "tools", "my_tool", ".py", "# user");
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
 
-        let roots = ResolutionRoots::from_flat(
-            Some(project_root),
-            Some(user_root),
-            vec![system_root],
-        );
+        let roots =
+            ResolutionRoots::from_flat(Some(project_root), Some(user_root), vec![system_root]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
@@ -654,11 +627,7 @@ mod tests {
         let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
         write_item(&project_root, "tools", "trace_tool", ".py", "# content");
 
-        let roots = ResolutionRoots::from_flat(
-            Some(project_root.clone()),
-            None,
-            vec![system_root],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_root.clone()), None, vec![system_root]);
         let ref_ = CanonicalRef::parse("tool:trace_tool").unwrap();
 
         let (_, spans) = trace_test::capture_traces(|| {
@@ -666,11 +635,21 @@ mod tests {
         });
 
         let span = trace_test::find_span(&spans, "engine:resolve_ref");
-        assert!(span.is_some(), "expected engine:resolve_ref span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected engine:resolve_ref span, got: {:?}",
+            spans
+                .iter()
+                .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
+                .collect::<Vec<_>>()
+        );
 
         let span = span.unwrap();
         let field_val = |name: &str| -> Option<&str> {
-            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+            span.fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
         };
         assert_eq!(field_val("ref"), Some("tool:trace_tool"));
     }

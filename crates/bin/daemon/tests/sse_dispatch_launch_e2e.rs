@@ -34,7 +34,11 @@ use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 
-fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
+fn plant_mock_provider(
+    user_space: &Path,
+    mock_base_url: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/crates/core/runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -228,17 +232,18 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, String, String) {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_directive(user, "test/launch_e2e", "Say hello.", &fixture.publisher)?;
-        plant_execute_stream_route(state_path, &fixture.publisher)?;
-        // Authorize the user key (HTTP caller principal). The file must
-        // be signed by the node identity (daemon requirement).
-        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_directive(user, "test/launch_e2e", "Say hello.", &fixture.publisher)?;
+            plant_execute_stream_route(state_path, &fixture.publisher)?;
+            // Authorize the user key (HTTP caller principal). The file must
+            // be signed by the node identity (daemon requirement).
+            write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
+            Ok(())
+        };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
@@ -279,8 +284,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
-    let headers =
-        build_ryeos_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
+    let headers = build_ryeos_signed_auth_headers(&node_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -328,7 +332,10 @@ async fn sse_dispatch_launch_e2e_round_trip() {
         .and_then(|v| v.as_str())
         .expect("stream_started carries thread_id")
         .to_string();
-    assert!(thread_id.starts_with("T-"), "minted id must start with T-: {thread_id}");
+    assert!(
+        thread_id.starts_with("T-"),
+        "minted id must start with T-: {thread_id}"
+    );
 
     // Last event must be terminal lifecycle.
     let last = events.last().expect("at least one event");
@@ -382,8 +389,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
-    let headers =
-        build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
+    let headers = build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -429,8 +435,8 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 #[test]
 fn sse_dispatch_launch_collision() {
     use ryeos_app::identity::NodeIdentity;
-    use ryeos_app::thread_lifecycle::new_thread_id;
     use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
+    use ryeos_app::thread_lifecycle::new_thread_id;
     use ryeos_app::write_barrier::WriteBarrier;
     use std::sync::Arc;
 
@@ -442,9 +448,8 @@ fn sse_dispatch_launch_collision() {
     let identity = NodeIdentity::create(&key_path).expect("create identity");
     let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
     let write_barrier = WriteBarrier::new();
-    let state_store =
-        StateStore::new(state_root, runtime_db_path, signer, write_barrier)
-            .expect("open state store");
+    let state_store = StateStore::new(state_root, runtime_db_path, signer, write_barrier)
+        .expect("open state store");
 
     let id = new_thread_id();
 
@@ -494,7 +499,11 @@ fn new_thread_id_format_and_uniqueness() {
         assert!(id.starts_with("T-"), "id must start with T-: got {id}");
         let suffix = &id[2..];
         let groups: Vec<&str> = suffix.split('-').collect();
-        assert_eq!(groups.len(), 5, "suffix must have 5 hex groups: got {suffix}");
+        assert_eq!(
+            groups.len(),
+            5,
+            "suffix must have 5 hex groups: got {suffix}"
+        );
         let expected = [8, 4, 4, 4, 12];
         for (g, want) in groups.iter().zip(expected.iter()) {
             assert_eq!(g.len(), *want, "group length: got `{g}` want {want} hex");
@@ -535,8 +544,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
 
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
-    let headers =
-        build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
+    let headers = build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();
@@ -602,8 +610,7 @@ async fn sse_dispatch_launch_rejects_relative_project_path() {
 
     let audience = format!("fp:{node_fp}");
     let path = "/execute/stream";
-    let headers =
-        build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
+    let headers = build_ryeos_signed_auth_headers(&user_sk, "POST", path, &body_bytes, &audience);
 
     let url = format!("http://{}{}", h.bind, path);
     let client = reqwest::Client::new();

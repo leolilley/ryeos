@@ -68,10 +68,7 @@ fn collect_signed_yaml_recursive(dir: &Path, hits: &mut Vec<PathBuf>) -> Result<
             Ok(c) => c,
             Err(_) => continue,
         };
-        let first_non_empty = content
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("");
+        let first_non_empty = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
         if first_non_empty.starts_with("# ryeos:signed:") {
             hits.push(path);
         }
@@ -91,7 +88,11 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     create_directory_layout(config)?;
 
     // 2. Write default config file if missing (or force rewrite)
-    let config_path = config.system_space_dir.join(".ai").join("node").join("config.yaml");
+    let config_path = config
+        .system_space_dir
+        .join(".ai")
+        .join("node")
+        .join("config.yaml");
     if options.force || !config_path.exists() {
         write_default_config(&config_path, config)?;
         tracing::info!(path = %config_path.display(), "wrote default config");
@@ -103,7 +104,11 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // Discover trust directory early — needed for stale-entry cleanup during
     // node-key regeneration.
     let user_space = roots::user_root().context("resolve user root for bootstrap")?;
-    let trust_dir = user_space.join(".ai").join("config").join("keys").join("trusted");
+    let trust_dir = user_space
+        .join(".ai")
+        .join("config")
+        .join("keys")
+        .join("trusted");
 
     // 4. Generate or load the NODE signing key (daemon-internal state)
     let node_key_path = &config.node_signing_key_path;
@@ -140,12 +145,14 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
                 old_fingerprint = %old_identity.fingerprint(),
                 "removing stale node trust entry before regeneration"
             );
-            fs::remove_file(&old_trust)
-                .with_context(|| format!("failed to remove stale trust entry {}", old_trust.display()))?;
+            fs::remove_file(&old_trust).with_context(|| {
+                format!("failed to remove stale trust entry {}", old_trust.display())
+            })?;
         }
         tracing::info!(path = %node_key_path.display(), "regenerating node signing key (--force)");
-        fs::remove_file(node_key_path)
-            .with_context(|| format!("failed to remove old node key {}", node_key_path.display()))?;
+        fs::remove_file(node_key_path).with_context(|| {
+            format!("failed to remove old node key {}", node_key_path.display())
+        })?;
         NodeIdentity::create(node_key_path)?
     } else if node_key_path.exists() {
         NodeIdentity::load(node_key_path)?
@@ -176,7 +183,12 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     );
 
     // 6. Write public identity document (node only)
-    let identity_path = config.system_space_dir.join(".ai").join("node").join("identity").join("public-identity.json");
+    let identity_path = config
+        .system_space_dir
+        .join(".ai")
+        .join("node")
+        .join("identity")
+        .join("public-identity.json");
     if options.force || !identity_path.exists() {
         node_identity.write_public_identity(&identity_path)?;
         tracing::info!(path = %identity_path.display(), "wrote node public identity");
@@ -215,10 +227,9 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // (the operator's persistent identity at ~/.ryeos/.ai/config/keys/signing/).
     // The authorized-key TOML must be signed by the node key per
     // auth::load_authorized_key().
-    let user_auth_entry = config.authorized_keys_dir.join(format!(
-        "{}.toml",
-        user_identity.fingerprint()
-    ));
+    let user_auth_entry = config
+        .authorized_keys_dir
+        .join(format!("{}.toml", user_identity.fingerprint()));
     if options.force || !user_auth_entry.exists() {
         write_user_authorized(
             &user_auth_entry,
@@ -233,13 +244,23 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // Node key trust doc
     let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
     if options.force || !node_trust_entry.exists() {
-        write_self_trust(&trust_dir, &node_trust_entry, node_identity.verifying_key(), node_identity.signing_key())?;
+        write_self_trust(
+            &trust_dir,
+            &node_trust_entry,
+            node_identity.verifying_key(),
+            node_identity.signing_key(),
+        )?;
     }
 
     // User key trust doc
     let user_trust_entry = trust_dir.join(format!("{}.toml", user_identity.fingerprint()));
     if options.force || !user_trust_entry.exists() {
-        write_self_trust(&trust_dir, &user_trust_entry, user_identity.verifying_key(), user_identity.signing_key())?;
+        write_self_trust(
+            &trust_dir,
+            &user_trust_entry,
+            user_identity.verifying_key(),
+            user_identity.signing_key(),
+        )?;
     }
 
     // NOTE: Bundle registrations are written by `ryeos init` (ryeos-tools),
@@ -286,8 +307,13 @@ pem = "ed25519:{key_b64}"
     let tmp = trust_entry.with_extension("tmp");
     fs::write(&tmp, signed.as_bytes())
         .with_context(|| format!("failed to write trust entry {}", trust_entry.display()))?;
-    fs::rename(&tmp, trust_entry)
-        .with_context(|| format!("failed to rename {} → {}", tmp.display(), trust_entry.display()))?;
+    fs::rename(&tmp, trust_entry).with_context(|| {
+        format!(
+            "failed to rename {} → {}",
+            tmp.display(),
+            trust_entry.display()
+        )
+    })?;
 
     tracing::info!(
         path = %trust_entry.display(),
@@ -312,10 +338,8 @@ fn write_user_authorized(
 ) -> Result<()> {
     let fp = user_identity.fingerprint();
     let vk = user_identity.verifying_key();
-    let key_b64 = base64::engine::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        vk.as_bytes(),
-    );
+    let key_b64 =
+        base64::engine::Engine::encode(&base64::engine::general_purpose::STANDARD, vk.as_bytes());
 
     let auth_dir = entry_path
         .parent()
@@ -343,7 +367,6 @@ fn write_user_authorized(
     Ok(())
 }
 
-
 // V5.2-CLOSEOUT: sign_unsigned_items + walk helpers deleted.
 // Daemon bootstrap is bootstrap-only — must NEVER mutate
 // system_space_dir or any operator/publisher-managed bundle.
@@ -357,22 +380,56 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     // runtime state under .ai/state/.
     let dirs = [
         // Node identity
-        config.system_space_dir.join(".ai").join("node").join("identity"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("identity"),
         // Node auth
-        config.system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("auth")
+            .join("authorized_keys"),
         // Node vault (sealed secrets)
-        config.system_space_dir.join(".ai").join("node").join("vault"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("vault"),
         // Node config (model routing, etc.)
-        config.system_space_dir.join(".ai").join("node").join("config"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("config"),
         // Node bundle registrations
-        config.system_space_dir.join(".ai").join("node").join("bundles"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("bundles"),
         // Node engine (merged kind schemas cache)
-        config.system_space_dir.join(".ai").join("node").join("engine").join("kinds"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("engine")
+            .join("kinds"),
         // Installed bundles
         config.system_space_dir.join(".ai").join("bundles"),
         // CAS state
-        config.system_space_dir.join(".ai").join("state").join("objects"),
-        config.system_space_dir.join(".ai").join("state").join("refs"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("state")
+            .join("objects"),
+        config
+            .system_space_dir
+            .join(".ai")
+            .join("state")
+            .join("refs"),
     ];
     for dir in &dirs {
         fs::create_dir_all(dir)
@@ -385,8 +442,7 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let yaml = serde_yaml::to_string(config)
-        .context("failed to serialize default config")?;
+    let yaml = serde_yaml::to_string(config).context("failed to serialize default config")?;
     fs::write(path, yaml.as_bytes())?;
     Ok(())
 }
@@ -411,10 +467,7 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
         );
     }
 
-    let bundles_dir = system_space_dir
-        .join(".ai")
-        .join("node")
-        .join("bundles");
+    let bundles_dir = system_space_dir.join(".ai").join("node").join("bundles");
 
     if !bundles_dir.is_dir() {
         anyhow::bail!(
@@ -428,10 +481,14 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
     let has_any_registration = fs::read_dir(&bundles_dir)
         .with_context(|| format!("read {}", bundles_dir.display()))?
         .any(|entry| {
-            entry.ok().and_then(|e| {
-                e.path().extension()
-                    .and_then(|ext| ext.to_str().map(|s| s == "yaml"))
-            }).unwrap_or(false)
+            entry
+                .ok()
+                .and_then(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str().map(|s| s == "yaml"))
+                })
+                .unwrap_or(false)
         });
 
     if !has_any_registration {
@@ -492,10 +549,8 @@ pub fn load_node_config_two_phase(
         .load_bundle_section()
         .context("Phase 1: failed to load bundle section from node config")?;
 
-    let effective_bundle_roots: Vec<PathBuf> = bundle_records
-        .iter()
-        .map(|b| b.path.clone())
-        .collect();
+    let effective_bundle_roots: Vec<PathBuf> =
+        bundle_records.iter().map(|b| b.path.clone()).collect();
 
     tracing::info!(
         system_space_dir = %system_space_dir.display(),
@@ -505,9 +560,10 @@ pub fn load_node_config_two_phase(
     );
 
     // ── Build engine ──
-    let engine = Arc::new(
-        crate::engine_init::build_engine(config, &effective_bundle_roots)?,
-    );
+    let engine = Arc::new(crate::engine_init::build_engine(
+        config,
+        &effective_bundle_roots,
+    )?);
 
     // ── Phase 2: full node-config scan ──
     let section_table = SectionTable::new();
@@ -538,12 +594,22 @@ mod tests {
     fn test_config(tmp: &std::path::Path) -> Config {
         let system_space_dir = tmp.join("state");
         let user_keys = tmp.join("user_keys");
-        std::fs::create_dir_all(system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys")).unwrap();
+        std::fs::create_dir_all(
+            system_space_dir
+                .join(".ai")
+                .join("node")
+                .join("auth")
+                .join("authorized_keys"),
+        )
+        .unwrap();
         std::fs::create_dir_all(system_space_dir.join(".ai").join("state")).unwrap();
         std::fs::create_dir_all(user_keys.join("signing")).unwrap();
         Config {
             bind: "127.0.0.1:0".parse().unwrap(),
-            db_path: system_space_dir.join(".ai").join("state").join("runtime.sqlite3"),
+            db_path: system_space_dir
+                .join(".ai")
+                .join("state")
+                .join("runtime.sqlite3"),
             uds_path: system_space_dir.join("ryeosd.sock"),
             system_space_dir: system_space_dir.clone(),
             node_signing_key_path: system_space_dir
@@ -552,7 +618,11 @@ mod tests {
                 .join("identity")
                 .join("private_key.pem"),
             user_signing_key_path: user_keys.join("signing").join("private_key.pem"),
-            authorized_keys_dir: system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+            authorized_keys_dir: system_space_dir
+                .join(".ai")
+                .join("node")
+                .join("auth")
+                .join("authorized_keys"),
             require_auth: false,
         }
     }
@@ -602,15 +672,32 @@ mod tests {
 
         init(&config, &InitOptions { force: false }).unwrap();
 
-        assert!(config.node_signing_key_path.exists(), "node key should be created");
-        assert!(config.user_signing_key_path.exists(), "user key should be created");
+        assert!(
+            config.node_signing_key_path.exists(),
+            "node key should be created"
+        );
+        assert!(
+            config.user_signing_key_path.exists(),
+            "user key should be created"
+        );
 
         // Trust entries for both keys — trust_dir = <USER_SPACE>/.ai/config/keys/trusted/
-        let trust_dir = tmp.path().join(".ai").join("config").join("keys").join("trusted");
+        let trust_dir = tmp
+            .path()
+            .join(".ai")
+            .join("config")
+            .join("keys")
+            .join("trusted");
         let node_fp = fingerprint_at(&config.node_signing_key_path);
         let user_fp = fingerprint_at(&config.user_signing_key_path);
-        assert!(trust_dir.join(format!("{}.toml", node_fp)).exists(), "node trust entry");
-        assert!(trust_dir.join(format!("{}.toml", user_fp)).exists(), "user trust entry");
+        assert!(
+            trust_dir.join(format!("{}.toml", node_fp)).exists(),
+            "node trust entry"
+        );
+        assert!(
+            trust_dir.join(format!("{}.toml", user_fp)).exists(),
+            "user trust entry"
+        );
     }
 
     #[test]
@@ -628,8 +715,14 @@ mod tests {
         let node_fp2 = fingerprint_at(&config.node_signing_key_path);
         let user_fp2 = fingerprint_at(&config.user_signing_key_path);
 
-        assert_eq!(node_fp1, node_fp2, "node key should not change on idempotent init");
-        assert_eq!(user_fp1, user_fp2, "user key should not change on idempotent init");
+        assert_eq!(
+            node_fp1, node_fp2,
+            "node key should not change on idempotent init"
+        );
+        assert_eq!(
+            user_fp1, user_fp2,
+            "user key should not change on idempotent init"
+        );
     }
 
     #[test]
@@ -657,7 +750,12 @@ mod tests {
         );
 
         // Trust dir
-        let trust_dir = tmp.path().join(".ai").join("config").join("keys").join("trusted");
+        let trust_dir = tmp
+            .path()
+            .join(".ai")
+            .join("config")
+            .join("keys")
+            .join("trusted");
 
         // Old node trust entry should be cleaned up
         assert!(
@@ -679,8 +777,14 @@ mod tests {
 
         init(&config, &InitOptions { force: true }).unwrap();
 
-        assert!(config.node_signing_key_path.exists(), "node key should be created even with --force on fresh state");
-        assert!(config.user_signing_key_path.exists(), "user key should be created on fresh state");
+        assert!(
+            config.node_signing_key_path.exists(),
+            "node key should be created even with --force on fresh state"
+        );
+        assert!(
+            config.user_signing_key_path.exists(),
+            "user key should be created on fresh state"
+        );
     }
 
     // ── γ: --force refusal when signed node-config items exist ───────
@@ -696,7 +800,11 @@ mod tests {
         assert!(config.node_signing_key_path.exists());
 
         // Plant a signed YAML in the node dir.
-        let node_bundles = config.system_space_dir.join(".ai").join("node").join("bundles");
+        let node_bundles = config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("bundles");
         fs::create_dir_all(&node_bundles).unwrap();
         let signed_yaml = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nname: test-bundle\n";
         fs::write(node_bundles.join("test.yaml"), signed_yaml).unwrap();
@@ -730,9 +838,17 @@ mod tests {
         init(&config, &InitOptions { force: false }).unwrap();
 
         // Plant an unsigned YAML.
-        let node_bundles = config.system_space_dir.join(".ai").join("node").join("bundles");
+        let node_bundles = config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("bundles");
         fs::create_dir_all(&node_bundles).unwrap();
-        fs::write(node_bundles.join("unsigned.yaml"), "name: unsigned-bundle\n").unwrap();
+        fs::write(
+            node_bundles.join("unsigned.yaml"),
+            "name: unsigned-bundle\n",
+        )
+        .unwrap();
 
         // --force should succeed — no signed items.
         init(&config, &InitOptions { force: true })

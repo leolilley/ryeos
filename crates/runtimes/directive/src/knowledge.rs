@@ -145,7 +145,8 @@ mod tests {
         ];
         write_thread_transcript(dir.path(), "T-abc", "my/directive", &messages).unwrap();
         let content = std::fs::read_to_string(
-            dir.path().join(".ai/knowledge/state/threads/T-abc/T-abc.md"),
+            dir.path()
+                .join(".ai/knowledge/state/threads/T-abc/T-abc.md"),
         )
         .unwrap();
         assert!(content.contains("T-abc"));
@@ -157,17 +158,16 @@ mod tests {
     #[test]
     fn write_capabilities_creates_file() {
         let dir = TempDir::new().unwrap();
-        let tools = vec![
-            ToolSchema {
-                name: "read_file".to_string(),
-                item_id: "tool:read_file".to_string(),
-                description: Some("Read a file".to_string()),
-                input_schema: None,
-            },
-        ];
+        let tools = vec![ToolSchema {
+            name: "read_file".to_string(),
+            item_id: "tool:read_file".to_string(),
+            description: Some("Read a file".to_string()),
+            input_schema: None,
+        }];
         write_capabilities(dir.path(), "T-abc", &tools, None).unwrap();
         let content = std::fs::read_to_string(
-            dir.path().join(".ai/knowledge/state/threads/T-abc/capabilities.md"),
+            dir.path()
+                .join(".ai/knowledge/state/threads/T-abc/capabilities.md"),
         )
         .unwrap();
         assert!(content.contains("read_file"));
@@ -180,7 +180,8 @@ mod tests {
         let tools = vec![];
         write_capabilities(dir.path(), "T-abc", &tools, Some("src/\n  main.rs")).unwrap();
         let content = std::fs::read_to_string(
-            dir.path().join(".ai/knowledge/state/threads/T-abc/capabilities.md"),
+            dir.path()
+                .join(".ai/knowledge/state/threads/T-abc/capabilities.md"),
         )
         .unwrap();
         assert!(content.contains("Project Tree"));

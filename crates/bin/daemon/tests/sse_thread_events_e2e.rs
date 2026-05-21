@@ -21,7 +21,11 @@ use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 
-fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
+fn plant_mock_provider(
+    user_space: &Path,
+    mock_base_url: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/crates/core/runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -213,25 +217,24 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
-        // thread/events-stream route is provided by the standard bundle.
-        // post_execute signs with fixture.user, so the thread's
-        // requested_by is the user fingerprint. The SSE GET must be
-        // signed by the same user for the ownership check to pass.
-        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
+            // thread/events-stream route is provided by the standard bundle.
+            // post_execute signs with fixture.user, so the thread's
+            // requested_by is the user fingerprint. The SSE GET must be
+            // signed by the same user for the ownership check to pass.
+            write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
+            Ok(())
+        };
 
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
     })
     .await
@@ -265,9 +268,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
 
     if status != reqwest::StatusCode::OK {
         let stderr = h.drain_stderr_nonblocking().await;
-        panic!(
-            "expected 200 from execute; got {status}\nbody={body:#}\n--- stderr ---\n{stderr}"
-        );
+        panic!("expected 200 from execute; got {status}\nbody={body:#}\n--- stderr ---\n{stderr}");
     }
 
     let result = match body.get("result").cloned() {
@@ -291,8 +292,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
 
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
-    let headers =
-        build_ryeos_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
+    let headers = build_ryeos_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
 
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
@@ -315,10 +315,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
 
     let first = &events[0];
     assert!(
-        matches!(
-            first.event.as_str(),
-            "thread_created" | "stream_started"
-        ),
+        matches!(first.event.as_str(), "thread_created" | "stream_started"),
         "first event must be thread_created or stream_started, got: {}",
         first.event
     );
@@ -376,26 +373,27 @@ async fn boot_and_run_directive_with_extra_keys(
 
     let extra_key_bytes: Vec<[u8; 32]> = extra_keys.iter().map(|sk| sk.to_bytes()).collect();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
-        // thread/events-stream route is provided by the standard bundle.
-        // post_execute signs with fixture.user, so the thread's
-        // requested_by is the user fingerprint. Authorize the user key
-        // so SSE requests signed by it pass the ryeos_signed verifier.
-        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
-        for bytes in &extra_key_bytes {
-            let extra = SigningKey::from_bytes(bytes);
-            // Authorized-key files MUST be signed by the node
-            // identity (auth.rs::load_authorized_key checks
-            // signer_fp == node_identity.fingerprint). When the
-            // subject is a different key, sign with the node key.
-            write_authorized_key_signed_by(state_path, &extra, &fixture.node)?;
-        }
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
+            // thread/events-stream route is provided by the standard bundle.
+            // post_execute signs with fixture.user, so the thread's
+            // requested_by is the user fingerprint. Authorize the user key
+            // so SSE requests signed by it pass the ryeos_signed verifier.
+            write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
+            for bytes in &extra_key_bytes {
+                let extra = SigningKey::from_bytes(bytes);
+                // Authorized-key files MUST be signed by the node
+                // identity (auth.rs::load_authorized_key checks
+                // signer_fp == node_identity.fingerprint). When the
+                // subject is a different key, sign with the node key.
+                write_authorized_key_signed_by(state_path, &extra, &fixture.node)?;
+            }
+            Ok(())
+        };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
@@ -455,8 +453,7 @@ async fn sse_thread_events_returns_404_for_non_owner() {
     // the OTHER key's fingerprint.
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");
-    let headers =
-        build_ryeos_signed_auth_headers(&other_sk, "GET", &sse_path, b"", &audience);
+    let headers = build_ryeos_signed_auth_headers(&other_sk, "GET", &sse_path, b"", &audience);
 
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
@@ -485,8 +482,7 @@ async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
     let sse_path = format!("/threads/{thread_id}/events/stream");
 
     // First connect: drain all events, capture their IDs.
-    let headers_1 =
-        build_ryeos_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
+    let headers_1 = build_ryeos_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
     let url = format!("http://{}{}", h.bind, sse_path);
     let client = reqwest::Client::new();
 
@@ -517,11 +513,14 @@ async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
         .iter()
         .filter_map(|e| e.id.as_ref().and_then(|s| s.parse::<i64>().ok()))
         .collect();
-    let expected_after: Vec<i64> = all_ids.iter().copied().filter(|&id| id > resume_from).collect();
+    let expected_after: Vec<i64> = all_ids
+        .iter()
+        .copied()
+        .filter(|&id| id > resume_from)
+        .collect();
 
     // Second connect: same path, with Last-Event-ID = resume_from.
-    let headers_2 =
-        build_ryeos_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
+    let headers_2 = build_ryeos_signed_auth_headers(&user_sk, "GET", &sse_path, b"", &audience);
     let mut req2 = client.get(&url);
     for (k, v) in &headers_2 {
         req2 = req2.header(k.as_str(), v.as_str());

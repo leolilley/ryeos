@@ -12,11 +12,11 @@
 
 use std::path::PathBuf;
 
+use ryeos_api::{handlers as service_handlers, ServiceDescriptor};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
-use ryeos_api::{handlers as service_handlers, ServiceDescriptor};
 
 /// Iterate the canonical descriptor table.
 fn descriptors() -> &'static [ServiceDescriptor] {
@@ -62,12 +62,9 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
     // Parser tools from both bundles.
     let bundle_roots: Vec<PathBuf> = vec![core_bundle.clone(), std_bundle];
-    let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &bundle_roots,
-        &trust_store,
-        &kinds,
-    )
-    .expect("load parser tools");
+    let (parser_tools, _) =
+        ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
+            .expect("load parser tools");
 
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher = ryeos_engine::parsers::ParserDispatcher::new(
@@ -75,18 +72,12 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
         std::sync::Arc::clone(&native_handlers),
     );
 
-    let composers =
-        ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
-            .expect("derive composers");
+    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
+        .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(
-        kinds,
-        parser_dispatcher,
-        None,
-        bundle_roots,
-    )
-    .with_trust_store(trust_store)
-    .with_composers(composers)
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, None, bundle_roots)
+        .with_trust_store(trust_store)
+        .with_composers(composers)
 }
 
 fn local_plan_ctx() -> PlanContext {
@@ -137,7 +128,9 @@ fn gate_all_services_verify() {
     for svc_ref in &services {
         let canonical = CanonicalRef::parse(svc_ref).unwrap();
         let resolved = engine.resolve(&ctx, &canonical).unwrap_or_else(|e| {
-            panic!("service `{svc_ref}` should resolve (gate_all_services_resolve covers this): {e}")
+            panic!(
+                "service `{svc_ref}` should resolve (gate_all_services_resolve covers this): {e}"
+            )
         });
         if let Err(e) = engine.verify(&ctx, resolved) {
             failed.push((*svc_ref, format!("{e}")));
@@ -173,7 +166,10 @@ fn gate_all_services_have_registered_handler() {
             Some(ep) if ep == desc.endpoint => {}
             Some(ep) => unregistered.push((
                 desc.service_ref,
-                format!("bundle endpoint `{ep}` != descriptor endpoint `{}`", desc.endpoint),
+                format!(
+                    "bundle endpoint `{ep}` != descriptor endpoint `{}`",
+                    desc.endpoint
+                ),
             )),
             None => unregistered.push((desc.service_ref, "<no endpoint field>".into())),
         }
@@ -266,8 +262,7 @@ fn gate_cap_enforcement_logic() {
             .collect();
 
         // Allowed only if: no caps required, OR all required caps are satisfied
-        let allowed = required_caps.is_empty()
-            || effective.len() == required_caps.len();
+        let allowed = required_caps.is_empty() || effective.len() == required_caps.len();
         (allowed, effective)
     }
 
@@ -287,11 +282,17 @@ fn gate_cap_enforcement_logic() {
     assert!(eff.is_empty());
 
     // Multiple required caps, partial match fails
-    let (ok, _) = enforce(&["commands.submit"], &["commands.submit", "node.maintenance"]);
+    let (ok, _) = enforce(
+        &["commands.submit"],
+        &["commands.submit", "node.maintenance"],
+    );
     assert!(!ok);
 
     // Multiple required caps, full match passes
-    let (ok, eff) = enforce(&["commands.submit", "node.maintenance"], &["commands.submit", "node.maintenance"]);
+    let (ok, eff) = enforce(
+        &["commands.submit", "node.maintenance"],
+        &["commands.submit", "node.maintenance"],
+    );
     assert!(ok);
     assert_eq!(eff.len(), 2);
 }

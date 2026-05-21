@@ -10,12 +10,14 @@ use anyhow::{bail, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
-use crate::remote::client::RemoteClient;
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
+use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
-fn default_remote() -> String { "default".to_string() }
+fn default_remote() -> String {
+    "default".to_string()
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,7 +52,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     for entry in &resp.entries {
         match entry.kind.as_str() {
             "blob" => {
-                let bytes = entry.data.as_deref()
+                let bytes = entry
+                    .data
+                    .as_deref()
                     .map(|b64| base64::engine::general_purpose::STANDARD.decode(b64))
                     .transpose()
                     .map_err(|e| anyhow::anyhow!("invalid base64 for blob {}: {e}", entry.hash))?
@@ -67,7 +71,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 }
             }
             "object" => {
-                let value = entry.value.as_ref()
+                let value = entry
+                    .value
+                    .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("object {} missing value field", entry.hash))?;
                 let stored = cas.store_object(value)?;
                 stored_hashes.push(stored.clone());

@@ -5,8 +5,8 @@
 //! manifest. The binary's integrity is anchored by a signed `item_source`
 //! JSON object stored in CAS.
 
-use std::collections::HashMap;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::resolution::TrustClass;
 
@@ -44,20 +44,20 @@ pub enum ExecutorResolutionError {
         available_triples: Vec<String>,
     },
     /// The item_source object is missing from CAS.
-    ItemSourceMissingFromCas {
-        item_ref: String,
-    },
+    ItemSourceMissingFromCas { item_ref: String },
     /// The item_source record has no mode (binary must have exec bit).
-    MissingMode {
-        item_ref: String,
-    },
+    MissingMode { item_ref: String },
 }
 
 impl std::fmt::Display for ExecutorResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotNativeExecutor => write!(f, "executor_ref is not a native executor"),
-            Self::NotInManifest { executor_ref, host_triple, available_triples } => {
+            Self::NotInManifest {
+                executor_ref,
+                host_triple,
+                available_triples,
+            } => {
                 if available_triples.is_empty() {
                     write!(
                         f,
@@ -79,7 +79,10 @@ impl std::fmt::Display for ExecutorResolutionError {
                 write!(f, "item_source for {item_ref} not found in CAS")
             }
             Self::MissingMode { item_ref } => {
-                write!(f, "item_source for {item_ref} has no mode field (binary must have exec bit)")
+                write!(
+                    f,
+                    "item_source for {item_ref} has no mode field (binary must have exec bit)"
+                )
             }
         }
     }
@@ -119,7 +122,10 @@ pub fn resolve_native_executor(
         let suffix = format!("/{bare}");
         let mut available_triples: Vec<String> = manifest_item_source_hashes
             .keys()
-            .filter_map(|k| k.strip_prefix("bin/").and_then(|rest| rest.strip_suffix(&suffix)))
+            .filter_map(|k| {
+                k.strip_prefix("bin/")
+                    .and_then(|rest| rest.strip_suffix(&suffix))
+            })
             .map(|t| t.to_string())
             .collect();
         available_triples.sort();
@@ -256,6 +262,9 @@ mod tests {
             TrustClass::TrustedUser.min(TrustClass::TrustedSystem),
             TrustClass::TrustedUser
         );
-        assert_eq!(TrustClass::Unsigned.min(TrustClass::TrustedUser), TrustClass::Unsigned);
+        assert_eq!(
+            TrustClass::Unsigned.min(TrustClass::TrustedUser),
+            TrustClass::Unsigned
+        );
     }
 }

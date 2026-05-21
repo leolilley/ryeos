@@ -75,18 +75,26 @@ pub async fn pull_results(
     base_manifest: &SourceManifest,
     base_user_manifest: Option<&SourceManifest>,
 ) -> Result<PullResult, PullResultsError> {
-    let local_cas_root = system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects");
+    let local_cas_root = system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("objects");
     let local_cas = CasStore::new(local_cas_root.clone());
 
     // 1. Fetch remote snapshot object
-    let snapshot_objs = client.objects_get(&[remote_snapshot_hash.to_string()])
+    let snapshot_objs = client
+        .objects_get(&[remote_snapshot_hash.to_string()])
         .await
         .map_err(PullResultsError::Other)?;
 
-    let snapshot_val = snapshot_objs.find_object(remote_snapshot_hash)
-        .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
-            format!("snapshot {} not found in objects_get response", remote_snapshot_hash)
-        ))?;
+    let snapshot_val = snapshot_objs
+        .find_object(remote_snapshot_hash)
+        .ok_or_else(|| {
+            PullResultsError::InvalidRemoteSnapshot(format!(
+                "snapshot {} not found in objects_get response",
+                remote_snapshot_hash
+            ))
+        })?;
 
     // 1a. Lineage check. Runs in every mode — including --no-project —
     //     so a misconfigured / hostile remote can't slip an unrelated
@@ -99,22 +107,28 @@ pub async fn pull_results(
     // user-space pull-back below still runs.
     let mut fetched_count = 0usize;
     let (files_updated, files_deleted) = if let Some(local_project_root) = local_project_root {
-        let manifest_hash = snapshot_val.get("project_manifest_hash")
+        let manifest_hash = snapshot_val
+            .get("project_manifest_hash")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
-                "missing project_manifest_hash in snapshot".into()
-            ))?
+            .ok_or_else(|| {
+                PullResultsError::InvalidRemoteSnapshot(
+                    "missing project_manifest_hash in snapshot".into(),
+                )
+            })?
             .to_string();
 
         // 2. Fetch remote manifest
-        let manifest_objs = client.objects_get(&[manifest_hash.clone()])
+        let manifest_objs = client
+            .objects_get(&[manifest_hash.clone()])
             .await
             .map_err(PullResultsError::Other)?;
 
-        let manifest_val = manifest_objs.find_object(&manifest_hash)
-            .ok_or_else(|| PullResultsError::InvalidRemoteSnapshot(
-                format!("manifest {} not found in objects_get response", manifest_hash)
-            ))?;
+        let manifest_val = manifest_objs.find_object(&manifest_hash).ok_or_else(|| {
+            PullResultsError::InvalidRemoteSnapshot(format!(
+                "manifest {} not found in objects_get response",
+                manifest_hash
+            ))
+        })?;
 
         let remote_manifest: SourceManifest = parse_manifest(&manifest_val)?;
 
@@ -136,7 +150,8 @@ pub async fn pull_results(
 
         // 4. Fetch needed items into local CAS
         if !needed_hashes.is_empty() {
-            let fetched = client.objects_get(&needed_hashes)
+            let fetched = client
+                .objects_get(&needed_hashes)
                 .await
                 .map_err(PullResultsError::Other)?;
 
@@ -145,8 +160,11 @@ pub async fn pull_results(
                     if let Some(ref val) = entry.value {
                         local_cas.store_object(val)?;
                         fetched_count += 1;
-                        if let Some(blob_hash) = val.get("content_blob_hash").and_then(|v| v.as_str()) {
-                            let blob_fetched = client.objects_get(&[blob_hash.to_string()])
+                        if let Some(blob_hash) =
+                            val.get("content_blob_hash").and_then(|v| v.as_str())
+                        {
+                            let blob_fetched = client
+                                .objects_get(&[blob_hash.to_string()])
                                 .await
                                 .map_err(PullResultsError::Other)?;
                             if let Some(blob_data) = blob_fetched.find_blob(blob_hash) {
@@ -160,7 +178,9 @@ pub async fn pull_results(
                         use base64::Engine;
                         let bytes = base64::engine::general_purpose::STANDARD
                             .decode(blob_data)
-                            .map_err(|e| PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}")))?;
+                            .map_err(|e| {
+                                PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}"))
+                            })?;
                         local_cas.store_blob(&bytes)?;
                         fetched_count += 1;
                     }
@@ -169,7 +189,12 @@ pub async fn pull_results(
         }
 
         // 5. Apply project changes with clean-base policy.
-        apply_manifest_diff(&local_cas, local_project_root, base_manifest, &remote_manifest)?
+        apply_manifest_diff(
+            &local_cas,
+            local_project_root,
+            base_manifest,
+            &remote_manifest,
+        )?
     } else {
         (0, 0)
     };
@@ -183,7 +208,9 @@ pub async fn pull_results(
     let mut user_fetched = 0usize;
     let (user_files_updated, user_files_deleted) = match (
         base_user_manifest,
-        snapshot_val.get("user_manifest_hash").and_then(|v| v.as_str()),
+        snapshot_val
+            .get("user_manifest_hash")
+            .and_then(|v| v.as_str()),
     ) {
         (Some(base_um), Some(remote_user_mh)) => {
             // Fetch remote user manifest.
@@ -191,24 +218,26 @@ pub async fn pull_results(
                 .objects_get(&[remote_user_mh.to_string()])
                 .await
                 .map_err(PullResultsError::Other)?;
-            let user_manifest_val = user_manifest_objs
-                .find_object(remote_user_mh)
-                .ok_or_else(|| {
-                    PullResultsError::InvalidRemoteSnapshot(format!(
-                        "user manifest {} not found in objects_get response",
-                        remote_user_mh
-                    ))
-                })?;
+            let user_manifest_val =
+                user_manifest_objs
+                    .find_object(remote_user_mh)
+                    .ok_or_else(|| {
+                        PullResultsError::InvalidRemoteSnapshot(format!(
+                            "user manifest {} not found in objects_get response",
+                            remote_user_mh
+                        ))
+                    })?;
             let remote_user_manifest: SourceManifest = parse_manifest(&user_manifest_val)?;
 
             // Reject any path that escapes the allow-list. Same
             // component-wise check the push side validates against.
-            ryeos_state::user_sync::validate_user_manifest_paths(&remote_user_manifest)
-                .map_err(|e| {
+            ryeos_state::user_sync::validate_user_manifest_paths(&remote_user_manifest).map_err(
+                |e| {
                     PullResultsError::InvalidRemoteSnapshot(format!(
                         "remote user manifest violates sync allow-list: {e}"
                     ))
-                })?;
+                },
+            )?;
 
             // Fetch any items/blobs the local CAS doesn't already have.
             let mut user_needed: Vec<String> = Vec::new();
@@ -246,9 +275,7 @@ pub async fn pull_results(
                             let bytes = base64::engine::general_purpose::STANDARD
                                 .decode(blob_data)
                                 .map_err(|e| {
-                                    PullResultsError::Other(anyhow::anyhow!(
-                                        "invalid base64: {e}"
-                                    ))
+                                    PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}"))
                                 })?;
                             local_cas.store_blob(&bytes)?;
                             user_fetched += 1;
@@ -347,7 +374,8 @@ fn apply_manifest_diff(
         // pre-existing local file — that would be a conflict too.
         if base_hash.is_none() && remote_hash.is_some() && local_path.exists() {
             return Err(PullResultsError::LocalConflict(format!(
-                "{} (new remote file would overwrite local)", path
+                "{} (new remote file would overwrite local)",
+                path
             )));
         }
 
@@ -358,18 +386,26 @@ fn apply_manifest_diff(
             // File changed — resolve content from CAS (fail hard if missing)
             (Some(_), Some(r)) => {
                 let content = fetch_content_for_item_strict(local_cas, r, path)?;
-                planned.push(PlannedChange::Write { rel_path: path.clone(), content });
+                planned.push(PlannedChange::Write {
+                    rel_path: path.clone(),
+                    content,
+                });
             }
             // File deleted on remote
             (Some(_), None) => {
                 if local_path.exists() {
-                    planned.push(PlannedChange::Delete { rel_path: path.clone() });
+                    planned.push(PlannedChange::Delete {
+                        rel_path: path.clone(),
+                    });
                 }
             }
             // New file on remote — resolve content from CAS (fail hard if missing)
             (None, Some(r)) => {
                 let content = fetch_content_for_item_strict(local_cas, r, path)?;
-                planned.push(PlannedChange::Write { rel_path: path.clone(), content });
+                planned.push(PlannedChange::Write {
+                    rel_path: path.clone(),
+                    content,
+                });
             }
             // Both None — shouldn't happen but no-op
             (None, None) => {}
@@ -468,12 +504,15 @@ fn apply_with_rollback(
                 if let Some(parent) = live_path.parent() {
                     if let Err(e) = std::fs::create_dir_all(parent) {
                         rollback_writes_and_deletes(
-                            &applied_writes, &applied_deletes,
-                            backup_dir, local_project_root,
+                            &applied_writes,
+                            &applied_deletes,
+                            backup_dir,
+                            local_project_root,
                         );
-                        return Err(PullResultsError::Other(
-                            anyhow::anyhow!("create dir for {}: {e}", rel_path)
-                        ));
+                        return Err(PullResultsError::Other(anyhow::anyhow!(
+                            "create dir for {}: {e}",
+                            rel_path
+                        )));
                     }
                 }
                 if let Err(e) = std::fs::rename(&staged_path, &live_path) {
@@ -482,12 +521,15 @@ fn apply_with_rollback(
                         .and_then(|_| std::fs::remove_file(&staged_path))
                     {
                         rollback_writes_and_deletes(
-                            &applied_writes, &applied_deletes,
-                            backup_dir, local_project_root,
+                            &applied_writes,
+                            &applied_deletes,
+                            backup_dir,
+                            local_project_root,
                         );
-                        return Err(PullResultsError::Other(
-                            anyhow::anyhow!("swap staged file {}: {e}, fallback copy: {e2}", rel_path)
-                        ));
+                        return Err(PullResultsError::Other(anyhow::anyhow!(
+                            "swap staged file {}: {e}, fallback copy: {e2}",
+                            rel_path
+                        )));
                     }
                 }
                 applied_writes.push(rel_path.clone());
@@ -497,12 +539,15 @@ fn apply_with_rollback(
                 let live_path = safe_join(local_project_root, rel_path)?;
                 if let Err(e) = std::fs::remove_file(&live_path) {
                     rollback_writes_and_deletes(
-                        &applied_writes, &applied_deletes,
-                        backup_dir, local_project_root,
+                        &applied_writes,
+                        &applied_deletes,
+                        backup_dir,
+                        local_project_root,
                     );
-                    return Err(PullResultsError::Other(
-                        anyhow::anyhow!("delete file {}: {e}", rel_path)
-                    ));
+                    return Err(PullResultsError::Other(anyhow::anyhow!(
+                        "delete file {}: {e}",
+                        rel_path
+                    )));
                 }
                 applied_deletes.push(rel_path.clone());
                 *files_deleted += 1;
@@ -576,10 +621,7 @@ fn verify_snapshot_lineage(
     let parents_match = result_snapshot
         .get("parent_hashes")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .any(|p| p.as_str() == Some(pushed_snapshot_hash))
-        })
+        .map(|arr| arr.iter().any(|p| p.as_str() == Some(pushed_snapshot_hash)))
         .unwrap_or(false);
     if parents_match {
         Ok(())
@@ -697,25 +739,49 @@ fn fetch_content_for_item_strict(
     item_hash: &str,
     rel_path: &str,
 ) -> Result<Vec<u8>, PullResultsError> {
-    let obj = cas.get_object(item_hash)
-        .map_err(|e| PullResultsError::Other(
-            anyhow::anyhow!("CAS object {} for '{}' not found: {}", item_hash, rel_path, e)
-        ))?
-        .ok_or_else(|| PullResultsError::Other(
-            anyhow::anyhow!("CAS object {} for '{}' not found in store", item_hash, rel_path)
-        ))?;
-    let blob_hash = obj.get("content_blob_hash")
+    let obj = cas
+        .get_object(item_hash)
+        .map_err(|e| {
+            PullResultsError::Other(anyhow::anyhow!(
+                "CAS object {} for '{}' not found: {}",
+                item_hash,
+                rel_path,
+                e
+            ))
+        })?
+        .ok_or_else(|| {
+            PullResultsError::Other(anyhow::anyhow!(
+                "CAS object {} for '{}' not found in store",
+                item_hash,
+                rel_path
+            ))
+        })?;
+    let blob_hash = obj
+        .get("content_blob_hash")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| PullResultsError::Other(
-            anyhow::anyhow!("CAS object {} for '{}' has no content_blob_hash", item_hash, rel_path)
-        ))?;
+        .ok_or_else(|| {
+            PullResultsError::Other(anyhow::anyhow!(
+                "CAS object {} for '{}' has no content_blob_hash",
+                item_hash,
+                rel_path
+            ))
+        })?;
     cas.get_blob(blob_hash)
-        .map_err(|e| PullResultsError::Other(
-            anyhow::anyhow!("CAS blob {} for '{}' not found: {}", blob_hash, rel_path, e)
-        ))?
-        .ok_or_else(|| PullResultsError::Other(
-            anyhow::anyhow!("CAS blob {} for '{}' not found in store", blob_hash, rel_path)
-        ))
+        .map_err(|e| {
+            PullResultsError::Other(anyhow::anyhow!(
+                "CAS blob {} for '{}' not found: {}",
+                blob_hash,
+                rel_path,
+                e
+            ))
+        })?
+        .ok_or_else(|| {
+            PullResultsError::Other(anyhow::anyhow!(
+                "CAS blob {} for '{}' not found in store",
+                blob_hash,
+                rel_path
+            ))
+        })
 }
 
 /// Extract snapshot_hash from a remote execute response.
@@ -723,26 +789,30 @@ fn fetch_content_for_item_strict(
 /// The snapshot hash is set by fold-back as a thread facet.
 pub fn extract_snapshot_hash(response: &Value) -> Option<String> {
     // Try from the top-level thread result
-    response.get("snapshot_hash")
+    response
+        .get("snapshot_hash")
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| {
             // Try from facets
-            response.get("facets")
+            response
+                .get("facets")
                 .and_then(|f| f.get("snapshot_hash"))
                 .and_then(|v| v.as_str())
                 .map(String::from)
         })
         .or_else(|| {
             // Try from nested result structure
-            response.get("result")
+            response
+                .get("result")
                 .and_then(|r| r.get("snapshot_hash"))
                 .and_then(|v| v.as_str())
                 .map(String::from)
         })
         .or_else(|| {
             // Try from thread.result (dispatch wraps result as {thread:{...}, result:{...}})
-            response.get("thread")
+            response
+                .get("thread")
                 .and_then(|t| t.get("result"))
                 .and_then(|r| r.get("snapshot_hash"))
                 .and_then(|v| v.as_str())
@@ -750,7 +820,8 @@ pub fn extract_snapshot_hash(response: &Value) -> Option<String> {
         })
         .or_else(|| {
             // Try from thread facets
-            response.get("thread")
+            response
+                .get("thread")
                 .and_then(|t| t.get("facets"))
                 .and_then(|f| f.get("snapshot_hash"))
                 .and_then(|v| v.as_str())
@@ -768,14 +839,16 @@ fn parse_manifest(val: &Value) -> Result<SourceManifest, PullResultsError> {
             }
         }
     }
-    Ok(SourceManifest { item_source_hashes: items })
+    Ok(SourceManifest {
+        item_source_hashes: items,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use lillux::cas::CasStore;
+    use std::path::PathBuf;
 
     /// Helper: create a CAS with a single blob and its corresponding item
     /// source object. Returns the item hash.
@@ -789,7 +862,8 @@ mod tests {
 
     fn make_manifest(items: &[(&str, &str)]) -> SourceManifest {
         SourceManifest {
-            item_source_hashes: items.iter()
+            item_source_hashes: items
+                .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         }
@@ -844,7 +918,10 @@ mod tests {
         match result {
             Err(PullResultsError::LocalConflict(msg)) => {
                 assert!(msg.contains("new.txt"), "got: {msg}");
-                assert!(msg.contains("new remote file would overwrite local"), "got: {msg}");
+                assert!(
+                    msg.contains("new remote file would overwrite local"),
+                    "got: {msg}"
+                );
             }
             other => panic!("expected LocalConflict, got {:?}", other),
         }
@@ -875,14 +952,8 @@ mod tests {
         let hash_b_old = lillux::cas::sha256_hex(content_b.as_bytes());
         // File B's hash doesn't exist in CAS — will trigger strict failure
 
-        let base = make_manifest(&[
-            ("a.txt", &hash_a_old),
-            ("b.txt", &hash_b_old),
-        ]);
-        let remote = make_manifest(&[
-            ("a.txt", &hash_a),
-            ("b.txt", "sha256:missing_hash"),
-        ]);
+        let base = make_manifest(&[("a.txt", &hash_a_old), ("b.txt", &hash_b_old)]);
+        let remote = make_manifest(&[("a.txt", &hash_a), ("b.txt", "sha256:missing_hash")]);
 
         let result = apply_manifest_diff(&cas, project_root, &base, &remote);
         assert!(result.is_err(), "should fail on missing CAS content");
@@ -939,10 +1010,22 @@ mod tests {
         assert_eq!(updated, 2); // a.txt + d.txt
         assert_eq!(deleted, 1); // b.txt
 
-        assert_eq!(std::fs::read_to_string(project_root.join("a.txt")).unwrap(), "new A");
-        assert!(!project_root.join("b.txt").exists(), "b.txt should be deleted");
-        assert_eq!(std::fs::read_to_string(project_root.join("c.txt")).unwrap(), "unchanged");
-        assert_eq!(std::fs::read_to_string(project_root.join("d.txt")).unwrap(), "brand new D");
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("a.txt")).unwrap(),
+            "new A"
+        );
+        assert!(
+            !project_root.join("b.txt").exists(),
+            "b.txt should be deleted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("c.txt")).unwrap(),
+            "unchanged"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_root.join("d.txt")).unwrap(),
+            "brand new D"
+        );
     }
 
     // ── extract_snapshot_hash coverage ──
@@ -1018,12 +1101,7 @@ mod tests {
         std::fs::write(backup_dir.join("b.txt"), "resurrected").unwrap();
         // b.txt does NOT exist in project_root (was deleted)
 
-        rollback_writes_and_deletes(
-            &[],
-            &["b.txt".into()],
-            &backup_dir,
-            project_root,
-        );
+        rollback_writes_and_deletes(&[], &["b.txt".into()], &backup_dir, project_root);
 
         assert_eq!(
             std::fs::read_to_string(project_root.join("b.txt")).unwrap(),
@@ -1152,10 +1230,13 @@ mod tests {
         // write through the symlink into `outside`.
         symlink(outside.path(), project.join("src")).unwrap();
 
-        let err = safe_join(project, "src/file.txt")
-            .expect_err("intermediate symlink must be rejected");
+        let err =
+            safe_join(project, "src/file.txt").expect_err("intermediate symlink must be rejected");
         let msg = format!("{:?}", err);
-        assert!(msg.contains("symlink"), "expected symlink rejection, got: {msg}");
+        assert!(
+            msg.contains("symlink"),
+            "expected symlink rejection, got: {msg}"
+        );
     }
 
     #[test]

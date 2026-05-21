@@ -48,10 +48,7 @@ fn bundle_binary_exists_and_is_executable() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&bin_path)
-            .unwrap()
-            .permissions()
-            .mode();
+        let mode = std::fs::metadata(&bin_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111, "binary should be executable");
     }
 }
@@ -69,16 +66,15 @@ fn bundle_sidecar_exists_and_parsable() {
         "sidecar not found at {sidecar_path:?}"
     );
 
-    let content = std::fs::read_to_string(&sidecar_path)
-        .expect("read sidecar");
+    let content = std::fs::read_to_string(&sidecar_path).expect("read sidecar");
 
     // The sidecar is signed — skip the signature header, parse the JSON body
     let json_start = content
         .find('\n')
         .expect("sidecar should have signature header line followed by JSON");
     let json_str = &content[json_start + 1..];
-    let value: serde_json::Value = serde_json::from_str(json_str)
-        .expect("sidecar JSON body should be valid");
+    let value: serde_json::Value =
+        serde_json::from_str(json_str).expect("sidecar JSON body should be valid");
 
     assert_eq!(
         value["item_ref"],
@@ -89,10 +85,7 @@ fn bundle_sidecar_exists_and_parsable() {
         value.get("content_blob_hash").is_some(),
         "missing content_blob_hash"
     );
-    assert!(
-        value.get("mode").is_some(),
-        "missing mode"
-    );
+    assert!(value.get("mode").is_some(), "missing mode");
     assert_eq!(value["mode"], 493, "mode should be 0o755");
     assert!(
         value["signature_info"]["fingerprint"]
@@ -119,8 +112,7 @@ fn bundle_manifest_ref_exists() {
         return;
     }
 
-    let content = std::fs::read_to_string(&ref_path)
-        .expect("read manifest ref");
+    let content = std::fs::read_to_string(&ref_path).expect("read manifest ref");
     let hash = content.trim();
 
     // SHA-256 hash is 64 hex chars
@@ -153,10 +145,9 @@ fn bundle_cas_contains_manifest_object() {
         "manifest object not found at {object_path:?}"
     );
 
-    let content = std::fs::read_to_string(&object_path)
-        .expect("read manifest object");
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .expect("manifest object should be valid JSON");
+    let content = std::fs::read_to_string(&object_path).expect("read manifest object");
+    let value: serde_json::Value =
+        serde_json::from_str(&content).expect("manifest object should be valid JSON");
 
     assert_eq!(value["kind"], "source_manifest");
     assert!(
@@ -180,11 +171,12 @@ fn bundle_cas_contains_binary_blob() {
 
     let objects_dir = bundle_dir().join(".ai/objects/objects");
     let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
-    let manifest_path = objects_dir.join(&shard).join(format!("{manifest_hash}.json"));
+    let manifest_path = objects_dir
+        .join(&shard)
+        .join(format!("{manifest_hash}.json"));
 
     let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
-    let manifest: serde_json::Value =
-        serde_json::from_str(&manifest_content).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_content).unwrap();
 
     // Get the item_source_hash for our binary
     let triple = host_triple();
@@ -210,14 +202,12 @@ fn bundle_cas_contains_binary_blob() {
     let blob_shard = format!("{}/{}", &blob_hash[..2], &blob_hash[2..4]);
     let blob_path = blobs_dir.join(&blob_shard).join(blob_hash);
 
-    assert!(
-        blob_path.exists(),
-        "binary blob not found at {blob_path:?}"
-    );
+    assert!(blob_path.exists(), "binary blob not found at {blob_path:?}");
 
     // Verify blob hash matches
     let blob_bytes = std::fs::read(&blob_path).unwrap();
-    let computed_hash = format!("{:x}", sha2::Sha256::digest(&blob_bytes));    assert_eq!(
+    let computed_hash = format!("{:x}", sha2::Sha256::digest(&blob_bytes));
+    assert_eq!(
         computed_hash, blob_hash,
         "blob content hash mismatch (corrupted blob)"
     );
@@ -289,7 +279,10 @@ fn bundle_all_yamls_are_signed() {
 #[test]
 fn descriptor_table_count_and_prefix() {
     let services = api_handler_service_refs();
-    assert!(!services.is_empty(), "failed to parse API handler service refs");
+    assert!(
+        !services.is_empty(),
+        "failed to parse API handler service refs"
+    );
 
     for service_ref in services {
         assert!(
@@ -302,7 +295,10 @@ fn descriptor_table_count_and_prefix() {
 #[test]
 fn service_descriptor_table_matches_api_handlers() {
     let services = api_handler_service_refs();
-    assert!(!services.is_empty(), "failed to parse API handler service refs");
+    assert!(
+        !services.is_empty(),
+        "failed to parse API handler service refs"
+    );
 
     let workspace = workspace_root();
     for service_ref in services {
@@ -330,7 +326,10 @@ fn bundle_manifest_includes_all_runtime_binaries() {
     if !ref_path.exists() {
         return; // bundle not built
     }
-    let manifest_hash = std::fs::read_to_string(&ref_path).unwrap().trim().to_string();
+    let manifest_hash = std::fs::read_to_string(&ref_path)
+        .unwrap()
+        .trim()
+        .to_string();
     let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
     let manifest_path = bundle_dir()
         .join(".ai/objects/objects")
@@ -340,7 +339,11 @@ fn bundle_manifest_includes_all_runtime_binaries() {
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     let triple = host_triple();
     let map = value["item_source_hashes"].as_object().expect("map");
-    for bare in &["ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
+    for bare in &[
+        "ryeos-directive-runtime",
+        "ryeos-graph-runtime",
+        "ryeos-knowledge-runtime",
+    ] {
         let key = format!("bin/{triple}/{bare}");
         assert!(
             map.contains_key(&key),
@@ -357,7 +360,10 @@ fn materialization_resolves_each_runtime_binary() {
     if !ref_path.exists() {
         return;
     }
-    let manifest_hash = std::fs::read_to_string(&ref_path).unwrap().trim().to_string();
+    let manifest_hash = std::fs::read_to_string(&ref_path)
+        .unwrap()
+        .trim()
+        .to_string();
     let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
     let manifest_path = bundle_dir()
         .join(".ai/objects/objects")
@@ -365,8 +371,7 @@ fn materialization_resolves_each_runtime_binary() {
         .join(format!("{manifest_hash}.json"));
     let manifest_value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    let item_source_hashes: HashMap<String, String> = manifest_value
-        ["item_source_hashes"]
+    let item_source_hashes: HashMap<String, String> = manifest_value["item_source_hashes"]
         .as_object()
         .unwrap()
         .iter()
@@ -375,7 +380,11 @@ fn materialization_resolves_each_runtime_binary() {
 
     let cas = lillux::cas::CasStore::new(bundle_dir().join(".ai/objects"));
     let triple = host_triple();
-    for bare in &["ryeos-directive-runtime", "ryeos-graph-runtime", "ryeos-knowledge-runtime"] {
+    for bare in &[
+        "ryeos-directive-runtime",
+        "ryeos-graph-runtime",
+        "ryeos-knowledge-runtime",
+    ] {
         let executor_ref = format!("native:{bare}");
         let resolved = ryeos_engine::executor_resolution::resolve_native_executor(
             &item_source_hashes,
@@ -384,10 +393,7 @@ fn materialization_resolves_each_runtime_binary() {
             |hash| cas.get_object(hash).map_err(|e| e.to_string()),
         )
         .unwrap_or_else(|e| panic!("resolve {executor_ref}: {e}"));
-        assert!(
-            !resolved.blob_hash.is_empty(),
-            "{bare}: empty blob_hash"
-        );
+        assert!(!resolved.blob_hash.is_empty(), "{bare}: empty blob_hash");
         assert!(
             resolved.mode & 0o111 != 0,
             "{bare}: mode {:o} missing exec bit",

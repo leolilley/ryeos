@@ -134,11 +134,12 @@ impl RuntimeHandler for EnvConfigHandler {
     )]
     fn apply(&self, block: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
         let intermediate = &ctx.chain[ctx.current_index];
-        let env_config: EnvConfig =
-            serde_json::from_value(block.clone()).map_err(|e| EngineError::InvalidRuntimeConfig {
+        let env_config: EnvConfig = serde_json::from_value(block.clone()).map_err(|e| {
+            EngineError::InvalidRuntimeConfig {
                 path: intermediate.source_path.display().to_string(),
                 reason: format!("invalid env_config: {e}"),
-            })?;
+            }
+        })?;
 
         // Always-present extra: this element's directory. Templates
         // may reference `{runtime_dir}` to locate sibling files
@@ -181,7 +182,12 @@ impl RuntimeHandler for EnvConfigHandler {
         // `runtime_dir`, `interpreter`, etc. already populated, so
         // bundle YAMLs can write `{prepend: ["{tool_dir}",
         // "{runtime_dir}/lib"]}` directly.
-        apply_env_paths(&env_config.env_paths, &mut ctx.env, &ctx.template_ctx, ctx.host_env)?;
+        apply_env_paths(
+            &env_config.env_paths,
+            &mut ctx.env,
+            &ctx.template_ctx,
+            ctx.host_env,
+        )?;
 
         Ok(())
     }

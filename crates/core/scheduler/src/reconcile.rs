@@ -28,17 +28,20 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     tracing::info!("scheduler: starting reconciliation");
 
     // Step 1: Rebuild projection from CAS
-    let schedules_dir = ctx.system_space_dir()
-        .join(ryeos_engine::AI_DIR).join("node").join("schedules");
-    let fires_dir = ctx.system_space_dir()
-        .join(ryeos_engine::AI_DIR).join("state").join("schedules");
+    let schedules_dir = ctx
+        .system_space_dir()
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("schedules");
+    let fires_dir = ctx
+        .system_space_dir()
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("schedules");
 
     let db = ctx.scheduler_db();
-    let live_ids = projection::rebuild_specs_from_dir(
-        &schedules_dir,
-        &db,
-        Some(ctx.trust_store()),
-    )?;
+    let live_ids =
+        projection::rebuild_specs_from_dir(&schedules_dir, &db, Some(ctx.trust_store()))?;
 
     // Delete projections for removed YAML files
     let live_refs: Vec<&str> = live_ids.iter().map(|s| s.as_str()).collect();
@@ -48,11 +51,17 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     }
 
     projection::rebuild_fires_from_dir(&fires_dir, &db)?;
-    tracing::info!(specs = live_ids.len(), "scheduler: projection rebuilt from CAS");
+    tracing::info!(
+        specs = live_ids.len(),
+        "scheduler: projection rebuilt from CAS"
+    );
 
     // Step 2: Recover in-flight fires
     let mut intents = recover_inflight_fires(ctx).await?;
-    tracing::info!(inflight = intents.len(), "scheduler: recovered in-flight fires");
+    tracing::info!(
+        inflight = intents.len(),
+        "scheduler: recovered in-flight fires"
+    );
 
     // Step 3: Evaluate misfire gaps
     let specs = db.load_enabled_specs()?;
@@ -88,7 +97,10 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
         }
     }
 
-    tracing::info!(intents = intents.len(), "scheduler: reconciliation complete");
+    tracing::info!(
+        intents = intents.len(),
+        "scheduler: reconciliation complete"
+    );
     Ok(intents)
 }
 
@@ -101,42 +113,49 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
         match &fire.thread_id {
             Some(thread_id) => {
                 match ctx.get_thread_status(thread_id) {
-                    Ok(Some(status)) => {
-                        match status.as_str() {
-                            "completed" => {
-                                update_fire_completed(ctx, fire, thread_id, "completed", "success").await?;
-                                tracing::info!(
-                                    fire_id = %fire.fire_id,
-                                    thread_id = %thread_id,
-                                    "recovered: thread completed during downtime"
-                                );
-                            }
-                            "failed" => {
-                                update_fire_completed(ctx, fire, thread_id, "failed", "thread_failed").await?;
-                                tracing::info!(
-                                    fire_id = %fire.fire_id,
-                                    thread_id = %thread_id,
-                                    "recovered: thread failed during downtime"
-                                );
-                            }
-                            "cancelled" => {
-                                update_fire_completed(ctx, fire, thread_id, "cancelled", "thread_cancelled").await?;
-                                tracing::info!(
-                                    fire_id = %fire.fire_id,
-                                    thread_id = %thread_id,
-                                    "recovered: thread cancelled during downtime"
-                                );
-                            }
-                            status => {
-                                tracing::warn!(
-                                    fire_id = %fire.fire_id,
-                                    thread_id = %thread_id,
-                                    status = %status,
-                                    "recovered: thread in non-terminal status — existing reconciler handles"
-                                );
-                            }
+                    Ok(Some(status)) => match status.as_str() {
+                        "completed" => {
+                            update_fire_completed(ctx, fire, thread_id, "completed", "success")
+                                .await?;
+                            tracing::info!(
+                                fire_id = %fire.fire_id,
+                                thread_id = %thread_id,
+                                "recovered: thread completed during downtime"
+                            );
                         }
-                    }
+                        "failed" => {
+                            update_fire_completed(ctx, fire, thread_id, "failed", "thread_failed")
+                                .await?;
+                            tracing::info!(
+                                fire_id = %fire.fire_id,
+                                thread_id = %thread_id,
+                                "recovered: thread failed during downtime"
+                            );
+                        }
+                        "cancelled" => {
+                            update_fire_completed(
+                                ctx,
+                                fire,
+                                thread_id,
+                                "cancelled",
+                                "thread_cancelled",
+                            )
+                            .await?;
+                            tracing::info!(
+                                fire_id = %fire.fire_id,
+                                thread_id = %thread_id,
+                                "recovered: thread cancelled during downtime"
+                            );
+                        }
+                        status => {
+                            tracing::warn!(
+                                fire_id = %fire.fire_id,
+                                thread_id = %thread_id,
+                                status = %status,
+                                "recovered: thread in non-terminal status — existing reconciler handles"
+                            );
+                        }
+                    },
                     Ok(None) => {
                         // Thread row gone — try to redispatch if schedule exists
                         let spec = db.get_spec(&fire.schedule_id)?;
@@ -244,9 +263,13 @@ async fn update_fire_completed<Ctx: SchedulerContext>(
         "outcome": outcome,
         "signer_fingerprint": fire.signer_fingerprint,
     });
-    let fires_path = ctx.system_space_dir()
-        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
-        .join(&fire.schedule_id).join("fires.jsonl");
+    let fires_path = ctx
+        .system_space_dir()
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("schedules")
+        .join(&fire.schedule_id)
+        .join("fires.jsonl");
 
     let db = ctx.scheduler_db();
     tokio::task::spawn_blocking(move || {

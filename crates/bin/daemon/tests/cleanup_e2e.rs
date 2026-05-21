@@ -21,9 +21,7 @@
 
 mod common;
 
-use common::{
-    ryeos_binary, run_service_standalone_fresh, ryeosd_binary, DaemonHarness,
-};
+use common::{run_service_standalone_fresh, ryeos_binary, ryeosd_binary, DaemonHarness};
 
 // ── Test 1: live /execute over TCP ─────────────────────────────────────
 
@@ -276,8 +274,10 @@ async fn init_only_does_not_mutate_system_space() {
     // Run --init-only against the COPIED system bundle.
     let init = std::process::Command::new(ryeosd_binary())
         .arg("--init-only")
-        .arg("--system-space-dir").arg(&state_path)
-        .arg("--uds-path").arg(state_path.join("ryeosd.sock"))
+        .arg("--system-space-dir")
+        .arg(&state_path)
+        .arg("--uds-path")
+        .arg(state_path.join("ryeosd.sock"))
         .env("RYEOS_SYSTEM_SPACE_DIR", &sys_root)
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
@@ -321,14 +321,8 @@ async fn uds_namespace_rejects_service_methods() {
     });
     let payload = rmp_serde::to_vec(&request).expect("encode rpc request");
     let len = (payload.len() as u32).to_be_bytes();
-    stream
-        .write_all(&len)
-        .await
-        .expect("write frame length");
-    stream
-        .write_all(&payload)
-        .await
-        .expect("write frame body");
+    stream.write_all(&len).await.expect("write frame length");
+    stream.write_all(&payload).await.expect("write frame body");
     stream.shutdown().await.expect("shutdown write side");
 
     let mut len_buf = [0u8; 4];
@@ -354,10 +348,7 @@ async fn uds_namespace_rejects_service_methods() {
         error["code"], "unknown_method",
         "expected 'unknown_method' error code, got: {response}"
     );
-    let msg = error["message"]
-        .as_str()
-        .unwrap_or("")
-        .to_lowercase();
+    let msg = error["message"].as_str().unwrap_or("").to_lowercase();
     assert!(
         msg.contains("unknown") || msg.contains("system/status"),
         "error message should mention unknown method, got: {}",
@@ -372,7 +363,9 @@ async fn uds_namespace_rejects_service_methods() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn state_lock_prevents_concurrent_daemons() {
-    let (h1, _fixture) = DaemonHarness::start_fast().await.expect("start first daemon");
+    let (h1, _fixture) = DaemonHarness::start_fast()
+        .await
+        .expect("start first daemon");
 
     let state_dir_outer = tempfile::tempdir().expect("state tempdir");
     let user_space = tempfile::tempdir().expect("user tempdir");
@@ -386,9 +379,12 @@ async fn state_lock_prevents_concurrent_daemons() {
 
     // Point the second daemon at the SAME state dir as the first
     let mut cmd = tokio::process::Command::new(common::ryeosd_binary());
-    cmd.arg("--system-space-dir").arg(&h1.state_path)
-        .arg("--bind").arg(bind.to_string())
-        .arg("--uds-path").arg(&uds_path)
+    cmd.arg("--system-space-dir")
+        .arg(&h1.state_path)
+        .arg("--bind")
+        .arg(bind.to_string())
+        .arg("--uds-path")
+        .arg(&uds_path)
         .env("HOSTNAME", "testhost")
         .env("RYEOS_SYSTEM_SPACE_DIR", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
@@ -417,19 +413,21 @@ async fn state_lock_prevents_concurrent_daemons() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn symlinked_node_config_rejected_at_startup() {
-    let result = DaemonHarness::start_with_pre_init(|state_path, _user_space| {
-        let bundles_dir = state_path.join(".ai").join("node").join("bundles");
-        std::fs::create_dir_all(&bundles_dir)?;
-        let link_target = bundles_dir.join("adversarial.yaml");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("/etc/passwd", &link_target)?;
-        Ok(())
-    }, |_cmd| {}).await;
+    let result = DaemonHarness::start_with_pre_init(
+        |state_path, _user_space| {
+            let bundles_dir = state_path.join(".ai").join("node").join("bundles");
+            std::fs::create_dir_all(&bundles_dir)?;
+            let link_target = bundles_dir.join("adversarial.yaml");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink("/etc/passwd", &link_target)?;
+            Ok(())
+        },
+        |_cmd| {},
+    )
+    .await;
 
     match result {
-        Ok(_) => panic!(
-            "daemon should reject symlinked node config items in bundles dir"
-        ),
+        Ok(_) => panic!("daemon should reject symlinked node config items in bundles dir"),
         Err(e) => {
             let err_msg = format!("{:#}", e);
             assert!(
@@ -448,7 +446,9 @@ async fn symlinked_node_config_rejected_at_startup() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_startup_proves_bundle_yamls_parse() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("daemon should start — bundle YAMLs must all parse");
+    let (h, _fixture) = DaemonHarness::start_fast()
+        .await
+        .expect("daemon should start — bundle YAMLs must all parse");
     // If we got here, the daemon completed Phase 1 + Phase 2 node_config
     // bootstrap and the self-check. Every bundle YAML in the system bundle
     // was loaded and verified. Verify the daemon is actually healthy.
@@ -456,7 +456,10 @@ async fn daemon_startup_proves_bundle_yamls_parse() {
         .post_execute("service:system/status", ".", serde_json::json!({}))
         .await
         .expect("post /execute");
-    assert!(status.is_success(), "daemon healthy check failed: {status}, body={body}");
+    assert!(
+        status.is_success(),
+        "daemon healthy check failed: {status}, body={body}"
+    );
 }
 
 // ── Test 13: Path=section invariant enforced by daemon (Gate 15 daemon-spawn) ──
@@ -469,26 +472,28 @@ async fn daemon_startup_proves_bundle_yamls_parse() {
 #[tokio::test(flavor = "multi_thread")]
 async fn path_section_mismatch_rejected_at_startup() {
     let workspace = common::workspace_root();
-    let route_yaml = workspace
-        .join("bundles/core/.ai/node/routes/execute-stream.yaml");
+    let route_yaml = workspace.join("bundles/core/.ai/node/routes/execute-stream.yaml");
     assert!(route_yaml.is_file(), "route fixture must exist");
 
-    let result = DaemonHarness::start_with_pre_init(move |state_path, _user_space| {
-        let bundles_dir = state_path.join(".ai").join("node").join("bundles");
-        std::fs::create_dir_all(&bundles_dir)?;
-        let dest = bundles_dir.join("execute-stream.yaml");
-        std::fs::copy(&route_yaml, &dest)?;
-        Ok(())
-    }, |_cmd| {}).await;
+    let result = DaemonHarness::start_with_pre_init(
+        move |state_path, _user_space| {
+            let bundles_dir = state_path.join(".ai").join("node").join("bundles");
+            std::fs::create_dir_all(&bundles_dir)?;
+            let dest = bundles_dir.join("execute-stream.yaml");
+            std::fs::copy(&route_yaml, &dest)?;
+            Ok(())
+        },
+        |_cmd| {},
+    )
+    .await;
 
     match result {
-        Ok(_) => panic!(
-            "daemon should reject node config item with section != parent directory"
-        ),
+        Ok(_) => panic!("daemon should reject node config item with section != parent directory"),
         Err(e) => {
             let err_msg = format!("{:#}", e);
             assert!(
-                err_msg.contains("path = section invariant") || err_msg.contains("declares section"),
+                err_msg.contains("path = section invariant")
+                    || err_msg.contains("declares section"),
                 "error should mention path=section invariant violation, got: {err_msg}"
             );
         }

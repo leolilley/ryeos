@@ -10,9 +10,7 @@ use anyhow::Result;
 #[derive(Debug)]
 pub enum ArchMismatchError {
     /// The binary's magic bytes don't match any supported format.
-    UnsupportedFormat {
-        magic: u64,
-    },
+    UnsupportedFormat { magic: u64 },
     /// The binary targets a different architecture than the host.
     Mismatch {
         binary_arch: String,
@@ -26,8 +24,14 @@ impl std::fmt::Display for ArchMismatchError {
             Self::UnsupportedFormat { magic } => {
                 write!(f, "unsupported binary format (magic: 0x{magic:08x})")
             }
-            Self::Mismatch { binary_arch, host_arch } => {
-                write!(f, "architecture mismatch: binary is {binary_arch}, host is {host_arch}")
+            Self::Mismatch {
+                binary_arch,
+                host_arch,
+            } => {
+                write!(
+                    f,
+                    "architecture mismatch: binary is {binary_arch}, host is {host_arch}"
+                )
             }
         }
     }
@@ -38,11 +42,11 @@ impl std::error::Error for ArchMismatchError {}
 /// Map ELF e_machine values to architecture names.
 fn elf_arch_name(e_machine: u16) -> Option<&'static str> {
     match e_machine {
-        0x03 => Some("x86"),       // EM_386
-        0x3E => Some("x86_64"),    // EM_X86_64
-        0x28 => Some("arm"),       // EM_ARM
-        0xB7 => Some("aarch64"),   // EM_AARCH64
-        0xF3 => Some("riscv64"),   // EM_RISCV
+        0x03 => Some("x86"),     // EM_386
+        0x3E => Some("x86_64"),  // EM_X86_64
+        0x28 => Some("arm"),     // EM_ARM
+        0xB7 => Some("aarch64"), // EM_AARCH64
+        0xF3 => Some("riscv64"), // EM_RISCV
         _ => None,
     }
 }
@@ -64,9 +68,7 @@ pub fn check_arch(blob_bytes: &[u8], host_arch: &str) -> Result<(), ArchMismatch
     if blob_bytes[0] == 0x7f && &blob_bytes[1..4] == b"ELF" {
         // ELF binary — read e_machine at offset 18-19 (little-endian u16)
         let e_machine = u16::from_le_bytes([blob_bytes[18], blob_bytes[19]]);
-        let binary_arch = elf_arch_name(e_machine)
-            .unwrap_or("unknown")
-            .to_string();
+        let binary_arch = elf_arch_name(e_machine).unwrap_or("unknown").to_string();
 
         if binary_arch != host_arch {
             return Err(ArchMismatchError::Mismatch {
@@ -82,8 +84,14 @@ pub fn check_arch(blob_bytes: &[u8], host_arch: &str) -> Result<(), ArchMismatch
     // The caller can read the first byte to identify the format for
     // error reporting.
     let magic = u64::from_be_bytes([
-        blob_bytes[0], blob_bytes[1], blob_bytes[2], blob_bytes[3],
-        0, 0, 0, 0,
+        blob_bytes[0],
+        blob_bytes[1],
+        blob_bytes[2],
+        blob_bytes[3],
+        0,
+        0,
+        0,
+        0,
     ]);
     Err(ArchMismatchError::UnsupportedFormat { magic })
 }
@@ -102,7 +110,7 @@ mod tests {
         bytes[2] = b'L';
         bytes[3] = b'F';
         bytes[4] = 2; // ELFCLASS64
-        // e_machine = EM_X86_64 = 0x3E at offset 18 (little-endian)
+                      // e_machine = EM_X86_64 = 0x3E at offset 18 (little-endian)
         bytes[18] = 0x3E;
         bytes[19] = 0x00;
 
@@ -132,8 +140,10 @@ mod tests {
 
     #[test]
     fn non_elf_magic_refused() {
-        let bytes = [0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x00,
-                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let bytes = [
+            0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
         let err = check_arch(&bytes, "x86_64").unwrap_err();
         assert!(err.to_string().contains("unsupported"));
     }

@@ -61,8 +61,7 @@ pub struct NodeConfigSnapshot {
     pub aliases: Vec<AliasRecord>,
 }
 
-impl NodeConfigSnapshot {
-}
+impl NodeConfigSnapshot {}
 
 /// Trait implemented by each node-config section handler.
 pub trait NodeConfigSection: Send + Sync {
@@ -70,7 +69,8 @@ pub trait NodeConfigSection: Send + Sync {
     fn source_policy(&self) -> SectionSourcePolicy;
 
     /// Parse a verified YAML body into a section record.
-    fn parse(&self, name: &str, body: &serde_json::Value) -> anyhow::Result<Box<dyn SectionRecord>>;
+    fn parse(&self, name: &str, body: &serde_json::Value)
+        -> anyhow::Result<Box<dyn SectionRecord>>;
 }
 
 /// A parsed section record (type-erased).
@@ -94,22 +94,10 @@ impl SectionTable {
     /// Build the section table with all known sections.
     pub fn new() -> Self {
         let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
-        sections.insert(
-            "aliases",
-            Box::new(sections::alias::AliasSection),
-        );
-        sections.insert(
-            "bundles",
-            Box::new(sections::bundle::BundleSection),
-        );
-        sections.insert(
-            "routes",
-            Box::new(sections::route::RouteSection),
-        );
-        sections.insert(
-            "verbs",
-            Box::new(sections::verb::VerbSection),
-        );
+        sections.insert("aliases", Box::new(sections::alias::AliasSection));
+        sections.insert("bundles", Box::new(sections::bundle::BundleSection));
+        sections.insert("routes", Box::new(sections::route::RouteSection));
+        sections.insert("verbs", Box::new(sections::verb::VerbSection));
         Self { sections }
     }
 

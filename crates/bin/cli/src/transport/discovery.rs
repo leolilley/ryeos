@@ -28,12 +28,12 @@ pub async fn discover_audience(daemon_url: &str) -> Result<String, CliTransportE
             detail: format!("failed to build request: {e}"),
         })?;
 
-    let stream = tokio::net::TcpStream::connect(&bind)
-        .await
-        .map_err(|e| CliTransportError::AudienceDiscoveryFailed {
+    let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+        CliTransportError::AudienceDiscoveryFailed {
             url: url.clone(),
             detail: format!("TCP connect: {e}"),
-        })?;
+        }
+    })?;
 
     let io = hyper_util::rt::TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
@@ -49,13 +49,14 @@ pub async fn discover_audience(daemon_url: &str) -> Result<String, CliTransportE
         }
     });
 
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| CliTransportError::AudienceDiscoveryFailed {
-            url: url.clone(),
-            detail: format!("request send: {e}"),
-        })?;
+    let resp =
+        sender
+            .send_request(req)
+            .await
+            .map_err(|e| CliTransportError::AudienceDiscoveryFailed {
+                url: url.clone(),
+                detail: format!("request send: {e}"),
+            })?;
 
     let status = resp.status();
     let body_bytes = collect_body(resp.into_body()).await?;
@@ -85,9 +86,7 @@ pub async fn discover_audience(daemon_url: &str) -> Result<String, CliTransportE
         })
 }
 
-async fn collect_body(
-    body: hyper::body::Incoming,
-) -> Result<Vec<u8>, CliTransportError> {
+async fn collect_body(body: hyper::body::Incoming) -> Result<Vec<u8>, CliTransportError> {
     let mut bufs = Vec::new();
     let mut body = body;
     while let Some(chunk) = body.frame().await {

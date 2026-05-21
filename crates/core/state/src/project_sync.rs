@@ -104,11 +104,11 @@ pub fn validate_safe_relative_path(rel_path: &str) -> Result<()> {
 
     // `Path::components` can normalize some odd forms; reject strings
     // that did not yield any normal component as a final guard.
-    if !path
-        .components()
-        .any(|c| matches!(c, Component::Normal(_)))
-    {
-        return Err(anyhow!("manifest path '{}' has no normal components", rel_path));
+    if !path.components().any(|c| matches!(c, Component::Normal(_))) {
+        return Err(anyhow!(
+            "manifest path '{}' has no normal components",
+            rel_path
+        ));
     }
 
     Ok(())

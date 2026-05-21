@@ -65,8 +65,12 @@ impl VerifiedHandler {
 
     pub fn descriptor_path(&self) -> &Path {
         match self {
-            Self::Resolved { descriptor_path, .. } => descriptor_path,
-            Self::Unresolved { descriptor_path, .. } => descriptor_path,
+            Self::Resolved {
+                descriptor_path, ..
+            } => descriptor_path,
+            Self::Unresolved {
+                descriptor_path, ..
+            } => descriptor_path,
         }
     }
 }
@@ -162,7 +166,8 @@ impl HandlerRegistry {
 
                 fingerprint_parts.push(format!(
                     "{}|{}",
-                    verified.canonical_ref(), verified.descriptor().abi_version
+                    verified.canonical_ref(),
+                    verified.descriptor().abi_version
                 ));
                 entries.insert(verified.canonical_ref().to_owned(), verified);
             }
@@ -206,12 +211,12 @@ impl HandlerRegistry {
         canonical_ref: &str,
         expected: HandlerServes,
     ) -> Result<&VerifiedHandler, HandlerError> {
-        let handler = self
-            .entries
-            .get(canonical_ref)
-            .ok_or_else(|| HandlerError::NotRegistered {
-                canonical_ref: canonical_ref.to_owned(),
-            })?;
+        let handler =
+            self.entries
+                .get(canonical_ref)
+                .ok_or_else(|| HandlerError::NotRegistered {
+                    canonical_ref: canonical_ref.to_owned(),
+                })?;
         if handler.descriptor().serves != expected {
             return Err(HandlerError::ServesMismatch {
                 canonical_ref: canonical_ref.to_owned(),
@@ -265,15 +270,12 @@ fn load_and_verify_handler(
     })?;
 
     // Verify signature envelope.
-    let sig_header = lillux::signature::parse_signature_line(
-        content.lines().next().unwrap_or(""),
-        "#",
-        None,
-    )
-    .ok_or_else(|| HandlerError::SignatureInvalid {
-        path: yaml_path.to_owned(),
-        detail: "missing or malformed signature line".to_owned(),
-    })?;
+    let sig_header =
+        lillux::signature::parse_signature_line(content.lines().next().unwrap_or(""), "#", None)
+            .ok_or_else(|| HandlerError::SignatureInvalid {
+                path: yaml_path.to_owned(),
+                detail: "missing or malformed signature line".to_owned(),
+            })?;
 
     let body = lillux::signature::strip_signature_lines(&content);
     let actual_hash = lillux::signature::content_hash(&body);
@@ -359,10 +361,7 @@ fn load_and_verify_handler(
 }
 
 /// Validate all invariants on a handler descriptor.
-fn validate_handler_descriptor(
-    path: &Path,
-    desc: &HandlerDescriptor,
-) -> Result<(), HandlerError> {
+fn validate_handler_descriptor(path: &Path, desc: &HandlerDescriptor) -> Result<(), HandlerError> {
     // 1. kind == "handler"
     if desc.kind != "handler" {
         return Err(HandlerError::WrongKindDiscriminator {
@@ -398,10 +397,7 @@ fn validate_handler_descriptor(
     }
 
     // 5. name matches filename stem
-    let file_stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     if desc.name != file_stem {
         return Err(HandlerError::NameFilenameMismatch {
             name: desc.name.clone(),
@@ -459,7 +455,9 @@ mod tests {
             trust_class: TrustClass::TrustedSystem,
             bundle_root: PathBuf::from("/tmp/bundle"),
             descriptor_path: PathBuf::from("/tmp/bundle/.ai/handlers/test/my_handler.yaml"),
-            resolved_binary_path: PathBuf::from("/tmp/bundle/.ai/bin/x86_64-unknown-linux-gnu/my_handler"),
+            resolved_binary_path: PathBuf::from(
+                "/tmp/bundle/.ai/bin/x86_64-unknown-linux-gnu/my_handler",
+            ),
         };
 
         assert_eq!(handler.canonical_ref(), "handler:test/my_handler");

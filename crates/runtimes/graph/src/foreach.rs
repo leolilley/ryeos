@@ -64,7 +64,10 @@ pub async fn run_foreach_sequential(
         };
         let stripped = strip_none_values(&interpolated);
 
-        if let Ok(val) = crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx).await {
+        if let Ok(val) =
+            crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx)
+                .await
+        {
             // Typed contract: dispatch_action returns the leaf result
             // directly; no `{status, data}` unwrap step.
             results.push(val.clone());
@@ -166,14 +169,20 @@ pub async fn run_foreach_parallel(
             let stripped = strip_none_values(&interpolated);
             // Typed contract: dispatch_action already returns the leaf
             // result directly; no `{status, data}` unwrap step.
-            match crate::dispatch::dispatch_action(&client, &stripped, &thread_id, &project_path, Some(&exec_ctx)).await {
+            match crate::dispatch::dispatch_action(
+                &client,
+                &stripped,
+                &thread_id,
+                &project_path,
+                Some(&exec_ctx),
+            )
+            .await
+            {
                 Ok(val) => {
                     // Perform node.assign (same as sequential path).
                     if let Some(ref assign_expr) = assign {
-                        let mut assign_ctx_map = item_owned
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default();
+                        let mut assign_ctx_map =
+                            item_owned.as_object().cloned().unwrap_or_default();
                         assign_ctx_map.insert("result".into(), val.clone());
                         let assign_ctx = Value::Object(assign_ctx_map);
                         if let Err(e) = ryeos_runtime::interpolate(assign_expr, &assign_ctx) {
@@ -240,9 +249,7 @@ fn strip_none_values(val: &Value) -> Value {
                 .collect();
             Value::Object(cleaned)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(strip_none_values).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.iter().map(strip_none_values).collect()),
         other => other.clone(),
     }
 }

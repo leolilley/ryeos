@@ -63,9 +63,7 @@ fn default_replay_limit() -> usize {
 }
 
 impl EventStoreService {
-    pub fn new(
-        state_store: Arc<StateStore>,
-    ) -> Self {
+    pub fn new(state_store: Arc<StateStore>) -> Self {
         Self { state_store }
     }
 
@@ -110,8 +108,9 @@ impl EventStoreService {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let persisted = self.state_store
-            .append_events(&thread.chain_root_id, &thread.thread_id, &events)?;
+        let persisted =
+            self.state_store
+                .append_events(&thread.chain_root_id, &thread.thread_id, &events)?;
 
         Ok(EventAppendBatchResult { persisted })
     }

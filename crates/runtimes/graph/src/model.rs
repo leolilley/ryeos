@@ -38,7 +38,6 @@ pub enum ErrorMode {
     Continue,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
@@ -92,7 +91,6 @@ pub enum NodeType {
     Foreach,
     Gate,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -270,7 +268,11 @@ config:
   start: a
 "#;
         let err = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
-        assert!(err.to_string().contains("cattegory"), "error should mention unknown field: {}", err);
+        assert!(
+            err.to_string().contains("cattegory"),
+            "error should mention unknown field: {}",
+            err
+        );
     }
 
     #[test]

@@ -72,8 +72,7 @@ config:
 
 fn build_engine_against_bundle() -> Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store =
-        TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -151,8 +150,7 @@ fn build_plan_accepts_params_conforming_to_config_schema() {
     let project_dir = synth_project_with_schema_tool();
     let ctx = plan_ctx(&project_dir);
 
-    let item =
-        CanonicalRef::parse("tool:ryeos/core/subprocess/execute").expect("ref parses");
+    let item = CanonicalRef::parse("tool:ryeos/core/subprocess/execute").expect("ref parses");
     let resolved = engine.resolve(&ctx, &item).expect("resolve bundle tool");
     let verified = engine.verify(&ctx, resolved).expect("verify");
 

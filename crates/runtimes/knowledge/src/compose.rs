@@ -11,8 +11,8 @@ use crate::ordering::{extends_first, OrderedItem};
 use crate::render::render_item;
 use crate::types::{
     ComposeContextPayload, ComposeEdge, ComposeEdgeKind, ComposeInputs, ComposeItem, ComposeMeta,
-    ComposeOutput, ComposePayload, KnowledgeError, OmittedItem, OmissionReason,
-    RenderedContexts, RenderedPosition,
+    ComposeOutput, ComposePayload, KnowledgeError, OmissionReason, OmittedItem, RenderedContexts,
+    RenderedPosition,
 };
 
 /// Single-root compose. Walks the graph from root_ref, strips frontmatter,
@@ -113,7 +113,9 @@ pub fn compose(payload: &ComposePayload) -> Result<ComposeOutput, KnowledgeError
 /// Iterates `roots_by_position` in deterministic order (system → before → after,
 /// then remaining in BTreeMap order). Cross-position deduplication: refs already
 /// emitted in an earlier position are excluded from later positions.
-pub fn compose_positions(payload: &ComposeContextPayload) -> Result<RenderedContexts, KnowledgeError> {
+pub fn compose_positions(
+    payload: &ComposeContextPayload,
+) -> Result<RenderedContexts, KnowledgeError> {
     let position_order = determine_position_order(&payload.roots_by_position);
     let mut already_emitted: BTreeSet<String> = BTreeSet::new();
     let mut rendered = BTreeMap::new();
@@ -150,8 +152,7 @@ pub fn compose_positions(payload: &ComposeContextPayload) -> Result<RenderedCont
                     .edges
                     .iter()
                     .filter(|e| {
-                        is_reachable_from(root_ref, &e.from, &payload.edges)
-                            || e.from == *root_ref
+                        is_reachable_from(root_ref, &e.from, &payload.edges) || e.from == *root_ref
                     })
                     .cloned()
                     .collect();
@@ -329,7 +330,10 @@ mod tests {
         let result = compose(&payload).unwrap();
         assert!(result.content.contains("Root body"));
         assert_eq!(result.composition.resolved_items.len(), 1);
-        assert_eq!(result.composition.resolved_items[0].role, ComposeRole::Primary);
+        assert_eq!(
+            result.composition.resolved_items[0].role,
+            ComposeRole::Primary
+        );
     }
 
     #[test]
@@ -406,7 +410,10 @@ mod tests {
         let result = compose(&payload).unwrap();
         assert!(!result.content.contains("Ref body"));
         assert_eq!(result.composition.items_omitted.len(), 1);
-        assert_eq!(result.composition.items_omitted[0].reason, OmissionReason::Excluded);
+        assert_eq!(
+            result.composition.items_omitted[0].reason,
+            OmissionReason::Excluded
+        );
     }
 
     #[test]
@@ -459,7 +466,10 @@ mod tests {
     #[test]
     fn compose_positions_cross_position_dedupe() {
         let mut items = BTreeMap::new();
-        items.insert("shared".to_string(), make_item("shared", "Shared content").1);
+        items.insert(
+            "shared".to_string(),
+            make_item("shared", "Shared content").1,
+        );
         items.insert("extra".to_string(), make_item("extra", "Extra content").1);
 
         let payload = ComposeContextPayload {
@@ -467,7 +477,10 @@ mod tests {
             edges: vec![],
             roots_by_position: BTreeMap::from([
                 ("system".to_string(), vec!["shared".to_string()]),
-                ("before".to_string(), vec!["shared".to_string(), "extra".to_string()]),
+                (
+                    "before".to_string(),
+                    vec!["shared".to_string(), "extra".to_string()],
+                ),
             ]),
             per_position_budget: BTreeMap::from([
                 ("system".to_string(), 1000),

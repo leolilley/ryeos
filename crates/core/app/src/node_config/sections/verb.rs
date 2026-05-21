@@ -45,8 +45,8 @@ impl NodeConfigSection for VerbSection {
     }
 
     fn parse(&self, name: &str, body: &Value) -> Result<Box<dyn SectionRecord>> {
-        let record: VerbRecord = serde_json::from_value(body.clone())
-            .context("failed to parse verb record")?;
+        let record: VerbRecord =
+            serde_json::from_value(body.clone()).context("failed to parse verb record")?;
 
         // Name must match filename
         if record.name != name {
@@ -78,9 +78,8 @@ impl NodeConfigSection for VerbSection {
 
         // Validate execute ref if present
         if let Some(ref execute_ref) = record.execute {
-            ryeos_engine::canonical_ref::CanonicalRef::parse(execute_ref).with_context(|| {
-                format!("invalid execute ref '{}' in verb record", execute_ref)
-            })?;
+            ryeos_engine::canonical_ref::CanonicalRef::parse(execute_ref)
+                .with_context(|| format!("invalid execute ref '{}' in verb record", execute_ref))?;
         }
 
         Ok(Box::new(record))
@@ -99,10 +98,7 @@ fn validate_verb_name(name: &str) -> Result<()> {
     let re = RE.get_or_init(|| Regex::new("^[a-z][a-z0-9-]*$").unwrap());
 
     if !re.is_match(name) {
-        bail!(
-            "invalid verb name '{}': must match ^[a-z][a-z0-9-]*$",
-            name
-        );
+        bail!("invalid verb name '{}': must match ^[a-z][a-z0-9-]*$", name);
     }
     Ok(())
 }
@@ -154,7 +150,10 @@ mod tests {
         let result = section.parse("fetch", &valid_body());
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("declares name 'sign' but filename is 'fetch'"), "got: {msg}");
+        assert!(
+            msg.contains("declares name 'sign' but filename is 'fetch'"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -225,6 +224,9 @@ mod tests {
     #[test]
     fn source_policy_is_effective_bundle_roots_and_state() {
         let section = VerbSection;
-        assert_eq!(section.source_policy(), SectionSourcePolicy::EffectiveBundleRootsAndState);
+        assert_eq!(
+            section.source_policy(),
+            SectionSourcePolicy::EffectiveBundleRootsAndState
+        );
     }
 }

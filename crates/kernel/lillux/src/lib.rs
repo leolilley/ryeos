@@ -11,8 +11,8 @@ pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult}
 pub use cas::{atomic_write, canonical_json, sha256_hex, shard_path, valid_hash, CasStore};
 
 pub use identity::envelope::{
-    inspect_envelope, open_envelope, seal_envelope, validate_envelope_env,
-    AadFields, Envelope, InspectResult, OpenResult, ValidateResult,
+    inspect_envelope, open_envelope, seal_envelope, validate_envelope_env, AadFields, Envelope,
+    InspectResult, OpenResult, ValidateResult,
 };
 
 pub fn run(request: SubprocessRequest) -> SubprocessResult {

@@ -113,10 +113,10 @@ pub fn bootstrap(
             for (idx, hv) in header_hooks.iter().enumerate() {
                 let mut def = serde_json::from_value::<ryeos_runtime::HookDefinition>(hv.clone())
                     .map_err(|e| {
-                        anyhow::anyhow!(
-                            "directive header hooks[{idx}]: malformed hook definition: {e:#}"
-                        )
-                    })?;
+                    anyhow::anyhow!(
+                        "directive header hooks[{idx}]: malformed hook definition: {e:#}"
+                    )
+                })?;
                 // Directive hooks default to layer 1 (before builtin layer 2)
                 if def.layer.is_none() {
                     def.layer = Some(1);
@@ -184,8 +184,7 @@ pub fn bootstrap(
             .filter(|(_, items)| !items.is_empty())
             .map(|(k, _)| k.clone())
             .collect();
-        let rendered_keys: std::collections::HashSet<String> =
-            rendered.keys().cloned().collect();
+        let rendered_keys: std::collections::HashSet<String> = rendered.keys().cloned().collect();
         let missing: Vec<&String> = expected_keys.difference(&rendered_keys).collect();
         if !missing.is_empty() {
             return Err(anyhow::anyhow!(
@@ -269,9 +268,8 @@ fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
         // the typed deserialise so the error names the actual cause.
         None => view.composed.clone(),
     };
-    serde_json::from_value(projected).map_err(|e| {
-        anyhow!("deserialize composed view into DirectiveHeader: {e}")
-    })
+    serde_json::from_value(projected)
+        .map_err(|e| anyhow!("deserialize composed view into DirectiveHeader: {e}"))
 }
 
 /// Project the daemon-baked inventory of `kind:tool` items shipped in
@@ -335,11 +333,7 @@ fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefiniti
     })?;
     for (idx, h) in hooks_arr.iter().enumerate() {
         let hook = serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone())
-            .map_err(|e| {
-                anyhow!(
-                    "load_hooks: malformed hook[{idx}] in `hook_conditions`: {e}"
-                )
-            })?;
+            .map_err(|e| anyhow!("load_hooks: malformed hook[{idx}] in `hook_conditions`: {e}"))?;
         hooks.push(hook);
     }
 
@@ -359,11 +353,7 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
     // Now we have a valid YAML value. Enforce structure.
     let policies = config
         .get("policies")
-        .ok_or_else(|| {
-            anyhow!(
-                "capability_risk config: missing required key `policies`"
-            )
-        })?
+        .ok_or_else(|| anyhow!("capability_risk config: missing required key `policies`"))?
         .as_sequence()
         .ok_or_else(|| {
             anyhow!(
@@ -385,28 +375,18 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
         // Policy rules are safety-critical; silent defaults are risky.
         let pattern = entry_mapping
             .get(serde_yaml::Value::String("pattern".into()))
-            .ok_or_else(|| {
-                anyhow!(
-                    "capability_risk config: policies[{idx}].pattern is required"
-                )
-            })?
+            .ok_or_else(|| anyhow!("capability_risk config: policies[{idx}].pattern is required"))?
             .as_str()
             .ok_or_else(|| {
-                anyhow!(
-                    "capability_risk config: policies[{idx}].pattern must be a string"
-                )
+                anyhow!("capability_risk config: policies[{idx}].pattern must be a string")
             })?
             .to_string();
 
         let level_str = entry_mapping
             .get(serde_yaml::Value::String("level".into()))
-            .ok_or_else(|| {
-                anyhow!(
-                    "capability_risk config: policies[{idx}].level is required"
-                )
-            })?;
-        let level: crate::harness::RiskLevel =
-            serde_yaml::from_value(level_str.clone()).with_context(|| {
+            .ok_or_else(|| anyhow!("capability_risk config: policies[{idx}].level is required"))?;
+        let level: crate::harness::RiskLevel = serde_yaml::from_value(level_str.clone())
+            .with_context(|| {
                 format!(
                     "capability_risk config: policies[{idx}].level must be \
                      one of: low, medium, high"
@@ -416,15 +396,11 @@ fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::Ri
         let requires_ack = entry_mapping
             .get(serde_yaml::Value::String("requires_ack".into()))
             .ok_or_else(|| {
-                anyhow!(
-                    "capability_risk config: policies[{idx}].requires_ack is required"
-                )
+                anyhow!("capability_risk config: policies[{idx}].requires_ack is required")
             })?
             .as_bool()
             .ok_or_else(|| {
-                anyhow!(
-                    "capability_risk config: policies[{idx}].requires_ack must be a bool"
-                )
+                anyhow!("capability_risk config: policies[{idx}].requires_ack must be a bool")
             })?;
 
         risk_patterns.push(crate::harness::RiskPattern {
@@ -450,5 +426,3 @@ fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
         serde_yaml::Value::Tagged(_) => "tagged",
     }
 }
-
-

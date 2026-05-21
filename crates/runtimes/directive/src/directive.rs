@@ -143,7 +143,9 @@ pub struct ExecutionConfig {
     pub retry_on_timeout: bool,
 }
 
-fn default_timeout() -> u64 { 300 }
+fn default_timeout() -> u64 {
+    300
+}
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
@@ -208,7 +210,11 @@ pub enum StreamEvent {
     #[allow(dead_code)] // Emitted by parser once reasoning extraction is wired
     ReasoningDelta(String),
     /// Complete tool call ready to dispatch.
-    ToolUse { id: Option<String>, name: String, arguments: Value },
+    ToolUse {
+        id: Option<String>,
+        name: String,
+        arguments: Value,
+    },
     /// Partial tool call argument JSON streamed mid-flight.
     ///
     /// Anthropic delivers tool arguments as `input_json_delta` chunks
@@ -240,7 +246,10 @@ pub enum StreamEvent {
     Warning { code: String, message: String },
     /// Stream is finished. Terminal event — runner stops consuming.
     /// Carries the normalized finish reason and the raw provider string.
-    Finish { reason: FinishReason, raw: Option<String> },
+    Finish {
+        reason: FinishReason,
+        raw: Option<String>,
+    },
 }
 
 /// Normalized finish reason across all provider families.

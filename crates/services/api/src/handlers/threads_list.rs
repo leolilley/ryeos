@@ -8,12 +8,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
-use crate::handler_context::HandlerContext;
 use super::default_list_limit;
+use crate::handler_context::HandlerContext;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,7 +29,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     } else {
         None
     };
-    state.threads.list_threads_filtered(req.limit, filter_principal)
+    state
+        .threads
+        .list_threads_filtered(req.limit, filter_principal)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

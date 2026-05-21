@@ -15,8 +15,8 @@ pub use alias::AliasResolver;
 pub use context::ResolutionContext;
 pub use decl::ResolutionStepDecl;
 pub use types::{
-    execution_trust, AliasHop, KindComposedView, ResolutionEdge,
-    ResolutionError, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+    execution_trust, AliasHop, KindComposedView, ResolutionEdge, ResolutionError, ResolutionOutput,
+    ResolutionStepName, ResolvedAncestor, TrustClass,
 };
 
 use crate::canonical_ref::CanonicalRef;
@@ -43,11 +43,11 @@ pub fn run_resolution_pipeline(
     trust_store: &TrustStore,
     composers: &ComposerRegistry,
 ) -> Result<ResolutionOutput, ResolutionError> {
-    let kind_schema = kinds.get(&item.kind).ok_or_else(|| {
-        ResolutionError::KindNotExecutable {
+    let kind_schema = kinds
+        .get(&item.kind)
+        .ok_or_else(|| ResolutionError::KindNotExecutable {
             kind: item.kind.clone(),
-        }
-    })?;
+        })?;
 
     let execution =
         kind_schema

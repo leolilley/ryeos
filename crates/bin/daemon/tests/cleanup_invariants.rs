@@ -15,14 +15,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ryeos_api::{handlers as service_handlers, ServiceAvailability, ServiceDescriptor};
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::contracts::{
-    EffectivePrincipal, PlanContext, Principal, ProjectContext,
-};
+use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
-use ryeos_api::{handlers as service_handlers, ServiceAvailability, ServiceDescriptor};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -37,14 +35,13 @@ fn workspace_root() -> PathBuf {
 
 fn build_test_engine() -> ryeos_engine::engine::Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store =
-        TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
 
     let workspace = workspace_root();
     let core_kinds = workspace.join("bundles/core/.ai/node/engine/kinds");
     let std_kinds = workspace.join("bundles/standard/.ai/node/engine/kinds");
-    let kinds =
-        KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store).expect("load kind registry");
+    let kinds = KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store)
+        .expect("load kind registry");
 
     let bundle_root = workspace.join("bundles/core");
     let standard_root = workspace.join("bundles/standard");
@@ -61,9 +58,8 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
         std::sync::Arc::clone(&native_handlers),
     );
 
-    let composers =
-        ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
-            .expect("derive composers");
+    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
+        .expect("derive composers");
 
     ryeos_engine::engine::Engine::new(
         kinds,
@@ -115,9 +111,8 @@ fn gate_01_all_service_refs_resolve_with_matching_endpoint() {
     let services = service_refs();
 
     for svc_ref in &services {
-        let canonical = CanonicalRef::parse(svc_ref).unwrap_or_else(|e| {
-            panic!("unparseable ref `{svc_ref}`: {e}")
-        });
+        let canonical = CanonicalRef::parse(svc_ref)
+            .unwrap_or_else(|e| panic!("unparseable ref `{svc_ref}`: {e}"));
         let resolved = engine
             .resolve(&ctx, &canonical)
             .unwrap_or_else(|e| panic!("service `{svc_ref}` failed to resolve: {e}"));
@@ -139,9 +134,7 @@ fn gate_01_all_service_refs_resolve_with_matching_endpoint() {
                 ep, &derived,
                 "endpoint mismatch for `{svc_ref}`: metadata={ep}, derived={derived}"
             ),
-            None => panic!(
-                "service `{svc_ref}` is missing 'endpoint' in metadata.extra"
-            ),
+            None => panic!("service `{svc_ref}` is missing 'endpoint' in metadata.extra"),
         }
     }
 }
@@ -227,10 +220,7 @@ fn gate_04_availability_consistency() {
                 "`{}` descriptor endpoint `{}` != bundle metadata `{ep}`",
                 desc.service_ref, desc.endpoint
             )),
-            None => mismatches.push(format!(
-                "`{}` has no endpoint metadata",
-                desc.service_ref
-            )),
+            None => mismatches.push(format!("`{}` has no endpoint metadata", desc.service_ref)),
         }
     }
 
@@ -250,7 +240,11 @@ fn gate_05_offline_only_services_correct() {
         .map(|d| d.service_ref)
         .collect();
 
-    let expected = ["service:bundle/install", "service:bundle/remove", "service:rebuild"];
+    let expected = [
+        "service:bundle/install",
+        "service:bundle/remove",
+        "service:rebuild",
+    ];
     assert_eq!(
         offline_only.as_slice(),
         &expected,
@@ -274,7 +268,10 @@ fn gate_07_both_services_count() {
         .filter(|d| d.availability == ServiceAvailability::Both)
         .count();
 
-    assert!(both_count > 0, "expected at least some Both-availability services");
+    assert!(
+        both_count > 0,
+        "expected at least some Both-availability services"
+    );
 }
 
 // ── Gate 8: State lock prevents concurrent ───────────────────────────
@@ -419,7 +416,9 @@ fn gate_12_bundle_path_canonicalization() {
         );
 
         assert!(
-            canonical_via_link.to_string_lossy().contains("real_bundles"),
+            canonical_via_link
+                .to_string_lossy()
+                .contains("real_bundles"),
             "canonicalized path should resolve the symlink to the real dir"
         );
     }
@@ -433,10 +432,7 @@ fn gate_12_bundle_path_canonicalization() {
 #[test]
 fn gate_13_bundle_yaml_files_parse() {
     let workspace = workspace_root();
-    let bundle_services_dir = workspace
-        .join("bundles/core")
-        .join(".ai")
-        .join("services");
+    let bundle_services_dir = workspace.join("bundles/core").join(".ai").join("services");
 
     if !bundle_services_dir.is_dir() {
         // No services dir in bundle — skip (bundle layout may vary)
@@ -561,7 +557,10 @@ fn gate_16_service_ref_format() {
         }
     }
 
-    assert!(bad.is_empty(), "service refs not prefixed with 'service:': {bad:?}");
+    assert!(
+        bad.is_empty(),
+        "service refs not prefixed with 'service:': {bad:?}"
+    );
 }
 
 // ── Gate 17: Engine trust store loads ────────────────────────────────

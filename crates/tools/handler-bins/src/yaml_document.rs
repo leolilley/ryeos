@@ -22,22 +22,20 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
 }
 
 pub fn parse(config: &Value, content: &str) -> Result<Value, ParseError> {
-    let cfg: YamlDocumentConfig = serde_json::from_value(config.clone()).map_err(|e| {
-        ParseError {
+    let cfg: YamlDocumentConfig =
+        serde_json::from_value(config.clone()).map_err(|e| ParseError {
             kind: ParseErrKind::Internal,
             message: format!("yaml_document config: {e}"),
-        }
-    })?;
+        })?;
 
     if content.trim().is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
     }
 
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(content).map_err(|e| ParseError {
-            kind: ParseErrKind::Syntax,
-            message: format!("yaml_document parse: {e}"),
-        })?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| ParseError {
+        kind: ParseErrKind::Syntax,
+        message: format!("yaml_document parse: {e}"),
+    })?;
 
     if cfg.require_mapping && !matches!(yaml, serde_yaml::Value::Mapping(_)) {
         return Err(ParseError {
@@ -59,7 +57,11 @@ mod tests {
 
     #[test]
     fn parses_yaml_mapping() {
-        let out = parse(&json!({ "require_mapping": true }), "name: foo\nversion: 1\n").unwrap();
+        let out = parse(
+            &json!({ "require_mapping": true }),
+            "name: foo\nversion: 1\n",
+        )
+        .unwrap();
         assert_eq!(out["name"], "foo");
     }
 

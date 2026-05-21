@@ -100,11 +100,12 @@ impl RuntimeHandler for VerifyDepsHandler {
     )]
     fn apply(&self, block: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
         let intermediate = &ctx.chain[ctx.current_index];
-        let cfg: VerifyDepsConfig =
-            serde_json::from_value(block.clone()).map_err(|e| EngineError::InvalidRuntimeConfig {
+        let cfg: VerifyDepsConfig = serde_json::from_value(block.clone()).map_err(|e| {
+            EngineError::InvalidRuntimeConfig {
                 path: intermediate.source_path.display().to_string(),
                 reason: format!("invalid verify_deps block: {e}"),
-            })?;
+            }
+        })?;
 
         if !cfg.enabled {
             return Ok(());
@@ -118,10 +119,12 @@ impl RuntimeHandler for VerifyDepsHandler {
 
         // Resolve base directory from scope.
         let (base, recursive) = resolve_base(&cfg, ctx)?;
-        let base = base.canonicalize().map_err(|e| EngineError::InvalidRuntimeConfig {
-            path: base.display().to_string(),
-            reason: format!("could not canonicalise verify_deps base: {e}"),
-        })?;
+        let base = base
+            .canonicalize()
+            .map_err(|e| EngineError::InvalidRuntimeConfig {
+                path: base.display().to_string(),
+                reason: format!("could not canonicalise verify_deps base: {e}"),
+            })?;
 
         let extensions: HashSet<String> = cfg.extensions.iter().cloned().collect();
         if extensions.is_empty() {
@@ -188,10 +191,12 @@ fn walk_and_verify(
             path: dir.display().to_string(),
             reason: format!("verify_deps: dir entry error: {e}"),
         })?;
-        let ftype = entry.file_type().map_err(|e| EngineError::InvalidRuntimeConfig {
-            path: entry.path().display().to_string(),
-            reason: format!("verify_deps: could not stat: {e}"),
-        })?;
+        let ftype = entry
+            .file_type()
+            .map_err(|e| EngineError::InvalidRuntimeConfig {
+                path: entry.path().display().to_string(),
+                reason: format!("verify_deps: could not stat: {e}"),
+            })?;
         let path = entry.path();
 
         if ftype.is_symlink() {
@@ -230,10 +235,12 @@ fn walk_and_verify(
 
         // Symlink escape guard (Python lines 1314-1319): the
         // resolved real path must be inside `base`.
-        let real = path.canonicalize().map_err(|e| EngineError::InvalidRuntimeConfig {
-            path: path.display().to_string(),
-            reason: format!("verify_deps: could not canonicalise: {e}"),
-        })?;
+        let real = path
+            .canonicalize()
+            .map_err(|e| EngineError::InvalidRuntimeConfig {
+                path: path.display().to_string(),
+                reason: format!("verify_deps: could not canonicalise: {e}"),
+            })?;
         if !real.starts_with(base) {
             return Err(EngineError::InvalidRuntimeConfig {
                 path: path.display().to_string(),
@@ -266,23 +273,23 @@ fn verify_file(path: &Path, ctx: &CompileContext<'_>) -> Result<(), EngineError>
         .and_then(|e| e.to_str())
         .map(|e| format!(".{e}"))
         .unwrap_or_default();
-    let kind_schema = pick_kind_for_extension(ctx, &suffix).ok_or_else(|| {
-        EngineError::InvalidRuntimeConfig {
+    let kind_schema =
+        pick_kind_for_extension(ctx, &suffix).ok_or_else(|| EngineError::InvalidRuntimeConfig {
             path: path.display().to_string(),
             reason: format!(
                 "verify_deps: no registered kind owns extension `{suffix}` — \
                  cannot determine signature envelope"
             ),
-        }
-    })?;
-    let ext_spec = kind_schema
-        .spec_for(&suffix)
-        .ok_or_else(|| EngineError::InvalidRuntimeConfig {
-            path: path.display().to_string(),
-            reason: format!(
-                "verify_deps: kind has no extension spec for `{suffix}` (internal)"
-            ),
         })?;
+    let ext_spec =
+        kind_schema
+            .spec_for(&suffix)
+            .ok_or_else(|| EngineError::InvalidRuntimeConfig {
+                path: path.display().to_string(),
+                reason: format!(
+                    "verify_deps: kind has no extension spec for `{suffix}` (internal)"
+                ),
+            })?;
     let envelope = &ext_spec.signature;
 
     match parse_signature_header(&content, envelope) {
@@ -343,22 +350,29 @@ mod tests {
     use std::path::PathBuf;
 
     static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    struct TempDir { path: PathBuf }
+    struct TempDir {
+        path: PathBuf,
+    }
     impl TempDir {
         fn new() -> std::io::Result<Self> {
             let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "rye_vd_{}_{}_{}", std::process::id(), nanos, n
-            ));
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("rye_vd_{}_{}_{}", std::process::id(), nanos, n));
             std::fs::create_dir_all(&path)?;
             Ok(Self { path })
         }
-        fn path(&self) -> &std::path::Path { &self.path }
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
     }
     impl Drop for TempDir {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.path); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 
     fn empty_registry() -> KindRegistry {

@@ -59,9 +59,8 @@ impl CheckpointWriter {
 
     /// Atomically replace `latest.json` with the serialized `state`.
     pub fn write(&self, state: &Value) -> Result<()> {
-        std::fs::create_dir_all(&self.dir).with_context(|| {
-            format!("create checkpoint dir {}", self.dir.display())
-        })?;
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("create checkpoint dir {}", self.dir.display()))?;
         let final_path = self.dir.join(LATEST_FILE);
         // Unique suffix from pid + monotonic nanos avoids pulling a
         // `rand` dep just for a temp filename.
@@ -74,8 +73,7 @@ impl CheckpointWriter {
             std::process::id(),
             nanos
         ));
-        let bytes =
-            serde_json::to_vec_pretty(state).context("serialize checkpoint payload")?;
+        let bytes = serde_json::to_vec_pretty(state).context("serialize checkpoint payload")?;
         std::fs::write(&tmp_path, &bytes)
             .with_context(|| format!("write {}", tmp_path.display()))?;
         std::fs::rename(&tmp_path, &final_path).with_context(|| {
@@ -96,8 +94,7 @@ impl CheckpointWriter {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         let value: Value = serde_json::from_slice(&bytes)
             .with_context(|| format!("parse checkpoint {}", path.display()))?;
         Ok(Some(value))

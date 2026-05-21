@@ -120,10 +120,7 @@ metadata:
 "##
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
-    std::fs::write(
-        kinds_dir.join(format!("{kind}.kind-schema.yaml")),
-        signed,
-    )?;
+    std::fs::write(kinds_dir.join(format!("{kind}.kind-schema.yaml")), signed)?;
     Ok(())
 }
 
@@ -209,7 +206,14 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         common::fast_fixture::register_standard_bundle(state, fixture)?;
         install_kind_schema(user, "e2e_kind", &fixture.publisher)?;
-        install_runtime(user, "e2e-direct-runtime", "e2e_kind", true, "v1", &fixture.publisher)
+        install_runtime(
+            user,
+            "e2e-direct-runtime",
+            "e2e_kind",
+            true,
+            "v1",
+            &fixture.publisher,
+        )
     };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
@@ -275,9 +279,8 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     // command below). populate_initialized_state writes the deterministic
     // node identity, vault keypair, user identity, and trust docs, plus
     // imports the system-bundle signer trust.
-    let fixture =
-        common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-            .expect("fast fixture populate");
+    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
+        .expect("fast fixture populate");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core bundle");
     common::fast_fixture::register_standard_bundle(&state_path, &fixture)
@@ -583,8 +586,7 @@ inputs: {}
 ---
 # P1.6
 "#;
-        let signed =
-            lillux::signature::sign_content(body, &fixture.publisher, "<!--", Some("-->"));
+        let signed = lillux::signature::sign_content(body, &fixture.publisher, "<!--", Some("-->"));
         std::fs::write(dir.join("flow.md"), signed)?;
         Ok(())
     };
@@ -625,10 +627,9 @@ inputs: {}
         projection_path.display()
     );
 
-    let db = ryeos_state::projection::ProjectionDb::open(&projection_path)
-        .expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100)
-        .expect("list_threads");
+    let db =
+        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
+    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject_thread = threads
         .iter()
@@ -741,10 +742,9 @@ config:
         projection_path.display()
     );
 
-    let db = ryeos_state::projection::ProjectionDb::open(&projection_path)
-        .expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100)
-        .expect("list_threads");
+    let db =
+        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
+    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject_thread = threads
         .iter()
@@ -797,7 +797,8 @@ config:
 #[test]
 fn grep_gate_no_kind_name_branching_in_dispatch_code() {
     let workspace = common::workspace_root();
-    let execute_mode = workspace.join("crates/services/api/src/routes/response_modes/execute_mode.rs");
+    let execute_mode =
+        workspace.join("crates/services/api/src/routes/response_modes/execute_mode.rs");
     let dispatch_rs = workspace.join("crates/core/executor/src/dispatch.rs");
 
     // Walk the file directly so we can:
@@ -818,8 +819,8 @@ fn grep_gate_no_kind_name_branching_in_dispatch_code() {
     ];
     let mut violations = Vec::new();
     for path in [&execute_mode, &dispatch_rs] {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|_| panic!("read {}", path.display()));
+        let content =
+            std::fs::read_to_string(path).unwrap_or_else(|_| panic!("read {}", path.display()));
         let lines: Vec<&str> = content.lines().collect();
 
         // First `#[cfg(test)]` line marks the test module boundary.
@@ -833,9 +834,7 @@ fn grep_gate_no_kind_name_branching_in_dispatch_code() {
                 continue;
             }
             let trimmed = line.trim_start();
-            if trimmed.starts_with("///")
-                || trimmed.starts_with("//!")
-                || trimmed.starts_with("//")
+            if trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("//")
             {
                 continue;
             }

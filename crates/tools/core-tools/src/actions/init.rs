@@ -45,9 +45,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
-use lillux::crypto::{
-    DecodePrivateKey, EncodePrivateKey, SigningKey, VerifyingKey,
-};
+use lillux::crypto::{DecodePrivateKey, EncodePrivateKey, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::Serialize;
 
@@ -71,10 +69,8 @@ pub const OFFICIAL_PUBLISHER_FP: &str =
 /// pin trust. The fingerprint over these bytes MUST equal
 /// [`OFFICIAL_PUBLISHER_FP`] — verified at init time.
 pub const OFFICIAL_PUBLISHER_PUBKEY: [u8; 32] = [
-    0xe7, 0x68, 0x9b, 0x49, 0x7f, 0xd5, 0x92, 0x57,
-    0x10, 0x2b, 0x97, 0x86, 0x68, 0x2d, 0x74, 0x10,
-    0xb4, 0x35, 0xf2, 0x1b, 0x16, 0x81, 0x44, 0x2d,
-    0x3b, 0xfb, 0x4a, 0xcd, 0xe6, 0x25, 0x36, 0x03,
+    0xe7, 0x68, 0x9b, 0x49, 0x7f, 0xd5, 0x92, 0x57, 0x10, 0x2b, 0x97, 0x86, 0x68, 0x2d, 0x74, 0x10,
+    0xb4, 0x35, 0xf2, 0x1b, 0x16, 0x81, 0x44, 0x2d, 0x3b, 0xfb, 0x4a, 0xcd, 0xe6, 0x25, 0x36, 0x03,
 ];
 
 #[derive(Debug)]
@@ -151,9 +147,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .join("config")
         .join("keys")
         .join("trusted");
-    fs::create_dir_all(&trust_dir).with_context(|| {
-        format!("failed to create trust dir {}", trust_dir.display())
-    })?;
+    fs::create_dir_all(&trust_dir)
+        .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
 
     // ── 2. User key ──
     let user_key_path = opts
@@ -179,15 +174,30 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     let node_fp = compute_fingerprint(&node_key.verifying_key());
 
     // ── 4. Self-trust both keys ──
-    pin_key(&user_key.verifying_key(), "user", &trust_dir, Some(&user_key))
-        .map_err(|e| anyhow!("pin user trust doc: {e}"))?;
-    pin_key(&node_key.verifying_key(), "node", &trust_dir, Some(&node_key))
-        .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
+    pin_key(
+        &user_key.verifying_key(),
+        "user",
+        &trust_dir,
+        Some(&user_key),
+    )
+    .map_err(|e| anyhow!("pin user trust doc: {e}"))?;
+    pin_key(
+        &node_key.verifying_key(),
+        "node",
+        &trust_dir,
+        Some(&node_key),
+    )
+    .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
 
     // ── 5. Pin official publisher key ──
     let official_publisher_vk = decode_official_publisher_pubkey()?;
-    let pinned_fp = pin_key(&official_publisher_vk, "official-publisher", &trust_dir, None)
-        .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
+    let pinned_fp = pin_key(
+        &official_publisher_vk,
+        "official-publisher",
+        &trust_dir,
+        None,
+    )
+    .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
     if pinned_fp != OFFICIAL_PUBLISHER_FP {
         bail!(
             "official publisher fingerprint mismatch: hardcoded {} but \
@@ -219,15 +229,14 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     );
 
     // ── 6b. Validate bundle manifest dependencies ──
-    validate_manifest_dependencies(&discovered)
-        .context("bundle manifest dependency check")?;
+    validate_manifest_dependencies(&discovered).context("bundle manifest dependency check")?;
 
     // ── 6c. Sort bundles by dependency order ──
     // Ensures bundles providing kinds (e.g. core) are installed before
     // bundles requiring them (e.g. standard), so preflight verification
     // can resolve parsers and kind schemas from already-installed bundles.
-    let discovered = sort_bundles_by_dependency(&discovered)
-        .context("bundle dependency ordering")?;
+    let discovered =
+        sort_bundles_by_dependency(&discovered).context("bundle dependency ordering")?;
     tracing::info!(
         order = ?discovered.iter().map(|(n, _)| n).collect::<Vec<_>>(),
         "installation order determined"
@@ -287,7 +296,11 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     }
 
     // ── 8. Vault X25519 keypair ──
-    let vault_dir = opts.system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("vault");
+    let vault_dir = opts
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault");
     fs::create_dir_all(&vault_dir)
         .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
     let vault_secret_path = vault_dir.join("private_key.pem");
@@ -312,9 +325,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .join("ingest");
     let ignore_path = ignore_dir.join("ignore.yaml");
     if !ignore_path.exists() {
-        fs::create_dir_all(&ignore_dir).with_context(|| {
-            format!("create ingest dir {}", ignore_dir.display())
-        })?;
+        fs::create_dir_all(&ignore_dir)
+            .with_context(|| format!("create ingest dir {}", ignore_dir.display()))?;
         let builtin = ryeos_app::ignore::builtin_patterns();
         let patterns_yaml = builtin
             .iter()
@@ -322,9 +334,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .collect::<Vec<_>>()
             .join("\n");
         let content = format!("patterns:\n{}\n", patterns_yaml);
-        fs::write(&ignore_path, content).with_context(|| {
-            format!("write ignore config {}", ignore_path.display())
-        })?;
+        fs::write(&ignore_path, content)
+            .with_context(|| format!("write ignore config {}", ignore_path.display()))?;
     }
 
     // ── 9. Post-init trust verification ──
@@ -444,9 +455,8 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
 
 // ── Bundle manifest (v2: generated + signed) ───────────────────────
 pub use ryeos_bundle::manifest::{
-    derive_provides_kinds, materialize_manifest, parse_manifest,
-    sort_bundles_by_dependency, validate_manifest_dependencies,
-    BundleManifest, BundleManifestSource,
+    derive_provides_kinds, materialize_manifest, parse_manifest, sort_bundles_by_dependency,
+    validate_manifest_dependencies, BundleManifest, BundleManifestSource,
 };
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
@@ -471,11 +481,10 @@ fn pin_trust_file(trust_file: &Path, trust_dir: &Path) -> Result<()> {
     let content = fs::read_to_string(trust_file)
         .with_context(|| format!("read trust file {}", trust_file.display()))?;
 
-    let doc = ryeos_engine::trust::PublisherTrustDoc::parse(&content)
-        .map_err(|e| anyhow!("{e}"))?;
+    let doc =
+        ryeos_engine::trust::PublisherTrustDoc::parse(&content).map_err(|e| anyhow!("{e}"))?;
 
-    let vk = doc.decode_verifying_key()
-        .map_err(|e| anyhow!("{e}"))?;
+    let vk = doc.decode_verifying_key().map_err(|e| anyhow!("{e}"))?;
 
     pin_key(&vk, &doc.owner, trust_dir, None)
         .map_err(|e| anyhow!("pin trust doc for {}: {e}", doc.owner))?;
@@ -492,24 +501,57 @@ fn pin_trust_file(trust_file: &Path, trust_dir: &Path) -> Result<()> {
 fn create_layout(system_space_dir: &Path, user_root: &Path) -> Result<()> {
     let dirs = [
         // Node tier (daemon-owned)
-        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("identity"),
-        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("auth").join("authorized_keys"),
-        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("vault"),
-        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("config"),
-        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("bundles"),
-        system_space_dir.join(ryeos_engine::AI_DIR).join("node").join("engine").join("kinds"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("identity"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("auth")
+            .join("authorized_keys"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("vault"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("config"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("bundles"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("engine")
+            .join("kinds"),
         // CAS state
-        system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects"),
-        system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("refs"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
+            .join("objects"),
+        system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
+            .join("refs"),
         // Installed bundles directory
         system_space_dir.join(ryeos_engine::AI_DIR).join("bundles"),
         // User tier (operator-edited)
-        user_root.join(ryeos_engine::AI_DIR).join("config").join("keys").join("signing"),
-        user_root.join(ryeos_engine::AI_DIR).join("config").join("keys").join("trusted"),
+        user_root
+            .join(ryeos_engine::AI_DIR)
+            .join("config")
+            .join("keys")
+            .join("signing"),
+        user_root
+            .join(ryeos_engine::AI_DIR)
+            .join("config")
+            .join("keys")
+            .join("trusted"),
     ];
     for d in &dirs {
-        fs::create_dir_all(d)
-            .with_context(|| format!("create {}", d.display()))?;
+        fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
     }
     Ok(())
 }
@@ -517,8 +559,7 @@ fn create_layout(system_space_dir: &Path, user_root: &Path) -> Result<()> {
 /// Load an existing key, or create one. Refuses to overwrite unless `force`.
 fn load_or_create_key(path: &Path, force: bool) -> Result<SigningKey> {
     if force && path.exists() {
-        fs::remove_file(path)
-            .with_context(|| format!("remove old key {}", path.display()))?;
+        fs::remove_file(path).with_context(|| format!("remove old key {}", path.display()))?;
     }
     if path.exists() {
         let pem = fs::read_to_string(path)
@@ -561,7 +602,9 @@ fn verify_bundle_structure(target: &Path) -> Result<()> {
 /// If step 3 fails, the old bundle is still at `.backup.prev` for recovery.
 /// One previous generation is kept for rollback; older backups are cleaned up.
 fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
-    let parent = target.parent().ok_or_else(|| anyhow!("bundle path has no parent"))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("bundle path has no parent"))?;
     let name = target
         .file_name()
         .ok_or_else(|| anyhow!("bundle path has no name"))?
@@ -641,7 +684,10 @@ fn install_bundle(
     }
 
     // Copy bundle into <system_space_dir>/.ai/bundles/<name>/
-    let target = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles").join(name);
+    let target = system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("bundles")
+        .join(name);
     fs::create_dir_all(target.parent().unwrap())
         .with_context(|| format!("create bundles parent for {}", target.display()))?;
     copy_dir_recursive(source, &target)
@@ -678,8 +724,7 @@ fn write_node_bundle_registration(
     let signed = lillux::signature::sign_content(&body, node_key, "#", None);
     let target = bundles_dir.join(format!("{name}.yaml"));
     let tmp = target.with_extension("tmp");
-    fs::write(&tmp, signed.as_bytes())
-        .with_context(|| format!("write {}", tmp.display()))?;
+    fs::write(&tmp, signed.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &target)
         .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
     Ok(())
@@ -712,21 +757,20 @@ fn ensure_node_bundle_registration(
     }
 
     // Existing record — verify signature and content.
-    let content = fs::read_to_string(&reg_path)
-        .with_context(|| format!("read {}", reg_path.display()))?;
+    let content =
+        fs::read_to_string(&reg_path).with_context(|| format!("read {}", reg_path.display()))?;
 
     let node_vk = node_key.verifying_key();
     let node_fp = compute_fingerprint(&node_vk);
 
-    let sig_header = lillux::signature::parse_signature_line(
-        content.lines().next().unwrap_or(""),
-        "#",
-        None,
-    )
-    .ok_or_else(|| anyhow!(
-        "node bundle registration {} has no valid signature line",
-        reg_path.display()
-    ))?;
+    let sig_header =
+        lillux::signature::parse_signature_line(content.lines().next().unwrap_or(""), "#", None)
+            .ok_or_else(|| {
+                anyhow!(
+                    "node bundle registration {} has no valid signature line",
+                    reg_path.display()
+                )
+            })?;
 
     let body = lillux::signature::strip_signature_lines(&content);
     let actual_hash = lillux::signature::content_hash(&body);
@@ -778,11 +822,8 @@ fn ensure_node_bundle_registration(
 
 /// Recursive directory copy with symlink preservation (Unix only).
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)
-        .with_context(|| format!("create {}", dst.display()))?;
-    for entry in fs::read_dir(src)
-        .with_context(|| format!("read {}", src.display()))?
-    {
+    fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let from = entry.path();
@@ -878,12 +919,16 @@ mod tests {
         assert!(state.join(".ai/node/bundles/standard.yaml").exists());
         // Kind schemas inside core
         assert!(
-            state.join(".ai/bundles/core/.ai/node/engine/kinds").is_dir(),
+            state
+                .join(".ai/bundles/core/.ai/node/engine/kinds")
+                .is_dir(),
             "core kind schemas must be inside the installed bundle"
         );
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
-        assert!(user.join(".ai/config/keys/signing/private_key.pem").exists());
+        assert!(user
+            .join(".ai/config/keys/signing/private_key.pem")
+            .exists());
     }
 
     #[test]
@@ -895,7 +940,9 @@ mod tests {
         assert_eq!(report.official_publisher_pinned, OFFICIAL_PUBLISHER_FP);
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
-        assert!(user.join(".ai/config/keys/signing/private_key.pem").exists());
+        assert!(user
+            .join(".ai/config/keys/signing/private_key.pem")
+            .exists());
         assert!(user
             .join(".ai/config/keys/trusted")
             .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
@@ -913,7 +960,10 @@ mod tests {
         assert!(vault_priv.exists(), "vault private key must exist");
         assert!(vault_pub.exists(), "vault public key must exist");
         let sk = lillux::vault::read_secret_key(&vault_priv).unwrap();
-        assert_eq!(report.vault_pubkey_fingerprint, sk.public_key().fingerprint());
+        assert_eq!(
+            report.vault_pubkey_fingerprint,
+            sk.public_key().fingerprint()
+        );
         assert_eq!(report.vault_pubkey_fingerprint.len(), 64);
         let env = lillux::vault::seal(&sk.public_key(), b"hello").unwrap();
         let out = lillux::vault::open(&sk, &env).unwrap();
@@ -952,7 +1002,11 @@ mod tests {
         let bundles = discover_bundles(&workspace_root().join("bundles")).unwrap();
         let names: Vec<&str> = bundles.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"core"), "must find core: {:?}", names);
-        assert!(names.contains(&"standard"), "must find standard: {:?}", names);
+        assert!(
+            names.contains(&"standard"),
+            "must find standard: {:?}",
+            names
+        );
     }
 
     #[test]
@@ -1273,7 +1327,10 @@ typo_field: oops
             assert!(
                 installed.is_empty(),
                 "no bundles should be installed on dep failure, found: {:?}",
-                installed.iter().map(|e| e.path().display().to_string()).collect::<Vec<_>>()
+                installed
+                    .iter()
+                    .map(|e| e.path().display().to_string())
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -1284,7 +1341,11 @@ typo_field: oops
                 .unwrap()
                 .filter_map(|e| {
                     let e = e.ok()?;
-                    if e.path().extension().map(|ext| ext == "yaml").unwrap_or(false) {
+                    if e.path()
+                        .extension()
+                        .map(|ext| ext == "yaml")
+                        .unwrap_or(false)
+                    {
                         Some(e)
                     } else {
                         None
@@ -1431,7 +1492,10 @@ version: "1.0"
 typo_field: oops
 "#;
         let result: Result<BundleManifestSource, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "unknown field in source should be rejected");
+        assert!(
+            result.is_err(),
+            "unknown field in source should be rejected"
+        );
     }
 
     fn workspace_root() -> PathBuf {

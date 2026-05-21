@@ -28,15 +28,33 @@ pub enum RouteConfigError {
     #[error("invalid limits for route '{id}': {reason}")]
     InvalidLimits { id: String, reason: String },
     #[error("path collision between routes '{id_a}' and '{id_b}' on pattern '{pattern}' method {method}")]
-    PathCollision { id_a: String, id_b: String, pattern: String, method: String },
+    PathCollision {
+        id_a: String,
+        id_b: String,
+        pattern: String,
+        method: String,
+    },
     #[error("invalid path template: {reason}")]
     InvalidPathTemplate { id: String, reason: String },
     #[error("source '{src}' for route '{id}' requires auth '{required}', got '{got}'")]
-    SourceAuthRequirement { id: String, src: String, required: String, got: String },
+    SourceAuthRequirement {
+        id: String,
+        src: String,
+        required: String,
+        got: String,
+    },
     #[error("invalid source config for source '{src}' on route '{id}': {reason}")]
-    InvalidSourceConfig { id: String, src: String, reason: String },
+    InvalidSourceConfig {
+        id: String,
+        src: String,
+        reason: String,
+    },
     #[error("invalid response spec for route '{id}' in mode '{mode}': {reason}")]
-    InvalidResponseSpec { id: String, mode: String, reason: String },
+    InvalidResponseSpec {
+        id: String,
+        mode: String,
+        reason: String,
+    },
     #[error("unknown streaming source '{src}' for route '{id}'")]
     UnknownStreamingSource { id: String, src: String },
     #[error("{0}")]

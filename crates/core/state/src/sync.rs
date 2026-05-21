@@ -73,13 +73,17 @@ pub fn export_chain(
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let head_path = refs_root.join("generic/chains").join(chain_root_id).join("head");
+        let head_path = refs_root
+            .join("generic/chains")
+            .join(chain_root_id)
+            .join("head");
         let signed_ref = crate::refs::read_signed_ref(&head_path)
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
     };
 
-    let mut entries = Vec::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
+    let mut entries =
+        Vec::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
     let mut total_bytes = 0usize;
 
     // Collect JSON objects
@@ -135,7 +139,10 @@ pub fn reconcile_export(
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let head_path = refs_root.join("generic/chains").join(chain_root_id).join("head");
+        let head_path = refs_root
+            .join("generic/chains")
+            .join(chain_root_id)
+            .join("head");
         let signed_ref = crate::refs::read_signed_ref(&head_path)
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
@@ -201,10 +208,7 @@ pub fn reconcile_export(
 /// - Write to the correct sharded path
 ///
 /// Returns statistics about what was imported.
-pub fn import_objects(
-    cas_root: &Path,
-    payload: &ExportPayload,
-) -> Result<ImportResult> {
+pub fn import_objects(cas_root: &Path, payload: &ExportPayload) -> Result<ImportResult> {
     let mut result = ImportResult::default();
 
     for entry in &payload.entries {
@@ -281,7 +285,10 @@ pub fn finalize_import(
         lillux::time::iso8601_now(),
         signer.fingerprint().to_string(),
     );
-    let head_ref_path = refs_root.join("generic/chains").join(chain_root_id).join("head");
+    let head_ref_path = refs_root
+        .join("generic/chains")
+        .join(chain_root_id)
+        .join("head");
     crate::refs::write_signed_ref(&head_ref_path, signed_ref, signer)?;
 
     tracing::info!(
@@ -316,9 +323,8 @@ pub fn collect_local_hashes(
     chain_root_id: &str,
 ) -> Result<HashSet<String>> {
     let reachable = reachability::collect_chain_reachable(cas_root, refs_root, chain_root_id)?;
-    let mut hashes = HashSet::with_capacity(
-        reachable.object_hashes.len() + reachable.blob_hashes.len(),
-    );
+    let mut hashes =
+        HashSet::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
     hashes.extend(reachable.object_hashes);
     hashes.extend(reachable.blob_hashes);
     Ok(hashes)
@@ -332,7 +338,13 @@ mod tests {
     use std::fs;
 
     fn make_hash(suffix: &str) -> String {
-        format!("{:064}", suffix.as_bytes().iter().fold(0u64, |a, &b| a.wrapping_add(b as u64)))
+        format!(
+            "{:064}",
+            suffix
+                .as_bytes()
+                .iter()
+                .fold(0u64, |a, &b| a.wrapping_add(b as u64))
+        )
     }
 
     fn write_object(cas_root: &Path, hash: &str, value: &serde_json::Value) {
@@ -353,7 +365,10 @@ mod tests {
             "2026-04-23T00:00:00Z".to_string(),
             signer.fingerprint().to_string(),
         );
-        let head_path = refs_root.join("generic/chains").join(chain_root_id).join("head");
+        let head_path = refs_root
+            .join("generic/chains")
+            .join(chain_root_id)
+            .join("head");
         crate::refs::write_signed_ref(&head_path, signed_ref, &signer).unwrap();
     }
 
@@ -662,7 +677,10 @@ mod tests {
 
         // Assert: projection caught up — thread is queryable
         let thread = crate::queries::get_thread(db.projection(), "T-imported").unwrap();
-        assert!(thread.is_some(), "imported thread should appear in projection");
+        assert!(
+            thread.is_some(),
+            "imported thread should appear in projection"
+        );
         let thread = thread.unwrap();
         assert_eq!(thread.status, "created");
         assert_eq!(thread.item_ref, "test/imported");

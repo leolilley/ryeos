@@ -20,7 +20,10 @@ impl RouteLimiter {
     }
 
     #[allow(clippy::result_large_err)] // Err type is axum::response::Response (third-party)
-    pub fn check_content_length(&self, headers: &axum::http::HeaderMap) -> Result<(), axum::response::Response> {
+    pub fn check_content_length(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<(), axum::response::Response> {
         if let Some(content_length) = headers
             .get(axum::http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
@@ -43,17 +46,15 @@ impl RouteLimiter {
         body: axum::body::Body,
     ) -> Result<Bytes, axum::response::Response> {
         let max_bytes = self.body_bytes_max as usize;
-        let bytes = axum::body::to_bytes(body, max_bytes)
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    axum::Json(serde_json::json!({
-                        "error": format!("body exceeded {} bytes", self.body_bytes_max)
-                    })),
-                )
-                    .into_response()
-            })?;
+        let bytes = axum::body::to_bytes(body, max_bytes).await.map_err(|_| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                axum::Json(serde_json::json!({
+                    "error": format!("body exceeded {} bytes", self.body_bytes_max)
+                })),
+            )
+                .into_response()
+        })?;
 
         if bytes.len() as u64 > self.body_bytes_max {
             return Err(

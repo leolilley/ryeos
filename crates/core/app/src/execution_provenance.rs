@@ -214,9 +214,7 @@ impl ExecutionProvenance {
     /// Project source dimension for capability gating and tracing.
     pub fn project_source(&self) -> ProjectSourceKind {
         match self {
-            Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => {
-                ProjectSourceKind::LiveFs
-            }
+            Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => ProjectSourceKind::LiveFs,
             Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => {
                 ProjectSourceKind::PushedHead
             }
@@ -268,7 +266,10 @@ impl std::fmt::Debug for ExecutionProvenance {
                     | Self::BorrowedChildPushedHead { .. } => None,
                 },
             )
-            .field("engine_arc_strong_count", &Arc::strong_count(self.request_engine()))
+            .field(
+                "engine_arc_strong_count",
+                &Arc::strong_count(self.request_engine()),
+            )
             .finish()
     }
 }
@@ -356,7 +357,10 @@ mod tests {
         let parent = ExecutionProvenance::root_live_fs(PathBuf::from("/live"), engine());
         let child = parent.clone_for_borrowed_child();
 
-        assert!(matches!(child, ExecutionProvenance::BorrowedChildLiveFs { .. }));
+        assert!(matches!(
+            child,
+            ExecutionProvenance::BorrowedChildLiveFs { .. }
+        ));
         assert!(child.is_borrowed_child());
         assert_eq!(child.project_source(), ProjectSourceKind::LiveFs);
         assert_eq!(child.effective_path(), Path::new("/live"));
@@ -412,12 +416,10 @@ mod tests {
         let extract = |p: &ExecutionProvenance| -> Arc<TempDirGuard> {
             match p {
                 ExecutionProvenance::RootPushedHead {
-                    workspace_lifeline,
-                    ..
+                    workspace_lifeline, ..
                 }
                 | ExecutionProvenance::BorrowedChildPushedHead {
-                    workspace_lifeline,
-                    ..
+                    workspace_lifeline, ..
                 } => workspace_lifeline.clone(),
                 _ => panic!("expected pushed variant"),
             }

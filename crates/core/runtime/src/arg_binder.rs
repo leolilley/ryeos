@@ -53,7 +53,10 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
             } else if i + 1 < argv.len() && !argv[i + 1].starts_with("--") {
                 // --key value (value may start with single dash, e.g. "-1")
                 i += 1;
-                (normalise_key(key), serde_json::Value::String(argv[i].clone()))
+                (
+                    normalise_key(key),
+                    serde_json::Value::String(argv[i].clone()),
+                )
             } else {
                 // --key (bare flag)
                 (normalise_key(key), serde_json::Value::Bool(true))
@@ -247,11 +250,7 @@ mod tests {
     #[test]
     fn repeated_mixed_scalar_and_equals_form() {
         // Combining `--key=a` then `--key b` accumulates.
-        let result = bind_argv(&[
-            "--key=a".into(),
-            "--key".into(),
-            "b".into(),
-        ]);
+        let result = bind_argv(&["--key=a".into(), "--key".into(), "b".into()]);
         let arr = result["key"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0], "a");
@@ -341,7 +340,10 @@ mod tests {
         let argv = vec!["directive:my/task".into()];
         let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
         assert_eq!(result["item_ref"], "directive:my/task");
-        assert!(result.get("_args").is_none(), "_args must be removed when positional is bound");
+        assert!(
+            result.get("_args").is_none(),
+            "_args must be removed when positional is bound"
+        );
     }
 
     #[test]
@@ -349,7 +351,10 @@ mod tests {
         let argv = vec!["a".into(), "b".into()];
         let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
         // Multi-positional: don't guess. Leave _args populated.
-        assert!(result.get("item_ref").is_none(), "must not bind when multi-positional");
+        assert!(
+            result.get("item_ref").is_none(),
+            "must not bind when multi-positional"
+        );
         let args = result["_args"].as_array().unwrap();
         assert_eq!(args.len(), 2);
     }
@@ -367,7 +372,12 @@ mod tests {
 
     #[test]
     fn positional_field_with_flags_and_one_positional() {
-        let argv = vec!["--verbose".into(), "tool:foo".into(), "--limit".into(), "5".into()];
+        let argv = vec![
+            "--verbose".into(),
+            "tool:foo".into(),
+            "--limit".into(),
+            "5".into(),
+        ];
         let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
         // `tool:foo` is consumed by --verbose because the binder is
         // schema-free and treats the next non-dash token as the value.

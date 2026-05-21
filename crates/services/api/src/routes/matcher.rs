@@ -30,7 +30,9 @@ pub struct PathMatcher {
 }
 
 impl PathMatcher {
-    pub fn new(routes: Vec<Arc<CompiledRoute>>) -> Result<Self, crate::route_error::RouteConfigError> {
+    pub fn new(
+        routes: Vec<Arc<CompiledRoute>>,
+    ) -> Result<Self, crate::route_error::RouteConfigError> {
         let mut entries = Vec::new();
         for route in routes {
             let segments = parse_path(&route.path_pattern, &route.id)?;
@@ -45,7 +47,10 @@ impl PathMatcher {
                 if !patterns_can_collide(&entries[i].segments, &entries[j].segments) {
                     continue;
                 }
-                let shared_methods: Vec<&Method> = entries[i].route.methods.iter()
+                let shared_methods: Vec<&Method> = entries[i]
+                    .route
+                    .methods
+                    .iter()
                     .filter(|m| entries[j].route.methods.contains(m))
                     .collect();
                 if let Some(method) = shared_methods.into_iter().next() {
@@ -67,10 +72,7 @@ impl PathMatcher {
         method: &Method,
         path: &str,
     ) -> Option<(Arc<CompiledRoute>, HashMap<String, String>)> {
-        let path_segments: Vec<&str> = path
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .collect();
+        let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         for entry in &self.entries {
             if !entry.route.methods.iter().any(|m| m == method) {
@@ -105,7 +107,9 @@ impl PathMatcher {
 }
 
 fn patterns_can_collide(a: &[Segment], b: &[Segment]) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     for (sa, sb) in a.iter().zip(b) {
         match (sa, sb) {
             (Segment::Literal(la), Segment::Literal(lb)) if la != lb => return false,
@@ -151,8 +155,10 @@ mod tests {
 
     fn make_route(id: &str, path: &str, methods: &[&str]) -> Arc<CompiledRoute> {
         use crate::routes::compile::ResponseMode;
-        use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec};
         use crate::routes::response_modes::static_mode::StaticMode;
+        use ryeos_app::route_raw::{
+            RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
+        };
 
         let mode = StaticMode;
         let raw = RawRouteSpec {
@@ -173,7 +179,9 @@ mod tests {
                 body_b64: Some("aGVsbG8=".to_string()), // "hello"
             },
             execute: None,
-            request: RawRequest { body: RawRequestBody::None },
+            request: RawRequest {
+                body: RawRequestBody::None,
+            },
             source_file: std::path::PathBuf::new(),
         };
         Arc::new(CompiledRoute {
@@ -197,9 +205,7 @@ mod tests {
     fn exact_match() {
         let routes = vec![make_route("r1", "/health", &["GET"])];
         let matcher = PathMatcher::new(routes).unwrap();
-        let (route, caps) = matcher
-            .match_request(&Method::GET, "/health")
-            .unwrap();
+        let (route, caps) = matcher.match_request(&Method::GET, "/health").unwrap();
         assert_eq!(route.id, "r1");
         assert!(caps.is_empty());
     }
@@ -222,16 +228,18 @@ mod tests {
     fn capture_match() {
         let routes = vec![make_route("r1", "/users/{id}", &["GET"])];
         let matcher = PathMatcher::new(routes).unwrap();
-        let (route, caps) = matcher
-            .match_request(&Method::GET, "/users/42")
-            .unwrap();
+        let (route, caps) = matcher.match_request(&Method::GET, "/users/42").unwrap();
         assert_eq!(route.id, "r1");
         assert_eq!(caps.get("id").unwrap(), "42");
     }
 
     #[test]
     fn capture_multiple() {
-        let routes = vec![make_route("r1", "/users/{user_id}/posts/{post_id}", &["GET"])];
+        let routes = vec![make_route(
+            "r1",
+            "/users/{user_id}/posts/{post_id}",
+            &["GET"],
+        )];
         let matcher = PathMatcher::new(routes).unwrap();
         let (_, caps) = matcher
             .match_request(&Method::GET, "/users/u1/posts/p2")

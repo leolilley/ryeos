@@ -77,9 +77,8 @@ impl PublisherTrustDoc {
     /// Parse a `PUBLISHER_TRUST.toml` from text. Validates that the
     /// fingerprint matches the public key bytes.
     pub fn parse(text: &str) -> Result<Self, EngineError> {
-        let doc: PublisherTrustDoc = toml::from_str(text).map_err(|e| {
-            EngineError::Internal(format!("invalid PUBLISHER_TRUST.toml: {e}"))
-        })?;
+        let doc: PublisherTrustDoc = toml::from_str(text)
+            .map_err(|e| EngineError::Internal(format!("invalid PUBLISHER_TRUST.toml: {e}")))?;
         doc.validate()?;
         Ok(doc)
     }
@@ -101,23 +100,17 @@ impl PublisherTrustDoc {
     /// Decode the `ed25519:<base64>` public key into a `VerifyingKey`.
     pub fn decode_verifying_key(&self) -> Result<VerifyingKey, EngineError> {
         let b64 = self.public_key.strip_prefix("ed25519:").ok_or_else(|| {
-            EngineError::Internal(
-                "public_key must be ed25519:<base64> format".to_string(),
-            )
+            EngineError::Internal("public_key must be ed25519:<base64> format".to_string())
         })?;
-        let bytes: Vec<u8> =
-            base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| {
-                EngineError::Internal(format!("invalid base64 in public_key: {e}"))
-            })?;
+        let bytes: Vec<u8> = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| EngineError::Internal(format!("invalid base64 in public_key: {e}")))?;
         let len = bytes.len();
         let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-            EngineError::Internal(format!(
-                "public_key must decode to 32 bytes, got {len}"
-            ))
+            EngineError::Internal(format!("public_key must decode to 32 bytes, got {len}"))
         })?;
-        VerifyingKey::from_bytes(&arr).map_err(|e| {
-            EngineError::Internal(format!("invalid Ed25519 public key: {e}"))
-        })
+        VerifyingKey::from_bytes(&arr)
+            .map_err(|e| EngineError::Internal(format!("invalid Ed25519 public key: {e}")))
     }
 
     /// Render to TOML text suitable for writing to disk.
@@ -375,7 +368,11 @@ impl TrustStore {
 
         let count = signers.len();
         if count > 0 {
-            tracing::info!(count, dirs = dirs.len(), "loaded trust store (operator-tier)");
+            tracing::info!(
+                count,
+                dirs = dirs.len(),
+                "loaded trust store (operator-tier)"
+            );
         }
 
         Ok(Self { signers })
@@ -541,7 +538,9 @@ fn load_trusted_key_doc(
     Ok(TrustedKeyDoc {
         fingerprint: actual_fp,
         owner: parsed.owner,
-        version: parsed.version.unwrap_or_else(|| DEFAULT_KEY_DOC_VERSION.to_string()),
+        version: parsed
+            .version
+            .unwrap_or_else(|| DEFAULT_KEY_DOC_VERSION.to_string()),
         attestation,
         verifying_key,
     })
@@ -1641,8 +1640,9 @@ pem = "ed25519:{key_b64}"
     #[test]
     fn content_hash_after_sig_with_shebang() {
         let body = "print('hello')\n";
-        let content =
-            format!("#!/usr/bin/env python3\n# ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp\n{body}");
+        let content = format!(
+            "#!/usr/bin/env python3\n# ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp\n{body}"
+        );
         let envelope = shebang_envelope();
 
         let hash = content_hash_after_signature(&content, &envelope).unwrap();

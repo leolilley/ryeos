@@ -63,9 +63,8 @@ async fn graph_spawn_smoke_returns_valid_result() {
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeosd=debug,ryeos_graph_runtime=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeosd=debug,ryeos_graph_runtime=debug".into()),
         );
     })
     .await
@@ -79,24 +78,20 @@ async fn graph_spawn_smoke_returns_valid_result() {
         project.path().to_str().unwrap(),
         serde_json::json!({}),
     );
-    let (status, body) = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        post_fut,
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => panic!("post /execute failed: {e}"),
-        Err(_) => {
-            let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
-                "POST /execute timed out after 30s — graph runtime hung.\n\
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
+                    "POST /execute timed out after 30s — graph runtime hung.\n\
                  --- daemon stderr ---\n{stderr}\n\
                  state_path={}",
-                h.state_path.display()
-            );
-        }
-    };
+                    h.state_path.display()
+                );
+            }
+        };
 
     if status != reqwest::StatusCode::OK {
         let stderr = h.drain_stderr_nonblocking().await;

@@ -185,10 +185,7 @@ fn load_authorized_key(
     }
 
     // Extract public key
-    let public_key_str = values
-        .get("public_key")
-        .map(|s| s.as_str())
-        .unwrap_or("");
+    let public_key_str = values.get("public_key").map(|s| s.as_str()).unwrap_or("");
     if !public_key_str.starts_with("ed25519:") {
         bail!("invalid public key format");
     }
@@ -231,10 +228,7 @@ fn load_authorized_key(
         }
     }
 
-    let owner = values
-        .get("label")
-        .cloned()
-        .unwrap_or_default();
+    let owner = values.get("label").cloned().unwrap_or_default();
 
     Ok(AuthorizedKey {
         public_key,
@@ -272,7 +266,13 @@ fn canonical_path(uri: &axum::http::Uri) -> String {
     }
 }
 
-pub(crate) fn verify_request(state: &AppState, method: &str, uri: &axum::http::Uri, headers: &axum::http::HeaderMap, body: &[u8]) -> Result<Principal, String> {
+pub(crate) fn verify_request(
+    state: &AppState,
+    method: &str,
+    uri: &axum::http::Uri,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> Result<Principal, String> {
     let key_id = headers
         .get("x-ryeos-key-id")
         .and_then(|v| v.to_str().ok())
@@ -403,8 +403,8 @@ mod tests {
 
         let real_fp = lillux::signature::compute_fingerprint(&real_subject.verifying_key());
         let attacker_vk = attacker_subject.verifying_key();
-        let attacker_key_b64 = base64::engine::general_purpose::STANDARD
-            .encode(attacker_vk.as_bytes());
+        let attacker_key_b64 =
+            base64::engine::general_purpose::STANDARD.encode(attacker_vk.as_bytes());
 
         let toml_body = format!(
             "fingerprint = \"{real_fp}\"\npublic_key = \"ed25519:{attacker_key_b64}\"\nscopes = [\"*\"]\nlabel = \"evil\"\n"
@@ -443,8 +443,7 @@ mod tests {
 
         let client_vk = client_key.verifying_key();
         let client_fp = lillux::signature::compute_fingerprint(&client_vk);
-        let client_key_b64 = base64::engine::general_purpose::STANDARD
-            .encode(client_vk.as_bytes());
+        let client_key_b64 = base64::engine::general_purpose::STANDARD.encode(client_vk.as_bytes());
 
         // Write via canonical writer using REAL handler-required caps
         // (long-form `ryeos.execute.service.<subject>`). Short-form
@@ -582,6 +581,9 @@ mod tests {
 
         let loaded = load_authorized_key(&fp, &auth_dir, &node_identity)
             .expect("canonical scopes must load");
-        assert_eq!(loaded.scopes, vec!["ryeos.execute.service.vault.list".to_string()]);
+        assert_eq!(
+            loaded.scopes,
+            vec!["ryeos.execute.service.vault.list".to_string()]
+        );
     }
 }

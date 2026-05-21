@@ -22,7 +22,9 @@ pub struct Request {
     pub sync_scope: ProjectSyncScope,
 }
 
-fn default_remote() -> String { "default".to_string() }
+fn default_remote() -> String {
+    "default".to_string()
+}
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     config::validate_remote_project_path(&req.remote_project)?;
@@ -33,10 +35,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let remote = remotes
         .get_mut(&req.remote)
         .ok_or_else(|| anyhow::anyhow!("remote '{}' not found in config", req.remote))?;
-    remote.project_bindings.insert(local_key.clone(), RemoteProjectBinding {
-        remote_project_path: req.remote_project.clone(),
-        sync_scope: req.sync_scope,
-    });
+    remote.project_bindings.insert(
+        local_key.clone(),
+        RemoteProjectBinding {
+            remote_project_path: req.remote_project.clone(),
+            sync_scope: req.sync_scope,
+        },
+    );
     config::save_remotes(&state.config.system_space_dir, &remotes)?;
 
     Ok(serde_json::json!({

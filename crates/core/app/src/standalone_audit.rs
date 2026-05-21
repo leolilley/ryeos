@@ -44,10 +44,7 @@ pub struct StandaloneAuditRecord {
 ///
 /// Creates the parent directory if it doesn't exist.
 /// Opens the file in append mode, writes, and closes.
-pub fn write_audit_record(
-    audit_path: &Path,
-    record: &StandaloneAuditRecord,
-) -> Result<()> {
+pub fn write_audit_record(audit_path: &Path, record: &StandaloneAuditRecord) -> Result<()> {
     if let Some(parent) = audit_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create audit dir {}", parent.display()))?;
@@ -59,8 +56,7 @@ pub fn write_audit_record(
         .open(audit_path)
         .with_context(|| format!("failed to open audit file {}", audit_path.display()))?;
 
-    let line = serde_json::to_string(record)
-        .context("failed to serialize audit record")?;
+    let line = serde_json::to_string(record).context("failed to serialize audit record")?;
     writeln!(file, "{}", line)
         .with_context(|| format!("failed to write audit record to {}", audit_path.display()))?;
 

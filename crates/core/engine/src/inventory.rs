@@ -109,21 +109,18 @@ pub fn build_inventory_for_launching_kind(
 ) -> Result<Inventory, EngineError> {
     let mut out: Inventory = HashMap::new();
     for inventoried_kind in &launching_kind_schema.inventory_kinds {
-        let target_schema = kinds.get(inventoried_kind).ok_or_else(|| {
-            EngineError::SchemaLoaderError {
-                reason: format!(
-                    "build_inventory: launching kind declares `inventory_kinds: \
+        let target_schema =
+            kinds
+                .get(inventoried_kind)
+                .ok_or_else(|| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "build_inventory: launching kind declares `inventory_kinds: \
                      [{inventoried_kind}]` but no kind by that name is registered \
                      (typo? missing bundle?)"
-                ),
-            }
-        })?;
-        let descriptors = build_inventory_for_kind(
-            inventoried_kind,
-            target_schema,
-            roots,
-            parsers,
-        )?;
+                    ),
+                })?;
+        let descriptors =
+            build_inventory_for_kind(inventoried_kind, target_schema, roots, parsers)?;
         out.insert(inventoried_kind.clone(), descriptors);
     }
     Ok(out)
@@ -146,11 +143,13 @@ pub fn build_inventory_for_kind(
     // overwrite one tool with another.
     let mut seen_names: HashMap<String, String> = HashMap::with_capacity(refs.len());
     for ref_ in &refs {
-        let descriptor = build_descriptor_for_ref(ref_, target_schema, roots, parsers)
-            .map_err(|e| EngineError::InventoryItemFailed {
-                kind: inventoried_kind.to_owned(),
-                bare_id: ref_.bare_id.clone(),
-                source: Box::new(e),
+        let descriptor =
+            build_descriptor_for_ref(ref_, target_schema, roots, parsers).map_err(|e| {
+                EngineError::InventoryItemFailed {
+                    kind: inventoried_kind.to_owned(),
+                    bare_id: ref_.bare_id.clone(),
+                    source: Box::new(e),
+                }
             })?;
         if let Some(prev_id) = seen_names.get(&descriptor.name) {
             return Err(EngineError::DuplicateInventoryName {
@@ -183,10 +182,12 @@ fn build_descriptor_for_ref(
 
     let source_format = target_schema
         .resolved_format_for(&resolution.matched_ext)
-        .ok_or_else(|| EngineError::Internal(format!(
-            "build_inventory: matched extension {} has no source format in schema",
-            resolution.matched_ext
-        )))?;
+        .ok_or_else(|| {
+            EngineError::Internal(format!(
+                "build_inventory: matched extension {} has no source format in schema",
+                resolution.matched_ext
+            ))
+        })?;
 
     let parsed = parsers.dispatch(
         &source_format.parser,
@@ -282,7 +283,10 @@ mod tests {
     #[test]
     fn flatten_strips_slashes_and_dashes() {
         assert_eq!(flatten_bare_id("ryeos/core/read"), "ryeos_core_read");
-        assert_eq!(flatten_bare_id("ryeos/file-system/ls"), "ryeos_file_system_ls");
+        assert_eq!(
+            flatten_bare_id("ryeos/file-system/ls"),
+            "ryeos_file_system_ls"
+        );
         assert_eq!(flatten_bare_id("echo"), "echo");
     }
 

@@ -36,24 +36,30 @@ pub async fn run(
     principal_fingerprint: &str,
     state: &ryeos_app::state::AppState,
 ) -> Result<(), LaunchAugmentationError> {
-    let (target_kind, target_op, source_derived, output_derived, meta_output_derived, per_position_budget) =
-        match decl {
-            LaunchAugmentationDecl::ComposeContextPositions {
-                target_kind,
-                target_op,
-                source_derived,
-                output_derived,
-                meta_output_derived,
-                per_position_budget,
-            } => (
-                target_kind,
-                target_op,
-                source_derived,
-                output_derived,
-                meta_output_derived,
-                per_position_budget,
-            ),
-        };
+    let (
+        target_kind,
+        target_op,
+        source_derived,
+        output_derived,
+        meta_output_derived,
+        per_position_budget,
+    ) = match decl {
+        LaunchAugmentationDecl::ComposeContextPositions {
+            target_kind,
+            target_op,
+            source_derived,
+            output_derived,
+            meta_output_derived,
+            per_position_budget,
+        } => (
+            target_kind,
+            target_op,
+            source_derived,
+            output_derived,
+            meta_output_derived,
+            per_position_budget,
+        ),
+    };
 
     // 1. Read source_derived from composed view.
     let positions = read_positions(resolution, source_derived)?;
@@ -80,8 +86,8 @@ pub async fn run(
 
     let mut per_root: BTreeMap<String, ResolutionOutput> = BTreeMap::new();
     for r in &unique_refs {
-        let canonical = CanonicalRef::parse(r)
-            .map_err(|e| LaunchAugmentationError::ParseRef(e.to_string()))?;
+        let canonical =
+            CanonicalRef::parse(r).map_err(|e| LaunchAugmentationError::ParseRef(e.to_string()))?;
         let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
             &canonical,
             &engine.kinds,
@@ -105,12 +111,9 @@ pub async fn run(
     )?;
 
     // 5. Look up the target kind's runtime.
-    let verified_runtime = engine
-        .runtimes
-        .lookup_for(target_kind)
-        .map_err(|_| LaunchAugmentationError::RuntimeRegistry(format!(
-            "no runtime serves kind '{target_kind}'"
-        )))?;
+    let verified_runtime = engine.runtimes.lookup_for(target_kind).map_err(|_| {
+        LaunchAugmentationError::RuntimeRegistry(format!("no runtime serves kind '{target_kind}'"))
+    })?;
 
     let executor_ref = format!(
         "native:{}",
@@ -122,20 +125,18 @@ pub async fn run(
     let child_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     state
         .threads
-        .create_thread(
-            &ryeos_app::thread_lifecycle::ThreadCreateParams {
-                thread_id: child_thread_id.clone(),
-                chain_root_id: parent_thread_id.to_string(),
-                kind: "system_task".to_string(),
-                item_ref: format!("{target_kind}://{target_op}"),
-                executor_ref: executor_ref.clone(),
-                launch_mode: "inline".to_string(),
-                current_site_id: plan_ctx.current_site_id.clone(),
-                origin_site_id: plan_ctx.origin_site_id.clone(),
-                upstream_thread_id: Some(parent_thread_id.to_string()),
-                requested_by: Some(principal_fingerprint.to_string()),
-            },
-        )
+        .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
+            thread_id: child_thread_id.clone(),
+            chain_root_id: parent_thread_id.to_string(),
+            kind: "system_task".to_string(),
+            item_ref: format!("{target_kind}://{target_op}"),
+            executor_ref: executor_ref.clone(),
+            launch_mode: "inline".to_string(),
+            current_site_id: plan_ctx.current_site_id.clone(),
+            origin_site_id: plan_ctx.origin_site_id.clone(),
+            upstream_thread_id: Some(parent_thread_id.to_string()),
+            requested_by: Some(principal_fingerprint.to_string()),
+        })
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
 
     // 7. Generate callback token.
@@ -184,7 +185,11 @@ pub async fn run(
                 .unwrap_or(r.ai_root.clone())
         })
         .collect();
-    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
+    let cache_root = state
+        .config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
         &system_roots,
         &executor_ref,
@@ -199,7 +204,8 @@ pub async fn run(
     let envs = ryeos_app::process::build_subprocess_envs(
         &std::collections::BTreeMap::new(),
         &vec![("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
-    ).map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
+    )
+    .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
@@ -215,14 +221,20 @@ pub async fn run(
 
     // 11. Invalidate callback + thread auth tokens.
     state.callback_tokens.invalidate(&cap.token);
-    state.callback_tokens.invalidate_for_thread(&child_thread_id);
+    state
+        .callback_tokens
+        .invalidate_for_thread(&child_thread_id);
     state.thread_auth.invalidate(&thread_auth.token);
     state.thread_auth.invalidate_for_thread(&child_thread_id);
 
     if !result.success {
-        let _ = state.threads.finalize_thread(
-            &crate::dispatch::finalize_params(&child_thread_id, "failed", None),
-        );
+        let _ = state
+            .threads
+            .finalize_thread(&crate::dispatch::finalize_params(
+                &child_thread_id,
+                "failed",
+                None,
+            ));
         return Err(LaunchAugmentationError::ChildBootstrap {
             kind: target_kind.clone(),
             op: target_op.clone(),
@@ -232,12 +244,15 @@ pub async fn run(
     }
 
     // 12. Parse BatchOpResult.
-    let batch_result: ryeos_runtime::op_wire::BatchOpResult =
-        serde_json::from_str(&result.stdout)?;
+    let batch_result: ryeos_runtime::op_wire::BatchOpResult = serde_json::from_str(&result.stdout)?;
     if !batch_result.success {
-        let _ = state.threads.finalize_thread(
-            &crate::dispatch::finalize_params(&child_thread_id, "failed", None),
-        );
+        let _ = state
+            .threads
+            .finalize_thread(&crate::dispatch::finalize_params(
+                &child_thread_id,
+                "failed",
+                None,
+            ));
         return Err(LaunchAugmentationError::ChildFailed {
             kind: target_kind.clone(),
             op: target_op.clone(),
@@ -263,9 +278,13 @@ pub async fn run(
         .insert(meta_output_derived.clone(), serde_json::to_value(&meta)?);
 
     // Finalize child thread as completed.
-    let _ = state.threads.finalize_thread(
-        &crate::dispatch::finalize_params(&child_thread_id, "completed", batch_result.output),
-    );
+    let _ = state
+        .threads
+        .finalize_thread(&crate::dispatch::finalize_params(
+            &child_thread_id,
+            "completed",
+            batch_result.output,
+        ));
 
     tracing::info!(
         kind = %target_kind,
@@ -290,23 +309,21 @@ fn read_positions(
             reason: format!("derived field '{source_derived}' not found in composed view"),
         })?;
 
-    let obj = value.as_object().ok_or_else(|| {
-        LaunchAugmentationError::ProjectionInvariant {
-            reason: format!(
-                "derived field '{source_derived}' must be an object, got {value}"
-            ),
-        }
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| LaunchAugmentationError::ProjectionInvariant {
+            reason: format!("derived field '{source_derived}' must be an object, got {value}"),
+        })?;
 
     let mut positions: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (key, val) in obj {
-        let arr = val.as_array().ok_or_else(|| {
-            LaunchAugmentationError::ProjectionInvariant {
+        let arr = val
+            .as_array()
+            .ok_or_else(|| LaunchAugmentationError::ProjectionInvariant {
                 reason: format!(
                     "derived field '{source_derived}': position '{key}' must be an array, got {val}"
                 ),
-            }
-        })?;
+            })?;
         let refs: Vec<String> = arr
             .iter()
             .map(|v| {
@@ -348,11 +365,7 @@ fn validate_canonical_refs(
 }
 
 /// Write empty maps when there are no positions to render.
-fn write_empty(
-    resolution: &mut ResolutionOutput,
-    output_derived: &str,
-    meta_output_derived: &str,
-) {
+fn write_empty(resolution: &mut ResolutionOutput, output_derived: &str, meta_output_derived: &str) {
     resolution
         .composed
         .derived

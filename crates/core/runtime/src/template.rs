@@ -36,27 +36,25 @@ pub fn apply_template(template: &Value, data: &HashMap<String, Value>) -> Value 
                 .strip_prefix('{')
                 .and_then(|rest| rest.strip_suffix('}'))
             {
-            // Whole-string placeholder: substitute the value.
-            match data.get(key) {
-                Some(v) => v.clone(),
-                None => {
-                    tracing::warn!(
-                        missing_placeholder = key,
-                        available_keys = ?data.keys().collect::<Vec<_>>(),
-                        "template placeholder not found in context — emitting null; \
-                         this is almost certainly a YAML typo"
-                    );
-                    Value::Null
+                // Whole-string placeholder: substitute the value.
+                match data.get(key) {
+                    Some(v) => v.clone(),
+                    None => {
+                        tracing::warn!(
+                            missing_placeholder = key,
+                            available_keys = ?data.keys().collect::<Vec<_>>(),
+                            "template placeholder not found in context — emitting null; \
+                             this is almost certainly a YAML typo"
+                        );
+                        Value::Null
+                    }
                 }
-            }
             } else {
                 // Plain string: return as-is.
                 Value::String(s.clone())
             }
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(|v| apply_template(v, data)).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.iter().map(|v| apply_template(v, data)).collect()),
         Value::Object(obj) => {
             let mut out = serde_json::Map::with_capacity(obj.len());
             for (k, v) in obj {
@@ -123,7 +121,10 @@ mod tests {
     use serde_json::json;
 
     fn data(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     #[test]

@@ -299,8 +299,8 @@ mod tests {
         ];
         for v in variants {
             let s = v.as_str();
-            let parsed = RuntimeEventType::parse(s)
-                .unwrap_or_else(|_| panic!("round-trip failed for {s}"));
+            let parsed =
+                RuntimeEventType::parse(s).unwrap_or_else(|_| panic!("round-trip failed for {s}"));
             assert_eq!(v, parsed, "round-trip mismatch for {s}");
         }
     }
@@ -328,7 +328,12 @@ mod tests {
         .collect();
         assert_eq!(
             journal_only,
-            vec!["token_delta", "stream_snapshot", "cognition_reasoning", "graph_foreach_iteration"]
+            vec![
+                "token_delta",
+                "stream_snapshot",
+                "cognition_reasoning",
+                "graph_foreach_iteration"
+            ]
         );
     }
 
@@ -336,7 +341,10 @@ mod tests {
     fn storage_class_round_trip() {
         assert_eq!(StorageClass::Indexed.as_str(), "indexed");
         assert_eq!(StorageClass::JournalOnly.as_str(), "journal_only");
-        assert_eq!(StorageClass::parse("indexed").unwrap(), StorageClass::Indexed);
+        assert_eq!(
+            StorageClass::parse("indexed").unwrap(),
+            StorageClass::Indexed
+        );
         assert_eq!(
             StorageClass::parse("journal_only").unwrap(),
             StorageClass::JournalOnly

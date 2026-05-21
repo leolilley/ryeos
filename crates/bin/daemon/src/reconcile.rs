@@ -3,8 +3,8 @@ use serde_json::json;
 
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::process::pgid_alive;
-use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_app::state::AppState;
+use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 
 /// Decision the reconciler makes for a single dead thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,11 +133,8 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     let refs_root = state.state_store.refs_root()?;
 
     state.state_store.with_projection(|projection| {
-        let catch_up = ryeos_state::rebuild::catch_up_projection(
-            projection,
-            &cas_root,
-            &refs_root,
-        )?;
+        let catch_up =
+            ryeos_state::rebuild::catch_up_projection(projection, &cas_root, &refs_root)?;
 
         if catch_up.chains_updated > 0 {
             tracing::info!(
@@ -162,7 +159,10 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         return Ok(Vec::new());
     }
 
-    tracing::info!(count = running_threads.len(), "checking non-terminal threads");
+    tracing::info!(
+        count = running_threads.len(),
+        "checking non-terminal threads"
+    );
 
     let mut reconciled = 0usize;
     let mut intents: Vec<ResumeIntent> = Vec::new();
@@ -199,10 +199,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     &thread.thread_id,
                     pgid,
                     &thread.status,
-                    Some((
-                        "resume_counter_io_error",
-                        json!({"error": err.to_string()}),
-                    )),
+                    Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
                     &mut reconciled,
                 );
                 continue;
@@ -213,7 +210,10 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         match decision {
             ResumeDecision::NoResumePolicy => {
                 let extra = if interrupted_spawn {
-                    Some(("interrupted_spawn", json!({"reason": "no pid/pgid attached"})))
+                    Some((
+                        "interrupted_spawn",
+                        json!({"reason": "no pid/pgid attached"}),
+                    ))
                 } else {
                     None
                 };
@@ -290,10 +290,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         &thread.thread_id,
                         pgid,
                         &thread.status,
-                        Some((
-                            "resume_counter_io_error",
-                            json!({"error": err.to_string()}),
-                        )),
+                        Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
                         &mut reconciled,
                     );
                     continue;

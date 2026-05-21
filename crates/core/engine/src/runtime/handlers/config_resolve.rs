@@ -99,11 +99,12 @@ impl RuntimeHandler for ConfigResolveHandler {
     )]
     fn apply(&self, block: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
         let intermediate = &ctx.chain[ctx.current_index];
-        let spec: ConfigResolveSpec =
-            serde_json::from_value(block.clone()).map_err(|e| EngineError::InvalidRuntimeConfig {
+        let spec: ConfigResolveSpec = serde_json::from_value(block.clone()).map_err(|e| {
+            EngineError::InvalidRuntimeConfig {
                 path: intermediate.source_path.display().to_string(),
                 reason: format!("invalid config_resolve: {e}"),
-            })?;
+            }
+        })?;
 
         // Resolve each declared spec into a JSON Value. A list-form
         // returns `{path: resolved}`; a single-form returns the
@@ -163,8 +164,10 @@ impl RuntimeHandler for ConfigResolveHandler {
             // `parse_execution_params` helper here will only fail
             // on a genuine engine bug (e.g. handler ordering
             // regression).
-            let mut allowed: BTreeSet<String> =
-                UNIVERSAL_EXEC_KEYS.iter().map(|s| (*s).to_owned()).collect();
+            let mut allowed: BTreeSet<String> = UNIVERSAL_EXEC_KEYS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
             if let Some(raw) = intermediate.parsed.get("execution_params") {
                 let list = crate::runtime::handlers::execution_params::parse_execution_params(
                     raw,
@@ -311,7 +314,9 @@ fn load_and_verify_config_file(
                         "config file signature verified"
                     );
                 }
-                Err(EngineError::ContentHashMismatch { expected, actual, .. }) => {
+                Err(EngineError::ContentHashMismatch {
+                    expected, actual, ..
+                }) => {
                     // Re-raise with the file path attached.
                     return Err(EngineError::ContentHashMismatch {
                         canonical_ref: path.display().to_string(),
@@ -437,11 +442,7 @@ metadata:
 ";
         let dir = kinds_dir.join("config");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("config.kind-schema.yaml"),
-            sign_yaml(yaml),
-        )
-        .unwrap();
+        fs::write(dir.join("config.kind-schema.yaml"), sign_yaml(yaml)).unwrap();
     }
 
     /// Create `<ai_root>/config/<rel_path>` containing signed YAML.
@@ -625,16 +626,13 @@ metadata:
     #[test]
     fn first_match_returns_project_version() {
         let rig = build_rig();
-        write_signed_config(
-            &rig.system_ai,
-            "alpha.yaml",
-            "winner: system\n",
-        );
+        write_signed_config(&rig.system_ai, "alpha.yaml", "winner: system\n");
         write_signed_config(&rig.user_ai, "alpha.yaml", "winner: user\n");
         write_signed_config(&rig.project_ai, "alpha.yaml", "winner: project\n");
 
         let chain = vec![fake_intermediate("git", json!({}))];
-        let block = json!({ "type": "single", "spec": { "path": "alpha.yaml", "mode": "first_match" } });
+        let block =
+            json!({ "type": "single", "spec": { "path": "alpha.yaml", "mode": "first_match" } });
 
         let params = run_handler(&rig, chain, 0, block, json!({})).unwrap();
         assert_eq!(
@@ -647,11 +645,7 @@ metadata:
     #[test]
     fn tampered_config_file_returns_content_hash_mismatch() {
         let rig = build_rig();
-        let path = write_signed_config(
-            &rig.project_ai,
-            "tamper.yaml",
-            "defaults:\n  timeout: 1\n",
-        );
+        let path = write_signed_config(&rig.project_ai, "tamper.yaml", "defaults:\n  timeout: 1\n");
         // Tamper: append after signing so content_hash no longer
         // matches what's in the signature header.
         let mut tampered = fs::read_to_string(&path).unwrap();
@@ -770,10 +764,7 @@ metadata:
     fn unsigned_config_warns_but_does_not_fail() {
         let rig = build_rig();
         // Write file WITHOUT a signature header.
-        let path = rig
-            .project_ai
-            .join("config")
-            .join("plain.yaml");
+        let path = rig.project_ai.join("config").join("plain.yaml");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "k: v\n").unwrap();
 
@@ -783,5 +774,4 @@ metadata:
         let params = run_handler(&rig, chain, 0, block, json!({})).unwrap();
         assert_eq!(params["resolved_config"]["k"], json!("v"));
     }
-
 }

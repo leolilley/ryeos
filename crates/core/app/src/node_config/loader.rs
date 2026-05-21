@@ -76,8 +76,12 @@ impl<'a> BootstrapLoader<'a> {
                 let content = fs::read_to_string(&path)
                     .with_context(|| format!("failed to read {}", path.display()))?;
 
-                let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-                    .context(format!("node config item at {} has no valid signature line", path.display()))?;
+                let header =
+                    ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+                        .context(format!(
+                            "node config item at {} has no valid signature line",
+                            path.display()
+                        ))?;
 
                 // Verify signature against trust store
                 let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
@@ -102,16 +106,22 @@ impl<'a> BootstrapLoader<'a> {
                     .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
 
                 // Check path = section invariant
-                let declared_section = body
-                    .get("section")
-                    .and_then(|v| v.as_str())
-                    .context(format!("node config item at {} missing 'section' field", path.display()))?;
+                let declared_section =
+                    body.get("section")
+                        .and_then(|v| v.as_str())
+                        .context(format!(
+                            "node config item at {} missing 'section' field",
+                            path.display()
+                        ))?;
 
                 let parent_dir_name = path
                     .parent()
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str())
-                    .context(format!("node config item at {} has no parent directory", path.display()))?;
+                    .context(format!(
+                        "node config item at {} has no parent directory",
+                        path.display()
+                    ))?;
 
                 if declared_section != parent_dir_name {
                     bail!(
@@ -144,10 +154,13 @@ impl<'a> BootstrapLoader<'a> {
                     );
                 }
 
-                let canonical = record
-                    .path
-                    .canonicalize()
-                    .with_context(|| format!("failed to canonicalize bundle '{}' path '{}'", name, record.path.display()))?;
+                let canonical = record.path.canonicalize().with_context(|| {
+                    format!(
+                        "failed to canonicalize bundle '{}' path '{}'",
+                        name,
+                        record.path.display()
+                    )
+                })?;
                 record.path = canonical;
 
                 records.push(record);
@@ -172,9 +185,10 @@ impl<'a> BootstrapLoader<'a> {
         let mut aliases: Vec<AliasRecord> = Vec::new();
 
         for section_name in section_table.section_names() {
-            let section = section_table
-                .get(section_name)
-                .context(format!("section '{}' registered but handler missing", section_name))?;
+            let section = section_table.get(section_name).context(format!(
+                "section '{}' registered but handler missing",
+                section_name
+            ))?;
 
             let scan_roots = match section.source_policy() {
                 SectionSourcePolicy::SystemAndState => {
@@ -198,18 +212,16 @@ impl<'a> BootstrapLoader<'a> {
             };
 
             for root in &scan_roots {
-                let node_section_dir = root
-                    .join(".ai")
-                    .join("node")
-                    .join(section_name);
+                let node_section_dir = root.join(".ai").join("node").join(section_name);
                 if !node_section_dir.is_dir() {
                     continue;
                 }
-                for entry in fs::read_dir(&node_section_dir)
-                    .with_context(|| {
-                        format!("failed to read node config section dir {}", node_section_dir.display())
-                    })?
-                {
+                for entry in fs::read_dir(&node_section_dir).with_context(|| {
+                    format!(
+                        "failed to read node config section dir {}",
+                        node_section_dir.display()
+                    )
+                })? {
                     let entry = entry?;
                     let path = entry.path();
 
@@ -233,11 +245,12 @@ impl<'a> BootstrapLoader<'a> {
                     let content = fs::read_to_string(&path)
                         .with_context(|| format!("failed to read {}", path.display()))?;
 
-                    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-                        .context(format!(
-                            "node config item at {} has no valid signature line",
-                            path.display()
-                        ))?;
+                    let header =
+                        ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+                            .context(format!(
+                                "node config item at {} has no valid signature line",
+                                path.display()
+                            ))?;
 
                     let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
                         &content,
@@ -255,16 +268,17 @@ impl<'a> BootstrapLoader<'a> {
                     }
 
                     let body_str = strip_signature(&content);
-                    let body: Value = serde_yaml::from_str(&body_str)
-                        .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
+                    let body: Value = serde_yaml::from_str(&body_str).with_context(|| {
+                        format!("failed to parse YAML body of {}", path.display())
+                    })?;
 
-                    let declared_section = body
-                        .get("section")
-                        .and_then(|v| v.as_str())
-                        .context(format!(
-                            "node config item at {} missing 'section' field",
-                            path.display()
-                        ))?;
+                    let declared_section =
+                        body.get("section")
+                            .and_then(|v| v.as_str())
+                            .context(format!(
+                                "node config item at {} missing 'section' field",
+                                path.display()
+                            ))?;
 
                     let parent_dir_name = path
                         .parent()
@@ -282,9 +296,9 @@ impl<'a> BootstrapLoader<'a> {
                     }
 
                     if section_name == "bundles" {
-                        let record = section
-                            .parse(name, &body)
-                            .with_context(|| format!("failed to parse bundle record {}", path.display()))?;
+                        let record = section.parse(name, &body).with_context(|| {
+                            format!("failed to parse bundle record {}", path.display())
+                        })?;
                         let mut record: BundleRecord = record
                             .as_any()
                             .downcast_ref::<BundleRecord>()
@@ -309,9 +323,9 @@ impl<'a> BootstrapLoader<'a> {
                         record.path = canonical;
                         loaded_bundles.push(record);
                     } else if section_name == "routes" {
-                        let record = section
-                            .parse(name, &body)
-                            .with_context(|| format!("failed to parse route record {}", path.display()))?;
+                        let record = section.parse(name, &body).with_context(|| {
+                            format!("failed to parse route record {}", path.display())
+                        })?;
                         let mut record: RawRouteSpec = record
                             .as_any()
                             .downcast_ref::<RawRouteSpec>()
@@ -320,9 +334,9 @@ impl<'a> BootstrapLoader<'a> {
                         record.source_file = path.clone();
                         routes.push(record);
                     } else if section_name == "verbs" {
-                        let record = section
-                            .parse(name, &body)
-                            .with_context(|| format!("failed to parse verb record {}", path.display()))?;
+                        let record = section.parse(name, &body).with_context(|| {
+                            format!("failed to parse verb record {}", path.display())
+                        })?;
                         let mut record: VerbRecord = record
                             .as_any()
                             .downcast_ref::<VerbRecord>()
@@ -331,9 +345,9 @@ impl<'a> BootstrapLoader<'a> {
                         record.source_file = path.clone();
                         verbs.push(record);
                     } else if section_name == "aliases" {
-                        let record = section
-                            .parse(name, &body)
-                            .with_context(|| format!("failed to parse alias record {}", path.display()))?;
+                        let record = section.parse(name, &body).with_context(|| {
+                            format!("failed to parse alias record {}", path.display())
+                        })?;
                         let mut record: AliasRecord = record
                             .as_any()
                             .downcast_ref::<AliasRecord>()
@@ -425,7 +439,8 @@ mod tests {
 
     #[test]
     fn strip_signature_preserves_body() {
-        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nsection: bundles\npath: /foo/bar\n";
+        let content =
+            "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nsection: bundles\npath: /foo/bar\n";
         let stripped = strip_signature(content);
         let parsed: Value = serde_yaml::from_str(&stripped).unwrap();
         assert_eq!(parsed["section"], "bundles");
@@ -443,8 +458,16 @@ mod tests {
     #[test]
     fn check_bundle_collisions_different_names_same_canonical_path_errors() {
         let records = vec![
-            make_record("alpha", "/var/lib/ryeos/bundles/core", "/etc/ryeos/.ai/node/bundles/alpha.yaml"),
-            make_record("beta", "/var/lib/ryeos/bundles/core", "/etc/ryeos/.ai/node/bundles/beta.yaml"),
+            make_record(
+                "alpha",
+                "/var/lib/ryeos/bundles/core",
+                "/etc/ryeos/.ai/node/bundles/alpha.yaml",
+            ),
+            make_record(
+                "beta",
+                "/var/lib/ryeos/bundles/core",
+                "/etc/ryeos/.ai/node/bundles/beta.yaml",
+            ),
         ];
         let err = check_bundle_collisions(&records).unwrap_err();
         let msg = format!("{}", err);
@@ -457,8 +480,16 @@ mod tests {
     #[test]
     fn check_bundle_collisions_same_name_errors() {
         let records = vec![
-            make_record("core", "/var/lib/ryeos/bundles/core-a", "/etc/ryeos/.ai/node/bundles/core.yaml"),
-            make_record("core", "/var/lib/ryeos/bundles/core-b", "/var/lib/ryeos/.ai/node/bundles/core.yaml"),
+            make_record(
+                "core",
+                "/var/lib/ryeos/bundles/core-a",
+                "/etc/ryeos/.ai/node/bundles/core.yaml",
+            ),
+            make_record(
+                "core",
+                "/var/lib/ryeos/bundles/core-b",
+                "/var/lib/ryeos/.ai/node/bundles/core.yaml",
+            ),
         ];
         let err = check_bundle_collisions(&records).unwrap_err();
         let msg = format!("{}", err);
@@ -469,8 +500,16 @@ mod tests {
     #[test]
     fn check_bundle_collisions_different_names_different_paths_ok() {
         let records = vec![
-            make_record("core", "/var/lib/ryeos/bundles/core", "/etc/ryeos/.ai/node/bundles/core.yaml"),
-            make_record("standard", "/var/lib/ryeos/bundles/standard", "/etc/ryeos/.ai/node/bundles/standard.yaml"),
+            make_record(
+                "core",
+                "/var/lib/ryeos/bundles/core",
+                "/etc/ryeos/.ai/node/bundles/core.yaml",
+            ),
+            make_record(
+                "standard",
+                "/var/lib/ryeos/bundles/standard",
+                "/etc/ryeos/.ai/node/bundles/standard.yaml",
+            ),
         ];
         check_bundle_collisions(&records).unwrap();
     }

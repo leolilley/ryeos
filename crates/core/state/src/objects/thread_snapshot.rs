@@ -72,7 +72,12 @@ impl ThreadStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Killed | Self::TimedOut | Self::Continued
+            Self::Completed
+                | Self::Failed
+                | Self::Cancelled
+                | Self::Killed
+                | Self::TimedOut
+                | Self::Continued
         )
     }
 }
@@ -190,8 +195,7 @@ fn serialize_btreemap<S: serde::Serializer>(
 fn deserialize_btreemap<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<BTreeMap<String, String>, D::Error> {
-    let map: std::collections::HashMap<String, String> =
-        serde::Deserialize::deserialize(d)?;
+    let map: std::collections::HashMap<String, String> = serde::Deserialize::deserialize(d)?;
     Ok(map.into_iter().collect())
 }
 
@@ -465,7 +469,11 @@ mod tests {
     #[test]
     fn snapshot_builder_defaults() {
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .created_at("2026-04-21T12:00:00Z".to_string())
         .updated_at("2026-04-21T12:00:00Z".to_string())
@@ -499,7 +507,11 @@ mod tests {
         facets.insert("cost.tokens".to_string(), "1500".to_string());
 
         let snap = ThreadSnapshotBuilder::new(
-            "T-child", "T-root", "agent", "directive:foo/bar", "native:directive-runtime",
+            "T-child",
+            "T-root",
+            "agent",
+            "directive:foo/bar",
+            "native:directive-runtime",
         )
         .status(ThreadStatus::Running)
         .launch_mode("detached")
@@ -528,7 +540,11 @@ mod tests {
     #[test]
     fn snapshot_validation_passes() {
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .created_at("2026-04-21T12:00:00Z".to_string())
         .updated_at("2026-04-21T12:00:00Z".to_string())
@@ -539,7 +555,11 @@ mod tests {
     #[test]
     fn snapshot_validation_rejects_bad_kind() {
         let mut snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .created_at("2026-04-21T12:00:00Z".to_string())
         .updated_at("2026-04-21T12:00:00Z".to_string())
@@ -551,7 +571,11 @@ mod tests {
     #[test]
     fn snapshot_validation_rejects_invalid_launch_mode() {
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .launch_mode("invalid_mode")
         .created_at("2026-04-21T12:00:00Z".to_string())
@@ -563,7 +587,11 @@ mod tests {
     #[test]
     fn snapshot_validation_rejects_invalid_event_hash() {
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .last_event_hash(Some("bad-hash".to_string()))
         .created_at("2026-04-21T12:00:00Z".to_string())
@@ -575,7 +603,11 @@ mod tests {
     #[test]
     fn snapshot_serialization_roundtrip() {
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .status(ThreadStatus::Failed)
         .error(Some(serde_json::json!({"message": "oom"})))
@@ -597,7 +629,11 @@ mod tests {
         facets.insert("a_key".to_string(), "1".to_string());
 
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .facets(facets)
         .created_at("2026-04-21T12:00:00Z".to_string())
@@ -679,7 +715,11 @@ mod tests {
     #[test]
     fn snapshot_detached_launch_mode_validates() {
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .launch_mode("detached")
         .created_at("2026-04-21T12:00:00Z".to_string())
@@ -691,7 +731,11 @@ mod tests {
     #[test]
     fn snapshot_with_result_and_error_serializes() {
         let snap = ThreadSnapshotBuilder::new(
-            "T-1", "T-root", "agent", "directive:test", "native:directive-runtime",
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
         )
         .status(ThreadStatus::Completed)
         .result(Some(serde_json::json!({"answer": 42})))

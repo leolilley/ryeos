@@ -17,16 +17,10 @@ pub const BLOCKED_NAMES: &[&str] = &[
     "DYLD_INSERT_LIBRARIES",
 ];
 
-pub fn validate_decrypted_keys(
-    map: &HashMap<String, String>,
-    store_path: &Path,
-) -> Result<()> {
+pub fn validate_decrypted_keys(map: &HashMap<String, String>, store_path: &Path) -> Result<()> {
     for key in map.keys() {
         if key.is_empty() {
-            bail!(
-                "vault: empty key in sealed store {}",
-                store_path.display()
-            );
+            bail!("vault: empty key in sealed store {}", store_path.display());
         }
         if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
             bail!(
@@ -50,14 +44,10 @@ pub fn validate_key_name(key: &str) -> Result<()> {
         bail!("vault: key name must not be empty");
     }
     if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-        bail!(
-            "vault: invalid key name `{key}` (must match [A-Za-z0-9_]+)"
-        );
+        bail!("vault: invalid key name `{key}` (must match [A-Za-z0-9_]+)");
     }
     if BLOCKED_NAMES.contains(&key) {
-        bail!(
-            "vault: key name `{key}` is on the blocked list"
-        );
+        bail!("vault: key name `{key}` is on the blocked list");
     }
     Ok(())
 }

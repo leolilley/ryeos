@@ -70,10 +70,7 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     }
     let ai_dir = opts.bundle_source.join(ryeos_engine::AI_DIR);
     if !ai_dir.is_dir() {
-        bail!(
-            "bundle_source has no .ai/ at {}",
-            ai_dir.display()
-        );
+        bail!("bundle_source has no .ai/ at {}", ai_dir.display());
     }
 
     // ── Phase 0: clean derived artifacts from prior publish runs ──
@@ -98,12 +95,9 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     // ── Phase 3: sign every other signable item ──
     // CAS now exists, HandlerRegistry can resolve binaries, parser
     // dispatcher works, validation runs, items get signed.
-    let sign_report = sign_bundle::sign_bundle_items(
-        &opts.bundle_source,
-        &opts.registry_root,
-        &opts.signing_key,
-    )
-    .context("sign-items phase failed")?;
+    let sign_report =
+        sign_bundle::sign_bundle_items(&opts.bundle_source, &opts.registry_root, &opts.signing_key)
+            .context("sign-items phase failed")?;
     if !sign_report.is_total_success() {
         let mut msg = format!(
             "sign-items reported {} failure(s):\n",
@@ -124,12 +118,9 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     // from actual kind schemas on disk, writes .ai/manifest.yaml with a
     // signed envelope. Skipped silently when no source manifest exists
     // (manifests are optional for third-party bundles, required for official).
-    let manifest_generated = generate_and_sign_manifest(
-        &ai_dir,
-        &opts.bundle_source,
-        &opts.signing_key,
-    )
-    .context("manifest generation phase failed")?;
+    let manifest_generated =
+        generate_and_sign_manifest(&ai_dir, &opts.bundle_source, &opts.signing_key)
+            .context("manifest generation phase failed")?;
 
     // ── Phase 5: emit publisher trust doc ──
     let publisher_trust_doc = if opts.emit_trust_doc {
@@ -171,7 +162,11 @@ fn bootstrap_sign_kinds_and_parsers(
     let mut kind_schemas = Vec::new();
     let mut parsers = Vec::new();
 
-    let kinds_dir = source.join(ryeos_engine::AI_DIR).join("node").join("engine").join("kinds");
+    let kinds_dir = source
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("engine")
+        .join("kinds");
     if kinds_dir.is_dir() {
         let mut files = Vec::new();
         collect_kind_schema_files(&kinds_dir, &mut files);
@@ -214,8 +209,7 @@ fn sign_raw_in_place(
     prefix: &str,
     suffix: Option<&str>,
 ) -> Result<()> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let stripped = lillux::signature::strip_signature_lines(&content);
     let signed = lillux::signature::sign_content(&stripped, signing_key, prefix, suffix);
     let tmp = path.with_extension(format!("publish.tmp.{}", std::process::id()));
@@ -229,15 +223,16 @@ fn sign_raw_in_place(
 /// Ensures readers never see a partially-written file.
 fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp, content.as_bytes())
-        .with_context(|| format!("write tmp {}", tmp.display()))?;
+    fs::write(&tmp, content.as_bytes()).with_context(|| format!("write tmp {}", tmp.display()))?;
     fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
 fn collect_kind_schema_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -253,7 +248,9 @@ fn collect_kind_schema_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn collect_yaml_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -292,8 +289,7 @@ fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
     // Ref pointers
     let refs_dir = ai_dir.join("refs");
     if refs_dir.is_dir() {
-        fs::remove_dir_all(&refs_dir)
-            .with_context(|| format!("remove {}", refs_dir.display()))?;
+        fs::remove_dir_all(&refs_dir).with_context(|| format!("remove {}", refs_dir.display()))?;
     }
 
     // Generated bundle manifest (from prior publish run)
@@ -313,15 +309,14 @@ fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
 }
 
 fn clean_bin_sidecars(bin_root: &Path) -> Result<()> {
-    let entries = fs::read_dir(bin_root)
-        .with_context(|| format!("read {}", bin_root.display()))?;
+    let entries = fs::read_dir(bin_root).with_context(|| format!("read {}", bin_root.display()))?;
     for entry in entries.flatten() {
         let triple_dir = entry.path();
         if !triple_dir.is_dir() {
             continue;
         }
-        let files = fs::read_dir(&triple_dir)
-            .with_context(|| format!("read {}", triple_dir.display()))?;
+        let files =
+            fs::read_dir(&triple_dir).with_context(|| format!("read {}", triple_dir.display()))?;
         for file in files.flatten() {
             let p = file.path();
             if !p.is_file() {
@@ -329,8 +324,7 @@ fn clean_bin_sidecars(bin_root: &Path) -> Result<()> {
             }
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name == "MANIFEST.json" || name.ends_with(".item_source.json") {
-                fs::remove_file(&p)
-                    .with_context(|| format!("remove {}", p.display()))?;
+                fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
             }
         }
     }
@@ -345,8 +339,7 @@ fn strip_all_signatures(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
-    let entries = fs::read_dir(dir)
-        .with_context(|| format!("read {}", dir.display()))?;
+    let entries = fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -363,8 +356,7 @@ fn strip_all_signatures(dir: &Path) -> Result<()> {
             let stripped = lillux::signature::strip_signature_lines(&content);
             if stripped != content {
                 let tmp = p.with_extension(format!("strip.tmp.{}", std::process::id()));
-                fs::write(&tmp, &stripped)
-                    .with_context(|| format!("write {}", tmp.display()))?;
+                fs::write(&tmp, &stripped).with_context(|| format!("write {}", tmp.display()))?;
                 fs::rename(&tmp, &p)
                     .with_context(|| format!("rename {} -> {}", tmp.display(), p.display()))?;
             }
@@ -408,11 +400,10 @@ fn generate_and_sign_manifest(
         .with_context(|| format!("parse manifest source {}", source_path.display()))?;
 
     // Materialize: validates identity, derives provides_kinds from disk.
-    let manifest = materialize_manifest(src, ai_dir, bundle_name)
-        .context("materialize bundle manifest")?;
+    let manifest =
+        materialize_manifest(src, ai_dir, bundle_name).context("materialize bundle manifest")?;
 
-    let body = serde_yaml::to_string(&manifest)
-        .context("serialize bundle manifest")?;
+    let body = serde_yaml::to_string(&manifest).context("serialize bundle manifest")?;
     let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
 
     let target = ai_dir.join("manifest.yaml");
@@ -455,8 +446,7 @@ fn write_publisher_trust_doc(
     );
     let target = bundle_source.join("PUBLISHER_TRUST.toml");
     let tmp = target.with_extension("tmp");
-    fs::write(&tmp, body.as_bytes())
-        .with_context(|| format!("write {}", tmp.display()))?;
+    fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &target)
         .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
     Ok(target)

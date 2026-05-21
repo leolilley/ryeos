@@ -9,9 +9,7 @@
 use anyhow::{bail, Context};
 use serde_json::Value;
 
-use crate::node_config::{
-    BundleRecord, NodeConfigSection, SectionRecord, SectionSourcePolicy,
-};
+use crate::node_config::{BundleRecord, NodeConfigSection, SectionRecord, SectionSourcePolicy};
 
 /// Section handler for `bundles` node-config items.
 pub struct BundleSection;
@@ -30,11 +28,7 @@ impl NodeConfigSection for BundleSection {
 
         let path_buf = std::path::PathBuf::from(path);
         if !path_buf.is_absolute() {
-            bail!(
-                "bundle '{}' path must be absolute, got: {}",
-                name,
-                path
-            );
+            bail!("bundle '{}' path must be absolute, got: {}", name, path);
         }
 
         let record = BundleRecord {

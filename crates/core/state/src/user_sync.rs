@@ -176,23 +176,19 @@ mod tests {
     #[test]
     fn rejects_absolute_path() {
         let m = manifest_with(&["/etc/passwd"]);
-        assert!(
-            validate_user_manifest_paths(&m)
-                .unwrap_err()
-                .to_string()
-                .contains("absolute path")
-        );
+        assert!(validate_user_manifest_paths(&m)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute path"));
     }
 
     #[test]
     fn rejects_dotdot_component() {
         let m = manifest_with(&["knowledge/../../etc/passwd"]);
-        assert!(
-            validate_user_manifest_paths(&m)
-                .unwrap_err()
-                .to_string()
-                .contains("'..'")
-        );
+        assert!(validate_user_manifest_paths(&m)
+            .unwrap_err()
+            .to_string()
+            .contains("'..'"));
     }
 
     #[test]
@@ -204,23 +200,19 @@ mod tests {
     #[test]
     fn rejects_lookalike_trust_prefix() {
         let m = manifest_with(&["config/keys/trustedness/abc.toml"]);
-        assert!(
-            validate_user_manifest_paths(&m)
-                .unwrap_err()
-                .to_string()
-                .contains("outside allowed")
-        );
+        assert!(validate_user_manifest_paths(&m)
+            .unwrap_err()
+            .to_string()
+            .contains("outside allowed"));
     }
 
     #[test]
     fn rejects_disallowed_signing_keys() {
         let m = manifest_with(&["config/keys/signing/private_key.pem"]);
-        assert!(
-            validate_user_manifest_paths(&m)
-                .unwrap_err()
-                .to_string()
-                .contains("outside allowed")
-        );
+        assert!(validate_user_manifest_paths(&m)
+            .unwrap_err()
+            .to_string()
+            .contains("outside allowed"));
     }
 
     #[test]

@@ -49,13 +49,12 @@ pub fn read_actual_bind(daemon_json_path: &Path) -> anyhow::Result<SocketAddr> {
         .with_context(|| format!("read daemon.json at {}", daemon_json_path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&body)
         .with_context(|| format!("parse daemon.json at {}", daemon_json_path.display()))?;
-    let s = v
-        .get("bind")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow::anyhow!(
+    let s = v.get("bind").and_then(|x| x.as_str()).ok_or_else(|| {
+        anyhow::anyhow!(
             "daemon.json at {} missing 'bind' field",
             daemon_json_path.display()
-        ))?;
+        )
+    })?;
     s.parse()
         .with_context(|| format!("parse 'bind' value '{s}' from daemon.json"))
 }
@@ -204,9 +203,9 @@ fn read_signature_timestamp(path: &Path) -> Option<std::time::SystemTime> {
     // of the remainder and reconstruct the RFC3339 string.
     let body = line.strip_prefix("# ryeos:signed:")?;
     let mut parts = body.splitn(4, ':');
-    let date_h = parts.next()?;  // "2026-05-07T08"
-    let mi = parts.next()?;      // "09"
-    let se_z = parts.next()?;    // "10Z"
+    let date_h = parts.next()?; // "2026-05-07T08"
+    let mi = parts.next()?; // "09"
+    let se_z = parts.next()?; // "10Z"
     let ts = format!("{date_h}:{mi}:{se_z}");
     rfc3339_to_systemtime(&ts)
 }
@@ -278,7 +277,9 @@ fn bundle_inputs_newer_than(root: &Path, published: std::time::SystemTime) -> bo
 }
 
 fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
-    let Ok(entries) = std::fs::read_dir(path) else { return false; };
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
@@ -323,8 +324,8 @@ fn fixture_trusted_signer_dir() -> PathBuf {
 pub fn populate_user_space(user_space: &Path) {
     let trusted_dst = user_space.join(".ai/config/keys/trusted");
     std::fs::create_dir_all(&trusted_dst).expect("create user trusted keys dir");
-    for entry in std::fs::read_dir(fixture_trusted_signer_dir())
-        .expect("read fixture trusted_signers")
+    for entry in
+        std::fs::read_dir(fixture_trusted_signer_dir()).expect("read fixture trusted_signers")
     {
         let entry = entry.expect("trusted_signer entry");
         let name = entry.file_name();
@@ -381,10 +382,7 @@ impl DaemonHarness {
     /// idempotently when key artefacts are missing). For tests that need
     /// deterministic keys and pre-registered bundles, prefer
     /// [`start_fast`] or [`start_fast_with`].
-    pub async fn start_with_pre_init<S, F>(
-        pre_init: S,
-        tweak: F,
-    ) -> anyhow::Result<Self>
+    pub async fn start_with_pre_init<S, F>(pre_init: S, tweak: F) -> anyhow::Result<Self>
     where
         S: FnOnce(&Path, &Path) -> anyhow::Result<()>,
         F: FnOnce(&mut Command),
@@ -409,9 +407,12 @@ impl DaemonHarness {
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
 
         let mut cmd = Command::new(ryeosd_binary());
-        cmd.arg("--system-space-dir").arg(&system_space_dir)
-            .arg("--bind").arg(bind.to_string())
-            .arg("--uds-path").arg(&uds_path)
+        cmd.arg("--system-space-dir")
+            .arg(&system_space_dir)
+            .arg("--bind")
+            .arg(bind.to_string())
+            .arg("--uds-path")
+            .arg(&uds_path)
             .env("HOSTNAME", "testhost")
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
@@ -427,7 +428,7 @@ impl DaemonHarness {
                             .join(format!("daemon-{harness_id}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
-                    .unwrap_or_else(Stdio::piped)
+                    .unwrap_or_else(Stdio::piped),
             )
             .kill_on_drop(true);
 
@@ -473,7 +474,13 @@ impl DaemonHarness {
         let url = format!("http://{actual_bind}/health");
         let connect_deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if client.get(&url).timeout(Duration::from_millis(200)).send().await.is_ok() {
+            if client
+                .get(&url)
+                .timeout(Duration::from_millis(200))
+                .send()
+                .await
+                .is_ok()
+            {
                 break;
             }
             if Instant::now() > connect_deadline {
@@ -507,7 +514,7 @@ impl DaemonHarness {
     /// [`fast_fixture::FastFixture`] keys so callers can sign their own
     /// items (directives, routes, providers, …) with
     /// `fixture.publisher`.
-     pub async fn start_fast() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
+    pub async fn start_fast() -> anyhow::Result<(Self, fast_fixture::FastFixture)> {
         Self::start_fast_with(
             |state_path, _user_space, fixture| {
                 fast_fixture::register_standard_bundle(state_path, fixture)
@@ -550,9 +557,7 @@ impl DaemonHarness {
         plant(&state_path, user_space.path(), &fixture)?;
 
         // Always authorize the user key so `post_execute` can sign requests.
-        fast_fixture::write_authorized_key_signed_by(
-            &state_path, &fixture.user, &fixture.node,
-        )?;
+        fast_fixture::write_authorized_key_signed_by(&state_path, &fixture.user, &fixture.node)?;
 
         // Bind `:0` and read the real address from daemon.json (no
         // cross-process port-pick race).
@@ -563,9 +568,12 @@ impl DaemonHarness {
 
         let mut cmd = Command::new(ryeosd_binary());
         // NOTE: NO . The fast fixture is the init.
-        cmd.arg("--system-space-dir").arg(&state_path)
-            .arg("--bind").arg(bind.to_string())
-            .arg("--uds-path").arg(&uds_path)
+        cmd.arg("--system-space-dir")
+            .arg(&state_path)
+            .arg("--bind")
+            .arg(bind.to_string())
+            .arg("--uds-path")
+            .arg(&uds_path)
             .env("HOSTNAME", "testhost")
             .env("USER_SPACE", user_space.path())
             .env("HOME", user_space.path())
@@ -577,7 +585,7 @@ impl DaemonHarness {
                             .join(format!("daemon-{harness_id}.stderr.log"));
                         std::fs::File::create(&path).ok().map(Stdio::from)
                     })
-                    .unwrap_or_else(Stdio::piped)
+                    .unwrap_or_else(Stdio::piped),
             )
             .kill_on_drop(true);
 
@@ -618,7 +626,13 @@ impl DaemonHarness {
         let url = format!("http://{actual_bind}/health");
         let connect_deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if client.get(&url).timeout(Duration::from_millis(200)).send().await.is_ok() {
+            if client
+                .get(&url)
+                .timeout(Duration::from_millis(200))
+                .send()
+                .await
+                .is_ok()
+            {
                 break;
             }
             if Instant::now() > connect_deadline {
@@ -666,7 +680,8 @@ impl DaemonHarness {
             .body(body_bytes.clone());
 
         if let (Some(user_key), Some(node_key)) = (&self.user_key, &self.node_key) {
-            let headers = build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute", &body_bytes);
+            let headers =
+                build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute", &body_bytes);
             for (k, v) in headers {
                 req = req.header(k, v);
             }
@@ -732,10 +747,7 @@ impl DaemonHarness {
     /// automatically at startup and picks up any orphaned threads.
     ///
     /// **No ``** is passed — state is already initialized.
-    pub async fn respawn_with<F: FnOnce(&mut Command)>(
-        &mut self,
-        tweak: F,
-    ) -> anyhow::Result<()> {
+    pub async fn respawn_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
         // Bind `:0` and read the new actual address back from daemon.json.
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let harness_id = next_harness_id();
@@ -830,10 +842,7 @@ impl DaemonHarness {
     /// For tests that need to kill orphaned subprocesses between
     /// daemon death and respawn, use [`kill_daemon`] + [`respawn_with`]
     /// instead.
-    pub async fn restart_with<F: FnOnce(&mut Command)>(
-        &mut self,
-        tweak: F,
-    ) -> anyhow::Result<()> {
+    pub async fn restart_with<F: FnOnce(&mut Command)>(&mut self, tweak: F) -> anyhow::Result<()> {
         // 1. SIGKILL the current child.
         self.child
             .start_kill()
@@ -984,7 +993,8 @@ impl DaemonHarness {
                     Err(_) => break,
                 }
             }
-        }).await;
+        })
+        .await;
         String::from_utf8_lossy(&buf).into_owned()
     }
 }
@@ -1038,15 +1048,10 @@ impl StandaloneHarness {
     pub fn new_initialized() -> anyhow::Result<Self> {
         let user_space = tempfile::tempdir()?;
         let (core_tmp, system_space_dir) = copy_core_to_temp();
-        let fixture = fast_fixture::populate_initialized_state(
-            &system_space_dir, user_space.path(),
-        )?;
-        fast_fixture::register_core_bundle_at_state(
-            &system_space_dir, &fixture,
-        )?;
-        fast_fixture::register_standard_bundle(
-            &system_space_dir, &fixture,
-        )?;
+        let fixture =
+            fast_fixture::populate_initialized_state(&system_space_dir, user_space.path())?;
+        fast_fixture::register_core_bundle_at_state(&system_space_dir, &fixture)?;
+        fast_fixture::register_standard_bundle(&system_space_dir, &fixture)?;
 
         // Install core under .ai/bundles/core/ so preflight's
         // discover_installed_bundle_roots finds it. Copy from the
@@ -1076,8 +1081,10 @@ impl StandaloneHarness {
         params_json: Option<&str>,
     ) -> anyhow::Result<std::process::Output> {
         let mut cmd = tokio::process::Command::new(ryeosd_binary());
-        cmd.arg("--system-space-dir").arg(&self.system_space_dir)
-            .arg("--uds-path").arg(&self.uds_path)
+        cmd.arg("--system-space-dir")
+            .arg(&self.system_space_dir)
+            .arg("--uds-path")
+            .arg(&self.uds_path)
             .arg("run-service")
             .arg(service_ref);
         if let Some(p) = params_json {
@@ -1112,7 +1119,7 @@ impl StandaloneHarness {
 ///
 /// The tempdirs are returned so callers can keep them alive for follow-up
 /// inspection or for a subsequent harness.
- pub async fn run_service_standalone(
+pub async fn run_service_standalone(
     state_dir: TempDir,
     user_space: TempDir,
     service_ref: &str,
@@ -1125,8 +1132,10 @@ impl StandaloneHarness {
     fast_fixture::register_standard_bundle(&state_path, &fixture)?;
 
     let mut cmd = Command::new(ryeosd_binary());
-    cmd.arg("--system-space-dir").arg(&state_path)
-        .arg("--uds-path").arg(state_dir.path().join("ryeosd.sock"))
+    cmd.arg("--system-space-dir")
+        .arg(&state_path)
+        .arg("--uds-path")
+        .arg(state_dir.path().join("ryeosd.sock"))
         .arg("run-service")
         .arg(service_ref);
     if let Some(p) = params_json {
@@ -1151,7 +1160,11 @@ impl StandaloneHarness {
     // core_tmp cleaned up here — child has exited so files are closed.
     let _ = core_tmp;
     Ok((
-        std::process::Output { status, stdout: stdout_buf, stderr: stderr_buf },
+        std::process::Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        },
         state_dir,
         user_space,
     ))

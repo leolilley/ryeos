@@ -40,12 +40,12 @@ pub async fn post_json(
             detail: format!("failed to build request: {e}"),
         })?;
 
-    let stream = tokio::net::TcpStream::connect(&bind)
-        .await
-        .map_err(|e| CliTransportError::Unreachable {
+    let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+        CliTransportError::Unreachable {
             bind: bind.clone(),
             detail: e.to_string(),
-        })?;
+        }
+    })?;
 
     let io = hyper_util::rt::TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
@@ -81,11 +81,10 @@ pub async fn post_json(
         .into());
     }
 
-    let value: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        CliTransportError::BodyDecode {
+    let value: Value =
+        serde_json::from_slice(&body_bytes).map_err(|e| CliTransportError::BodyDecode {
             detail: format!("{e}"),
-        }
-    })?;
+        })?;
 
     Ok(value)
 }
@@ -107,7 +106,9 @@ async fn collect_body(body: Incoming) -> Result<Vec<u8>, CliTransportError> {
 /// Resolve the daemon URL. Priority:
 ///   1. RYEOSD_URL env var
 ///   2. daemon.json bind discovery (existing path)
-pub async fn resolve_daemon_url(system_space_dir: &std::path::Path) -> Result<String, CliTransportError> {
+pub async fn resolve_daemon_url(
+    system_space_dir: &std::path::Path,
+) -> Result<String, CliTransportError> {
     if let Ok(url) = std::env::var("RYEOSD_URL") {
         return Ok(url.trim_end_matches('/').to_string());
     }
@@ -116,14 +117,16 @@ pub async fn resolve_daemon_url(system_space_dir: &std::path::Path) -> Result<St
 }
 
 /// Read `daemon.json` from the system space dir and return the bind address.
-pub async fn read_daemon_bind(system_space_dir: &std::path::Path) -> Result<String, CliTransportError> {
+pub async fn read_daemon_bind(
+    system_space_dir: &std::path::Path,
+) -> Result<String, CliTransportError> {
     let path = system_space_dir.join("daemon.json");
-    let raw = std::fs::read_to_string(&path).map_err(|_| CliTransportError::DaemonJsonMissing {
-        path: path.clone(),
-    })?;
-    let v: Value = serde_json::from_str(&raw).map_err(|e| CliTransportError::DaemonJsonMalformed {
-        detail: e.to_string(),
-    })?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|_| CliTransportError::DaemonJsonMissing { path: path.clone() })?;
+    let v: Value =
+        serde_json::from_str(&raw).map_err(|e| CliTransportError::DaemonJsonMalformed {
+            detail: e.to_string(),
+        })?;
     v.get("bind")
         .and_then(|x| x.as_str())
         .map(String::from)

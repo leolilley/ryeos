@@ -43,7 +43,9 @@ pub fn write_locator(
 ) -> anyhow::Result<()> {
     locator.validate()?;
 
-    let path = locators_root.join("threads").join(format!("{}.json", thread_id));
+    let path = locators_root
+        .join("threads")
+        .join(format!("{}.json", thread_id));
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("failed to create locator directory")?;
@@ -58,8 +60,13 @@ pub fn write_locator(
 /// Read a thread locator hint from a file.
 ///
 /// Returns None if the locator doesn't exist.
-pub fn read_locator(locators_root: &Path, thread_id: &str) -> anyhow::Result<Option<ThreadLocator>> {
-    let path = locators_root.join("threads").join(format!("{}.json", thread_id));
+pub fn read_locator(
+    locators_root: &Path,
+    thread_id: &str,
+) -> anyhow::Result<Option<ThreadLocator>> {
+    let path = locators_root
+        .join("threads")
+        .join(format!("{}.json", thread_id));
 
     if !path.exists() {
         return Ok(None);
@@ -75,7 +82,9 @@ pub fn read_locator(locators_root: &Path, thread_id: &str) -> anyhow::Result<Opt
 
 /// Delete a thread locator hint.
 pub fn delete_locator(locators_root: &Path, thread_id: &str) -> anyhow::Result<()> {
-    let path = locators_root.join("threads").join(format!("{}.json", thread_id));
+    let path = locators_root
+        .join("threads")
+        .join(format!("{}.json", thread_id));
 
     if path.exists() {
         fs::remove_file(&path).context("failed to delete locator")?;
@@ -108,9 +117,7 @@ mod tests {
         let locator = ThreadLocator::new("T-root".to_string());
         write_locator(locators_root, "T-abc123", &locator).unwrap();
 
-        let read_back = read_locator(locators_root, "T-abc123")
-            .unwrap()
-            .unwrap();
+        let read_back = read_locator(locators_root, "T-abc123").unwrap().unwrap();
         assert_eq!(read_back.chain_root_id, "T-root");
     }
 

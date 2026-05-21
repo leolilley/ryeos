@@ -86,12 +86,9 @@ fn signing_key_path() -> PathBuf {
 /// but the directory walker has to know not to recurse into linked
 /// directories or copy them as symlinks themselves.
 fn copy_dir_dereference(src: &Path, dst: &Path, src_root: &Path) -> Result<()> {
-    fs::create_dir_all(dst)
-        .with_context(|| format!("create dir {}", dst.display()))?;
+    fs::create_dir_all(dst).with_context(|| format!("create dir {}", dst.display()))?;
 
-    for entry in fs::read_dir(src)
-        .with_context(|| format!("read_dir {}", src.display()))?
-    {
+    for entry in fs::read_dir(src).with_context(|| format!("read_dir {}", src.display()))? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
@@ -106,8 +103,8 @@ fn copy_dir_dereference(src: &Path, dst: &Path, src_root: &Path) -> Result<()> {
         // want to dereference symlinks pointing at files (which is the
         // ryeos-core-tools case) into real files in the copy. Symlinked
         // directories are not expected in the bundle layout.
-        let meta = fs::metadata(&src_path)
-            .with_context(|| format!("metadata {}", src_path.display()))?;
+        let meta =
+            fs::metadata(&src_path).with_context(|| format!("metadata {}", src_path.display()))?;
         if meta.is_dir() {
             copy_dir_dereference(&src_path, &dst_path, src_root)?;
         } else if meta.is_file() {

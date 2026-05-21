@@ -19,10 +19,7 @@ impl ResultGuard {
         let hash = sha256_hex(&truncated);
 
         if self.seen_hashes.contains(&hash) {
-            return format!(
-                "[duplicate result omitted — hash {}]",
-                &hash[..16]
-            );
+            return format!("[duplicate result omitted — hash {}]", &hash[..16]);
         }
 
         self.seen_hashes.insert(hash);

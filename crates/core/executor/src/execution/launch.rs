@@ -6,15 +6,15 @@ use rand::Rng;
 use serde_json::{json, Value};
 
 use super::arch_check;
-use ryeos_app::callback_token::compute_ttl;
 use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
 };
 use super::limits::{compute_effective_limits, load_limits_config};
 use super::thread_meta::ThreadMeta;
-use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
+use ryeos_app::callback_token::compute_ttl;
 use ryeos_app::state::AppState;
+use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 
 /// Typed error for native executor materialization failures.
 ///
@@ -25,25 +25,41 @@ use ryeos_app::state::AppState;
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializationError {
     #[error("native executor '{executor_ref}' not available: {detail}")]
-    ExecutorUnavailable { executor_ref: String, detail: String },
+    ExecutorUnavailable {
+        executor_ref: String,
+        detail: String,
+    },
     #[error("bundle manifest error: {0}")]
     ManifestError(String),
     #[error("executor resolution failed for '{executor_ref}': {detail}")]
-    ResolutionFailed { executor_ref: String, detail: String },
+    ResolutionFailed {
+        executor_ref: String,
+        detail: String,
+    },
     #[error("binary blob '{hash}' not found in system CAS")]
     BlobNotFound { hash: String },
     #[error("arch check failed for '{executor_ref}': {detail}")]
-    ArchCheckFailed { executor_ref: String, detail: String },
+    ArchCheckFailed {
+        executor_ref: String,
+        detail: String,
+    },
     #[error("executor materialization failed for '{executor_ref}': {detail}")]
-    MaterializationFailed { executor_ref: String, detail: String },
-    #[error("executor '{executor_ref}' failed trust check (class={trust_class:?}, fp={fingerprint:?})")]
+    MaterializationFailed {
+        executor_ref: String,
+        detail: String,
+    },
+    #[error(
+        "executor '{executor_ref}' failed trust check (class={trust_class:?}, fp={fingerprint:?})"
+    )]
     ExecutorUntrusted {
         executor_ref: String,
         trust_class: ryeos_engine::resolution::TrustClass,
         fingerprint: Option<String>,
     },
-    #[error("provider secret `{env_var}` (for provider `{provider_id}`) is not in vault — \
-             run: ryeos-core-tools vault put --name {env_var} --value-stdin")]
+    #[error(
+        "provider secret `{env_var}` (for provider `{provider_id}`) is not in vault — \
+             run: ryeos-core-tools vault put --name {env_var} --value-stdin"
+    )]
     ProviderSecretMissing {
         provider_id: String,
         env_var: String,
@@ -100,11 +116,7 @@ const BUNDLE_MANIFEST_REF: &str = "refs/bundles/manifest";
 /// Content-addressed cache target for a native executor binary.
 ///
 /// Returns `<cache_root>/cache/executors/<blob_hash>/<bare>`.
-fn executor_cache_target(
-    cache_root: &Path,
-    blob_hash: &str,
-    bare: &str,
-) -> PathBuf {
+fn executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> PathBuf {
     cache_root
         .join("cache")
         .join("executors")
@@ -133,12 +145,12 @@ pub fn resolve_native_executor_path(
     trust_store: &ryeos_engine::trust::TrustStore,
     root_trust_class: ryeos_engine::resolution::TrustClass,
 ) -> Result<PathBuf, MaterializationError> {
-    let bare = executor_ref
-        .strip_prefix("native:")
-        .ok_or_else(|| MaterializationError::ExecutorUnavailable {
+    let bare = executor_ref.strip_prefix("native:").ok_or_else(|| {
+        MaterializationError::ExecutorUnavailable {
             executor_ref: executor_ref.to_string(),
             detail: "executor_ref is not a native executor".into(),
-        })?;
+        }
+    })?;
 
     let triple = host_triple();
 
@@ -182,17 +194,21 @@ pub fn resolve_native_executor_path(
 
         let manifest_value = cas
             .get_object(&mhash)
-            .map_err(|e| MaterializationError::ManifestError(format!(
-                "failed to read bundle manifest object {mhash}: {e}"
-            )))?
-            .ok_or_else(|| MaterializationError::ManifestError(
-                format!("bundle manifest object {mhash} not found in system CAS")
-            ))?;
+            .map_err(|e| {
+                MaterializationError::ManifestError(format!(
+                    "failed to read bundle manifest object {mhash}: {e}"
+                ))
+            })?
+            .ok_or_else(|| {
+                MaterializationError::ManifestError(format!(
+                    "bundle manifest object {mhash} not found in system CAS"
+                ))
+            })?;
 
-        let manifest = ryeos_state::objects::SourceManifest::from_value(&manifest_value)
-            .map_err(|e| MaterializationError::ManifestError(format!(
-                "failed to parse bundle manifest: {e}"
-            )))?;
+        let manifest =
+            ryeos_state::objects::SourceManifest::from_value(&manifest_value).map_err(|e| {
+                MaterializationError::ManifestError(format!("failed to parse bundle manifest: {e}"))
+            })?;
 
         tracing::debug!(
             executor_ref,
@@ -240,12 +256,11 @@ pub fn resolve_native_executor_path(
     })?;
 
     // 4. Verify trust on the binary's item_source record
-    let (trust_class, fingerprint) =
-        ryeos_engine::executor_resolution::verify_executor_trust(
-            &resolved.item_source,
-            |fp| trust_store.get(fp).is_some(),
-            root_trust_class,
-        );
+    let (trust_class, fingerprint) = ryeos_engine::executor_resolution::verify_executor_trust(
+        &resolved.item_source,
+        |fp| trust_store.get(fp).is_some(),
+        root_trust_class,
+    );
 
     match trust_class {
         ryeos_engine::resolution::TrustClass::TrustedSystem
@@ -280,11 +295,12 @@ pub fn resolve_native_executor_path(
         })?;
 
     // 6. Architecture check
-    arch_check::check_arch(&blob_bytes, std::env::consts::ARCH)
-        .map_err(|e| MaterializationError::ArchCheckFailed {
+    arch_check::check_arch(&blob_bytes, std::env::consts::ARCH).map_err(|e| {
+        MaterializationError::ArchCheckFailed {
             executor_ref: bare.to_string(),
             detail: e.to_string(),
-        })?;
+        }
+    })?;
 
     // 7. Materialize to content-addressed cache under daemon state.
     //    Path: <cache_root>/cache/executors/<blob_hash>/<bare>
@@ -302,29 +318,26 @@ pub fn resolve_native_executor_path(
     }
 
     // Stage atomically — first writer wins.
-    let staging_dir = target_path
-        .parent()
-        .unwrap()
-        .with_file_name(format!(
-            "{}.staging.{}.{}",
-            resolved.blob_hash,
-            std::process::id(),
-            rand::thread_rng().gen::<u32>()
-        ));
-    std::fs::create_dir_all(&staging_dir)
-        .map_err(|e| MaterializationError::MaterializationFailed {
+    let staging_dir = target_path.parent().unwrap().with_file_name(format!(
+        "{}.staging.{}.{}",
+        resolved.blob_hash,
+        std::process::id(),
+        rand::thread_rng().gen::<u32>()
+    ));
+    std::fs::create_dir_all(&staging_dir).map_err(|e| {
+        MaterializationError::MaterializationFailed {
             executor_ref: bare.to_string(),
             detail: format!("failed to create staging dir: {e}"),
-        })?;
+        }
+    })?;
     let staged_bin = staging_dir.join(bare);
-    lillux::cas::materialize_executable(&staged_bin, &blob_bytes, resolved.mode)
-        .map_err(|e| {
-            let _ = std::fs::remove_dir_all(&staging_dir);
-            MaterializationError::MaterializationFailed {
-                executor_ref: bare.to_string(),
-                detail: format!("failed to materialize executable: {e}"),
-            }
-        })?;
+    lillux::cas::materialize_executable(&staged_bin, &blob_bytes, resolved.mode).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to materialize executable: {e}"),
+        }
+    })?;
 
     // Atomic publish — first writer wins.
     //
@@ -336,11 +349,12 @@ pub fn resolve_native_executor_path(
     // with a confusing ENOENT.
     let target_parent = target_path.parent().unwrap();
     if let Some(grandparent) = target_parent.parent() {
-        std::fs::create_dir_all(grandparent)
-            .map_err(|e| MaterializationError::MaterializationFailed {
+        std::fs::create_dir_all(grandparent).map_err(|e| {
+            MaterializationError::MaterializationFailed {
                 executor_ref: bare.to_string(),
                 detail: format!("failed to create cache root dir: {e}"),
-            })?;
+            }
+        })?;
     }
     match std::fs::rename(&staging_dir, target_parent) {
         Ok(_) => {
@@ -386,8 +400,9 @@ fn extract_model_spec_from_resolved(
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(v) => {
             let spec: ryeos_runtime::model_resolution::ModelSpec =
-                serde_json::from_value(v.clone())
-                    .map_err(|e| anyhow::anyhow!("failed to parse model spec from composed view: {e}"))?;
+                serde_json::from_value(v.clone()).map_err(|e| {
+                    anyhow::anyhow!("failed to parse model spec from composed view: {e}")
+                })?;
             Ok(Some(spec))
         }
     }
@@ -403,20 +418,35 @@ fn build_verified_loader_for_thread(
         .ordered
         .iter()
         .find(|r| r.space == ryeos_engine::contracts::ItemSpace::Project)
-        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()))
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or(r.ai_root.clone())
+        })
         .ok_or_else(|| anyhow::anyhow!("no project root in engine resolution roots"))?;
 
     let user_root = engine_roots
         .ordered
         .iter()
         .find(|r| r.space == ryeos_engine::contracts::ItemSpace::User)
-        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()));
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or(r.ai_root.clone())
+        });
 
     let system_roots: Vec<PathBuf> = engine_roots
         .ordered
         .iter()
         .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
-        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()))
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or(r.ai_root.clone())
+        })
         .collect();
 
     Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
@@ -447,9 +477,8 @@ pub(crate) fn preflight_inject_provider_secret(
     };
     let loader = build_verified_loader_for_thread(engine_roots)
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
-    let resolved_target = ryeos_runtime::model_resolution::preflight_resolve(
-        &header, &loader,
-    ).map_err(|e| MaterializationError::Internal(e.to_string()))?;
+    let resolved_target = ryeos_runtime::model_resolution::preflight_resolve(&header, &loader)
+        .map_err(|e| MaterializationError::Internal(e.to_string()))?;
 
     if let Some(env_var) = resolved_target.provider.auth.env_var.as_deref() {
         // If the secret is already present in bindings (e.g. from
@@ -547,7 +576,9 @@ pub struct BuildAndLaunchParams<'a> {
     pub pre_minted_thread_id: Option<&'a str>,
 }
 
-pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+pub async fn build_and_launch(
+    params: BuildAndLaunchParams<'_>,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
         state,
         executor_ref,
@@ -576,16 +607,15 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     let thread_id = &thread.thread_id;
 
     // 2. Compute limits (root execution: depth = 0)
-    let limits_config = load_limits_config(project_path)
-        .with_context(|| format!("loading limits config for project {}", project_path.display()))?;
+    let limits_config = load_limits_config(project_path).with_context(|| {
+        format!(
+            "loading limits config for project {}",
+            project_path.display()
+        )
+    })?;
     let limits_config = limits_config.unwrap_or_default();
-    let hard_limits = compute_effective_limits(
-        None,
-        &limits_config.defaults,
-        &limits_config.caps,
-        None,
-        0,
-    );
+    let hard_limits =
+        compute_effective_limits(None, &limits_config.defaults, &limits_config.caps, None, 0);
 
     // 3. Effective capabilities derivation happens below — sourced
     //    from `resolution.composed.effective_caps` so callback
@@ -597,13 +627,27 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // 4. Build envelope
     let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
 
-    let user_root = engine_roots.ordered.iter()
+    let user_root = engine_roots
+        .ordered
+        .iter()
         .find(|r| r.space == ryeos_engine::contracts::ItemSpace::User)
-        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()));
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or(r.ai_root.clone())
+        });
 
-    let system_roots: Vec<PathBuf> = engine_roots.ordered.iter()
+    let system_roots: Vec<PathBuf> = engine_roots
+        .ordered
+        .iter()
         .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
-        .map(|r| r.ai_root.parent().map(|pp| pp.to_path_buf()).unwrap_or(r.ai_root.clone()))
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or(r.ai_root.clone())
+        })
         .collect();
 
     // Run the resolution pipeline (extends/references DAGs etc.) so the
@@ -647,13 +691,16 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // resolution.composed.derived in place. On failure, abort the
     // parent launch with a structured error.
     {
-        let launching_kind_schema = engine
-            .kinds
-            .get(&resolved.resolved_item.kind)
-            .ok_or_else(|| anyhow::anyhow!(
-                "build_and_launch: launching kind `{}` is not registered",
-                resolved.resolved_item.kind
-            ))?;
+        let launching_kind_schema =
+            engine
+                .kinds
+                .get(&resolved.resolved_item.kind)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "build_and_launch: launching kind `{}` is not registered",
+                        resolved.resolved_item.kind
+                    )
+                })?;
         if let Some(exec) = launching_kind_schema.execution() {
             if !exec.launch_augmentations.is_empty() {
                 crate::augmentations::run_augmentations(
@@ -693,25 +740,25 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // The launching kind schema (e.g. `directive`, `graph`) drives
     // inventory build below; it does NOT carry the subprocess
     // terminator — those kinds run in-process inside a runtime.
-    let launching_kind_schema = engine
-        .kinds
-        .get(&resolved.resolved_item.kind)
-        .ok_or_else(|| anyhow::anyhow!(
-            "build_and_launch: launching kind `{}` is not registered",
-            resolved.resolved_item.kind
-        ))?;
+    let launching_kind_schema =
+        engine
+            .kinds
+            .get(&resolved.resolved_item.kind)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "build_and_launch: launching kind `{}` is not registered",
+                    resolved.resolved_item.kind
+                )
+            })?;
 
     // Resolve the protocol descriptor from the **runtime** kind schema
     // (always `runtime`), not from the launching item's kind.
     // build_and_launch is only ever called for managed-lifecycle
     // subprocess spawns where a runtime hosts the launching item; the
     // subprocess terminator + protocol_ref live on the runtime kind.
-    let runtime_kind_schema = engine
-        .kinds
-        .get("runtime")
-        .ok_or_else(|| anyhow::anyhow!(
-            "build_and_launch: `runtime` kind schema is not registered"
-        ))?;
+    let runtime_kind_schema = engine.kinds.get("runtime").ok_or_else(|| {
+        anyhow::anyhow!("build_and_launch: `runtime` kind schema is not registered")
+    })?;
 
     let protocol_ref = runtime_kind_schema
         .execution()
@@ -723,9 +770,11 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
             // InProcess terminators don't carry a protocol ref.
             ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => None,
         })
-        .ok_or_else(|| anyhow::anyhow!(
-            "build_and_launch: `runtime` kind has no subprocess terminator with protocol ref"
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "build_and_launch: `runtime` kind has no subprocess terminator with protocol ref"
+            )
+        })?;
 
     let verified_protocol = engine
         .protocols
@@ -781,7 +830,11 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     // 7. Resolve the native executor from the system bundle's CAS.
     //    Materialized to content-addressed cache under system space,
     //    not the project tree (works with read-only mounts).
-    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
+    let cache_root = state
+        .config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state");
     let materialized_binary = resolve_native_executor_path(
         &system_roots,
         executor_ref,
@@ -820,8 +873,9 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         resolution,
     )
     .inventory(inventory)
-    .provider_snapshot(serde_json::to_value(&provider_snapshot)
-        .expect("ResolvedProviderSnapshot serializable"))
+    .provider_snapshot(
+        serde_json::to_value(&provider_snapshot).expect("ResolvedProviderSnapshot serializable"),
+    )
     .build();
 
     // 8. Write thread.json (status = created, pre-execution audit).
@@ -841,9 +895,7 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
         executor_trust_class: Some(executor_trust_class),
     };
     let identity = &state.identity;
-    super::thread_meta::write_thread_meta(
-        project_path, thread_id, &meta, identity,
-    )?;
+    super::thread_meta::write_thread_meta(project_path, thread_id, &meta, identity)?;
 
     // 9. Spawn runtime (env vars + stdin envelope)
     //
@@ -882,19 +934,17 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
     let tat_owned = thread_auth.token.clone();
 
     let spawn_result = tokio::task::spawn_blocking(move || {
-        spawn_runtime(
-            SpawnRuntimeParams {
-                descriptor: &descriptor_clone,
-                binary: &binary_path,
-                project_path: &project_owned,
-                envelope: &envelope,
-                timeout_secs: duration,
-                callback: &callback_owned,
-                thread_id: &thread_id_owned,
-                vault_bindings: &vault_owned,
-                thread_auth_token: &tat_owned,
-            },
-        )
+        spawn_runtime(SpawnRuntimeParams {
+            descriptor: &descriptor_clone,
+            binary: &binary_path,
+            project_path: &project_owned,
+            envelope: &envelope,
+            timeout_secs: duration,
+            callback: &callback_owned,
+            thread_id: &thread_id_owned,
+            vault_bindings: &vault_owned,
+            thread_auth_token: &tat_owned,
+        })
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_runtime join error: {e}"))?;
@@ -934,15 +984,17 @@ pub async fn build_and_launch(params: BuildAndLaunchParams<'_>) -> Result<Native
                 ..meta
             };
             let _ = super::thread_meta::write_thread_meta(
-                project_path, thread_id, &failed_meta, identity,
+                project_path,
+                thread_id,
+                &failed_meta,
+                identity,
             );
             return Err(BuildAndLaunchError::Internal(err));
         }
     };
 
     // 12. Build response from DB thread (runtime already finalized via callback)
-    let thread_detail = state.threads.get_thread(thread_id)?
-        .unwrap_or(thread);
+    let thread_detail = state.threads.get_thread(thread_id)?.unwrap_or(thread);
 
     // The runtime returns terminal text in `result` (Option<String>) and any
     // non-fatal callback drift in `warnings`. Both must be visible to the
@@ -993,9 +1045,8 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
     let base_env = ryeos_app::process::build_spawn_env(&secret_map)?;
 
     // Use the protocol builder to produce the SubprocessSpec.
-    let item_ref =
-        ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
-            .expect("hardcoded runtime:spawn ref is valid");
+    let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
+        .expect("hardcoded runtime:spawn ref is valid");
     let callback_bindings = ryeos_engine::protocols::CallbackBindings {
         socket_path: callback.socket_path.to_string_lossy().to_string(),
         token: callback.token.clone(),
@@ -1014,7 +1065,7 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         vault_bindings,
         launch_envelope: Some(envelope),
         timeout: std::time::Duration::from_secs(timeout_secs),
-        acting_principal: "", // not needed for env injection in runtime path
+        acting_principal: "",     // not needed for env injection in runtime path
         cas_root: Path::new("/"), // not needed for env injection in runtime path
         system_space_dir: Path::new("/"), // not needed for env injection in runtime path
         thread_auth_token,
@@ -1026,8 +1077,7 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
     // Merge builder-produced injected env on top of base env.
     // Base env has PATH, HOME, etc. + vault secrets.
     // Builder env has the descriptor-declared injections (socket path, token, etc).
-    let mut merged_env: std::collections::BTreeMap<String, String> =
-        base_env.into_iter().collect();
+    let mut merged_env: std::collections::BTreeMap<String, String> = base_env.into_iter().collect();
     for (k, v) in &spec.env {
         merged_env.insert(k.clone(), v.clone());
     }
@@ -1052,11 +1102,13 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         });
     }
 
-    serde_json::from_str(&result.stdout)
-        .map_err(|e| anyhow::anyhow!(
+    serde_json::from_str(&result.stdout).map_err(|e| {
+        anyhow::anyhow!(
             "failed to parse runtime stdout: {}\nstdout: {}",
-            e, &result.stdout[..result.stdout.len().min(500)]
-        ))
+            e,
+            &result.stdout[..result.stdout.len().min(500)]
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1102,7 +1154,8 @@ mod tests {
         );
         if cfg!(target_os = "linux") {
             assert_eq!(
-                segs, 4,
+                segs,
+                4,
                 "linux rustc triples include an ABI segment (gnu/musl); got {:?}",
                 host_triple(),
             );
@@ -1114,12 +1167,8 @@ mod tests {
 
     #[test]
     fn enforce_trust_blocks_unsigned() {
-        let err = enforce_executor_trust(
-            TrustClass::Unsigned,
-            "directive:my/agent",
-            "directive",
-        )
-        .unwrap_err();
+        let err = enforce_executor_trust(TrustClass::Unsigned, "directive:my/agent", "directive")
+            .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("refusing to spawn"));
         assert!(msg.contains("Unsigned"));
@@ -1159,7 +1208,10 @@ mod tests {
     fn caps_passed_through_from_policy_fact() {
         let view = view_with_caps(vec!["ryeos.execute.tool.bash", "ryeos.execute.tool.read"]);
         let caps = derive_effective_caps(&view);
-        assert_eq!(caps, vec!["ryeos.execute.tool.bash", "ryeos.execute.tool.read"]);
+        assert_eq!(
+            caps,
+            vec!["ryeos.execute.tool.bash", "ryeos.execute.tool.read"]
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContract, RouteInvocationContext,
+    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
     RouteInvocationOutput, RouteInvocationResult,
 };
 
@@ -42,9 +42,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             .get("project_path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                RouteDispatchError::Internal(
-                    "launch invoker: missing project_path in input".into(),
-                )
+                RouteDispatchError::Internal("launch invoker: missing project_path in input".into())
             })?;
 
         let parameters = ctx
@@ -66,19 +64,16 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             .unwrap_or_default();
 
         // Parse and validate canonical ref.
-        let item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(item_ref_str).map_err(
-            |e| {
+        let item_ref =
+            crate::routes::parsed_ref::ParsedItemRef::parse(item_ref_str).map_err(|e| {
                 RouteDispatchError::BadRequest(format!(
                     "invalid item_ref '{}': {}",
                     item_ref_str, e
                 ))
-            },
-        )?;
+            })?;
 
-        let project_path =
-            crate::routes::abs_path::AbsolutePathBuf::try_from_str(project_path_str).map_err(
-                |e| RouteDispatchError::BadRequest(format!("project_path: {e}")),
-            )?;
+        let project_path = crate::routes::abs_path::AbsolutePathBuf::try_from_str(project_path_str)
+            .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 

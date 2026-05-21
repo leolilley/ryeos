@@ -34,8 +34,7 @@ impl GcLock {
 
         // Ensure state_root exists
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent)
-                .context("failed to create state_root for GC lock")?;
+            fs::create_dir_all(parent).context("failed to create state_root for GC lock")?;
         }
 
         // Open (create if needed) and lock
@@ -68,11 +67,7 @@ impl GcLock {
         fs::write(&state_path, serde_json::to_string_pretty(&state)?)
             .context("failed to write GC state file")?;
 
-        tracing::info!(
-            pid = pid,
-            node_id = node_id,
-            "GC lock acquired"
-        );
+        tracing::info!(pid = pid, node_id = node_id, "GC lock acquired");
 
         Ok(Self {
             _lock_file: lock_file,
@@ -143,7 +138,10 @@ mod tests {
 
         let result = GcLock::acquire(&state_root, "node-2");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to acquire GC lock"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed to acquire GC lock"));
     }
 
     #[test]

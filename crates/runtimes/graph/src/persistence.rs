@@ -50,17 +50,50 @@ mod tests {
 
     #[async_trait]
     impl RuntimeCallbackAPI for MockCallback {
-        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
         async fn publish_artifact(&self, _: &str, artifact: Value) -> Result<Value, CallbackError> {
             self.artifacts.lock().unwrap().push(artifact);
             Ok(json!({}))
@@ -88,7 +121,9 @@ mod tests {
             error: None,
         };
         let (callback, mock) = make_callback();
-        let output = write_node_receipt(&callback, "gr-1", &receipt).await.unwrap();
+        let output = write_node_receipt(&callback, "gr-1", &receipt)
+            .await
+            .unwrap();
         assert_eq!(output["cache_hit"], false);
         assert_eq!(output["elapsed_ms"], 142);
         assert_eq!(output["node_result_hash"], "abc123");

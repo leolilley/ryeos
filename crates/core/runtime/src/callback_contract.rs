@@ -59,9 +59,7 @@ impl CallbackDispatchResponse {
     /// This is the ONLY place runtime-side code should look for a
     /// continuation ID — there is no `data.continuation_id` fallback.
     pub fn continuation_id(&self) -> Option<&str> {
-        self.result
-            .get("continuation_id")
-            .and_then(|v| v.as_str())
+        self.result.get("continuation_id").and_then(|v| v.as_str())
     }
 }
 

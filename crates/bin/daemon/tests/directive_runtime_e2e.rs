@@ -27,7 +27,11 @@ use lillux::crypto::SigningKey;
 /// `<user>/.ai/config/crates/core/runtime/model-providers/mock.yaml`.
 /// `auth: {}` keeps the adapter's `Authorization` header skipped
 /// (see `crates/runtimes/directive/src/adapter.rs:38-43`).
-fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
+fn plant_mock_provider(
+    user_space: &Path,
+    mock_base_url: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/crates/core/runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -171,13 +175,20 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     let mock = MockProvider::start(vec![MockResponse::Text("hello World".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_directive(user, "test/hello", "Say hello to {{ name }}.", &[], &fixture.publisher)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_directive(
+                user,
+                "test/hello",
+                "Say hello to {{ name }}.",
+                &[],
+                &fixture.publisher,
+            )?;
+            Ok(())
+        };
 
     let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         // Bubble runtime tracing through to the daemon's stderr so a
@@ -185,9 +196,8 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         // panic message.
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
     })
     .await
@@ -199,39 +209,35 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "World"}),
     );
-    let (status, body) = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        post_fut,
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => panic!("post /execute failed: {e}"),
-        Err(_) => {
-            let stderr = h.drain_stderr_nonblocking().await;
-            // Probe state dir for runtime exit + thread events
-            let state = h.state_path.clone();
-            let projection = state.join(".ai/state/projection.sqlite3");
-            let projection_dump = if projection.exists() {
-                match ryeos_state::projection::ProjectionDb::open(&projection) {
-                    Ok(db) => format!(
-                        "threads = {:#?}",
-                        ryeos_state::queries::list_threads(&db, 10).ok()
-                    ),
-                    Err(e) => format!("projection open error: {e}"),
-                }
-            } else {
-                "no projection.sqlite3".into()
-            };
-            panic!(
-                "POST /execute timed out after 30s — directive-runtime hung.\n\
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                // Probe state dir for runtime exit + thread events
+                let state = h.state_path.clone();
+                let projection = state.join(".ai/state/projection.sqlite3");
+                let projection_dump = if projection.exists() {
+                    match ryeos_state::projection::ProjectionDb::open(&projection) {
+                        Ok(db) => format!(
+                            "threads = {:#?}",
+                            ryeos_state::queries::list_threads(&db, 10).ok()
+                        ),
+                        Err(e) => format!("projection open error: {e}"),
+                    }
+                } else {
+                    "no projection.sqlite3".into()
+                };
+                panic!(
+                    "POST /execute timed out after 30s — directive-runtime hung.\n\
                  --- daemon stderr ---\n{stderr}\n\
                  --- projection ---\n{projection_dump}\n\
                  state_path={}",
-                state.display()
-            );
-        }
-    };
+                    state.display()
+                );
+            }
+        };
 
     if status != reqwest::StatusCode::OK {
         let stderr = h.drain_stderr_nonblocking().await;
@@ -290,13 +296,20 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let mock = MockProvider::start(vec![MockResponse::Text("hi P3b.3".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_directive(user, "p3b3/subject", "irrelevant — mock returns canned text", &[], &fixture.publisher)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_directive(
+                user,
+                "p3b3/subject",
+                "irrelevant — mock returns canned text",
+                &[],
+                &fixture.publisher,
+            )?;
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
@@ -334,8 +347,8 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
         projection_path.display()
     );
 
-    let db = ryeos_state::projection::ProjectionDb::open(&projection_path)
-        .expect("open projection db");
+    let db =
+        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
     let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject = threads
@@ -407,30 +420,30 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_python_echo_tool(user, "echo")?;
-        // Wildcard cap: the dispatcher checks `ryeos.execute.tool.<canonical_ref>`
-        // (see dispatcher.rs::resolve). The runner no longer does a separate
-        // name-based pre-check — permission is the dispatcher's job.
-        plant_directive(
-            user,
-            "test/round_trip",
-            "Call the echo tool, then summarise.",
-            &["ryeos.execute.tool.*"],
-            &fixture.publisher,
-        )?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_python_echo_tool(user, "echo")?;
+            // Wildcard cap: the dispatcher checks `ryeos.execute.tool.<canonical_ref>`
+            // (see dispatcher.rs::resolve). The runner no longer does a separate
+            // name-based pre-check — permission is the dispatcher's job.
+            plant_directive(
+                user,
+                "test/round_trip",
+                "Call the echo tool, then summarise.",
+                &["ryeos.execute.tool.*"],
+                &fixture.publisher,
+            )?;
+            Ok(())
+        };
 
     let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
     })
     .await
@@ -442,22 +455,18 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "World"}),
     );
-    let (status, body) = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        post_fut,
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => panic!("post /execute failed: {e}"),
-        Err(_) => {
-            let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
-                "POST /execute timed out after 30s — directive-runtime hung mid-loop.\n\
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
+                    "POST /execute timed out after 30s — directive-runtime hung mid-loop.\n\
                  --- daemon stderr ---\n{stderr}"
-            );
-        }
-    };
+                );
+            }
+        };
 
     if status != reqwest::StatusCode::OK {
         let stderr = h.drain_stderr_nonblocking().await;
@@ -467,9 +476,10 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
         );
     }
 
-    let result = body.get("result").cloned().unwrap_or_else(|| {
-        panic!("response missing `result` envelope; body={body:#}")
-    });
+    let result = body
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("response missing `result` envelope; body={body:#}"));
     if result.get("success").and_then(|v| v.as_bool()) != Some(true) {
         let stderr = h.drain_stderr_nonblocking().await;
         panic!(
@@ -522,30 +532,30 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_python_echo_tool(user, "echo")?;
-        // Grant ONLY a non-matching cap. `echo` is not in this set,
-        // and `cap_matches` is anchored ($-terminated regex) so the
-        // literal `allowed_only` does NOT subsume `echo`.
-        plant_directive(
-            user,
-            "test/denied",
-            "Try to call echo; you should be denied.",
-            &["ryeos.execute.tool.allowed_only"],
-            &fixture.publisher,
-        )?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_python_echo_tool(user, "echo")?;
+            // Grant ONLY a non-matching cap. `echo` is not in this set,
+            // and `cap_matches` is anchored ($-terminated regex) so the
+            // literal `allowed_only` does NOT subsume `echo`.
+            plant_directive(
+                user,
+                "test/denied",
+                "Try to call echo; you should be denied.",
+                &["ryeos.execute.tool.allowed_only"],
+                &fixture.publisher,
+            )?;
+            Ok(())
+        };
 
     let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
     })
     .await
@@ -557,22 +567,18 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "X"}),
     );
-    let (status, body) = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        post_fut,
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => panic!("post /execute failed: {e}"),
-        Err(_) => {
-            let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
                 "POST /execute timed out after 30s — denial path hung instead of failing cleanly.\n\
                  --- daemon stderr ---\n{stderr}"
             );
-        }
-    };
+            }
+        };
 
     assert_eq!(
         status,

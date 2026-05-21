@@ -40,12 +40,11 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
 }
 
 pub fn parse(config: &Value, content: &str) -> Result<Value, ParseError> {
-    let cfg: YamlHeaderDocumentConfig = serde_json::from_value(config.clone()).map_err(|e| {
-        ParseError {
+    let cfg: YamlHeaderDocumentConfig =
+        serde_json::from_value(config.clone()).map_err(|e| ParseError {
             kind: ParseErrKind::Internal,
             message: format!("yaml_header_document config: {e}"),
-        }
-    })?;
+        })?;
 
     let mut matches: Vec<(usize, ExtractedHeader)> = Vec::new();
     for (i, form) in cfg.forms.iter().enumerate() {
@@ -81,11 +80,9 @@ pub fn parse(config: &Value, content: &str) -> Result<Value, ParseError> {
 
     let mut map = match header_yaml {
         Some(text) if !text.trim().is_empty() => {
-            let yaml: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| {
-                ParseError {
-                    kind: ParseErrKind::Syntax,
-                    message: format!("yaml_header_document yaml: {e}"),
-                }
+            let yaml: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| ParseError {
+                kind: ParseErrKind::Syntax,
+                message: format!("yaml_header_document yaml: {e}"),
             })?;
             let v: Value = serde_json::to_value(yaml).map_err(|e| ParseError {
                 kind: ParseErrKind::Internal,
@@ -119,13 +116,19 @@ fn try_form(form: &HeaderForm, content: &str) -> Result<Option<ExtractedHeader>,
     }
 }
 
-fn extract_frontmatter(content: &str, delimiter: &str) -> Result<Option<ExtractedHeader>, ParseError> {
+fn extract_frontmatter(
+    content: &str,
+    delimiter: &str,
+) -> Result<Option<ExtractedHeader>, ParseError> {
     let trimmed = content.trim_start_matches(['\u{feff}']);
     if !trimmed.starts_with(delimiter) {
         return Ok(None);
     }
     let after = &trimmed[delimiter.len()..];
-    let after = match after.strip_prefix('\n').or_else(|| after.strip_prefix("\r\n")) {
+    let after = match after
+        .strip_prefix('\n')
+        .or_else(|| after.strip_prefix("\r\n"))
+    {
         Some(s) => s,
         None => return Ok(None),
     };
@@ -163,7 +166,10 @@ fn extract_frontmatter(content: &str, delimiter: &str) -> Result<Option<Extracte
     Ok(Some(ExtractedHeader { header, body }))
 }
 
-fn extract_fenced_block(content: &str, language: &str) -> Result<Option<ExtractedHeader>, ParseError> {
+fn extract_fenced_block(
+    content: &str,
+    language: &str,
+) -> Result<Option<ExtractedHeader>, ParseError> {
     let opener = format!("```{language}");
 
     let trimmed = content.trim_start_matches(['\u{feff}']);
@@ -225,22 +231,14 @@ mod tests {
 
     #[test]
     fn frontmatter_form() {
-        let out = parse(
-            &cfg(),
-            "---\nname: child\nversion: 1\n---\nbody-text\n",
-        )
-        .unwrap();
+        let out = parse(&cfg(), "---\nname: child\nversion: 1\n---\nbody-text\n").unwrap();
         assert_eq!(out["name"], "child");
         assert_eq!(out["body"], "body-text\n");
     }
 
     #[test]
     fn fenced_form() {
-        let out = parse(
-            &cfg(),
-            "```yaml\nname: child\n```\nthe body\n",
-        )
-        .unwrap();
+        let out = parse(&cfg(), "```yaml\nname: child\n```\nthe body\n").unwrap();
         assert_eq!(out["name"], "child");
         assert_eq!(out["body"], "the body");
     }

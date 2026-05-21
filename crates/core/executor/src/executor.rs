@@ -19,12 +19,10 @@ use anyhow::{bail, Result};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
-use ryeos_app::service_registry::{
-    extract_endpoint, extract_required_caps, ServiceDescriptor,
-};
+pub use ryeos_app::service_registry::ServiceAvailability;
+use ryeos_app::service_registry::{extract_endpoint, extract_required_caps, ServiceDescriptor};
 use ryeos_app::standalone_audit;
 use ryeos_app::state::AppState;
-pub use ryeos_app::service_registry::ServiceAvailability;
 
 /// Execution mode — determines which checks and audit path to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +48,9 @@ pub fn availability_for_endpoint(
         .iter()
         .find(|d| d.endpoint == endpoint)
         .map(|d| d.availability)
-        .ok_or_else(|| anyhow::anyhow!("unknown service endpoint '{endpoint}'; not in the operational catalog"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("unknown service endpoint '{endpoint}'; not in the operational catalog")
+        })
 }
 
 /// Execution context passed to `execute_service`.
@@ -110,10 +110,12 @@ pub fn resolve_and_verify(
     let canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| anyhow::anyhow!("invalid {label} ref '{item_ref}': {e}"))?;
 
-    let resolved = engine.resolve(plan_ctx, &canonical)
+    let resolved = engine
+        .resolve(plan_ctx, &canonical)
         .map_err(|e| anyhow::anyhow!("{label} '{item_ref}' failed to resolve: {e}"))?;
 
-    let verified = engine.verify(plan_ctx, resolved)
+    let verified = engine
+        .verify(plan_ctx, resolved)
         .map_err(|e| anyhow::anyhow!("{label} '{item_ref}' failed verification: {e}"))?;
 
     Ok(verified)
@@ -173,9 +175,7 @@ pub async fn execute_service_verified(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     match (mode, avail) {
         (ExecutionMode::Standalone, ServiceAvailability::DaemonOnly) => {
-            bail!(
-                "service:{service_ref} is DaemonOnly; start the daemon and call /execute"
-            );
+            bail!("service:{service_ref} is DaemonOnly; start the daemon and call /execute");
         }
         (ExecutionMode::Live, ServiceAvailability::OfflineOnly) => {
             bail!(
@@ -196,7 +196,8 @@ pub async fn execute_service_verified(
             Err(_) => {
                 bail!(
                     "insufficient capabilities: required {:?}, caller has {:?}",
-                    required_caps, ctx.caller_scopes
+                    required_caps,
+                    ctx.caller_scopes
                 );
             }
         }
@@ -250,7 +251,9 @@ pub async fn execute_service_verified(
     );
 
     // 7. Dispatch to handler
-    let handler = state.services.get(&endpoint)
+    let handler = state
+        .services
+        .get(&endpoint)
         .ok_or_else(|| anyhow::anyhow!("service handler '{}' not registered", endpoint))?
         .clone();
 

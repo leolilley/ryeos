@@ -10,8 +10,8 @@
 use crate::handlers;
 
 pub use ryeos_app::service_registry::{
-    extract_endpoint, extract_required_caps, RawHandlerFn, ServiceAvailability,
-    ServiceDescriptor, ServiceRegistry,
+    extract_endpoint, extract_required_caps, RawHandlerFn, ServiceAvailability, ServiceDescriptor,
+    ServiceRegistry,
 };
 
 /// Build the service registry with all service handlers declared in
@@ -71,14 +71,20 @@ mod tests {
     fn extract_endpoint_from_metadata() {
         let mut extra = HashMap::new();
         extra.insert("endpoint".to_string(), serde_json::json!("system.status"));
-        extra.insert("required_caps".to_string(), serde_json::json!(["system.read"]));
+        extra.insert(
+            "required_caps".to_string(),
+            serde_json::json!(["system.read"]),
+        );
         assert_eq!(extract_endpoint(&extra).unwrap(), "system.status");
     }
 
     #[test]
     fn extract_endpoint_missing_fails() {
         let mut extra = HashMap::new();
-        extra.insert("required_caps".to_string(), serde_json::json!(["system.read"]));
+        extra.insert(
+            "required_caps".to_string(),
+            serde_json::json!(["system.read"]),
+        );
         assert!(extract_endpoint(&extra).is_err());
     }
 

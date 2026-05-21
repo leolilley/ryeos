@@ -6,13 +6,13 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::registry::ServiceDescriptor;
 use ryeos_app::node_config::writer;
+use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 use ryeos_scheduler::crontab;
 use ryeos_scheduler::projection;
 use ryeos_scheduler::types::ScheduleSpecRecord;
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use ryeos_app::state::AppState;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,9 +35,15 @@ pub struct Request {
     pub project_root: Option<String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
-pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
     // Caller identity is used for execution authority — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
 
@@ -63,7 +69,9 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
         }
     }
 
-    if req.schedule_type == "at" && crontab::is_at_past(&req.expression, lillux::time::timestamp_millis()) {
+    if req.schedule_type == "at"
+        && crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
+    {
         bail!("at schedule timestamp is in the past");
     }
 
@@ -81,8 +89,12 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
     // Disallow schedule_id reuse if fire history exists from a previous schedule.
     // Prevents old JSONL from corrupting new schedule on rebuild.
     // existing_spec.is_none() means this is a new registration, not an update.
-    let fires_dir = state.config.system_space_dir
-        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
+    let fires_dir = state
+        .config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("schedules")
         .join(&req.schedule_id);
     if fires_dir.exists() && existing_spec.is_none() {
         bail!(
@@ -96,8 +108,12 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
     // The YAML body is the canonical source of truth for registered_at.
     // We read it from the existing file (not DB) so repeated updates don't drift the anchor.
     let registered_at = if existing_spec.is_some() {
-        let existing_yaml_path = state.config.system_space_dir
-            .join(ryeos_engine::AI_DIR).join("node").join("schedules")
+        let existing_yaml_path = state
+            .config
+            .system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("schedules")
             .join(&req.schedule_id)
             .with_extension("yaml");
         std::fs::read_to_string(&existing_yaml_path)
@@ -107,7 +123,12 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
                 let body: serde_json::Value = serde_yaml::from_str(&body_str).ok()?;
                 body.get("registered_at").and_then(|v| v.as_i64())
             })
-            .unwrap_or_else(|| existing_spec.as_ref().map(|s| s.registered_at).unwrap_or_else(lillux::time::timestamp_millis))
+            .unwrap_or_else(|| {
+                existing_spec
+                    .as_ref()
+                    .map(|s| s.registered_at)
+                    .unwrap_or_else(lillux::time::timestamp_millis)
+            })
     } else {
         lillux::time::timestamp_millis()
     };
@@ -174,7 +195,11 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
     });
 
     // Write signed YAML
-    let node_dir = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("node");
+    let node_dir = state
+        .config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node");
     let spec_path = writer::write_signed_node_item(
         &node_dir,
         "schedules",
@@ -201,7 +226,7 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
     let rec = ScheduleSpecRecord {
         schedule_id: req.schedule_id.clone(),
         item_ref: req.item_ref.clone(),
-        params: serde_json::to_string(&req.params)? ,
+        params: serde_json::to_string(&req.params)?,
         schedule_type: req.schedule_type.clone(),
         expression: req.expression.clone(),
         timezone: timezone.to_string(),
@@ -219,7 +244,9 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
 
     // Ping timer loop
     if let Some(ref tx) = state.scheduler_reload_tx {
-        if let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal { schedule_id: Some(req.schedule_id.clone()) }) {
+        if let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
+            schedule_id: Some(req.schedule_id.clone()),
+        }) {
             tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
         }
     }
@@ -241,16 +268,14 @@ pub async fn handle(req: Request, ctx: crate::handler_context::HandlerContext, s
 fn is_valid_misfire_policy(p: &str) -> bool {
     match p {
         "skip" | "fire_once_now" => true,
-        s if s.starts_with("catch_up_bounded:") => {
-            s.strip_prefix("catch_up_bounded:")
-                .and_then(|n| n.parse::<usize>().ok())
-                .is_some()
-        }
-        s if s.starts_with("catch_up_within_secs:") => {
-            s.strip_prefix("catch_up_within_secs:")
-                .and_then(|n| n.parse::<u64>().ok())
-                .is_some()
-        }
+        s if s.starts_with("catch_up_bounded:") => s
+            .strip_prefix("catch_up_bounded:")
+            .and_then(|n| n.parse::<usize>().ok())
+            .is_some(),
+        s if s.starts_with("catch_up_within_secs:") => s
+            .strip_prefix("catch_up_within_secs:")
+            .and_then(|n| n.parse::<u64>().ok())
+            .is_some(),
         _ => false,
     }
 }

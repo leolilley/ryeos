@@ -45,7 +45,9 @@ pub fn run_verify(params: VerifyParams, engine: &Engine) -> Result<Value> {
             scopes: vec!["bundle.read".to_string()],
         }),
         project_context: project_path
-            .map(|p| ProjectContext::LocalPath { path: p.to_path_buf() })
+            .map(|p| ProjectContext::LocalPath {
+                path: p.to_path_buf(),
+            })
             .unwrap_or(ProjectContext::None),
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),

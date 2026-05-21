@@ -19,7 +19,11 @@ use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
-fn plant_mock_provider(user_space: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
+fn plant_mock_provider(
+    user_space: &Path,
+    mock_base_url: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
     let dir = user_space.join(".ai/config/crates/core/runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -148,36 +152,39 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
     let mock = MockProvider::start(vec![MockResponse::Text("Context was loaded.".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = |state_path: &Path, user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user_space, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user_space, &fixture.publisher)?;
+    let plant =
+        |state_path: &Path, user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user_space, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user_space, &fixture.publisher)?;
 
-        // Plant a knowledge item with a distinctive body.
-        plant_knowledge_item(
-            user_space,
-            "test/important_fact",
-            "", // no extra frontmatter
-            "The sky is blue on a clear day.",
-            &fixture.publisher,
-        )?;
+            // Plant a knowledge item with a distinctive body.
+            plant_knowledge_item(
+                user_space,
+                "test/important_fact",
+                "", // no extra frontmatter
+                "The sky is blue on a clear day.",
+                &fixture.publisher,
+            )?;
 
-        // Plant a directive that references the knowledge item in its
-        // context block.
-        plant_directive_with_context(
-            user_space,
-            "test/ctx_dir",
-            "Repeat whatever context was provided.",
-            &["knowledge:test/important_fact"],
-            &fixture.publisher,
-        )?;
+            // Plant a directive that references the knowledge item in its
+            // context block.
+            plant_directive_with_context(
+                user_space,
+                "test/ctx_dir",
+                "Repeat whatever context was provided.",
+                &["knowledge:test/important_fact"],
+                &fixture.publisher,
+            )?;
 
-        Ok(())
-    };
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
-    }).await.expect("daemon should start");
+    })
+    .await
+    .expect("daemon should start");
 
     let project = tempfile::tempdir().expect("temp project dir");
     let (status, body) = tokio::time::timeout(
@@ -209,26 +216,29 @@ async fn e2e_directive_without_context_still_works() {
     let mock = MockProvider::start(vec![MockResponse::Text("Hello!".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = |state_path: &Path, user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider(user_space, &mock_url, &fixture.publisher)?;
-        plant_model_routing(user_space, &fixture.publisher)?;
+    let plant =
+        |state_path: &Path, user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider(user_space, &mock_url, &fixture.publisher)?;
+            plant_model_routing(user_space, &fixture.publisher)?;
 
-        // Directive with NO context block.
-        plant_directive_with_context(
-            user_space,
-            "test/no_ctx",
-            "Say hello.",
-            &[], // empty — no context
-            &fixture.publisher,
-        )?;
+            // Directive with NO context block.
+            plant_directive_with_context(
+                user_space,
+                "test/no_ctx",
+                "Say hello.",
+                &[], // empty — no context
+                &fixture.publisher,
+            )?;
 
-        Ok(())
-    };
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
-    }).await.expect("daemon should start");
+    })
+    .await
+    .expect("daemon should start");
 
     let project = tempfile::tempdir().expect("temp project dir");
     let (status, body) = tokio::time::timeout(

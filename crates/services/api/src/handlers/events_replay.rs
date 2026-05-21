@@ -13,12 +13,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use crate::handler_error::HandlerError;
 use crate::handler_context::HandlerContext;
+use crate::handler_error::HandlerError;
+use crate::registry::ServiceDescriptor;
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 use super::default_replay_limit;
 
@@ -32,7 +32,11 @@ pub struct Request {
     pub limit: usize,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
     // Ownership check against the thread.
     let thread = state
         .state_store
@@ -46,12 +50,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         None => return Err(HandlerError::NotFound),
     }
 
-    let result = state.events.replay(&EventReplayParams {
-        thread_id: Some(req.thread_id),
-        chain_root_id: None,
-        after_chain_seq: req.after_chain_seq,
-        limit: req.limit,
-    }).map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let result = state
+        .events
+        .replay(&EventReplayParams {
+            thread_id: Some(req.thread_id),
+            chain_root_id: None,
+            after_chain_seq: req.after_chain_seq,
+            limit: req.limit,
+        })
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     Ok(serde_json::json!({
         "events": result.events,

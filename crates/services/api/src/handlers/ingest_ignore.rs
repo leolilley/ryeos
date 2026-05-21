@@ -8,16 +8,18 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Request {}
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
-    let config_path = state.config.system_space_dir
+    let config_path = state
+        .config
+        .system_space_dir
         .join(ryeos_app::ignore::IGNORE_CONFIG_RELATIVE);
 
     if config_path.exists() {

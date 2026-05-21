@@ -79,8 +79,8 @@ pub fn compact_projects(
     }
 
     // Two-level walk: projects/<principal_key>/<project_hash>/head
-    for principal_entry in std::fs::read_dir(&projects_dir)
-        .context("failed to read projects refs directory")?
+    for principal_entry in
+        std::fs::read_dir(&projects_dir).context("failed to read projects refs directory")?
     {
         let principal_entry = principal_entry.context("failed to read principal dir entry")?;
         if !principal_entry.file_type()?.is_dir() {
@@ -105,8 +105,13 @@ pub fn compact_projects(
             result.projects_scanned += 1;
 
             match compact_single_project(
-                cas_root, refs_root, &principal_key, &project_hash,
-                signer, policy, dry_run,
+                cas_root,
+                refs_root,
+                &principal_key,
+                &project_hash,
+                signer,
+                policy,
+                dry_run,
             ) {
                 Ok(project_result) => {
                     result.snapshots_removed += project_result.snapshots_removed;
@@ -142,9 +147,13 @@ fn compact_single_project(
     dry_run: bool,
 ) -> Result<ProjectCompactionResult> {
     let head_hash = refs::read_project_head_ref(refs_root, principal_key, project_hash)?
-        .ok_or_else(|| anyhow::anyhow!(
-            "no project head for principal/project {}/{}", principal_key, project_hash
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no project head for principal/project {}/{}",
+                principal_key,
+                project_hash
+            )
+        })?;
 
     // Step 1: Walk the full DAG and collect all snapshots with metadata.
     // walk_dag is strict: returns error on missing/corrupt objects.
@@ -181,8 +190,16 @@ fn compact_single_project(
         }
 
         let is_manual = snap.source == "push" || snap.source == "manual";
-        let limit = if is_manual { policy.manual_pushes } else { policy.auto_snapshots };
-        let count = if is_manual { &mut manual_count } else { &mut auto_count };
+        let limit = if is_manual {
+            policy.manual_pushes
+        } else {
+            policy.auto_snapshots
+        };
+        let count = if is_manual {
+            &mut manual_count
+        } else {
+            &mut auto_count
+        };
 
         if *count < limit {
             keep.insert(snap.hash.clone());
@@ -209,7 +226,9 @@ fn compact_single_project(
         anyhow::bail!(
             "compaction: topological sort returned {} nodes but {} are kept \
              (possible cycle in snapshot DAG for project {})",
-            kept_topo.len(), keep.len(), project_hash
+            kept_topo.len(),
+            keep.len(),
+            project_hash
         );
     }
 
@@ -221,12 +240,11 @@ fn compact_single_project(
 
         // Resolve parents: removed → lift to surviving ancestors,
         // remapped → use new hash
-        let new_parents: Vec<String> = resolve_surviving_parents(
-            &snap.parent_hashes, &keep, &all_snapshots,
-        )
-        .into_iter()
-        .map(|p| hash_remap.get(&p).cloned().unwrap_or(p))
-        .collect();
+        let new_parents: Vec<String> =
+            resolve_surviving_parents(&snap.parent_hashes, &keep, &all_snapshots)
+                .into_iter()
+                .map(|p| hash_remap.get(&p).cloned().unwrap_or(p))
+                .collect();
 
         if new_parents == snap.parent_hashes {
             continue; // No change needed
@@ -265,10 +283,19 @@ fn compact_single_project(
     }
 
     // Step 5: Determine final HEAD hash and update ref if changed
-    let new_head_hash = hash_remap.get(&head_hash).cloned().unwrap_or(head_hash.clone());
+    let new_head_hash = hash_remap
+        .get(&head_hash)
+        .cloned()
+        .unwrap_or(head_hash.clone());
 
     if new_head_hash != head_hash && !dry_run {
-        refs::write_project_head_ref(refs_root, principal_key, project_hash, &new_head_hash, signer)?;
+        refs::write_project_head_ref(
+            refs_root,
+            principal_key,
+            project_hash,
+            &new_head_hash,
+            signer,
+        )?;
         tracing::info!(
             project_hash = %project_hash,
             old_head = %&head_hash[..16.min(head_hash.len())],
@@ -320,24 +347,24 @@ fn walk_dag(
         visited.insert(hash.clone());
 
         let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!(
+        let content = std::fs::read_to_string(&path).with_context(|| {
+            format!(
                 "compaction: failed to read snapshot {} at {}",
-                hash, path.display()
-            ))?;
+                hash,
+                path.display()
+            )
+        })?;
 
         let value: serde_json::Value = serde_json::from_str(&content)
-            .with_context(|| format!(
-                "compaction: failed to parse snapshot {}",
-                hash
-            ))?;
+            .with_context(|| format!("compaction: failed to parse snapshot {}", hash))?;
 
         // Validate kind — only compact project_snapshot objects
         let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         if kind != "project_snapshot" {
             anyhow::bail!(
                 "compaction: expected project_snapshot, got kind='{}' for hash {}",
-                kind, hash
+                kind,
+                hash
             );
         }
 
@@ -388,15 +415,10 @@ fn walk_dag(
 /// Sort kept snapshots so parents come before children.
 /// Returns hashes in order: roots first, HEAD last.
 /// Uses Kahn's algorithm for deterministic topological sort.
-fn topological_sort_kept(
-    all_snapshots: &[SnapshotInfo],
-    keep: &HashSet<String>,
-) -> Vec<String> {
+fn topological_sort_kept(all_snapshots: &[SnapshotInfo], keep: &HashSet<String>) -> Vec<String> {
     // Build adjacency: for each kept snapshot, its kept parents
-    let snap_map: HashMap<&str, &SnapshotInfo> = all_snapshots
-        .iter()
-        .map(|s| (s.hash.as_str(), s))
-        .collect();
+    let snap_map: HashMap<&str, &SnapshotInfo> =
+        all_snapshots.iter().map(|s| (s.hash.as_str(), s)).collect();
 
     let mut in_degree: HashMap<String, usize> = HashMap::new();
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
@@ -408,7 +430,10 @@ fn topological_sort_kept(
                 // Only count kept parents (removed ones are resolved separately)
                 if keep.contains(parent) {
                     *in_degree.entry(hash.clone()).or_insert(0) += 1;
-                    children.entry(parent.clone()).or_default().push(hash.clone());
+                    children
+                        .entry(parent.clone())
+                        .or_default()
+                        .push(hash.clone());
                 }
             }
         }
@@ -495,8 +520,8 @@ fn fs_err_create_dir_all(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::signer::TestSigner;
+    use std::fs;
 
     fn make_hash(suffix: &str) -> String {
         // Use SHA-256 to ensure unique hashes per suffix
@@ -505,7 +530,10 @@ mod tests {
         let mut hasher = DefaultHasher::new();
         suffix.hash(&mut hasher);
         // Combine with byte sum for additional uniqueness
-        let byte_sum: u64 = suffix.as_bytes().iter().fold(0u64, |a, &b| a.wrapping_add(b as u64));
+        let byte_sum: u64 = suffix
+            .as_bytes()
+            .iter()
+            .fold(0u64, |a, &b| a.wrapping_add(b as u64));
         let h = hasher.finish().wrapping_add(byte_sum);
         format!("{h:064x}")
     }
@@ -526,7 +554,8 @@ mod tests {
         target_hash: &str,
         signer: &dyn Signer,
     ) {
-        refs::write_project_head_ref(refs_root, principal_key, project_hash, target_hash, signer).unwrap();
+        refs::write_project_head_ref(refs_root, principal_key, project_hash, target_hash, signer)
+            .unwrap();
     }
 
     fn make_project_snapshot(hash: &str, source: &str, parents: &[&str]) -> serde_json::Value {
@@ -573,18 +602,44 @@ mod tests {
         let snap4_hash = make_hash("snap4");
         let snap5_hash = make_hash("snap5");
 
-        write_object(&cas_root, &snap1_hash, &make_project_snapshot("snap1", "fold_back", &[]));
-        write_object(&cas_root, &snap2_hash, &make_project_snapshot("snap2", "fold_back", &[&snap1_hash]));
-        write_object(&cas_root, &snap3_hash, &make_project_snapshot("snap3", "fold_back", &[&snap2_hash]));
-        write_object(&cas_root, &snap4_hash, &make_project_snapshot("snap4", "fold_back", &[&snap3_hash]));
-        write_object(&cas_root, &snap5_hash, &make_project_snapshot("snap5", "fold_back", &[&snap4_hash]));
+        write_object(
+            &cas_root,
+            &snap1_hash,
+            &make_project_snapshot("snap1", "fold_back", &[]),
+        );
+        write_object(
+            &cas_root,
+            &snap2_hash,
+            &make_project_snapshot("snap2", "fold_back", &[&snap1_hash]),
+        );
+        write_object(
+            &cas_root,
+            &snap3_hash,
+            &make_project_snapshot("snap3", "fold_back", &[&snap2_hash]),
+        );
+        write_object(
+            &cas_root,
+            &snap4_hash,
+            &make_project_snapshot("snap4", "fold_back", &[&snap3_hash]),
+        );
+        write_object(
+            &cas_root,
+            &snap5_hash,
+            &make_project_snapshot("snap5", "fold_back", &[&snap4_hash]),
+        );
 
         // HEAD points to snap5
-        write_project_head(&refs_root, "fp:test-principal", "test-project", &snap5_hash, &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "test-project",
+            &snap5_hash,
+            &signer,
+        );
 
         let policy = RetentionPolicy {
             manual_pushes: 10,
-            auto_snapshots: 2,  // Keep HEAD (snap5) + snap4, snap3 only
+            auto_snapshots: 2, // Keep HEAD (snap5) + snap4, snap3 only
         };
 
         let result = compact_projects(&cas_root, &refs_root, &signer, &policy, true).unwrap();
@@ -608,11 +663,29 @@ mod tests {
         let push2_hash = make_hash("push2");
         let push3_hash = make_hash("push3");
 
-        write_object(&cas_root, &push1_hash, &make_project_snapshot("push1", "push", &[]));
-        write_object(&cas_root, &push2_hash, &make_project_snapshot("push2", "push", &[&push1_hash]));
-        write_object(&cas_root, &push3_hash, &make_project_snapshot("push3", "push", &[&push2_hash]));
+        write_object(
+            &cas_root,
+            &push1_hash,
+            &make_project_snapshot("push1", "push", &[]),
+        );
+        write_object(
+            &cas_root,
+            &push2_hash,
+            &make_project_snapshot("push2", "push", &[&push1_hash]),
+        );
+        write_object(
+            &cas_root,
+            &push3_hash,
+            &make_project_snapshot("push3", "push", &[&push2_hash]),
+        );
 
-        write_project_head(&refs_root, "fp:test-principal", "test-proj", &push3_hash, &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "test-proj",
+            &push3_hash,
+            &signer,
+        );
 
         let policy = RetentionPolicy {
             manual_pushes: 10,
@@ -637,10 +710,20 @@ mod tests {
         let hashes: Vec<String> = (1..=5).map(|i| make_hash(&format!("auto{}", i))).collect();
         for (i, hash) in hashes.iter().enumerate() {
             let parents: Vec<&str> = if i > 0 { vec![&hashes[i - 1]] } else { vec![] };
-            write_object(&cas_root, hash, &make_project_snapshot(&format!("auto{}", i + 1), "fold_back", &parents));
+            write_object(
+                &cas_root,
+                hash,
+                &make_project_snapshot(&format!("auto{}", i + 1), "fold_back", &parents),
+            );
         }
 
-        write_project_head(&refs_root, "fp:test-principal", "test-proj", &hashes[4], &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "test-proj",
+            &hashes[4],
+            &signer,
+        );
 
         let policy = RetentionPolicy {
             manual_pushes: 0,
@@ -661,7 +744,14 @@ mod tests {
         fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
 
-        let result = compact_projects(&cas_root, &refs_root, &signer, &RetentionPolicy::default(), false).unwrap();
+        let result = compact_projects(
+            &cas_root,
+            &refs_root,
+            &signer,
+            &RetentionPolicy::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(result.projects_scanned, 0);
         assert_eq!(result.snapshots_removed, 0);
     }
@@ -669,16 +759,22 @@ mod tests {
     #[test]
     fn resolve_surviving_parents_basic() {
         let snap1 = SnapshotInfo {
-            hash: "h1".into(), source: "push".into(),
-            parent_hashes: vec![], created_at: "2026-01-01T00:00:00Z".into(),
+            hash: "h1".into(),
+            source: "push".into(),
+            parent_hashes: vec![],
+            created_at: "2026-01-01T00:00:00Z".into(),
         };
         let snap2 = SnapshotInfo {
-            hash: "h2".into(), source: "push".into(),
-            parent_hashes: vec!["h1".into()], created_at: "2026-01-02T00:00:00Z".into(),
+            hash: "h2".into(),
+            source: "push".into(),
+            parent_hashes: vec!["h1".into()],
+            created_at: "2026-01-02T00:00:00Z".into(),
         };
         let snap3 = SnapshotInfo {
-            hash: "h3".into(), source: "auto".into(),
-            parent_hashes: vec!["h2".into()], created_at: "2026-01-03T00:00:00Z".into(),
+            hash: "h3".into(),
+            source: "auto".into(),
+            parent_hashes: vec!["h2".into()],
+            created_at: "2026-01-03T00:00:00Z".into(),
         };
         let all = vec![snap1, snap2, snap3];
 
@@ -711,11 +807,7 @@ mod tests {
             .collect();
 
         for (i, hash) in hashes.iter().enumerate() {
-            let parents: Vec<&str> = if i > 0 {
-                vec![&hashes[i - 1]]
-            } else {
-                vec![]
-            };
+            let parents: Vec<&str> = if i > 0 { vec![&hashes[i - 1]] } else { vec![] };
             write_object(
                 &cas_root,
                 hash,
@@ -725,7 +817,13 @@ mod tests {
 
         // HEAD = snap20 (last element)
         let head_hash = &hashes[count - 1];
-        write_project_head(&refs_root, "fp:test-principal", "scale-proj", head_hash, &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "scale-proj",
+            head_hash,
+            &signer,
+        );
 
         // Keep HEAD + 4 auto = 5 total, remove 15
         let policy = RetentionPolicy {
@@ -757,13 +855,39 @@ mod tests {
         let s4 = make_hash("integrity-4");
         let s5 = make_hash("integrity-5");
 
-        write_object(&cas_root, &s1, &make_project_snapshot("i1", "fold_back", &[]));
-        write_object(&cas_root, &s2, &make_project_snapshot("i2", "fold_back", &[&s1]));
-        write_object(&cas_root, &s3, &make_project_snapshot("i3", "fold_back", &[&s2]));
-        write_object(&cas_root, &s4, &make_project_snapshot("i4", "fold_back", &[&s3]));
-        write_object(&cas_root, &s5, &make_project_snapshot("i5", "fold_back", &[&s4]));
+        write_object(
+            &cas_root,
+            &s1,
+            &make_project_snapshot("i1", "fold_back", &[]),
+        );
+        write_object(
+            &cas_root,
+            &s2,
+            &make_project_snapshot("i2", "fold_back", &[&s1]),
+        );
+        write_object(
+            &cas_root,
+            &s3,
+            &make_project_snapshot("i3", "fold_back", &[&s2]),
+        );
+        write_object(
+            &cas_root,
+            &s4,
+            &make_project_snapshot("i4", "fold_back", &[&s3]),
+        );
+        write_object(
+            &cas_root,
+            &s5,
+            &make_project_snapshot("i5", "fold_back", &[&s4]),
+        );
 
-        write_project_head(&refs_root, "fp:test-principal", "integrity-proj", &s5, &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "integrity-proj",
+            &s5,
+            &signer,
+        );
 
         // Keep only HEAD + 1 auto = 2 total. Should remove s1, s2, s3.
         // s4 should rewrite its parent from s3 → (resolved through removed to root).
@@ -812,23 +936,52 @@ mod tests {
         let head_hash = make_hash("merge-HEAD");
 
         // E is the root (merge base)
-        write_object(&cas_root, &e_hash,
-            &make_project_snapshot_with_time("E", "fold_back", &[], "2026-04-20T00:00:00Z"));
+        write_object(
+            &cas_root,
+            &e_hash,
+            &make_project_snapshot_with_time("E", "fold_back", &[], "2026-04-20T00:00:00Z"),
+        );
         // C and D are children of E
-        write_object(&cas_root, &c_hash,
-            &make_project_snapshot_with_time("C", "fold_back", &[&e_hash], "2026-04-21T00:00:00Z"));
-        write_object(&cas_root, &d_hash,
-            &make_project_snapshot_with_time("D", "fold_back", &[&e_hash], "2026-04-21T00:00:00Z"));
+        write_object(
+            &cas_root,
+            &c_hash,
+            &make_project_snapshot_with_time("C", "fold_back", &[&e_hash], "2026-04-21T00:00:00Z"),
+        );
+        write_object(
+            &cas_root,
+            &d_hash,
+            &make_project_snapshot_with_time("D", "fold_back", &[&e_hash], "2026-04-21T00:00:00Z"),
+        );
         // A is child of C, B is child of D
-        write_object(&cas_root, &a_hash,
-            &make_project_snapshot_with_time("A", "fold_back", &[&c_hash], "2026-04-22T00:00:00Z"));
-        write_object(&cas_root, &b_hash,
-            &make_project_snapshot_with_time("B", "fold_back", &[&d_hash], "2026-04-22T00:00:00Z"));
+        write_object(
+            &cas_root,
+            &a_hash,
+            &make_project_snapshot_with_time("A", "fold_back", &[&c_hash], "2026-04-22T00:00:00Z"),
+        );
+        write_object(
+            &cas_root,
+            &b_hash,
+            &make_project_snapshot_with_time("B", "fold_back", &[&d_hash], "2026-04-22T00:00:00Z"),
+        );
         // HEAD has parents A and B
-        write_object(&cas_root, &head_hash,
-            &make_project_snapshot_with_time("HEAD", "fold_back", &[&a_hash, &b_hash], "2026-04-23T00:00:00Z"));
+        write_object(
+            &cas_root,
+            &head_hash,
+            &make_project_snapshot_with_time(
+                "HEAD",
+                "fold_back",
+                &[&a_hash, &b_hash],
+                "2026-04-23T00:00:00Z",
+            ),
+        );
 
-        write_project_head(&refs_root, "fp:test-principal", "merge-proj", &head_hash, &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "merge-proj",
+            &head_hash,
+            &signer,
+        );
 
         // Keep HEAD + 2 auto snapshots.
         // By created_at (newest first): HEAD(23rd), A(22nd), B(22nd), C(21st), D(21st), E(20th)
@@ -842,18 +995,24 @@ mod tests {
         let result = compact_projects(&cas_root, &refs_root, &signer, &policy, false).unwrap();
 
         assert_eq!(result.snapshots_removed, 3, "should remove C, D, E");
-        assert!(result.snapshots_rewritten >= 2, "A and B should both be rewritten (C→E, D→E)");
+        assert!(
+            result.snapshots_rewritten >= 2,
+            "A and B should both be rewritten (C→E, D→E)"
+        );
 
         // Verify A and B now point to E (not C/D)
         // Read the actual rewritten objects from CAS
-        let new_head = refs::read_project_head_ref(&refs_root, "fp:test-principal", "merge-proj").unwrap().unwrap();
+        let new_head = refs::read_project_head_ref(&refs_root, "fp:test-principal", "merge-proj")
+            .unwrap()
+            .unwrap();
         let head_obj: serde_json::Value = {
             let path = lillux::shard_path(&cas_root, "objects", &new_head, ".json");
             let content = std::fs::read_to_string(&path).unwrap();
             serde_json::from_str(&content).unwrap()
         };
         let head_parents: Vec<String> = head_obj["parent_hashes"]
-            .as_array().unwrap()
+            .as_array()
+            .unwrap()
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
@@ -868,7 +1027,8 @@ mod tests {
             let content = std::fs::read_to_string(&path).unwrap();
             let obj: serde_json::Value = serde_json::from_str(&content).unwrap();
             let grandparents: Vec<String> = obj["parent_hashes"]
-                .as_array().unwrap()
+                .as_array()
+                .unwrap()
                 .iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect();
@@ -903,16 +1063,49 @@ mod tests {
         let mid_old_hash = make_hash("time-mid-old");
         let head_hash = make_hash("time-head");
 
-        write_object(&cas_root, &old_root_hash,
-            &make_project_snapshot_with_time("root", "fold_back", &[], "2026-04-21T00:00:00Z"));
-        write_object(&cas_root, &mid_new_hash,
-            &make_project_snapshot_with_time("mid-new", "fold_back", &[&old_root_hash], "2026-04-23T00:00:00Z"));
-        write_object(&cas_root, &mid_old_hash,
-            &make_project_snapshot_with_time("mid-old", "fold_back", &[&mid_new_hash], "2026-04-20T00:00:00Z"));
-        write_object(&cas_root, &head_hash,
-            &make_project_snapshot_with_time("head", "fold_back", &[&mid_old_hash], "2026-04-22T00:00:00Z"));
+        write_object(
+            &cas_root,
+            &old_root_hash,
+            &make_project_snapshot_with_time("root", "fold_back", &[], "2026-04-21T00:00:00Z"),
+        );
+        write_object(
+            &cas_root,
+            &mid_new_hash,
+            &make_project_snapshot_with_time(
+                "mid-new",
+                "fold_back",
+                &[&old_root_hash],
+                "2026-04-23T00:00:00Z",
+            ),
+        );
+        write_object(
+            &cas_root,
+            &mid_old_hash,
+            &make_project_snapshot_with_time(
+                "mid-old",
+                "fold_back",
+                &[&mid_new_hash],
+                "2026-04-20T00:00:00Z",
+            ),
+        );
+        write_object(
+            &cas_root,
+            &head_hash,
+            &make_project_snapshot_with_time(
+                "head",
+                "fold_back",
+                &[&mid_old_hash],
+                "2026-04-22T00:00:00Z",
+            ),
+        );
 
-        write_project_head(&refs_root, "fp:test-principal", "time-proj", &head_hash, &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "time-proj",
+            &head_hash,
+            &signer,
+        );
 
         // Keep HEAD + 1 auto. By created_at newest: mid_new(23rd), head(22nd), old_root(21st), mid_old(20th)
         // HEAD always kept. Then auto_snapshots=1: mid_new (newest non-HEAD).
@@ -944,22 +1137,35 @@ mod tests {
         let head_hash = make_hash("orphan-head");
         let missing_parent = make_hash("nonexistent");
 
-        write_object(&cas_root, &head_hash, &serde_json::json!({
-            "kind": "project_snapshot",
-            "schema": 2,
-            "project_manifest_hash": make_hash("manifest-orphan"),
-            "parent_hashes": [missing_parent],
-            "created_at": "2026-04-23T00:00:00Z",
-            "source": "fold_back",
-        }));
+        write_object(
+            &cas_root,
+            &head_hash,
+            &serde_json::json!({
+                "kind": "project_snapshot",
+                "schema": 2,
+                "project_manifest_hash": make_hash("manifest-orphan"),
+                "parent_hashes": [missing_parent],
+                "created_at": "2026-04-23T00:00:00Z",
+                "source": "fold_back",
+            }),
+        );
 
-        write_project_head(&refs_root, "fp:test-principal", "orphan-proj", &head_hash, &signer);
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "orphan-proj",
+            &head_hash,
+            &signer,
+        );
 
         let policy = RetentionPolicy::default();
 
         // compact_projects propagates per-project errors (fail-hard).
         let result = compact_projects(&cas_root, &refs_root, &signer, &policy, false);
-        assert!(result.is_err(), "compaction should fail on missing snapshot");
+        assert!(
+            result.is_err(),
+            "compaction should fail on missing snapshot"
+        );
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(
             err_msg.contains("orphan-proj"),

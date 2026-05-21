@@ -32,7 +32,8 @@ pub async fn load_resume_state(
     // This is the runtime reconstructing its own budget from the
     // event stream — the daemon stays generic.
     let mut has_thread_usage_event = false;
-    let thread_usage = extract_thread_usage_from_events(&response.events, &mut has_thread_usage_event);
+    let thread_usage =
+        extract_thread_usage_from_events(&response.events, &mut has_thread_usage_event);
 
     Ok(ResumeState {
         messages: trimmed,
@@ -80,7 +81,8 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
             }
             "assistant_message" => {
                 let content = event.payload.get("content").cloned();
-                let tool_calls = match event.payload.get("tool_calls").and_then(|tc| tc.as_array()) {
+                let tool_calls = match event.payload.get("tool_calls").and_then(|tc| tc.as_array())
+                {
                     Some(arr) => {
                         let calls: Vec<crate::directive::ToolCall> = arr
                             .iter()
@@ -114,7 +116,9 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                 });
             }
             "tool_result" => {
-                let call_id = event.payload.get("call_id")
+                let call_id = event
+                    .payload
+                    .get("call_id")
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 let content = event.payload.get("result").cloned();
@@ -136,13 +140,13 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
 }
 
 fn count_turns(messages: &[ProviderMessage]) -> u32 {
-    messages
-        .iter()
-        .filter(|m| m.role == "assistant")
-        .count() as u32
+    messages.iter().filter(|m| m.role == "assistant").count() as u32
 }
 
-fn trim_to_token_budget(mut messages: Vec<ProviderMessage>, max_tokens: u64) -> Vec<ProviderMessage> {
+fn trim_to_token_budget(
+    mut messages: Vec<ProviderMessage>,
+    max_tokens: u64,
+) -> Vec<ProviderMessage> {
     if messages.is_empty() {
         return messages;
     }
@@ -170,7 +174,10 @@ fn estimate_tokens_from_value(v: &Option<Value>) -> u64 {
         Some(Value::Number(_)) => 1,
         Some(Value::Bool(_)) => 1,
         Some(Value::Null) | None => 0,
-        Some(Value::Array(arr)) => arr.iter().map(|v| estimate_tokens_from_value(&Some(v.clone()))).sum(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .map(|v| estimate_tokens_from_value(&Some(v.clone())))
+            .sum(),
         Some(Value::Object(obj)) => obj
             .values()
             .map(|v| estimate_tokens_from_value(&Some(v.clone())))
@@ -182,7 +189,9 @@ fn estimate_tokens_from_value(v: &Option<Value>) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI};
+    use ryeos_runtime::callback::{
+        CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI,
+    };
     use ryeos_runtime::ReplayedEventRecord;
     use serde_json::json;
     use std::sync::Arc;
@@ -196,20 +205,56 @@ mod tests {
         async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
-            Ok(serde_json::to_value(ReplayResponse { events: self.events.clone() }).unwrap())
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
         }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(serde_json::to_value(ReplayResponse {
+                events: self.events.clone(),
+            })
+            .unwrap())
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
     }
 
     fn make_callback(events: Vec<ReplayedEventRecord>) -> CallbackClient {
@@ -278,7 +323,10 @@ mod tests {
         let result = reconstruct_messages(&events);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("unknown event_type"), "expected bail on unknown type, got: {err}");
+        assert!(
+            err.contains("unknown event_type"),
+            "expected bail on unknown type, got: {err}"
+        );
     }
 
     #[test]

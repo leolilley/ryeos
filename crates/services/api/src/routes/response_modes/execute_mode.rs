@@ -23,9 +23,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::route_error::{RouteConfigError, RouteDispatchError};
-use ryeos_executor::execution::project_source::{self, ProjectSource};
-use crate::routes::compile::{CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext};
+use crate::routes::compile::{
+    CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
+};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
+use ryeos_executor::execution::project_source::{self, ProjectSource};
 
 // ── Request shape ─────────────────────────────────────────────────────────
 
@@ -217,25 +219,25 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 )
                     .into_response());
             }
-            let resolved = ryeos_runtime::resolve_command(
-                tokens,
-                &state.alias_registry,
-                &state.verb_registry,
-            )
-            .map_err(|e| match &e {
-                ryeos_runtime::ResolveError::NoMatch { tokens } => {
-                    RouteDispatchError::BadRequest(json!({
-                        "error": e.to_string(),
-                        "tokens": tokens,
-                    }).to_string())
-                }
-                ryeos_runtime::ResolveError::VerbNotFound { .. } => {
-                    RouteDispatchError::Internal(e.to_string())
-                }
-                ryeos_runtime::ResolveError::VerbNotExecutable { .. } => {
-                    RouteDispatchError::BadRequest(e.to_string())
-                }
-            })?;
+            let resolved =
+                ryeos_runtime::resolve_command(tokens, &state.alias_registry, &state.verb_registry)
+                    .map_err(|e| match &e {
+                        ryeos_runtime::ResolveError::NoMatch { tokens } => {
+                            RouteDispatchError::BadRequest(
+                                json!({
+                                    "error": e.to_string(),
+                                    "tokens": tokens,
+                                })
+                                .to_string(),
+                            )
+                        }
+                        ryeos_runtime::ResolveError::VerbNotFound { .. } => {
+                            RouteDispatchError::Internal(e.to_string())
+                        }
+                        ryeos_runtime::ResolveError::VerbNotExecutable { .. } => {
+                            RouteDispatchError::BadRequest(e.to_string())
+                        }
+                    })?;
 
             tracing::debug!(
                 tokens = ?tokens,
@@ -299,7 +301,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
         }
 
         // Resolve project execution context.
-        let checkout_id = format!("pre-{}-{:08x}", lillux::time::timestamp_millis(), rand::random::<u32>());
+        let checkout_id = format!(
+            "pre-{}-{:08x}",
+            lillux::time::timestamp_millis(),
+            rand::random::<u32>()
+        );
         let project_ctx = match project_source::resolve_project_context(
             &state,
             &project_source,
@@ -328,12 +334,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
 
         let plan_ctx = PlanContext {
-            requested_by: EffectivePrincipal::Local(
-                ryeos_engine::contracts::Principal {
-                    fingerprint: caller_principal_id.clone(),
-                    scopes: caller_scopes.clone(),
-                },
-            ),
+            requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
+                fingerprint: caller_principal_id.clone(),
+                scopes: caller_scopes.clone(),
+            }),
             project_context: ProjectContext::LocalPath {
                 path: project_ctx.effective_path.clone(),
             },
@@ -366,28 +370,33 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     axum::Json(json!({
                         "error": format!("invalid item ref '{}': {e}", item_ref)
                     })),
-                ).into_response());
+                )
+                    .into_response());
             }
         };
 
         let provenance = match project_source {
-            ProjectSource::LiveFs => ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                project_ctx.effective_path.clone(),
-                project_ctx.request_engine.clone(),
-            ),
-            ProjectSource::PushedHead => ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
-                project_ctx.effective_path.clone(),
-                project_ctx.original_path.clone(),
-                project_ctx.request_engine.clone(),
-                project_ctx
-                    .temp_dir
-                    .clone()
-                    .expect("ResolvedProjectContext PushedHead must carry a temp_dir Arc"),
-                project_ctx
-                    .snapshot_hash
-                    .clone()
-                    .expect("ResolvedProjectContext PushedHead must carry a snapshot_hash"),
-            ),
+            ProjectSource::LiveFs => {
+                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+                    project_ctx.effective_path.clone(),
+                    project_ctx.request_engine.clone(),
+                )
+            }
+            ProjectSource::PushedHead => {
+                ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
+                    project_ctx.effective_path.clone(),
+                    project_ctx.original_path.clone(),
+                    project_ctx.request_engine.clone(),
+                    project_ctx
+                        .temp_dir
+                        .clone()
+                        .expect("ResolvedProjectContext PushedHead must carry a temp_dir Arc"),
+                    project_ctx
+                        .snapshot_hash
+                        .clone()
+                        .expect("ResolvedProjectContext PushedHead must carry a snapshot_hash"),
+                )
+            }
         };
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
@@ -417,7 +426,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
 /// Map a `DispatchError` into an HTTP response with the correct status code
 /// and structured error payload.
-fn dispatch_error_response(e: ryeos_executor::dispatch_error::DispatchError) -> axum::response::Response {
+fn dispatch_error_response(
+    e: ryeos_executor::dispatch_error::DispatchError,
+) -> axum::response::Response {
     let status = e.http_status();
     let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);
     (status, axum::Json(payload.to_value())).into_response()
@@ -494,7 +505,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must not declare response.source"), "got: {msg}");
+        assert!(
+            msg.contains("must not declare response.source"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -511,7 +525,10 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must not have a top-level 'execute' block"), "got: {msg}");
+        assert!(
+            msg.contains("must not have a top-level 'execute' block"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -524,6 +541,9 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("must not set static-mode fields"), "got: {msg}");
+        assert!(
+            msg.contains("must not set static-mode fields"),
+            "got: {msg}"
+        );
     }
 }

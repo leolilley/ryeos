@@ -74,10 +74,7 @@ impl CallbackCapabilityStore {
             provenance,
         };
 
-        self.capabilities
-            .lock()
-            .unwrap()
-            .insert(token, cap.clone());
+        self.capabilities.lock().unwrap().insert(token, cap.clone());
         cap
     }
 
@@ -431,13 +428,18 @@ mod tests {
         let validated = store.validate(&cap.token, "T-test", tmp.path()).unwrap();
 
         assert!(Arc::ptr_eq(validated.provenance.request_engine(), &engine));
-        assert_eq!(validated.provenance.original_project_path(), Path::new("/original"));
-        assert_eq!(validated.provenance.project_source(), ProjectSourceKind::PushedHead);
+        assert_eq!(
+            validated.provenance.original_project_path(),
+            Path::new("/original")
+        );
+        assert_eq!(
+            validated.provenance.project_source(),
+            ProjectSourceKind::PushedHead
+        );
         assert_eq!(validated.provenance.effective_path(), tmp.path());
         match &validated.provenance {
             ExecutionProvenance::RootPushedHead {
-                workspace_lifeline,
-                ..
+                workspace_lifeline, ..
             } => assert!(Arc::ptr_eq(workspace_lifeline, &lifeline)),
             other => panic!("expected RootPushedHead, got {other:?}"),
         }
@@ -453,7 +455,10 @@ mod tests {
             project_path: PathBuf::from("/project"),
             expires_at: Instant::now() + Duration::from_secs(300),
             effective_caps: vec![],
-            provenance: ExecutionProvenance::root_live_fs(PathBuf::from("/project"), engine.clone()),
+            provenance: ExecutionProvenance::root_live_fs(
+                PathBuf::from("/project"),
+                engine.clone(),
+            ),
         };
 
         let cloned = cap.clone();
@@ -521,12 +526,7 @@ mod tests {
     #[test]
     fn thread_auth_rejects_wrong_thread() {
         let store = ThreadAuthStore::new();
-        let state = store.mint(
-            "T-1",
-            "fp:u".to_string(),
-            vec![],
-            Duration::from_secs(300),
-        );
+        let state = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(300));
         let err = store.validate(&state.token, "T-2").unwrap_err();
         assert!(err.to_string().contains("thread_id"));
     }

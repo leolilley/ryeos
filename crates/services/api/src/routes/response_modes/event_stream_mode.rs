@@ -133,13 +133,11 @@ fn compile_gateway(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfi
         });
     }
 
-    let cfg: RawGatewaySourceConfig =
-        serde_json::from_value(raw.response.source_config.clone()).map_err(|e| {
-            RouteConfigError::InvalidSourceConfig {
-                id: raw.id.clone(),
-                src: "dispatch_launch".into(),
-                reason: format!("invalid source_config: {e}"),
-            }
+    let cfg: RawGatewaySourceConfig = serde_json::from_value(raw.response.source_config.clone())
+        .map_err(|e| RouteConfigError::InvalidSourceConfig {
+            id: raw.id.clone(),
+            src: "dispatch_launch".into(),
+            reason: format!("invalid source_config: {e}"),
         })?;
 
     if cfg.keep_alive_secs == 0 {
@@ -184,11 +182,7 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
             reason: "missing 'thread_id' in source_config".into(),
         })?;
 
-    let capture_name = validate_and_extract_path_capture(
-        thread_id_template,
-        "thread_id",
-        &raw.id,
-    )?;
+    let capture_name = validate_and_extract_path_capture(thread_id_template, "thread_id", &raw.id)?;
 
     let declared_captures = extract_path_captures(&raw.path);
     if !declared_captures.contains(&capture_name) {
@@ -397,8 +391,6 @@ mod tests {
     use crate::routes::invokers::subscription_stream_invocation::parse_last_event_id;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
 
-    fn compile_ctx() {}
-
     // ── Last-Event-ID tests ────────────────────
 
     #[test]
@@ -553,10 +545,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("unknown event_stream source"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("unknown event_stream source"), "got: {msg}");
     }
 
     #[test]
@@ -570,10 +559,7 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("requires `response.source`"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("requires `response.source`"), "got: {msg}");
     }
 
     // ── Gateway-specific compile tests ─────────
@@ -583,7 +569,10 @@ mod tests {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.auth = "none".into();
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("requires auth 'ryeos_signed'"), "got: {msg}");
     }
@@ -593,7 +582,10 @@ mod tests {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.request.body = RawRequestBody::Raw;
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("requires request.body = json"), "got: {msg}");
     }
@@ -603,7 +595,10 @@ mod tests {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.response.source_config = serde_json::json!({"keep_alive_secs": 0});
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("keep_alive_secs must be > 0"), "got: {msg}");
     }
@@ -616,7 +611,10 @@ mod tests {
             "item_ref": "bogus",
         });
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown field") && msg.contains("item_ref"),
@@ -629,7 +627,10 @@ mod tests {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.response.source_config = serde_json::json!({});
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(
             msg.contains("missing field `keep_alive_secs`"),
@@ -642,7 +643,10 @@ mod tests {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.response.source_config = serde_json::json!(123);
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("invalid source_config"), "got: {msg}");
     }
@@ -654,7 +658,10 @@ mod tests {
         let err = serde_json::from_slice::<LaunchRequest>(&bytes)
             .expect_err("must reject missing fields");
         let msg = err.to_string();
-        assert!(msg.contains("missing field"), "expected missing-field error, got: {msg}");
+        assert!(
+            msg.contains("missing field"),
+            "expected missing-field error, got: {msg}"
+        );
     }
 
     #[test]
@@ -683,8 +690,7 @@ mod tests {
             "parameters": {"name": "World"},
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let req: LaunchRequest =
-            serde_json::from_slice(&bytes).expect("valid body must parse");
+        let req: LaunchRequest = serde_json::from_slice(&bytes).expect("valid body must parse");
         assert_eq!(req.item_ref, "directive:my/agent");
         assert_eq!(req.project_path, "/tmp/proj");
         assert_eq!(req.parameters["name"], "World");
@@ -697,12 +703,12 @@ mod tests {
         let mut raw = make_subscription_raw("r1", "/threads/{id}/stream");
         raw.auth = "none".into();
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
-        assert!(
-            msg.contains("requires auth 'ryeos_signed'"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("requires auth 'ryeos_signed'"), "got: {msg}");
     }
 
     #[test]
@@ -713,7 +719,10 @@ mod tests {
             "keep_alive_secs": 15,
         });
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("must use ${path."), "got: {msg}");
     }
@@ -726,7 +735,10 @@ mod tests {
             "keep_alive_secs": 15,
         });
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("undeclared path capture"), "got: {msg}");
     }
@@ -739,7 +751,10 @@ mod tests {
             "keep_alive_secs": 0,
         });
         let result = EventStreamMode.compile(&raw);
-        let err = match result { Err(e) => e, Ok(_) => panic!("expected error") };
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("keep_alive_secs must be > 0"), "got: {msg}");
     }
@@ -780,15 +795,11 @@ mod tests {
 
     #[test]
     fn validate_rejects_double_interpolation() {
-        assert!(
-            validate_and_extract_path_capture("${path.x}-${path.y}", "f", "r1").is_err()
-        );
+        assert!(validate_and_extract_path_capture("${path.x}-${path.y}", "f", "r1").is_err());
     }
 
     #[test]
     fn validate_rejects_static_string() {
-        assert!(
-            validate_and_extract_path_capture("static", "f", "r1").is_err()
-        );
+        assert!(validate_and_extract_path_capture("static", "f", "r1").is_err());
     }
 }

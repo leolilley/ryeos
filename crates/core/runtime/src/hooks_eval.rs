@@ -28,10 +28,12 @@ pub async fn run_hooks(
         let condition = hook.condition.as_ref().cloned().unwrap_or(Value::Null);
         let condition_passes = match crate::condition::matches(context, &condition) {
             Ok(b) => b,
-            Err(e) => return Err(format!(
-                "hook[{idx}] (id={}): condition evaluation failed: {e:#}",
-                hook.id
-            )),
+            Err(e) => {
+                return Err(format!(
+                    "hook[{idx}] (id={}): condition evaluation failed: {e:#}",
+                    hook.id
+                ))
+            }
         };
         if !condition_passes {
             continue;
@@ -42,10 +44,12 @@ pub async fn run_hooks(
 
         let result = match dispatcher(interpolated, project_path.to_string()).await {
             Ok(val) => val,
-            Err(e) => return Err(format!(
-                "hook[{idx}] (id={}): dispatch failed: {e:#}",
-                hook.id
-            )),
+            Err(e) => {
+                return Err(format!(
+                    "hook[{idx}] (id={}): dispatch failed: {e:#}",
+                    hook.id
+                ))
+            }
         };
 
         let layer = hook.layer.unwrap_or(2);
@@ -54,9 +58,11 @@ pub async fn run_hooks(
         }
 
         if control_result.is_none()
-            && !result.is_null() && result != serde_json::json!({"success": true}) {
-                control_result = Some(result);
-            }
+            && !result.is_null()
+            && result != serde_json::json!({"success": true})
+        {
+            control_result = Some(result);
+        }
     }
 
     Ok(control_result)
@@ -138,11 +144,12 @@ mod tests {
             make_hook("h1", "step_complete", 1),
             make_hook("h2", "error", 1),
         ];
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
-            Box::pin(async { Ok(json!({"dispatched": true})) })
-        });
+        let dispatcher: HookDispatcher =
+            Box::new(|_action, _project| Box::pin(async { Ok(json!({"dispatched": true})) }));
         let ctx = json!({"state": {}});
-        let result = run_hooks("error", &ctx, &hooks, "/tmp", &dispatcher).await.unwrap();
+        let result = run_hooks("error", &ctx, &hooks, "/tmp", &dispatcher)
+            .await
+            .unwrap();
         assert!(result.is_some());
     }
 
@@ -153,7 +160,9 @@ mod tests {
             Box::pin(async { Ok(json!({"should_be_ignored": true})) })
         });
         let ctx = json!({"state": {}});
-        let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher).await.unwrap();
+        let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -161,15 +170,20 @@ mod tests {
     async fn run_hooks_propagates_dispatch_error() {
         let hooks = vec![make_hook("h1", "step_complete", 1)];
         let dispatcher: HookDispatcher = Box::new(|_action, _project| {
-            Box::pin(async { Err(CallbackError::ActionFailed {
-                code: "timeout".to_string(),
-                message: "simulated timeout".to_string(),
-                retryable: false,
-            }) })
+            Box::pin(async {
+                Err(CallbackError::ActionFailed {
+                    code: "timeout".to_string(),
+                    message: "simulated timeout".to_string(),
+                    retryable: false,
+                })
+            })
         });
         let ctx = json!({"state": {}});
         let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher).await;
-        assert!(result.is_err(), "dispatch failure should propagate as Err: {result:?}");
+        assert!(
+            result.is_err(),
+            "dispatch failure should propagate as Err: {result:?}"
+        );
         assert!(result.unwrap_err().contains("dispatch failed"));
     }
 }

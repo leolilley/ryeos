@@ -10,16 +10,17 @@ pub mod matcher;
 pub mod parsed_ref;
 pub mod reload;
 pub mod response_modes;
-pub mod webhook_dedupe;use std::collections::HashMap;
+pub mod webhook_dedupe;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::http::Method;
 
-use compile::CompiledRoute;
 use crate::route_error::RouteConfigError;
+use compile::CompiledRoute;
 use matcher::PathMatcher;
-use ryeos_app::route_raw::RawRouteSpec;
 use response_modes::ResponseModeRegistry;
+use ryeos_app::route_raw::RawRouteSpec;
 
 pub struct RouteTable {
     matcher: PathMatcher,
@@ -73,10 +74,11 @@ pub fn build_route_table(
             .methods
             .iter()
             .map(|m| {
-                m.parse::<Method>().map_err(|_| RouteConfigError::InvalidMethods {
-                    id: raw.id.clone(),
-                    reason: format!("unknown HTTP method '{m}'"),
-                })
+                m.parse::<Method>()
+                    .map_err(|_| RouteConfigError::InvalidMethods {
+                        id: raw.id.clone(),
+                        reason: format!("unknown HTTP method '{m}'"),
+                    })
             })
             .collect();
 
@@ -102,17 +104,14 @@ pub fn build_route_table(
         // reservation is needed.
 
         // Compile auth invoker (no registry lookup).
-        let auth_invoker = match invokers::compile_auth_invoker(
-            &raw.auth,
-            raw.auth_config.as_ref(),
-            &raw.id,
-        ) {
-            Ok(a) => a,
-            Err(e) => {
-                errors.push(e);
-                continue;
-            }
-        };
+        let auth_invoker =
+            match invokers::compile_auth_invoker(&raw.auth, raw.auth_config.as_ref(), &raw.id) {
+                Ok(a) => a,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
 
         let mode = match mode_registry.get(&raw.response.mode) {
             Some(m) => m,
@@ -210,7 +209,7 @@ pub fn swap(state: &crate::api_state::ApiState, new_table: Arc<RouteTable>) {
 mod tests {
     use super::*;
     use ryeos_app::route_raw::{
-        RawLimits, RawRequestBody, RawRequest, RawResponseSpec, RawRouteSpec,
+        RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
     };
 
     fn make_raw(id: &str, path: &str, methods: &[&str], auth: &str, mode: &str) -> RawRouteSpec {
@@ -267,8 +266,8 @@ mod tests {
     #[test]
     fn hook_prefix_allowed_for_config_routes() {
         let raw = make_raw("r1", "/hook/stripe", &["POST"], "none", "static");
-        let table = build_table(&[raw])
-            .expect("/hook/* must be admitted by the route table builder");
+        let table =
+            build_table(&[raw]).expect("/hook/* must be admitted by the route table builder");
         assert_eq!(table.all.len(), 1);
     }
 

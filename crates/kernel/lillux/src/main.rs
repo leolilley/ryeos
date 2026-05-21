@@ -6,7 +6,10 @@ use lillux::time;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "lillux", about = "Lillux microkernel — Execute, Memory, Identity, Time")]
+#[command(
+    name = "lillux",
+    about = "Lillux microkernel — Execute, Memory, Identity, Time"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

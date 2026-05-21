@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContract, RouteInvocationContext,
+    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
     RouteInvocationOutput, RouteInvocationResult, RoutePrincipal,
 };
 
@@ -60,9 +60,9 @@ mod tests {
             authorized_keys_dir: tmpdir.path().join("auth"),
         };
         let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
-        let signer = Arc::new(
-            ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
-        );
+        let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
         let state_store = Arc::new(
             ryeos_app::state_store::StateStore::new(
@@ -73,12 +73,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let kind_profiles = Arc::new(
-            ryeos_app::kind_profiles::KindProfileRegistry::load_defaults(),
-        );
-        let events = Arc::new(
-            ryeos_app::event_store_service::EventStoreService::new(state_store.clone()),
-        );
+        let kind_profiles =
+            Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::load_defaults());
+        let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
+            state_store.clone(),
+        ));
         let threads = Arc::new(
             ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
                 state_store.clone(),
@@ -87,13 +86,11 @@ mod tests {
             )
             .expect("HOSTNAME not set in test environment"),
         );
-        let commands = Arc::new(
-            ryeos_app::command_service::CommandService::new(
-                state_store.clone(),
-                kind_profiles,
-                events.clone(),
-            ),
-        );
+        let commands = Arc::new(ryeos_app::command_service::CommandService::new(
+            state_store.clone(),
+            kind_profiles,
+            events.clone(),
+        ));
         let engine = ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -109,12 +106,25 @@ mod tests {
             verbs: vec![],
             aliases: vec![],
         };
-        let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-            ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
-        ]).unwrap());
-        let test_ar = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
+        let test_vr = Arc::new(
+            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "fetch".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "sign".into(),
+                    execute: Some("tool:ryeos/core/sign".into()),
+                },
+            ])
+            .unwrap(),
+        );
+        let test_ar =
+            Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
@@ -128,12 +138,8 @@ mod tests {
             events,
             event_streams: Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
             commands,
-            callback_tokens: Arc::new(
-                ryeos_app::callback_token::CallbackCapabilityStore::new(),
-            ),
-            thread_auth: Arc::new(
-                ryeos_app::callback_token::ThreadAuthStore::new(),
-            ),
+            callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
+            thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
             write_barrier: Arc::new(write_barrier),
             started_at: std::time::Instant::now(),
             started_at_iso: String::new(),

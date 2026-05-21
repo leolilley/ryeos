@@ -5,17 +5,16 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-use ryeos_app::command_service::{
-    CommandClaimParams, CommandCompleteParams, CommandSubmitParams,
-};
-use ryeos_app::event_store_service::{EventAppendBatchParams, EventAppendParams, EventReplayParams};
-use ryeos_app::thread_lifecycle::{
-    ArtifactPublishParams, ThreadAttachProcessParams,
-    ThreadContinuationParams, ThreadFinalizeParams, ThreadGetParams,
-    ThreadMarkRunningParams,
+use crate::uds::protocol::{RpcRequest, RpcResponse};
+use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, CommandSubmitParams};
+use ryeos_app::event_store_service::{
+    EventAppendBatchParams, EventAppendParams, EventReplayParams,
 };
 use ryeos_app::state::AppState;
-use crate::uds::protocol::{RpcRequest, RpcResponse};
+use ryeos_app::thread_lifecycle::{
+    ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams,
+    ThreadFinalizeParams, ThreadGetParams, ThreadMarkRunningParams,
+};
 
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
     loop {
@@ -44,11 +43,7 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
             thread_id = tracing::field::Empty,
         );
         // Opportunistically record thread_id when present in params.
-        if let Some(tid) = request
-            .params
-            .get("thread_id")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(tid) = request.params.get("thread_id").and_then(|v| v.as_str()) {
             span.record("thread_id", tid);
         }
         let _enter = span.enter();
@@ -82,9 +77,10 @@ pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcRespon
         "system.health" => RpcResponse::ok(request.request_id, json!({ "status": "ok" })),
 
         // ── runtime callbacks (token-gated, used by runtimes) ───────
-        other if other.starts_with("runtime.") => {
-            rpc_result(request.request_id, dispatch_runtime_method(other, &request.params, state).await)
-        }
+        other if other.starts_with("runtime.") => rpc_result(
+            request.request_id,
+            dispatch_runtime_method(other, &request.params, state).await,
+        ),
 
         other => RpcResponse::err(
             request.request_id,
@@ -102,20 +98,26 @@ pub async fn dispatch_runtime_method(
     // Validate callback token on ALL runtime.* methods
     // dispatch_action does its own stronger validation (primary + project_path)
     if method != "runtime.dispatch_action" {
-        let token = params.get("callback_token")
+        let token = params
+            .get("callback_token")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing callback_token"))?;
-        let thread_id = params.get("thread_id")
+        let thread_id = params
+            .get("thread_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
-        state.callback_tokens.validate_token_and_thread(token, thread_id)?;
+        state
+            .callback_tokens
+            .validate_token_and_thread(token, thread_id)?;
     } else {
         // runtime.dispatch_action: validate thread_auth_token (per-request
         // identity proof). Missing or invalid = hard fail, no fallback.
-        let tat = params.get("thread_auth_token")
+        let tat = params
+            .get("thread_auth_token")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.dispatch_action"))?;
-        let thread_id = params.get("thread_id")
+        let thread_id = params
+            .get("thread_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         state.thread_auth.validate(tat, thread_id)?;
@@ -178,8 +180,10 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
     match state.threads.get_thread(&params.thread_id)? {
         Some(thread) => {
             let facets = state.state_store.get_facets(&params.thread_id)?;
-            let facets_map: std::collections::HashMap<&str, &str> =
-                facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let facets_map: std::collections::HashMap<&str, &str> = facets
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
             serde_json::to_value(json!({
                 "thread": thread,
                 "result": state.threads.get_thread_result(&params.thread_id)?,
@@ -225,8 +229,7 @@ fn handle_append_event_batch(
     // Group by thread_id and bulk-publish so each thread's
     // subscribers receive its events in persisted order under a
     // single hub lock acquisition per thread.
-    let mut by_thread: std::collections::HashMap<String, Vec<_>> =
-        std::collections::HashMap::new();
+    let mut by_thread: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
     for ev in &result.persisted {
         by_thread
             .entry(ev.thread_id.clone())
@@ -292,8 +295,10 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing thread_id"))?;
     let facets = state.state_store.get_facets(thread_id)?;
-    let facets_map: std::collections::HashMap<&str, &str> =
-        facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let facets_map: std::collections::HashMap<&str, &str> = facets
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     serde_json::to_value(facets_map).context("failed to encode facets")
 }
 
@@ -316,7 +321,11 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
 
     let frame_len = u32::from_be_bytes(len_buf);
     if frame_len > MAX_FRAME_SIZE {
-        return Err(anyhow!("frame too large: {} bytes (max {})", frame_len, MAX_FRAME_SIZE));
+        return Err(anyhow!(
+            "frame too large: {} bytes (max {})",
+            frame_len,
+            MAX_FRAME_SIZE
+        ));
     }
     let mut frame = vec![0u8; frame_len as usize];
     stream
@@ -343,16 +352,16 @@ async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+    use crate::uds::protocol::RpcError;
     use ryeos_app::callback_token::CallbackCapabilityStore;
-    use ryeos_app::identity::NodeIdentity;
-    use ryeos_app::kind_profiles::KindProfileRegistry;
     use ryeos_app::command_service::CommandService;
     use ryeos_app::event_store_service::EventStoreService;
-    use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
+    use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+    use ryeos_app::identity::NodeIdentity;
+    use ryeos_app::kind_profiles::KindProfileRegistry;
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::StateStore;
-    use crate::uds::protocol::RpcError;
+    use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
     use ryeos_app::write_barrier::WriteBarrier;
     use std::sync::Arc;
     use std::time::Instant;
@@ -386,24 +395,22 @@ mod tests {
         };
 
         let identity = NodeIdentity::create(&key_path).unwrap();
-        identity.write_public_identity(
-            &tmpdir.path().join("identity").join("public-identity.json"),
-        ).unwrap();
+        identity
+            .write_public_identity(&tmpdir.path().join("identity").join("public-identity.json"))
+            .unwrap();
 
-        let signer = Arc::new(
-            ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
-        );
+        let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
         let write_barrier = WriteBarrier::new();
-        let state_store = Arc::new(
-            StateStore::new(state_root, runtime_db_path, signer, write_barrier).unwrap(),
-        );
+        let state_store =
+            Arc::new(StateStore::new(state_root, runtime_db_path, signer, write_barrier).unwrap());
         let kind_profiles = Arc::new(KindProfileRegistry::load_defaults());
         let events = Arc::new(EventStoreService::new(state_store.clone()));
-        let threads = Arc::new(ThreadLifecycleService::new(
-            state_store.clone(),
-            kind_profiles.clone(),
-            events.clone(),
-        ).expect("HOSTNAME not set in test environment"));
+        let threads = Arc::new(
+            ThreadLifecycleService::new(state_store.clone(), kind_profiles.clone(), events.clone())
+                .expect("HOSTNAME not set in test environment"),
+        );
         let commands = Arc::new(CommandService::new(
             state_store.clone(),
             kind_profiles,
@@ -420,12 +427,25 @@ mod tests {
             Vec::new(),
         );
 
-        let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-            ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
-        ]).unwrap());
-        let test_ar = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
+        let test_vr = Arc::new(
+            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "fetch".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "sign".into(),
+                    execute: Some("tool:ryeos/core/sign".into()),
+                },
+            ])
+            .unwrap(),
+        );
+        let test_ar =
+            Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
 
         let state = AppState {
@@ -451,7 +471,12 @@ mod tests {
             },
             services: Arc::new(ryeos_api::build_service_registry()),
             service_descriptors: ryeos_api::handlers::ALL,
-            node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot { bundles: vec![], routes: vec![], verbs: vec![], aliases: vec![] }),
+            node_config: Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
+                bundles: vec![],
+                routes: vec![],
+                verbs: vec![],
+                aliases: vec![],
+            }),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             verb_registry: test_vr,
             alias_registry: test_ar,
@@ -597,29 +622,42 @@ mod tests {
             test_provenance(&state, "/test"),
         );
 
-        let resp = dispatch(rpc("runtime.finalize_thread", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-1",
-                "status": "completed",
-                "outcome_code": "test",
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.finalize_thread",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-1",
+                    "status": "completed",
+                    "outcome_code": "test",
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
     }
 
     #[tokio::test]
     async fn runtime_finalize_missing_token_returns_error() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-Bad", "T-Bad")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-Bad", "T-Bad"))
+            .unwrap();
 
-        let resp = dispatch(rpc("runtime.finalize_thread", json!({
-                "thread_id": "T-Bad",
-                "status": "completed",
-                "outcome_code": "test",
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.finalize_thread",
+                json!({
+                    "thread_id": "T-Bad",
+                    "status": "completed",
+                    "outcome_code": "test",
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         assert!(resp.error.is_some());
     }
 
@@ -636,30 +674,58 @@ mod tests {
             test_provenance(&state, "/test"),
         );
 
-        state.threads.create_thread(&make_create_params("T-events-1", "T-events-1")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-events-1", "T-events-1"))
+            .unwrap();
 
-        let finalize_resp = dispatch(rpc("runtime.finalize_thread", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-events-1",
-                "status": "completed",
-                "outcome_code": "test",
-            })),
+        let finalize_resp = dispatch(
+            rpc(
+                "runtime.finalize_thread",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-events-1",
+                    "status": "completed",
+                    "outcome_code": "test",
+                }),
+            ),
             &state,
-        ).await;
-        assert!(finalize_resp.error.is_none(), "finalize failed: {:?}", finalize_resp.error);
+        )
+        .await;
+        assert!(
+            finalize_resp.error.is_none(),
+            "finalize failed: {:?}",
+            finalize_resp.error
+        );
 
-        let replay_resp = dispatch(rpc("runtime.replay_events", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-events-1",
-                "limit": 10,
-            })),
+        let replay_resp = dispatch(
+            rpc(
+                "runtime.replay_events",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-events-1",
+                    "limit": 10,
+                }),
+            ),
             &state,
-        ).await;
-        assert!(replay_resp.error.is_none(), "replay failed: {:?}", replay_resp.error);
+        )
+        .await;
+        assert!(
+            replay_resp.error.is_none(),
+            "replay failed: {:?}",
+            replay_resp.error
+        );
         let result = rpc_ok(&replay_resp);
         let events = result["events"].as_array().unwrap();
-        assert!(events.len() >= 2, "expected >= 2 events, got {}", events.len());
-        let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
+        assert!(
+            events.len() >= 2,
+            "expected >= 2 events, got {}",
+            events.len()
+        );
+        let types: Vec<&str> = events
+            .iter()
+            .map(|e| e["event_type"].as_str().unwrap())
+            .collect();
         assert!(types.contains(&"thread_created"));
         assert!(types.contains(&"thread_completed"));
     }
@@ -687,18 +753,27 @@ mod tests {
         // the live broadcast.
         let mut rx = state.event_streams.subscribe("T-stream-1");
 
-        let resp = dispatch(rpc("runtime.append_event", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-stream-1",
-                "event": {
-                    "event_type": "stream_opened",
-                    "storage_class": "indexed",
-                    "payload": {"turn": 1},
-                },
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.append_event",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-stream-1",
+                    "event": {
+                        "event_type": "stream_opened",
+                        "storage_class": "indexed",
+                        "payload": {"turn": 1},
+                    },
+                }),
+            ),
             &state,
-        ).await;
-        assert!(resp.error.is_none(), "append_event failed: {:?}", resp.error);
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "append_event failed: {:?}",
+            resp.error
+        );
 
         let live = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
@@ -739,7 +814,11 @@ mod tests {
             })),
             &state,
         ).await;
-        assert!(resp.error.is_none(), "append_events failed: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "append_events failed: {:?}",
+            resp.error
+        );
 
         let mut last_seq = 0;
         for expected_type in ["tool_call_start", "tool_call_result", "stream_closed"] {
@@ -756,11 +835,16 @@ mod tests {
     #[tokio::test]
     async fn runtime_events_replay_missing_token_returns_error() {
         let (_tmp, state) = setup_app_state();
-        let resp = dispatch(rpc("runtime.replay_events", json!({
-                "thread_id": "NONEXISTENT",
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.replay_events",
+                json!({
+                    "thread_id": "NONEXISTENT",
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         assert!(resp.error.is_some());
     }
 
@@ -769,7 +853,10 @@ mod tests {
     #[tokio::test]
     async fn runtime_commands_submit_and_claim() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-cmd-1", "T-cmd-1")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-cmd-1", "T-cmd-1"))
+            .unwrap();
 
         let cbt = state.callback_tokens.generate(
             "T-cmd-1",
@@ -780,31 +867,54 @@ mod tests {
         );
 
         // Mark running first — cancel is only allowed on running threads
-        let _ = dispatch(rpc("runtime.mark_running", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-cmd-1",
-            })),
+        let _ = dispatch(
+            rpc(
+                "runtime.mark_running",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-cmd-1",
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
 
-        let submit_resp = dispatch(rpc("runtime.submit_command", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-cmd-1",
-                "command_type": "cancel",
-            })),
+        let submit_resp = dispatch(
+            rpc(
+                "runtime.submit_command",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-cmd-1",
+                    "command_type": "cancel",
+                }),
+            ),
             &state,
-        ).await;
-        assert!(submit_resp.error.is_none(), "submit failed: {:?}", submit_resp.error);
+        )
+        .await;
+        assert!(
+            submit_resp.error.is_none(),
+            "submit failed: {:?}",
+            submit_resp.error
+        );
         let submitted = rpc_ok(&submit_resp);
         assert_eq!(submitted["command_type"], "cancel");
 
-        let claim_resp = dispatch(rpc("runtime.claim_commands", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-cmd-1",
-            })),
+        let claim_resp = dispatch(
+            rpc(
+                "runtime.claim_commands",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-cmd-1",
+                }),
+            ),
             &state,
-        ).await;
-        assert!(claim_resp.error.is_none(), "claim failed: {:?}", claim_resp.error);
+        )
+        .await;
+        assert!(
+            claim_resp.error.is_none(),
+            "claim failed: {:?}",
+            claim_resp.error
+        );
         let claimed = rpc_ok(&claim_resp);
         let commands = claimed["commands"].as_array().unwrap();
         assert_eq!(commands.len(), 1);
@@ -825,7 +935,10 @@ mod tests {
     #[tokio::test]
     async fn dispatch_action_without_thread_auth_token_is_rejected() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-tat-missing", "T-tat-missing")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-tat-missing", "T-tat-missing"))
+            .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-missing",
             std::path::PathBuf::from("/p"),
@@ -835,20 +948,26 @@ mod tests {
         );
 
         // Note: `thread_auth_token` field intentionally absent.
-        let resp = dispatch(rpc("runtime.dispatch_action", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-tat-missing",
-                "project_path": "/p",
-                "action": {
-                    "item_id": "directive:ryeos/agent/core/base",
-                    "thread": "inline",
-                },
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.dispatch_action",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-tat-missing",
+                    "project_path": "/p",
+                    "action": {
+                        "item_id": "directive:ryeos/agent/core/base",
+                        "thread": "inline",
+                    },
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         let err = rpc_err(&resp);
         assert!(
-            err.message.contains("missing thread_auth_token") || err.message.contains("thread_auth_token"),
+            err.message.contains("missing thread_auth_token")
+                || err.message.contains("thread_auth_token"),
             "expected missing thread_auth_token error, got: {err:?}"
         );
     }
@@ -856,7 +975,10 @@ mod tests {
     #[tokio::test]
     async fn dispatch_action_with_wrong_thread_auth_token_is_rejected() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-tat-wrong", "T-tat-wrong")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-tat-wrong", "T-tat-wrong"))
+            .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-wrong",
             std::path::PathBuf::from("/p"),
@@ -891,7 +1013,10 @@ mod tests {
     #[tokio::test]
     async fn dispatch_action_with_correct_token_uses_server_side_principal() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-tat-ok", "T-tat-ok")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-tat-ok", "T-tat-ok"))
+            .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-ok",
             std::path::PathBuf::from("/p"),
@@ -914,44 +1039,56 @@ mod tests {
         // Even attempting to pass an unknown field like `acting_principal`
         // must be rejected at parse time — proving spoofed body principals
         // never reach the inner handler.
-        let resp = dispatch(rpc("runtime.dispatch_action", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-tat-ok",
-                "project_path": "/p",
-                "thread_auth_token": tat.token.clone(),
-                "acting_principal": "fp:attacker-spoofed-principal",
-                "action": {
-                    "item_id": "directive:ryeos/agent/core/base",
-                    "thread": "inline",
-                },
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.dispatch_action",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-tat-ok",
+                    "project_path": "/p",
+                    "thread_auth_token": tat.token.clone(),
+                    "acting_principal": "fp:attacker-spoofed-principal",
+                    "action": {
+                        "item_id": "directive:ryeos/agent/core/base",
+                        "thread": "inline",
+                    },
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         let err = rpc_err(&resp);
         // Must fail at deserialization — `acting_principal` is unknown.
         // This is the structural proof that body cannot smuggle principal.
         assert!(
             err.message.to_lowercase().contains("unknown field")
                 || err.message.contains("acting_principal")
-                || err.message.contains("invalid runtime.dispatch_action params"),
+                || err
+                    .message
+                    .contains("invalid runtime.dispatch_action params"),
             "expected unknown-field rejection of body-side principal, got: {err:?}"
         );
 
         // Sanity: the same call without the spoof field should make it past
         // auth (it will still fail later because the directive isn't loaded
         // in this minimal test state, but the failure must NOT be auth).
-        let resp_clean = dispatch(rpc("runtime.dispatch_action", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-tat-ok",
-                "project_path": "/p",
-                "thread_auth_token": tat.token,
-                "action": {
-                    "item_id": "directive:ryeos/agent/core/base",
-                    "thread": "inline",
-                },
-            })),
+        let resp_clean = dispatch(
+            rpc(
+                "runtime.dispatch_action",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-tat-ok",
+                    "project_path": "/p",
+                    "thread_auth_token": tat.token,
+                    "action": {
+                        "item_id": "directive:ryeos/agent/core/base",
+                        "thread": "inline",
+                    },
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         if let Some(err) = resp_clean.error.as_ref() {
             assert!(
                 !err.message.contains("missing thread_auth_token")
@@ -964,7 +1101,10 @@ mod tests {
     #[tokio::test]
     async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-caps-empty", "T-caps-empty")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-caps-empty", "T-caps-empty"))
+            .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-caps-empty",
             std::path::PathBuf::from("/p"),
@@ -979,18 +1119,23 @@ mod tests {
             std::time::Duration::from_secs(300),
         );
 
-        let resp = dispatch(rpc("runtime.dispatch_action", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-caps-empty",
-                "project_path": "/p",
-                "thread_auth_token": tat.token,
-                "action": {
-                    "item_id": "directive:ryeos/agent/core/base",
-                    "thread": "inline",
-                },
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.dispatch_action",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-caps-empty",
+                    "project_path": "/p",
+                    "thread_auth_token": tat.token,
+                    "action": {
+                        "item_id": "directive:ryeos/agent/core/base",
+                        "thread": "inline",
+                    },
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         let err = rpc_err(&resp);
         assert!(
             err.message.contains("deny-all") && err.message.contains("no effective_caps"),
@@ -1001,7 +1146,10 @@ mod tests {
     #[tokio::test]
     async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-caps-wild", "T-caps-wild")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-caps-wild", "T-caps-wild"))
+            .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-caps-wild",
             std::path::PathBuf::from("/p"),
@@ -1016,18 +1164,23 @@ mod tests {
             std::time::Duration::from_secs(300),
         );
 
-        let resp = dispatch(rpc("runtime.dispatch_action", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-caps-wild",
-                "project_path": "/p",
-                "thread_auth_token": tat.token,
-                "action": {
-                    "item_id": "directive:ryeos/agent/core/base",
-                    "thread": "inline",
-                },
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.dispatch_action",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-caps-wild",
+                    "project_path": "/p",
+                    "thread_auth_token": tat.token,
+                    "action": {
+                        "item_id": "directive:ryeos/agent/core/base",
+                        "thread": "inline",
+                    },
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
 
         if let Some(err) = resp.error.as_ref() {
             assert!(
@@ -1044,7 +1197,10 @@ mod tests {
     #[tokio::test]
     async fn runtime_get_facets_returns_empty_for_new_thread() {
         let (_tmp, state) = setup_app_state();
-        state.threads.create_thread(&make_create_params("T-facets-1", "T-facets-1")).unwrap();
+        state
+            .threads
+            .create_thread(&make_create_params("T-facets-1", "T-facets-1"))
+            .unwrap();
 
         let cbt = state.callback_tokens.generate(
             "T-facets-1",
@@ -1053,12 +1209,17 @@ mod tests {
             Vec::new(),
             test_provenance(&state, "/test"),
         );
-        let resp = dispatch(rpc("runtime.get_facets", json!({
-                "callback_token": cbt.token,
-                "thread_id": "T-facets-1",
-            })),
+        let resp = dispatch(
+            rpc(
+                "runtime.get_facets",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-facets-1",
+                }),
+            ),
             &state,
-        ).await;
+        )
+        .await;
         // Empty facets is OK — new thread has no facets
         if resp.error.is_none() {
             let result = rpc_ok(&resp);

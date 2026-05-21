@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContract,
-    RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
+    CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContext,
+    RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_app::event_store_service::EventReplayParams;
 
@@ -52,23 +52,20 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         }
 
         // Parse launch request from input (mode prepares it from body).
-        let req: LaunchRequest = serde_json::from_value(ctx.input.clone()).map_err(|e| {
-            RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
-        })?;
+        let req: LaunchRequest = serde_json::from_value(ctx.input.clone())
+            .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
 
-        let item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&req.item_ref).map_err(
-            |e| {
+        let item_ref =
+            crate::routes::parsed_ref::ParsedItemRef::parse(&req.item_ref).map_err(|e| {
                 RouteDispatchError::BadRequest(format!(
                     "invalid item_ref '{}': {}",
                     req.item_ref, e
                 ))
-            },
-        )?;
+            })?;
 
         let project_path =
-            crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path).map_err(
-                |e| RouteDispatchError::BadRequest(format!("project_path: {e}")),
-            )?;
+            crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path)
+                .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 

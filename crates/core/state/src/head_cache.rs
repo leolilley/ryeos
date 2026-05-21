@@ -55,7 +55,10 @@ impl HeadCache {
 
     /// Get just the chain state hash for a cached chain.
     pub fn get_hash(&self, chain_root_id: &str) -> Option<&str> {
-        let found = self.heads.get(chain_root_id).map(|h| h.chain_state_hash.as_str());
+        let found = self
+            .heads
+            .get(chain_root_id)
+            .map(|h| h.chain_state_hash.as_str());
         tracing::trace!(chain_root_id = %chain_root_id, hit = found.is_some(), "head cache hash lookup");
         found
     }
@@ -73,16 +76,10 @@ impl HeadCache {
     }
 
     /// Insert a new cached head. Returns `false` if already present.
-    pub fn insert(
-        &mut self,
-        chain_root_id: impl Into<String>,
-        cached: CachedHead,
-    ) -> bool {
+    pub fn insert(&mut self, chain_root_id: impl Into<String>, cached: CachedHead) -> bool {
         let chain_root_id_as_str = chain_root_id.into();
         tracing::trace!(chain_root_id = %chain_root_id_as_str, hash = %cached.chain_state_hash, "head cache insert");
-        self.heads
-            .insert(chain_root_id_as_str, cached)
-            .is_none()
+        self.heads.insert(chain_root_id_as_str, cached).is_none()
     }
 
     /// Invalidate (remove) a cached head. Returns the removed entry if present.
@@ -116,10 +113,7 @@ impl HeadCache {
 
     /// Get all cached entries as (chain_root_id, CachedHead) pairs.
     pub fn entries(&self) -> Vec<(&str, &CachedHead)> {
-        self.heads
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect()
+        self.heads.iter().map(|(k, v)| (k.as_str(), v)).collect()
     }
 }
 

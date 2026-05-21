@@ -44,7 +44,9 @@ fn plant_provider_config(
     env_var: Option<&str>,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space.join(ryeos_engine::AI_DIR).join("config/crates/core/runtime/model-providers");
+    let dir = user_space
+        .join(ryeos_engine::AI_DIR)
+        .join("config/crates/core/runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let auth_block = match env_var {
         Some(ev) => format!("  env_var: \"{ev}\"\n  header_name: \"Authorization\"\n"),
@@ -75,7 +77,9 @@ fn plant_model_routing_to(
     provider_id: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space.join(ryeos_engine::AI_DIR).join("config/ryeos-runtime");
+    let dir = user_space
+        .join(ryeos_engine::AI_DIR)
+        .join("config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"tiers:
@@ -90,11 +94,7 @@ fn plant_model_routing_to(
     Ok(())
 }
 
-fn plant_directive(
-    user_space: &Path,
-    rel_path: &str,
-    signer: &SigningKey,
-) -> anyhow::Result<()> {
+fn plant_directive(user_space: &Path, rel_path: &str, signer: &SigningKey) -> anyhow::Result<()> {
     let path = user_space.join(format!("{}/directives/{rel_path}.md", ryeos_engine::AI_DIR));
     let stem = Path::new(rel_path)
         .file_stem()
@@ -176,22 +176,27 @@ async fn missing_selected_secret_fails_before_provider_request() {
     let mock = MockProvider::start(vec![MockResponse::Text("should not be called".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_provider_config(user, "zen", &mock_url, Some("ZEN_API_KEY"), &fixture.publisher)?;
-        plant_model_routing_to(user, "zen", &fixture.publisher)?;
-        plant_directive(user, "test/narrow_missing", &fixture.publisher)?;
-        // Empty vault — no ZEN_API_KEY sealed.
-        plant_empty_vault(state_path)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_provider_config(
+                user,
+                "zen",
+                &mock_url,
+                Some("ZEN_API_KEY"),
+                &fixture.publisher,
+            )?;
+            plant_model_routing_to(user, "zen", &fixture.publisher)?;
+            plant_directive(user, "test/narrow_missing", &fixture.publisher)?;
+            // Empty vault — no ZEN_API_KEY sealed.
+            plant_empty_vault(state_path)?;
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
     })
     .await
@@ -217,21 +222,30 @@ async fn missing_selected_secret_fails_before_provider_request() {
     );
 
     // The body MUST contain the stable machine-readable error code.
-    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or_default();
+    let code = body
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert_eq!(
         code, "required_secret_missing",
         "error body must have code=required_secret_missing; got code={code} body={body:#}"
     );
 
     // The body MUST contain the missing env var name.
-    let env_var = body.get("env_var").and_then(|v| v.as_str()).unwrap_or_default();
+    let env_var = body
+        .get("env_var")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert_eq!(
         env_var, "ZEN_API_KEY",
         "error body must have env_var=ZEN_API_KEY; got env_var={env_var} body={body:#}"
     );
 
     // The body MUST contain the remediation hint.
-    let remediation = body.get("remediation").and_then(|v| v.as_str()).unwrap_or_default();
+    let remediation = body
+        .get("remediation")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert!(
         remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY --value-stdin"),
         "remediation must include the vault put command; got: {remediation}"
@@ -273,7 +287,13 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
     let (h, _fixture) = DaemonHarness::start_fast_with(
         move |state_path: &Path, user: &Path, fixture: &FastFixture| {
             register_standard_bundle(state_path, fixture)?;
-            plant_provider_config(user, "zen", &mock_url, Some("ZEN_API_KEY"), &fixture.publisher)?;
+            plant_provider_config(
+                user,
+                "zen",
+                &mock_url,
+                Some("ZEN_API_KEY"),
+                &fixture.publisher,
+            )?;
             plant_model_routing_to(user, "zen", &fixture.publisher)?;
             plant_directive(user, "test/resume_typed", &fixture.publisher)?;
             // Empty vault — no ZEN_API_KEY.
@@ -312,19 +332,28 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
         "expected 502; got status={status} body={body:#}"
     );
 
-    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or_default();
+    let code = body
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert_eq!(
         code, "required_secret_missing",
         "must have stable code; got code={code} body={body:#}"
     );
 
-    let env_var = body.get("env_var").and_then(|v| v.as_str()).unwrap_or_default();
+    let env_var = body
+        .get("env_var")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert_eq!(
         env_var, "ZEN_API_KEY",
         "must have env_var=ZEN_API_KEY; got={env_var}"
     );
 
-    let remediation = body.get("remediation").and_then(|v| v.as_str()).unwrap_or_default();
+    let remediation = body
+        .get("remediation")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert!(
         remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY"),
         "remediation must contain the vault put command; got: {remediation}"
@@ -353,22 +382,21 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
     let mock = MockProvider::start(vec![MockResponse::Text("hello from noauth".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_provider_config(user, "noauth", &mock_url, None, &fixture.publisher)?;
-        plant_model_routing_to(user, "noauth", &fixture.publisher)?;
-        plant_directive(user, "test/narrow_noauth", &fixture.publisher)?;
-        // Empty vault — fine because provider declares no env var.
-        plant_empty_vault(state_path)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_provider_config(user, "noauth", &mock_url, None, &fixture.publisher)?;
+            plant_model_routing_to(user, "noauth", &fixture.publisher)?;
+            plant_directive(user, "test/narrow_noauth", &fixture.publisher)?;
+            // Empty vault — fine because provider declares no env var.
+            plant_empty_vault(state_path)?;
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
     })
     .await
@@ -467,12 +495,12 @@ description: "native_resume test tool"
 
 /// Read the PID from the runtime DB for a given thread.
 fn read_pid_from_runtime_db(state_path: &Path, thread_id: &str) -> Option<i64> {
-    let db_path = state_path.join(ryeos_engine::AI_DIR).join("state/runtime.sqlite3");
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let db_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     let mut stmt = conn
         .prepare("SELECT pid FROM thread_runtime WHERE thread_id = ?1")
         .ok()?;
@@ -488,12 +516,12 @@ fn read_thread_outcome_full(
     state_path: &Path,
     thread_id: &str,
 ) -> Option<(String, Option<String>, Option<String>)> {
-    let db_path = state_path.join(ryeos_engine::AI_DIR).join("state/projection.sqlite3");
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let db_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/projection.sqlite3");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
 
     // Check thread_results for status + error.
     let mut stmt = conn
@@ -511,7 +539,11 @@ fn read_thread_outcome_full(
     let outcome_code = error_json.as_ref().and_then(|e| {
         serde_json::from_str::<serde_json::Value>(e)
             .ok()
-            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(|s| s.to_string()))
+            .and_then(|v| {
+                v.get("code")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            })
     });
     Some((status, outcome_code, error_json))
 }
@@ -519,27 +551,20 @@ fn read_thread_outcome_full(
 /// Read thread status + outcome_code from the projection DB.
 /// Returns `(status, outcome_code)` where `outcome_code` is extracted
 /// from the error JSON if present.
-fn read_thread_outcome(
-    state_path: &Path,
-    thread_id: &str,
-) -> Option<(String, Option<String>)> {
-    read_thread_outcome_full(state_path, thread_id)
-        .map(|(s, oc, _)| (s, oc))
+fn read_thread_outcome(state_path: &Path, thread_id: &str) -> Option<(String, Option<String>)> {
+    read_thread_outcome_full(state_path, thread_id).map(|(s, oc, _)| (s, oc))
 }
 
 /// Read the most recent persisted event for a thread from the projection DB.
 /// Returns `(event_type, payload_json)` where payload_json is parsed from
 /// the `payload` BLOB column.
-fn read_last_event(
-    state_path: &Path,
-    thread_id: &str,
-) -> Option<(String, serde_json::Value)> {
-    let db_path = state_path.join(ryeos_engine::AI_DIR).join("state/projection.sqlite3");
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+fn read_last_event(state_path: &Path, thread_id: &str) -> Option<(String, serde_json::Value)> {
+    let db_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/projection.sqlite3");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     let mut stmt = conn
         .prepare(
             "SELECT event_type, payload FROM events \
@@ -550,8 +575,8 @@ fn read_last_event(
     stmt.query_row(rusqlite::params![thread_id], |row| {
         let event_type: String = row.get(0)?;
         let payload_blob: Vec<u8> = row.get(1)?;
-        let payload: serde_json::Value = serde_json::from_slice(&payload_blob)
-            .unwrap_or(serde_json::json!({}));
+        let payload: serde_json::Value =
+            serde_json::from_slice(&payload_blob).unwrap_or(serde_json::json!({}));
         Ok((event_type, payload))
     })
     .ok()
@@ -589,8 +614,7 @@ async fn resume_missing_secret_after_daemon_restart() {
         |cmd| {
             cmd.env(
                 "RUST_LOG",
-                std::env::var("RUST_LOG")
-                    .unwrap_or_else(|_| "info,ryeosd=debug".into()),
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
             );
         },
     )
@@ -599,8 +623,7 @@ async fn resume_missing_secret_after_daemon_restart() {
 
     // Create a project with a native_resume tool.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_native_resume_tool(project.path(), &fixture.publisher)
-        .expect("plant native_resume tool");
+    plant_native_resume_tool(project.path(), &fixture.publisher).expect("plant native_resume tool");
 
     // ── Phase 1: Execute the tool (detached) ────────────────────
     let body = serde_json::json!({
@@ -612,9 +635,8 @@ async fn resume_missing_secret_after_daemon_restart() {
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
     let user_key = h.user_key.as_ref().expect("fast fixture user key");
     let node_key = h.node_key.as_ref().expect("fast fixture node key");
-    let signed_headers = common::build_signed_headers_for_bytes(
-        user_key, node_key, "POST", "/execute", &body_bytes,
-    );
+    let signed_headers =
+        common::build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute", &body_bytes);
     let mut req = reqwest::Client::new()
         .post(format!("http://{}/execute", h.bind))
         .header("content-type", "application/json")
@@ -652,7 +674,9 @@ async fn resume_missing_secret_after_daemon_restart() {
             break pid;
         }
         // Check if the thread was already finalized (spawn failure).
-        if let Some((status, outcome, full_error)) = read_thread_outcome_full(&h.state_path, &thread_id) {
+        if let Some((status, outcome, full_error)) =
+            read_thread_outcome_full(&h.state_path, &thread_id)
+        {
             if status == "failed" || status == "completed" || status == "killed" {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!(
@@ -698,8 +722,7 @@ async fn resume_missing_secret_after_daemon_restart() {
     h.respawn_with(|cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "info,ryeosd=debug".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
     })
     .await
@@ -748,8 +771,8 @@ async fn resume_missing_secret_after_daemon_restart() {
     let full_error = read_thread_outcome_full(&h.state_path, &thread_id)
         .and_then(|(_, _, err)| err)
         .expect("thread must have error JSON");
-    let error_json: serde_json::Value = serde_json::from_str(&full_error)
-        .expect("error must be valid JSON");
+    let error_json: serde_json::Value =
+        serde_json::from_str(&full_error).expect("error must be valid JSON");
     assert_eq!(
         error_json["code"].as_str(),
         Some("required_secret_missing"),
@@ -769,8 +792,8 @@ async fn resume_missing_secret_after_daemon_restart() {
     // F3 final: prove the persisted thread_failed event payload carries
     // the structured error (not just the projection DB column). This is
     // the wire shape SSE consumers see on replay or live subscription.
-    let (event_type, payload) = read_last_event(&h.state_path, &thread_id)
-        .expect("thread must have a terminal event");
+    let (event_type, payload) =
+        read_last_event(&h.state_path, &thread_id).expect("thread must have a terminal event");
 
     assert_eq!(
         event_type, "thread_failed",
@@ -857,9 +880,7 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
             plant_directive(user, "test/sse_secret", &f.publisher)?;
             plant_empty_vault(state_path)?;
             // Authorize the user key so /execute/stream accepts signed requests.
-            common::fast_fixture::write_authorized_key_signed_by(
-                state_path, &f.user, &f.node,
-            )?;
+            common::fast_fixture::write_authorized_key_signed_by(state_path, &f.user, &f.node)?;
             Ok(())
         },
         |cmd| {
@@ -888,8 +909,7 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
     let path = "/execute/stream";
 
     // Build ryeos_signed auth headers using the user key.
-    let user_fp =
-        lillux::signature::compute_fingerprint(&fixture.user.verifying_key());
+    let user_fp = lillux::signature::compute_fingerprint(&fixture.user.verifying_key());
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -946,7 +966,10 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
                 let parsed: serde_json::Value =
                     serde_json::from_str(data.trim()).unwrap_or(serde_json::json!({}));
 
-                let code = parsed.get("code").and_then(|v| v.as_str()).unwrap_or_default();
+                let code = parsed
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 if code == "required_secret_missing" {
                     found_error = true;
 

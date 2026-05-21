@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 
-use ryeos_app::state::AppState;
 use ryeos_app::callback_token::ThreadAuthState;
+use ryeos_app::state::AppState;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,24 +35,26 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // compare against the same form here or PathBuf equality will fail.
     let project_path = std::path::PathBuf::from(&params.project_path);
 
-    let cap = state.callback_tokens.validate(
-        &params.callback_token,
-        &params.thread_id,
-        &project_path,
-    )?;
+    let cap =
+        state
+            .callback_tokens
+            .validate(&params.callback_token, &params.thread_id, &project_path)?;
 
     // V5.5 P2 — daemon-enforced callback caps. The token carries the
     // composed `effective_caps` minted at launch time; the runtime is
     // no longer trusted to self-police what it dispatches. An empty
     // cap-set is deny-all; a wildcard `*` short-circuits to allow.
-    enforce_callback_caps(&params.action.item_id, &cap.effective_caps, &state.authorizer)?;
+    enforce_callback_caps(
+        &params.action.item_id,
+        &cap.effective_caps,
+        &state.authorizer,
+    )?;
 
     let child_provenance = cap.provenance.clone_for_borrowed_child();
 
-    let thread_auth = state.thread_auth.validate(
-        &params.thread_auth_token,
-        &params.thread_id,
-    )?;
+    let thread_auth = state
+        .thread_auth
+        .validate(&params.thread_auth_token, &params.thread_id)?;
 
     // Note: DispatchActionParams has `deny_unknown_fields` and no
     // `principal` field — the request body cannot supply (and so
@@ -139,8 +141,9 @@ async fn handle_execute(
     let caller_scopes = thread_auth.caller_scopes.clone();
     let site_id = state.threads.site_id();
 
-    let root_canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
-        .with_context(|| format!("invalid callback item_id '{}'", params.action.item_id))?;
+    let root_canonical =
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
+            .with_context(|| format!("invalid callback item_id '{}'", params.action.item_id))?;
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
     let plan_ctx = PlanContext {
@@ -186,14 +189,9 @@ async fn handle_execute(
     // we await `dispatch::dispatch` directly. The previous
     // `Handle::current().block_on(...)` was a panic/deadlock risk on
     // the P3b hot path (a runtime-thread blocking on its own runtime).
-    crate::dispatch::dispatch(
-        &params.action.item_id,
-        &dispatch_req,
-        &exec_ctx,
-        state,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[cfg(test)]
@@ -203,13 +201,23 @@ mod tests {
     // ── V5.5 P2: enforce_callback_caps ──────────────────────────────
 
     fn test_auth() -> ryeos_runtime::authorizer::Authorizer {
-        ryeos_runtime::authorizer::Authorizer::new(
-            std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-                ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
-                ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-                ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
-            ]).unwrap()),
-        )
+        ryeos_runtime::authorizer::Authorizer::new(std::sync::Arc::new(
+            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "fetch".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "sign".into(),
+                    execute: Some("tool:ryeos/core/sign".into()),
+                },
+            ])
+            .unwrap(),
+        ))
     }
 
     #[test]

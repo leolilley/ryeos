@@ -27,7 +27,10 @@ pub fn resolve_overlap_policy(spec: &ScheduleSpecRecord) -> OverlapPolicy {
 pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx) -> bool {
     let policy = resolve_overlap_policy(spec);
 
-    let last_fire = match ctx.scheduler_db().get_inflight_for_schedule(&spec.schedule_id) {
+    let last_fire = match ctx
+        .scheduler_db()
+        .get_inflight_for_schedule(&spec.schedule_id)
+    {
         Ok(Some(f)) => f,
         Ok(None) => return true, // no in-flight fire
         Err(e) => {
@@ -44,40 +47,36 @@ pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx
     match policy {
         OverlapPolicy::Allow => true,
 
-        OverlapPolicy::Skip => {
-            match ctx.get_thread_status(&previous_thread_id) {
-                Ok(Some(status)) if thread_is_terminal(&status) => true,
-                Ok(Some(_)) => {
-                    tracing::info!(
-                        schedule_id = %spec.schedule_id,
-                        previous_thread = %previous_thread_id,
-                        overlap = "skip",
-                        "previous fire still running — skipping"
-                    );
-                    false
-                }
-                Ok(None) => true,
-                Err(_) => true,
+        OverlapPolicy::Skip => match ctx.get_thread_status(&previous_thread_id) {
+            Ok(Some(status)) if thread_is_terminal(&status) => true,
+            Ok(Some(_)) => {
+                tracing::info!(
+                    schedule_id = %spec.schedule_id,
+                    previous_thread = %previous_thread_id,
+                    overlap = "skip",
+                    "previous fire still running — skipping"
+                );
+                false
             }
-        }
+            Ok(None) => true,
+            Err(_) => true,
+        },
 
-        OverlapPolicy::CancelPrevious => {
-            match ctx.get_thread_status(&previous_thread_id) {
-                Ok(Some(status)) if thread_is_terminal(&status) => true,
-                Ok(Some(_)) => {
-                    tracing::info!(
-                        schedule_id = %spec.schedule_id,
-                        previous_thread = %previous_thread_id,
-                        overlap = "cancel_previous",
-                        "cancelling previous fire"
-                    );
-                    let _ = ctx.submit_cancel(&previous_thread_id);
-                    true
-                }
-                Ok(None) => true,
-                Err(_) => true,
+        OverlapPolicy::CancelPrevious => match ctx.get_thread_status(&previous_thread_id) {
+            Ok(Some(status)) if thread_is_terminal(&status) => true,
+            Ok(Some(_)) => {
+                tracing::info!(
+                    schedule_id = %spec.schedule_id,
+                    previous_thread = %previous_thread_id,
+                    overlap = "cancel_previous",
+                    "cancelling previous fire"
+                );
+                let _ = ctx.submit_cancel(&previous_thread_id);
+                true
             }
-        }
+            Ok(None) => true,
+            Err(_) => true,
+        },
     }
 }
 
@@ -111,17 +110,26 @@ mod tests {
 
     #[test]
     fn resolve_allow() {
-        assert_eq!(resolve_overlap_policy(&make_spec("allow")), OverlapPolicy::Allow);
+        assert_eq!(
+            resolve_overlap_policy(&make_spec("allow")),
+            OverlapPolicy::Allow
+        );
     }
 
     #[test]
     fn resolve_skip() {
-        assert_eq!(resolve_overlap_policy(&make_spec("skip")), OverlapPolicy::Skip);
+        assert_eq!(
+            resolve_overlap_policy(&make_spec("skip")),
+            OverlapPolicy::Skip
+        );
     }
 
     #[test]
     fn resolve_cancel_previous() {
-        assert_eq!(resolve_overlap_policy(&make_spec("cancel_previous")), OverlapPolicy::CancelPrevious);
+        assert_eq!(
+            resolve_overlap_policy(&make_spec("cancel_previous")),
+            OverlapPolicy::CancelPrevious
+        );
     }
 
     #[test]
@@ -131,7 +139,10 @@ mod tests {
 
     #[test]
     fn resolve_unknown_defaults_to_skip() {
-        assert_eq!(resolve_overlap_policy(&make_spec("invalid")), OverlapPolicy::Skip);
+        assert_eq!(
+            resolve_overlap_policy(&make_spec("invalid")),
+            OverlapPolicy::Skip
+        );
     }
 
     #[test]

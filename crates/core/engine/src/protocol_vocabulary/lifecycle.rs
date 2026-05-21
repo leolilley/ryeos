@@ -41,10 +41,7 @@ mod tests {
 
     #[test]
     fn round_trip_all_variants() {
-        for mode in [
-            LifecycleMode::Managed,
-            LifecycleMode::DetachedOk,
-        ] {
+        for mode in [LifecycleMode::Managed, LifecycleMode::DetachedOk] {
             let yaml = serde_yaml::to_string(&mode).unwrap();
             let parsed: LifecycleMode = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(parsed, mode);
@@ -71,7 +68,10 @@ mod tests {
                 result.is_ok(),
                 compatible,
                 "({:?}, allows_detached={}) expected compatible={}, got {:?}",
-                mode, detached, compatible, result
+                mode,
+                detached,
+                compatible,
+                result
             );
         }
     }

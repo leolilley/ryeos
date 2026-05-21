@@ -46,24 +46,14 @@ pub struct ActionPayload {
 
 #[async_trait]
 pub trait RuntimeCallbackAPI: Send + Sync {
-    async fn dispatch_action(
-        &self,
-        request: DispatchActionRequest,
-    ) -> Result<Value, CallbackError>;
+    async fn dispatch_action(&self, request: DispatchActionRequest)
+        -> Result<Value, CallbackError>;
 
-    async fn attach_process(
-        &self,
-        thread_id: &str,
-        pid: u32,
-    ) -> Result<Value, CallbackError>;
+    async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
-    async fn finalize_thread(
-        &self,
-        thread_id: &str,
-        status: &str,
-    ) -> Result<Value, CallbackError>;
+    async fn finalize_thread(&self, thread_id: &str, status: &str) -> Result<Value, CallbackError>;
 
     async fn get_thread(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
@@ -114,13 +104,12 @@ pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
     let tat = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     if socket_path.exists() {
-        Box::new(
-            crate::callback_uds::UdsRuntimeClient::new(socket_path, token, tat),
-        )
+        Box::new(crate::callback_uds::UdsRuntimeClient::new(
+            socket_path,
+            token,
+            tat,
+        ))
     } else {
-        panic!(
-            "UDS socket not found at {}",
-            socket_path.display()
-        );
+        panic!("UDS socket not found at {}", socket_path.display());
     }
 }

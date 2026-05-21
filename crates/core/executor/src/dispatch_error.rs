@@ -39,10 +39,7 @@ pub enum DispatchError {
         visited: Vec<String>,
     },
     #[error("alias chain exceeded MAX_HOPS ({max_hops}) resolving '{root_ref}'")]
-    AliasChainTooLong {
-        root_ref: String,
-        max_hops: usize,
-    },
+    AliasChainTooLong { root_ref: String, max_hops: usize },
     #[error("schema misconfigured for kind '{kind}': {detail}")]
     SchemaMisconfigured { kind: String, detail: String },
     /// `Display` is the bare reason — pin tests assert byte-equality
@@ -59,7 +56,9 @@ pub enum DispatchError {
     /// Service handler not found in the in-process handler registry.
     /// The kind schema declared `InProcessHandler { Services }` but
     /// no handler matched the item's service name.
-    #[error("service handler not found for '{service_ref}' in {registry}; available: [{available}]")]
+    #[error(
+        "service handler not found for '{service_ref}' in {registry}; available: [{available}]"
+    )]
     ServiceHandlerMissing {
         service_ref: String,
         registry: String,
@@ -92,7 +91,10 @@ pub enum DispatchError {
     /// Runtime binary materialization failed — the native executor
     /// could not be resolved from the bundle CAS.
     #[error("runtime materialization failed for '{executor_ref}': {detail}")]
-    RuntimeMaterializationFailed { executor_ref: String, detail: String },
+    RuntimeMaterializationFailed {
+        executor_ref: String,
+        detail: String,
+    },
     /// A declared required secret was not in the operator vault.
     /// Generic at the dispatch layer; the `source_kind`/`source_name`
     /// fields attribute *which* subsystem demanded the secret (today
@@ -140,11 +142,7 @@ pub enum DispatchError {
     },
     /// The op returned NotImplemented (phase gate).
     #[error("op '{op}' on kind '{kind}' is not implemented (phase {phase})")]
-    OpNotImplemented {
-        kind: String,
-        op: String,
-        phase: u8,
-    },
+    OpNotImplemented { kind: String, op: String, phase: u8 },
     /// Projection invariant violated during slim-payload construction.
     #[error("projection invariant violated: {reason}")]
     ProjectionInvariant { reason: String },
@@ -188,8 +186,7 @@ impl DispatchError {
                 StatusCode::NOT_IMPLEMENTED
             }
             // State-conflict: push-first, checkout race, etc.
-            Self::ProjectSource(_)
-            | Self::ProjectSourcePushFirst(_) => StatusCode::CONFLICT,
+            Self::ProjectSource(_) | Self::ProjectSourcePushFirst(_) => StatusCode::CONFLICT,
             // Bad gateway: the daemon reached out to a subsystem
             // (service handler, runtime binary, CAS) and it was
             // missing, unavailable, or returned an error.

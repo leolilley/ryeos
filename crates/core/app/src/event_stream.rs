@@ -71,12 +71,10 @@ impl ThreadEventHub {
     /// been persisted by the caller.
     pub fn publish(&self, thread_id: &str, event: PersistedEventRecord) {
         let mut guard = self.inner.lock().expect("ThreadEventHub mutex poisoned");
-        let sender = guard
-            .entry(thread_id.to_owned())
-            .or_insert_with(|| {
-                let (tx, _rx) = broadcast::channel(self.capacity);
-                tx
-            });
+        let sender = guard.entry(thread_id.to_owned()).or_insert_with(|| {
+            let (tx, _rx) = broadcast::channel(self.capacity);
+            tx
+        });
         let _ = sender.send(event);
         let receiver_count = sender.receiver_count();
         if receiver_count == 0 {
@@ -95,12 +93,10 @@ impl ThreadEventHub {
             return;
         }
         let mut guard = self.inner.lock().expect("ThreadEventHub mutex poisoned");
-        let sender = guard
-            .entry(thread_id.to_owned())
-            .or_insert_with(|| {
-                let (tx, _rx) = broadcast::channel(self.capacity);
-                tx
-            });
+        let sender = guard.entry(thread_id.to_owned()).or_insert_with(|| {
+            let (tx, _rx) = broadcast::channel(self.capacity);
+            tx
+        });
         for ev in events {
             let _ = sender.send(ev.clone());
         }
@@ -127,11 +123,7 @@ impl ThreadEventHub {
 
 impl std::fmt::Debug for ThreadEventHub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let count = self
-            .inner
-            .lock()
-            .map(|g| g.len())
-            .unwrap_or(0);
+        let count = self.inner.lock().map(|g| g.len()).unwrap_or(0);
         f.debug_struct("ThreadEventHub")
             .field("active_threads", &count)
             .field("capacity", &self.capacity)

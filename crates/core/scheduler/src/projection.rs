@@ -25,8 +25,7 @@ pub fn append_jsonl_entry(path: &Path, entry: &serde_json::Value) -> Result<()> 
         .append(true)
         .open(path)
         .with_context(|| format!("open fires.jsonl at {}", path.display()))?;
-    let mut line = serde_json::to_string(entry)
-        .with_context(|| "serialize fire entry")?;
+    let mut line = serde_json::to_string(entry).with_context(|| "serialize fire entry")?;
     line.push('\n');
     file.write_all(line.as_bytes())
         .with_context(|| "write fire entry")?;
@@ -94,7 +93,9 @@ pub fn rebuild_specs_from_dir(
             }
         };
         let expected_hash = lillux::cas::sha256_hex(body_str.as_bytes());
-        let sig_header = content.lines().next()
+        let sig_header = content
+            .lines()
+            .next()
             .and_then(|line| lillux::signature::parse_signature_line(line, "#", None));
         if let Some(ref header) = sig_header {
             if header.content_hash != expected_hash {
@@ -189,7 +190,8 @@ pub fn rebuild_specs_from_dir(
             }
         };
 
-        let rec = match spec_record_from_body(&body, &signer_fingerprint, &spec_hash, registered_at) {
+        let rec = match spec_record_from_body(&body, &signer_fingerprint, &spec_hash, registered_at)
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
@@ -213,10 +215,7 @@ pub fn rebuild_specs_from_dir(
 }
 
 /// Rebuild `schedule_fires` from `.ai/state/schedules/*/fires.jsonl`.
-pub fn rebuild_fires_from_dir(
-    fires_dir: &Path,
-    db: &SchedulerDb,
-) -> Result<()> {
+pub fn rebuild_fires_from_dir(fires_dir: &Path, db: &SchedulerDb) -> Result<()> {
     if !fires_dir.is_dir() {
         return Ok(());
     }
@@ -258,8 +257,8 @@ pub fn rebuild_fires_from_dir(
 /// Parse a JSONL file and upsert fire records.
 /// Last entry for a given `fire_id` wins (self-contained snapshots).
 fn rebuild_fire_projection(jsonl_path: &Path, db: &SchedulerDb) -> Result<()> {
-    let content = fs::read_to_string(jsonl_path)
-        .with_context(|| format!("read {}", jsonl_path.display()))?;
+    let content =
+        fs::read_to_string(jsonl_path).with_context(|| format!("read {}", jsonl_path.display()))?;
 
     // Collect entries by fire_id (last wins)
     let mut latest: std::collections::HashMap<String, FireRecord> =
@@ -303,16 +302,32 @@ fn fire_record_from_entry(entry: &serde_json::Value) -> FireRecord {
         scheduled_at: entry_int(entry, "scheduled_at"),
         fired_at: entry.get("fired_at").and_then(|v| v.as_i64()),
         completed_at: entry.get("completed_at").and_then(|v| v.as_i64()),
-        thread_id: entry.get("thread_id").and_then(|v| v.as_str()).map(String::from),
+        thread_id: entry
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         status: entry_str(entry, "status"),
-        trigger_reason: entry.get("trigger_reason").and_then(|v| v.as_str()).unwrap_or("normal").to_string(),
-        outcome: entry.get("outcome").and_then(|v| v.as_str()).map(String::from),
-        signer_fingerprint: entry.get("signer_fingerprint").and_then(|v| v.as_str()).map(String::from),
+        trigger_reason: entry
+            .get("trigger_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("normal")
+            .to_string(),
+        outcome: entry
+            .get("outcome")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        signer_fingerprint: entry
+            .get("signer_fingerprint")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     }
 }
 
 fn entry_str(v: &serde_json::Value, key: &str) -> String {
-    v.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    v.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn entry_int(v: &serde_json::Value, key: &str) -> i64 {
@@ -347,11 +362,16 @@ fn spec_record_from_body(
 
     // Normalize misfire default: both live and rebuild paths must use the
     // same default when the field is empty. Interval → fire_once_now, else → skip.
-    let raw_misfire = body.get("misfire_policy")
+    let raw_misfire = body
+        .get("misfire_policy")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let misfire_policy = if raw_misfire.is_empty() {
-        match body.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("") {
+        match body
+            .get("schedule_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+        {
             "interval" => "fire_once_now".to_string(),
             _ => "skip".to_string(),
         }
@@ -362,19 +382,31 @@ fn spec_record_from_body(
     Ok(ScheduleSpecRecord {
         schedule_id: body_str(body, "schedule_id"),
         item_ref: body_str(body, "item_ref"),
-        params: body.get("params")
+        params: body
+            .get("params")
             .map(|v| serde_json::to_string(v).unwrap_or_default())
             .unwrap_or_default(),
         schedule_type: body_str(body, "schedule_type"),
         expression: body_str(body, "expression"),
-        timezone: body.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC").to_string(),
+        timezone: body
+            .get("timezone")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UTC")
+            .to_string(),
         misfire_policy,
-        overlap_policy: body.get("overlap_policy")
+        overlap_policy: body
+            .get("overlap_policy")
             .and_then(|v| v.as_str())
             .unwrap_or("skip")
             .to_string(),
-        enabled: body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-        project_root: body.get("project_root").and_then(|v| v.as_str()).map(String::from),
+        enabled: body
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        project_root: body
+            .get("project_root")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         signer_fingerprint: signer_fingerprint.to_string(),
         spec_hash: spec_hash.to_string(),
         registered_at,
@@ -384,7 +416,10 @@ fn spec_record_from_body(
 }
 
 fn body_str(v: &serde_json::Value, key: &str) -> String {
-    v.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    v.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 pub fn parse_signer_fingerprint_from_str(content: &str) -> Option<String> {
@@ -606,7 +641,10 @@ expression: "60"
     #[test]
     fn public_wrapper_works() {
         let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc:Sig==:fp:test:hello\nrest";
-        assert_eq!(parse_signer_fingerprint_from_str(content), Some("hello".to_string()));
+        assert_eq!(
+            parse_signer_fingerprint_from_str(content),
+            Some("hello".to_string())
+        );
     }
 
     // ── Authority model acceptance tests (Phase 4) ──────────────
@@ -640,7 +678,10 @@ registered_at: 1700000000000
         let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
         // Must be rejected — no execution block
-        assert!(live_ids.is_empty(), "schedule without execution block should be rejected");
+        assert!(
+            live_ids.is_empty(),
+            "schedule without execution block should be rejected"
+        );
         assert!(db.get_spec("no-exec").unwrap().is_none());
     }
 
@@ -668,7 +709,10 @@ execution:
         let db = test_db();
         let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
-        assert!(live_ids.is_empty(), "schedule with empty capabilities should be rejected");
+        assert!(
+            live_ids.is_empty(),
+            "schedule with empty capabilities should be rejected"
+        );
         assert!(db.get_spec("empty-caps").unwrap().is_none());
     }
 
@@ -697,7 +741,10 @@ execution:
         let db = test_db();
         let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
-        assert!(live_ids.is_empty(), "schedule with empty requester_fingerprint should be rejected");
+        assert!(
+            live_ids.is_empty(),
+            "schedule with empty requester_fingerprint should be rejected"
+        );
         assert!(db.get_spec("empty-fp").unwrap().is_none());
     }
 
@@ -730,7 +777,10 @@ execution:
         assert_eq!(live_ids, vec!["valid-auth"]);
         let spec = db.get_spec("valid-auth").unwrap().unwrap();
         assert_eq!(spec.requester_fingerprint, "fp:principal-abc");
-        assert_eq!(spec.capabilities, vec!["ryeos.execute.tool.*", "ryeos.execute.directive.*"]);
+        assert_eq!(
+            spec.capabilities,
+            vec!["ryeos.execute.tool.*", "ryeos.execute.directive.*"]
+        );
     }
 
     #[test]
@@ -778,7 +828,8 @@ execution:
         fs::create_dir_all(&sched_dir).unwrap();
 
         let fixed_ts: i64 = 1700000000000; // a known timestamp
-        let body = format!(r#"spec_version: 1
+        let body = format!(
+            r#"spec_version: 1
 section: schedules
 schedule_id: anchor-test
 item_ref: "directive:test/hello"
@@ -789,7 +840,8 @@ execution:
   requester_fingerprint: "fp:test"
   capabilities:
     - "ryeos.execute.*"
-"#);
+"#
+        );
         sign_and_write(&sched_dir, "anchor-test.yaml", &body);
 
         let db = test_db();
@@ -797,7 +849,10 @@ execution:
 
         assert_eq!(live_ids, vec!["anchor-test"]);
         let spec = db.get_spec("anchor-test").unwrap().unwrap();
-        assert_eq!(spec.registered_at, fixed_ts, "registered_at should come from YAML body exactly");
+        assert_eq!(
+            spec.registered_at, fixed_ts,
+            "registered_at should come from YAML body exactly"
+        );
     }
 
     #[test]
@@ -823,7 +878,10 @@ execution:
         let db = test_db();
         let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
-        assert!(live_ids.is_empty(), "schedule missing registered_at should be rejected");
+        assert!(
+            live_ids.is_empty(),
+            "schedule missing registered_at should be rejected"
+        );
         assert!(db.get_spec("no-anchor").unwrap().is_none());
     }
 
@@ -882,8 +940,10 @@ execution:
         rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
         let spec = db.get_spec("misfire-default").unwrap().unwrap();
-        assert_eq!(spec.misfire_policy, "fire_once_now",
-            "interval schedule without explicit misfire_policy should default to fire_once_now");
+        assert_eq!(
+            spec.misfire_policy, "fire_once_now",
+            "interval schedule without explicit misfire_policy should default to fire_once_now"
+        );
     }
 
     #[test]
@@ -912,8 +972,10 @@ execution:
         rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
         let spec = db.get_spec("cron-misfire").unwrap().unwrap();
-        assert_eq!(spec.misfire_policy, "skip",
-            "cron schedule without explicit misfire_policy should default to skip");
+        assert_eq!(
+            spec.misfire_policy, "skip",
+            "cron schedule without explicit misfire_policy should default to skip"
+        );
     }
 
     #[test]
@@ -938,7 +1000,10 @@ execution:
         let db = test_db();
         let live_ids = rebuild_specs_from_dir(&sched_dir, &db, None).unwrap();
 
-        assert!(live_ids.is_empty(), "schedule missing capabilities key should be rejected");
+        assert!(
+            live_ids.is_empty(),
+            "schedule missing capabilities key should be rejected"
+        );
     }
 
     // ── Full Ed25519 signature verification (Phase 6) ──────────
@@ -1025,7 +1090,10 @@ execution:
         let db = test_db();
         let live_ids = rebuild_specs_from_dir(&sched_dir, &db, Some(&ts)).unwrap();
 
-        assert!(live_ids.is_empty(), "schedule signed by untrusted key should be rejected");
+        assert!(
+            live_ids.is_empty(),
+            "schedule signed by untrusted key should be rejected"
+        );
         assert!(db.get_spec("untrusted-sig").unwrap().is_none());
     }
 
@@ -1072,10 +1140,10 @@ execution:
         let forged_line = format!(
             "# {}{}:{}:{}:{}",
             lillux::signature::SIGNATURE_PREFIX,
-            parts[3],  // timestamp
-            parts[2],  // content_hash (untouched)
+            parts[3],                  // timestamp
+            parts[2],                  // content_hash (untouched)
             "FORGEDSIGNATUREBASE64==", // bogus sig_b64
-            parts[0],  // fingerprint (untouched)
+            parts[0],                  // fingerprint (untouched)
         );
         let forged_content = format!("{}\n{}", forged_line, rest);
 
@@ -1085,7 +1153,10 @@ execution:
         let ts = test_trust_store();
         let live_ids = rebuild_specs_from_dir(&sched_dir, &db, Some(&ts)).unwrap();
 
-        assert!(live_ids.is_empty(), "forged signature should be rejected by Ed25519 verification");
+        assert!(
+            live_ids.is_empty(),
+            "forged signature should be rejected by Ed25519 verification"
+        );
         assert!(db.get_spec("forged-sig").unwrap().is_none());
     }
 

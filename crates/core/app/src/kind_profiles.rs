@@ -28,9 +28,8 @@ impl KindProfileRegistry {
                     if let Some(profiles_val) = parsed.get("thread_kind_profiles") {
                         if let Ok(profiles) = serde_yaml::from_value::<
                             HashMap<String, ThreadKindProfile>,
-                        >(
-                            profiles_val.clone()
-                        ) {
+                        >(profiles_val.clone())
+                        {
                             if !profiles.is_empty() {
                                 return Self { profiles };
                             }
@@ -43,7 +42,11 @@ impl KindProfileRegistry {
     }
 
     fn find_config_path(config: &Config) -> Option<PathBuf> {
-        let path = config.system_space_dir.join(".ai").join("node").join("config.yaml");
+        let path = config
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("config.yaml");
         if path.exists() {
             Some(path)
         } else {

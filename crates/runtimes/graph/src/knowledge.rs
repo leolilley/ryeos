@@ -64,7 +64,8 @@ mod tests {
         let path = dir.path().to_string_lossy().to_string();
         write_knowledge_transcript(&path, "test/graph", "gr-abc", r#"{"success": true}"#).unwrap();
         let written = std::fs::read_to_string(
-            dir.path().join(".ai/knowledge/state/graphs/test/graph/gr-abc.md"),
+            dir.path()
+                .join(".ai/knowledge/state/graphs/test/graph/gr-abc.md"),
         )
         .unwrap();
         assert!(written.contains("gr-abc"));
@@ -81,10 +82,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_string_lossy().to_string();
         write_knowledge_transcript(&path, "/flow", "gr-1", r#"{"ok": 1}"#).unwrap();
-        let written = std::fs::read_to_string(
-            dir.path().join(".ai/knowledge/state/graphs/flow/gr-1.md"),
-        )
-        .unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join(".ai/knowledge/state/graphs/flow/gr-1.md"))
+                .unwrap();
         assert!(written.contains("gr-1"));
     }
 
@@ -95,7 +95,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_string_lossy().to_string();
         let err = write_knowledge_transcript(&path, "../escape", "gr-x", "{}").unwrap_err();
-        assert!(err.to_string().contains(".."), "expected traversal error: {err}");
+        assert!(
+            err.to_string().contains(".."),
+            "expected traversal error: {err}"
+        );
     }
 
     #[test]
@@ -103,7 +106,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_string_lossy().to_string();
         let err = write_knowledge_transcript(&path, "ok/../escape", "gr-x", "{}").unwrap_err();
-        assert!(err.to_string().contains(".."), "expected traversal error: {err}");
+        assert!(
+            err.to_string().contains(".."),
+            "expected traversal error: {err}"
+        );
     }
 
     /// Empty / pure-anchor graph_ids cannot be silently written to

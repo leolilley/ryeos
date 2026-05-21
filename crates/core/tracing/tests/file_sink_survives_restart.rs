@@ -9,9 +9,15 @@ use std::process::Command;
 
 /// Build the ryeosd binary if needed, then spawn it with a temp state dir.
 /// Returns (state_dir, trace_path).
-fn spawn_daemon_once(tmp: &tempfile::TempDir, exe: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+fn spawn_daemon_once(
+    tmp: &tempfile::TempDir,
+    exe: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let state_dir = tmp.path().to_path_buf();
-    let trace_path = state_dir.join(".ai").join("state").join("trace-events.ndjson");
+    let trace_path = state_dir
+        .join(".ai")
+        .join("state")
+        .join("trace-events.ndjson");
 
     // Bootstrap a minimal state
     let output = Command::new(exe)
@@ -36,8 +42,7 @@ fn spawn_daemon_once(tmp: &tempfile::TempDir, exe: &str) -> (std::path::PathBuf,
 
 fn cargo_exe() -> Option<String> {
     // Try to find the ryeosd binary in the target directory
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .unwrap_or_else(|_| "target".to_string());
+    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
     let path = format!("{}/debug/ryeosd", target_dir);
     if std::path::Path::new(&path).exists() {
         Some(path)
@@ -99,20 +104,20 @@ fn file_sink_survives_daemon_restart() {
 
     // Each daemon start writes multiple JSON lines. We had 2 starts.
     // The file persists across restarts, so line count should be >= contents_after_run1.
-    assert!(
-        !lines.is_empty(),
-        "expected ndjson lines from daemon runs"
-    );
+    assert!(!lines.is_empty(), "expected ndjson lines from daemon runs");
 
     // Verify all lines are valid JSON
     for (i, line) in lines.iter().enumerate() {
-        let _: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("line {} invalid JSON: {}", i, e));
+        let _: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("line {} invalid JSON: {}", i, e));
     }
 
     // The final file should be strictly larger than after run 1
     // (run 2 appends more lines)
-    let run1_line_count = contents_after_run1.lines().filter(|l| !l.is_empty()).count();
+    let run1_line_count = contents_after_run1
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count();
     assert!(
         lines.len() > run1_line_count,
         "expected more lines after restart ({} > {})",

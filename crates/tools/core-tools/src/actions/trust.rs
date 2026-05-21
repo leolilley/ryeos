@@ -64,8 +64,8 @@ pub fn run_pin_from(opts: &PinFromOptions) -> Result<PinReport> {
     let target = trust_dir.join(format!("{}.toml", doc.fingerprint));
     let already = target.exists();
 
-    let pinned = pin_key(&vk, &doc.owner, &trust_dir, None)
-        .map_err(|e| anyhow!("pin trust doc: {e}"))?;
+    let pinned =
+        pin_key(&vk, &doc.owner, &trust_dir, None).map_err(|e| anyhow!("pin trust doc: {e}"))?;
 
     Ok(PinReport {
         fingerprint: pinned,
@@ -99,9 +99,8 @@ pub fn run_pin(opts: &PinOptions) -> Result<PinReport> {
         .join("config")
         .join("keys")
         .join("trusted");
-    fs::create_dir_all(&trust_dir).with_context(|| {
-        format!("create trust dir {}", trust_dir.display())
-    })?;
+    fs::create_dir_all(&trust_dir)
+        .with_context(|| format!("create trust dir {}", trust_dir.display()))?;
 
     let raw = fs::read_to_string(&opts.pubkey_file)
         .with_context(|| format!("read pubkey file {}", opts.pubkey_file.display()))?;
@@ -120,8 +119,8 @@ pub fn run_pin(opts: &PinOptions) -> Result<PinReport> {
 
     let target = trust_dir.join(format!("{actual}.toml"));
     let already = target.exists();
-    let pinned = pin_key(&vk, &opts.owner, &trust_dir, None)
-        .map_err(|e| anyhow!("pin trust doc: {e}"))?;
+    let pinned =
+        pin_key(&vk, &opts.owner, &trust_dir, None).map_err(|e| anyhow!("pin trust doc: {e}"))?;
 
     Ok(PinReport {
         fingerprint: pinned,

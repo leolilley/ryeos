@@ -35,8 +35,10 @@ pub const USER_ROOT_DIR: &str = ".ryeos";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RootError {
-    #[error("could not resolve user root: set USER_SPACE or run \
-             under a user account with a discoverable home directory")]
+    #[error(
+        "could not resolve user root: set USER_SPACE or run \
+             under a user account with a discoverable home directory"
+    )]
     UserRootUnresolvable,
 }
 

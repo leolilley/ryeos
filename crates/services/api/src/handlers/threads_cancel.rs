@@ -11,13 +11,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use crate::handler_error::HandlerError;
 use crate::handler_context::HandlerContext;
-use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+use crate::handler_error::HandlerError;
+use crate::registry::ServiceDescriptor;
+use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
 use ryeos_app::state::AppState;
+use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,7 +25,11 @@ pub struct Request {
     pub thread_id: String,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
@@ -38,16 +42,18 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
     if is_terminal(current_status) {
-        return Err(HandlerError::BadRequest(
-            format!("thread {} is already {} — cannot cancel", req.thread_id, current_status)
-        ));
+        return Err(HandlerError::BadRequest(format!(
+            "thread {} is already {} — cannot cancel",
+            req.thread_id, current_status
+        )));
     }
 
     // Only threads in "created" or "running" are cancellable.
     if current_status != "created" && current_status != "running" {
-        return Err(HandlerError::BadRequest(
-            format!("thread {} has non-cancellable status: {}", req.thread_id, current_status)
-        ));
+        return Err(HandlerError::BadRequest(format!(
+            "thread {} has non-cancellable status: {}",
+            req.thread_id, current_status
+        )));
     }
 
     // If the thread has a PGID, kill the process group.
@@ -65,9 +71,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         // finalize — the process is still alive and marking it
         // cancelled would be a lie.
         if !result.success {
-            return Err(HandlerError::Internal(
-                format!("failed to kill process group {} for thread {}: {}", pgid, req.thread_id, result.method)
-            ));
+            return Err(HandlerError::Internal(format!(
+                "failed to kill process group {} for thread {}: {}",
+                pgid, req.thread_id, result.method
+            )));
         }
 
         json!({
@@ -83,28 +90,34 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     // Finalize via ThreadLifecycleService so scheduler fire records
     // get updated correctly (a raw state_store call would skip that).
-    let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
-        thread_id: req.thread_id.clone(),
-        status: "cancelled".to_string(),
-        outcome_code: Some("cancelled".to_string()),
-        result: None,
-        error: Some(json!({
-            "reason": "cancelled_by_request",
-        })),
-        metadata: None,
-        artifacts: Vec::new(),
-        final_cost: None,
-        summary_json: None,
-    }).map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let finalized = state
+        .threads
+        .finalize_thread(&ThreadFinalizeParams {
+            thread_id: req.thread_id.clone(),
+            status: "cancelled".to_string(),
+            outcome_code: Some("cancelled".to_string()),
+            result: None,
+            error: Some(json!({
+                "reason": "cancelled_by_request",
+            })),
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        })
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     // Broadcast the terminal event to any live subscribers for this
     // thread.
-    if let Ok(events) = state.events.replay(&ryeos_app::event_store_service::EventReplayParams {
-        chain_root_id: None,
-        thread_id: Some(req.thread_id.clone()),
-        after_chain_seq: None,
-        limit: 1,
-    }) {
+    if let Ok(events) = state
+        .events
+        .replay(&ryeos_app::event_store_service::EventReplayParams {
+            chain_root_id: None,
+            thread_id: Some(req.thread_id.clone()),
+            after_chain_seq: None,
+            limit: 1,
+        })
+    {
         for event in &events.events {
             if event.event_type == "thread_cancelled" {
                 state.event_streams.publish(&req.thread_id, event.clone());
@@ -122,12 +135,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 fn is_terminal(status: &str) -> bool {
     matches!(
         status,
-        "completed"
-            | "failed"
-            | "cancelled"
-            | "killed"
-            | "timed_out"
-            | "continued"
+        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
     )
 }
 
@@ -150,7 +158,14 @@ mod tests {
 
     #[test]
     fn is_terminal_detects_all_terminal_statuses() {
-        for status in &["completed", "failed", "cancelled", "killed", "timed_out", "continued"] {
+        for status in &[
+            "completed",
+            "failed",
+            "cancelled",
+            "killed",
+            "timed_out",
+            "continued",
+        ] {
             assert!(is_terminal(status), "expected '{}' to be terminal", status);
         }
     }
@@ -158,13 +173,20 @@ mod tests {
     #[test]
     fn is_terminal_rejects_non_terminal() {
         for status in &["created", "running", "pending", "paused"] {
-            assert!(!is_terminal(status), "expected '{}' to NOT be terminal", status);
+            assert!(
+                !is_terminal(status),
+                "expected '{}' to NOT be terminal",
+                status
+            );
         }
     }
 
     #[test]
     fn descriptor_has_required_caps() {
-        assert_eq!(DESCRIPTOR.required_caps, &["ryeos.execute.service.threads.cancel"]);
+        assert_eq!(
+            DESCRIPTOR.required_caps,
+            &["ryeos.execute.service.threads.cancel"]
+        );
     }
 
     #[test]
@@ -176,7 +198,8 @@ mod tests {
     fn request_deserialize_with_caller_fields() {
         let req: Request = serde_json::from_value(json!({
             "thread_id": "T-1234",
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(req.thread_id, "T-1234");
     }
 

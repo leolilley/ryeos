@@ -44,8 +44,7 @@ impl ResolvedProviderSnapshot {
     /// Compute config_hash from `provider`.
     pub fn compute_hash(provider: &ProviderConfig) -> String {
         // serde_json with sorted keys = canonical-enough for hashing.
-        let canonical = serde_json::to_string(provider)
-            .unwrap_or_else(|_| String::new());
+        let canonical = serde_json::to_string(provider).unwrap_or_else(|_| String::new());
         let mut h = Sha256::new();
         h.update(canonical.as_bytes());
         format!("{:x}", h.finalize())

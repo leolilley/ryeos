@@ -45,10 +45,14 @@ mod tests {
     fn roundtrip() {
         let mut map = HashMap::new();
         map.insert("directive:test/simple".to_string(), "ab".repeat(32));
-        let original = SourceManifest { item_source_hashes: map };
+        let original = SourceManifest {
+            item_source_hashes: map,
+        };
         let value = original.to_value();
         let restored = SourceManifest::from_value(&value).unwrap();
         assert_eq!(restored.item_source_hashes.len(), 1);
-        assert!(restored.item_source_hashes.contains_key("directive:test/simple"));
+        assert!(restored
+            .item_source_hashes
+            .contains_key("directive:test/simple"));
     }
 }

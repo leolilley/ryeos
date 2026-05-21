@@ -9,7 +9,12 @@ pub fn render_item(role: ComposeRole, item_id: &str, body: &str) -> String {
         ComposeRole::Extends => "Extends",
         ComposeRole::Reference => "Reference",
     };
-    format!("## {}: {}\n\n{}\n\n---\n\n", role_label, item_id, body.trim())
+    format!(
+        "## {}: {}\n\n{}\n\n---\n\n",
+        role_label,
+        item_id,
+        body.trim()
+    )
 }
 
 #[cfg(test)]

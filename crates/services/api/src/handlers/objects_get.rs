@@ -12,9 +12,9 @@ use anyhow::Result;
 use base64::Engine as _;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

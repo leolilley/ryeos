@@ -8,8 +8,8 @@ mod common;
 
 use std::collections::HashMap;
 
-use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
 
@@ -32,8 +32,8 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let workspace = workspace_root();
     let core_kinds = workspace.join("bundles/core/.ai/node/engine/kinds");
     let std_kinds = workspace.join("bundles/standard/.ai/node/engine/kinds");
-    let kinds =
-        KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store).expect("load kind registry");
+    let kinds = KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store)
+        .expect("load kind registry");
 
     let core_root = workspace.join("bundles/core");
     let std_root = workspace.join("bundles/standard");
@@ -50,18 +50,12 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
         std::sync::Arc::clone(&native_handlers),
     );
 
-    let composers =
-        ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
-            .expect("derive composers");
+    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
+        .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(
-        kinds,
-        parser_dispatcher,
-        None,
-        vec![core_root, std_root],
-    )
-    .with_trust_store(trust_store)
-    .with_composers(composers)
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, None, vec![core_root, std_root])
+        .with_trust_store(trust_store)
+        .with_composers(composers)
 }
 
 fn local_plan_ctx() -> PlanContext {
@@ -128,7 +122,10 @@ fn cap_enforcement_denies_when_caller_lacks_required_cap() {
         .filter(|cap| !caller_scopes.contains(cap))
         .cloned()
         .collect();
-    assert!(!missing.is_empty(), "test.cap must be missing from caller scopes");
+    assert!(
+        !missing.is_empty(),
+        "test.cap must be missing from caller scopes"
+    );
 
     // When caller has the required cap → no missing caps
     let matching_scopes = ["execute".to_string(), "test.cap".to_string()];

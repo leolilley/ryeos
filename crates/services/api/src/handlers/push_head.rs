@@ -40,10 +40,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // 2. Validate manifest exists in CAS
     let manifest_obj = cas
         .get_object(&snapshot.project_manifest_hash)?
-        .ok_or_else(|| anyhow!(
-            "manifest {} not found in CAS (referenced by snapshot {})",
-            snapshot.project_manifest_hash, req.snapshot_hash
-        ))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "manifest {} not found in CAS (referenced by snapshot {})",
+                snapshot.project_manifest_hash,
+                req.snapshot_hash
+            )
+        })?;
     let manifest = ryeos_state::objects::SourceManifest::from_value(&manifest_obj)?;
 
     ryeos_state::project_sync::validate_project_manifest_paths(
@@ -66,12 +69,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // user_manifest_hash is populated, validate all paths against the
     // allow-list and reject absolute/..-traversal paths.
     if let Some(ref user_manifest_hash) = snapshot.user_manifest_hash {
-        let user_manifest_obj = cas
-            .get_object(user_manifest_hash)?
-            .ok_or_else(|| anyhow!(
+        let user_manifest_obj = cas.get_object(user_manifest_hash)?.ok_or_else(|| {
+            anyhow!(
                 "user manifest {} not found in CAS (referenced by snapshot {})",
-                user_manifest_hash, req.snapshot_hash
-            ))?;
+                user_manifest_hash,
+                req.snapshot_hash
+            )
+        })?;
         let user_manifest = ryeos_state::objects::SourceManifest::from_value(&user_manifest_obj)?;
         ryeos_state::user_sync::validate_user_manifest_paths(&user_manifest)?;
     }
@@ -96,14 +100,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let _project_guard = project_lock
         .lock()
         .map_err(|_| anyhow!("project lock poisoned for '{}'", canonical_project_path))?;
-    let _permit = state.write_barrier.try_acquire()
+    let _permit = state
+        .write_barrier
+        .try_acquire()
         .map_err(|e| anyhow!("cannot acquire CAS write permit: {e}"))?;
 
     // If a HEAD already exists for this principal+project, advance it with CAS.
     // Otherwise, write a new ref.
-    match state.state_store.with_state_db(|db| {
-        db.read_project_head(principal_key, &project_hash)
-    })? {
+    match state
+        .state_store
+        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?
+    {
         Some(current_hash) => {
             // Advance with conflict detection
             ryeos_state::refs::advance_project_head_ref(

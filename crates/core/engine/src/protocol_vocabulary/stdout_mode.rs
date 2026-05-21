@@ -17,7 +17,10 @@ pub enum StdoutMode {
 /// | opaque_bytes          | YES      | NO        |
 /// | runtime_result_v1     | YES      | NO        |
 /// | streaming_chunks_v1   | NO       | YES       |
-pub fn is_compatible_shape_mode(shape: StdoutShape, mode: StdoutMode) -> Result<(), VocabularyError> {
+pub fn is_compatible_shape_mode(
+    shape: StdoutShape,
+    mode: StdoutMode,
+) -> Result<(), VocabularyError> {
     match (shape, mode) {
         (StdoutShape::OpaqueBytes, StdoutMode::Terminal) => Ok(()),
         (StdoutShape::RuntimeResultV1, StdoutMode::Terminal) => Ok(()),
@@ -64,7 +67,10 @@ mod tests {
                 result.is_ok(),
                 compatible,
                 "({:?}, {:?}) expected compatible={}, got {:?}",
-                shape, mode, compatible, result
+                shape,
+                mode,
+                compatible,
+                result
             );
         }
     }

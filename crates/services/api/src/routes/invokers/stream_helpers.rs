@@ -49,7 +49,10 @@ pub fn sse_error_event_with(
             payload.insert(k, v);
         }
     }
-    payload.insert("code".to_string(), serde_json::Value::String(code.to_string()));
+    payload.insert(
+        "code".to_string(),
+        serde_json::Value::String(code.to_string()),
+    );
     payload.insert(
         "error".to_string(),
         serde_json::Value::String(message.to_string()),

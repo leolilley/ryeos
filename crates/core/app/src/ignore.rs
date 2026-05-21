@@ -4,7 +4,7 @@
 //! the daemon and CLI can use it without circular dependencies.
 
 pub use ryeos_state::ignore::{
-    IgnoreConfig, IgnoreMatcher, builtin_patterns, matcher_from_builtins,
+    builtin_patterns, matcher_from_builtins, IgnoreConfig, IgnoreMatcher,
 };
 
 /// Path to the ingest ignore config relative to system space root.

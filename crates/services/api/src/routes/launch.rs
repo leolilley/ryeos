@@ -28,8 +28,8 @@
 
 use serde_json::Value;
 
-use ryeos_executor::dispatch_error::DispatchError;
 use ryeos_app::state::AppState;
+use ryeos_executor::dispatch_error::DispatchError;
 
 /// Typed error returned by the background dispatch-launch task.
 ///
@@ -84,9 +84,7 @@ pub(crate) fn spawn_dispatch_launch(
     let project_path_buf = project_path.into_path_buf();
 
     tokio::spawn(async move {
-        use ryeos_engine::contracts::{
-            EffectivePrincipal, PlanContext, Principal, ProjectContext,
-        };
+        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 
         let site_id = state_clone.threads.site_id().to_string();
 
@@ -132,7 +130,14 @@ pub(crate) fn spawn_dispatch_launch(
             inputs: None,
         };
 
-        match ryeos_executor::dispatch::dispatch(item_ref.as_str(), &dispatch_req, &exec_ctx, &state_clone).await {
+        match ryeos_executor::dispatch::dispatch(
+            item_ref.as_str(),
+            &dispatch_req,
+            &exec_ctx,
+            &state_clone,
+        )
+        .await
+        {
             Ok(_value) => Ok(()),
             Err(e) => Err(LaunchSpawnError::Dispatch(e)),
         }

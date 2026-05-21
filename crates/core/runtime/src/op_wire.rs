@@ -70,10 +70,23 @@ impl BatchOpResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum BatchOpError {
-    OpFailed { reason: String },
-    NotImplemented { op: String, phase: u8 },
-    UnknownOp { kind: String, requested: String, declared: Vec<String> },
-    InvalidInput { op: String, field: Option<String>, reason: String },
+    OpFailed {
+        reason: String,
+    },
+    NotImplemented {
+        op: String,
+        phase: u8,
+    },
+    UnknownOp {
+        kind: String,
+        requested: String,
+        declared: Vec<String>,
+    },
+    InvalidInput {
+        op: String,
+        field: Option<String>,
+        reason: String,
+    },
 }
 
 // -------- Generic verified-item + edge types --------

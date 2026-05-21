@@ -56,9 +56,7 @@ pub fn compute_scheduled_at(
             let interval_ms = interval_secs * 1000;
             last_fire_at.map(|last| last + interval_ms)
         }
-        "at" => {
-            parse_iso_ts(expression)
-        }
+        "at" => parse_iso_ts(expression),
         _ => None,
     }
 }
@@ -69,10 +67,10 @@ fn next_cron_fire(expression: &str, timezone: &str, after_ms: i64) -> Result<Opt
     let schedule = cron::Schedule::from_str(expression)
         .with_context(|| format!("invalid cron expression: {}", expression))?;
 
-    let after = chrono::DateTime::from_timestamp_millis(after_ms)
-        .unwrap_or_else(chrono::Utc::now);
+    let after = chrono::DateTime::from_timestamp_millis(after_ms).unwrap_or_else(chrono::Utc::now);
 
-    let tz: chrono_tz::Tz = timezone.parse()
+    let tz: chrono_tz::Tz = timezone
+        .parse()
         .with_context(|| format!("invalid IANA timezone: {}", timezone))?;
 
     let after_with_tz = after.with_timezone(&tz);
@@ -88,7 +86,12 @@ fn next_cron_fire(expression: &str, timezone: &str, after_ms: i64) -> Result<Opt
 ///
 /// Caps iteration at 10 000 steps to prevent runaway loops on pathological
 /// cron expressions (e.g. every second over a multi-year span).
-fn find_most_recent_cron(expression: &str, timezone: &str, start_ms: i64, end_ms: i64) -> Option<i64> {
+fn find_most_recent_cron(
+    expression: &str,
+    timezone: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Option<i64> {
     let schedule = cron::Schedule::from_str(expression).ok()?;
     let tz: chrono_tz::Tz = timezone.parse().ok()?;
     let start = chrono::DateTime::from_timestamp_millis(start_ms)?;
@@ -115,9 +118,17 @@ fn find_most_recent_cron(expression: &str, timezone: &str, start_ms: i64, end_ms
 
 // ── Interval ────────────────────────────────────────────────────────
 
-fn next_interval_fire(expression: &str, now_ms: i64, last_fire_at: Option<i64>) -> Result<Option<i64>> {
-    let interval_secs: i64 = expression.parse()
-        .with_context(|| format!("invalid interval expression (must be integer seconds): {}", expression))?;
+fn next_interval_fire(
+    expression: &str,
+    now_ms: i64,
+    last_fire_at: Option<i64>,
+) -> Result<Option<i64>> {
+    let interval_secs: i64 = expression.parse().with_context(|| {
+        format!(
+            "invalid interval expression (must be integer seconds): {}",
+            expression
+        )
+    })?;
     if interval_secs <= 0 {
         bail!("interval must be positive, got: {}", interval_secs);
     }
@@ -145,7 +156,10 @@ fn next_at_fire(expression: &str, now_ms: i64) -> Result<Option<i64>> {
     match parse_iso_ts(expression) {
         Some(target) if target > now_ms => Ok(Some(target)),
         Some(_) => Ok(None), // past — schedule exhausted
-        None => bail!("invalid at expression (must be ISO 8601 timestamp): {}", expression),
+        None => bail!(
+            "invalid at expression (must be ISO 8601 timestamp): {}",
+            expression
+        ),
     }
 }
 
@@ -174,7 +188,8 @@ pub fn validate_expression(schedule_type: &str, expression: &str) -> Result<()> 
             Ok(())
         }
         "interval" => {
-            let secs: i64 = expression.parse()
+            let secs: i64 = expression
+                .parse()
                 .with_context(|| format!("interval must be integer seconds: {}", expression))?;
             if secs <= 0 {
                 bail!("interval must be positive, got: {}", secs);
@@ -183,7 +198,10 @@ pub fn validate_expression(schedule_type: &str, expression: &str) -> Result<()> 
         }
         "at" => {
             if parse_iso_ts(expression).is_none() {
-                bail!("invalid at expression (must be ISO 8601 timestamp): {}", expression);
+                bail!(
+                    "invalid at expression (must be ISO 8601 timestamp): {}",
+                    expression
+                );
             }
             Ok(())
         }
@@ -370,16 +388,18 @@ mod tests {
 
     #[test]
     fn at_is_past_old_timestamp() {
-        assert!(is_at_past("2020-01-01T00:00:00Z", lillux::time::timestamp_millis()));
+        assert!(is_at_past(
+            "2020-01-01T00:00:00Z",
+            lillux::time::timestamp_millis()
+        ));
     }
 
     #[test]
     fn at_is_not_past_future_timestamp() {
-        let future = chrono::DateTime::from_timestamp_millis(
-            lillux::time::timestamp_millis() + 600_000,
-        )
-        .unwrap()
-        .to_rfc3339();
+        let future =
+            chrono::DateTime::from_timestamp_millis(lillux::time::timestamp_millis() + 600_000)
+                .unwrap()
+                .to_rfc3339();
         assert!(!is_at_past(&future, lillux::time::timestamp_millis()));
     }
 }

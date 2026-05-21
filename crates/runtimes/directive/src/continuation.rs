@@ -84,7 +84,9 @@ mod tests {
     fn over_threshold_continues() {
         let check = ContinuationCheck::new(100);
         let mut messages = Vec::new();
-        let long = (0..200).map(|i| format!("long message {} with padding content here", i)).collect::<Vec<_>>();
+        let long = (0..200)
+            .map(|i| format!("long message {} with padding content here", i))
+            .collect::<Vec<_>>();
         for msg in &long {
             messages.push(make_message("user", msg));
         }
@@ -126,10 +128,7 @@ mod tests {
         let check = ContinuationCheck::new(100_000);
         let a = "a".repeat(400);
         let b = "b".repeat(400);
-        let messages = vec![
-            make_message("user", &a),
-            make_message("assistant", &b),
-        ];
+        let messages = vec![make_message("user", &a), make_message("assistant", &b)];
         let tokens = check.estimate_total_tokens(&messages, None);
         assert_eq!(tokens, 201);
     }

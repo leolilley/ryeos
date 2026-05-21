@@ -65,7 +65,8 @@ pub async fn load_resume_state(
         if ev.event_type != "graph_step_started" {
             continue;
         }
-        let payload_run_id = ev.payload
+        let payload_run_id = ev
+            .payload
             .get("graph_run_id")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
@@ -191,7 +192,9 @@ pub fn decide_resume_source(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI};
+    use ryeos_runtime::callback::{
+        CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI,
+    };
     use serde_json::json;
     use std::sync::Arc;
 
@@ -204,20 +207,56 @@ mod tests {
         async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
-            Ok(serde_json::to_value(ReplayResponse { events: self.events.clone() }).unwrap())
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
         }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(serde_json::to_value(ReplayResponse {
+                events: self.events.clone(),
+            })
+            .unwrap())
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
     }
 
     fn make_callback(events: Vec<ReplayedEventRecord>) -> CallbackClient {
@@ -291,7 +330,10 @@ mod tests {
         // Picks the LAST graph_step_started regardless of run_id.
         assert_eq!(rs.current_node, "step5");
         assert_eq!(rs.step_count, 4);
-        assert_eq!(rs.graph_run_id, "run-a", "graph_run_id reconstructed from matched event");
+        assert_eq!(
+            rs.graph_run_id, "run-a",
+            "graph_run_id reconstructed from matched event"
+        );
     }
 
     #[tokio::test]
@@ -301,9 +343,7 @@ mod tests {
             payload: json!({"graph_run_id": "gr-target", "graph_id": "g1"}),
         }];
         let callback = make_callback(events);
-        let rs = load_resume_state(&callback, "T-test")
-            .await
-            .unwrap();
+        let rs = load_resume_state(&callback, "T-test").await.unwrap();
         assert!(rs.is_none());
     }
 

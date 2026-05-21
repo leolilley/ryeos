@@ -26,11 +26,14 @@ impl ResponseMode for StaticMode {
         &self,
         raw: &RawRouteSpec,
     ) -> Result<Arc<dyn CompiledResponseMode>, RouteConfigError> {
-        let status_raw = raw.response.status.ok_or_else(|| RouteConfigError::InvalidResponseSpec {
-            id: raw.id.clone(),
-            mode: "static".into(),
-            reason: "missing 'status' field".into(),
-        })?;
+        let status_raw =
+            raw.response
+                .status
+                .ok_or_else(|| RouteConfigError::InvalidResponseSpec {
+                    id: raw.id.clone(),
+                    mode: "static".into(),
+                    reason: "missing 'status' field".into(),
+                })?;
 
         let content_type = raw.response.content_type.as_ref().ok_or_else(|| {
             RouteConfigError::InvalidResponseSpec {
@@ -48,10 +51,12 @@ impl ResponseMode for StaticMode {
             }
         })?;
 
-        let status = StatusCode::from_u16(status_raw).map_err(|_| RouteConfigError::InvalidResponseSpec {
-            id: raw.id.clone(),
-            mode: "static".into(),
-            reason: format!("invalid HTTP status code: {status_raw}"),
+        let status = StatusCode::from_u16(status_raw).map_err(|_| {
+            RouteConfigError::InvalidResponseSpec {
+                id: raw.id.clone(),
+                mode: "static".into(),
+                reason: format!("invalid HTTP status code: {status_raw}"),
+            }
         })?;
 
         let header_val = content_type.parse::<HeaderValue>().map_err(|_| {
@@ -100,9 +105,15 @@ impl CompiledResponseMode for CompiledStaticMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec};
+    use ryeos_app::route_raw::{
+        RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
+    };
 
-    fn make_raw(status: Option<u16>, content_type: Option<&str>, body_b64: Option<&str>) -> RawRouteSpec {
+    fn make_raw(
+        status: Option<u16>,
+        content_type: Option<&str>,
+        body_b64: Option<&str>,
+    ) -> RawRouteSpec {
         RawRouteSpec {
             section: "routes".to_string(),
             category: None,

@@ -149,7 +149,10 @@ impl ParserRegistry {
 
         let mut dup_list: Vec<DuplicateRef> = duplicates
             .into_iter()
-            .map(|(canonical_ref, paths)| DuplicateRef { canonical_ref, paths })
+            .map(|(canonical_ref, paths)| DuplicateRef {
+                canonical_ref,
+                paths,
+            })
             .collect();
         dup_list.sort_by(|a, b| a.canonical_ref.cmp(&b.canonical_ref));
 
@@ -236,9 +239,7 @@ impl ParserRegistry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ParserDescriptor)> {
-        self.descriptors
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
+        self.descriptors.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn len(&self) -> usize {
@@ -275,11 +276,11 @@ struct ParserBootstrap {
 
 impl ParserBootstrap {
     fn derive(kinds: &KindRegistry) -> Result<Self, EngineError> {
-        let parser_kind = kinds.get("parser").ok_or_else(|| EngineError::SchemaLoaderError {
-            reason:
-                "parser kind schema not registered — required for parser bootstrap"
-                    .into(),
-        })?;
+        let parser_kind = kinds
+            .get("parser")
+            .ok_or_else(|| EngineError::SchemaLoaderError {
+                reason: "parser kind schema not registered — required for parser bootstrap".into(),
+            })?;
 
         if parser_kind.extensions.is_empty() {
             return Err(EngineError::SchemaLoaderError {
@@ -434,14 +435,10 @@ fn walk_tools(ctx: WalkToolsContext<'_>, cur: &Path) -> Result<(), EngineError> 
             &bootstrap.signature.prefix,
             bootstrap.signature.suffix.as_deref(),
         );
-        let descriptor: ParserDescriptor = serde_yaml::from_str(&stripped).map_err(|e| {
-            EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{}: invalid parser descriptor: {e}",
-                    path.display()
-                ),
-            }
-        })?;
+        let descriptor: ParserDescriptor =
+            serde_yaml::from_str(&stripped).map_err(|e| EngineError::SchemaLoaderError {
+                reason: format!("{}: invalid parser descriptor: {e}", path.display()),
+            })?;
 
         if descriptor.parser_api_version != 1 {
             return Err(EngineError::SchemaLoaderError {
@@ -453,9 +450,8 @@ fn walk_tools(ctx: WalkToolsContext<'_>, cur: &Path) -> Result<(), EngineError> 
             });
         }
 
-        let canonical_ref = derive_canonical_ref(tools_root, &path).map_err(|reason| {
-            EngineError::SchemaLoaderError { reason }
-        })?;
+        let canonical_ref = derive_canonical_ref(tools_root, &path)
+            .map_err(|reason| EngineError::SchemaLoaderError { reason })?;
 
         if replace_existing {
             // Within a single overlay walk, a canonical ref MUST
@@ -535,9 +531,8 @@ fn verify_signature_with_envelope(
 
     match header {
         Some(h) => {
-            let body = lillux::signature::strip_signature_lines_with_envelope(
-                content, prefix, suffix,
-            );
+            let body =
+                lillux::signature::strip_signature_lines_with_envelope(content, prefix, suffix);
             let actual = lillux::signature::content_hash(&body);
             if actual != h.content_hash {
                 return Err(EngineError::ContentHashMismatch {
@@ -546,12 +541,12 @@ fn verify_signature_with_envelope(
                     actual,
                 });
             }
-            let signer = trust_store
-                .get(&h.signer_fingerprint)
-                .ok_or_else(|| EngineError::UntrustedSigner {
+            let signer = trust_store.get(&h.signer_fingerprint).ok_or_else(|| {
+                EngineError::UntrustedSigner {
                     canonical_ref: canonical_ref.clone(),
                     fingerprint: h.signer_fingerprint.clone(),
-                })?;
+                }
+            })?;
             if !lillux::signature::verify_signature(
                 &h.content_hash,
                 &h.signature_b64,
@@ -636,15 +631,14 @@ mod tests {
         // Inject an empty mapping for descriptors that don't exercise
         // contract semantics. Detected by path containing `parsers`.
         let owned;
-        let body: &str =
-            if path.to_string_lossy().contains("parsers") && !content.contains("output_schema") {
-                owned = format!(
-                    "{content}output_schema:\n  root_type: mapping\n  required: {{}}\n"
-                );
-                &owned
-            } else {
-                content
-            };
+        let body: &str = if path.to_string_lossy().contains("parsers")
+            && !content.contains("output_schema")
+        {
+            owned = format!("{content}output_schema:\n  root_type: mapping\n  required: {{}}\n");
+            &owned
+        } else {
+            content
+        };
         let signed = lillux::signature::sign_content(body, sk, "#", None);
         fs::write(path, signed).unwrap();
     }
@@ -674,12 +668,20 @@ formats:
         let yaml_owned = if yaml.contains("composed_value_contract") {
             yaml.to_string()
         } else {
-            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:ryeos/core/identity\n") } }
+            {
+                let with_contract = format!(
+                    "{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"
+                );
+                if with_contract.contains("composer:") {
+                    with_contract
+                } else {
+                    format!("{with_contract}composer: handler:ryeos/core/identity\n")
+                }
+            }
         };
         let signed = lillux::signature::sign_content(&yaml_owned, sk, "#", None);
         fs::write(parser_dir.join("parser.kind-schema.yaml"), signed).unwrap();
-        KindRegistry::load_base(&[kinds_dir], ts)
-            .expect("test parser kind schema loads")
+        KindRegistry::load_base(&[kinds_dir], ts).expect("test parser kind schema loads")
     }
 
     fn default_parser_kinds(sk: &SigningKey, ts: &TrustStore) -> KindRegistry {
@@ -700,11 +702,11 @@ parser_api_version: 1
 parser_config:
   require_mapping: true
 ";
-        let p = root
-            .join(".ai/parsers/ryeos/core/yaml/yaml.yaml");
+        let p = root.join(".ai/parsers/ryeos/core/yaml/yaml.yaml");
         write_signed(&p, yaml, &sk);
 
-        let (reg, dups) = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
+        let (reg, dups) =
+            ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
         assert!(dups.is_empty());
         let d = reg.get("parser:ryeos/core/yaml/yaml").unwrap();
         assert_eq!(d.handler, "handler:ryeos/core/yaml-document");
@@ -730,7 +732,8 @@ handler: \"handler:ryeos/core/yaml-document\"
         let p = root.join(".ai/parsers/ryeos/core/something.yaml");
         write_signed(&p, yaml, &sk);
 
-        let err = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();
+        let err =
+            ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();
         assert!(
             matches!(err, EngineError::SchemaLoaderError { .. }),
             "expected SchemaLoaderError, got: {err:?}"
@@ -753,7 +756,8 @@ parser_config: {}
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, yaml).unwrap();
 
-        let err = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();
+        let err =
+            ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();
         assert!(matches!(err, EngineError::SignatureMissing { .. }));
     }
 
@@ -791,8 +795,12 @@ parser_config: {}
         write_signed(&p_a, yaml_a, &sk);
         write_signed(&p_b, yaml_b, &sk);
 
-        let (reg, dups) =
-            ParserRegistry::load_base(&[root_a.clone(), root_b.clone()], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
+        let (reg, dups) = ParserRegistry::load_base(
+            &[root_a.clone(), root_b.clone()],
+            &ts,
+            &default_parser_kinds(&sk, &ts),
+        )
+        .unwrap();
         let d = reg.get("parser:ryeos/core/yaml/yaml").unwrap();
         assert_eq!(d.version, "1.0.0");
         assert_eq!(d.description.as_deref(), Some("A wins"));
@@ -844,8 +852,11 @@ parser_config: {}
             &sk,
         );
 
-        let (base_reg, _dups) = ParserRegistry::load_base(&[base], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
-        let overlaid = base_reg.with_project_overlay(&project, &ts, &default_parser_kinds(&sk, &ts)).unwrap();
+        let (base_reg, _dups) =
+            ParserRegistry::load_base(&[base], &ts, &default_parser_kinds(&sk, &ts)).unwrap();
+        let overlaid = base_reg
+            .with_project_overlay(&project, &ts, &default_parser_kinds(&sk, &ts))
+            .unwrap();
         let d = overlaid.get("parser:ryeos/core/yaml/yaml").unwrap();
         assert_eq!(d.version, "9.0.0");
         assert_eq!(d.description.as_deref(), Some("project override"));
@@ -1078,7 +1089,8 @@ totally_made_up_field: hi
         let p = root.join(".ai/parsers/ryeos/core/y/y.yaml");
         write_signed(&p, yaml, &sk);
 
-        let err = ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();
+        let err =
+            ParserRegistry::load_base(&[root], &ts, &default_parser_kinds(&sk, &ts)).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown field") || msg.contains("totally_made_up_field"),

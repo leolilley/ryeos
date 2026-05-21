@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use lillux::crypto::{load_signing_key, SigningKey, fingerprint as compute_fp};
+use lillux::crypto::{fingerprint as compute_fp, load_signing_key, SigningKey};
 use ryeos_engine::roots;
 use ryeos_engine::AI_DIR;
 
@@ -34,13 +34,11 @@ impl Signer {
             let pb = PathBuf::from(&p);
             return Self::load_from(&pb);
         }
-        let user_root = roots::user_root().map_err(|_| {
-            CliTransportError::SigningKeyMissing {
-                path: PathBuf::from(format!(
-                    "<user_root>/{AI_DIR}/config/keys/signing/private_key.pem \
+        let user_root = roots::user_root().map_err(|_| CliTransportError::SigningKeyMissing {
+            path: PathBuf::from(format!(
+                "<user_root>/{AI_DIR}/config/keys/signing/private_key.pem \
                      (set USER_SPACE or ensure $HOME is discoverable)"
-                )),
-            }
+            )),
         })?;
         let user_key = user_root
             .join(AI_DIR)
@@ -141,13 +139,7 @@ fn canonicalize_path(path_and_query: &str) -> String {
         }
         let sorted: Vec<String> = params
             .into_iter()
-            .map(|(k, v)| {
-                if v.is_empty() {
-                    k
-                } else {
-                    format!("{k}={v}")
-                }
-            })
+            .map(|(k, v)| if v.is_empty() { k } else { format!("{k}={v}") })
             .collect();
         format!("{}?{}", path, sorted.join("&"))
     } else {

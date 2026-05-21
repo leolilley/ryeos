@@ -105,10 +105,7 @@ impl ChainLock {
             use std::os::unix::io::AsRawFd;
             let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
             if ret != 0 {
-                anyhow::bail!(
-                    "flock failed: {}",
-                    std::io::Error::last_os_error()
-                );
+                anyhow::bail!("flock failed: {}", std::io::Error::last_os_error());
             }
         }
 
@@ -165,11 +162,8 @@ pub fn create_chain(
     let snapshot_json = lillux::canonical_json(&snapshot_value);
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
     let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
-    lillux::atomic_write(
-        &snapshot_path,
-        snapshot_json.as_bytes(),
-    )
-    .context("failed to store initial snapshot in CAS")?;
+    lillux::atomic_write(&snapshot_path, snapshot_json.as_bytes())
+        .context("failed to store initial snapshot in CAS")?;
 
     // Create initial chain_state
     let mut threads = BTreeMap::new();
@@ -200,11 +194,8 @@ pub fn create_chain(
     let chain_state_json = lillux::canonical_json(&chain_state_value);
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
-    lillux::atomic_write(
-        &chain_state_path,
-        chain_state_json.as_bytes(),
-    )
-    .context("failed to store initial chain_state in CAS")?;
+    lillux::atomic_write(&chain_state_path, chain_state_json.as_bytes())
+        .context("failed to store initial chain_state in CAS")?;
 
     // Write signed head ref
     let signed_ref = SignedRef::new(
@@ -326,11 +317,8 @@ pub fn append_events(
         let event_json = lillux::canonical_json(&event_value);
         let event_hash = lillux::sha256_hex(event_json.as_bytes());
         let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
-        lillux::atomic_write(
-            &event_path,
-            event_json.as_bytes(),
-        )
-        .context("failed to store event in CAS")?;
+        lillux::atomic_write(&event_path, event_json.as_bytes())
+            .context("failed to store event in CAS")?;
 
         last_event_hash = Some(event_hash.clone());
         last_thread_event_hash = Some(event_hash);
@@ -354,11 +342,8 @@ pub fn append_events(
         let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
 
         let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
-        lillux::atomic_write(
-            &snapshot_path,
-            snapshot_json.as_bytes(),
-        )
-        .context("failed to store snapshot in CAS")?;
+        lillux::atomic_write(&snapshot_path, snapshot_json.as_bytes())
+            .context("failed to store snapshot in CAS")?;
 
         let thread_entry = new_threads.get_mut(&update.thread_id).ok_or_else(|| {
             anyhow!(
@@ -382,9 +367,9 @@ pub fn append_events(
         schema: 1,
         kind: "chain_state".to_string(),
         chain_root_id: chain_root_id.to_string(),
-        prev_chain_state_hash: Some(
-            lillux::sha256_hex(lillux::canonical_json(&current_chain_state.to_value()).as_bytes()),
-        ),
+        prev_chain_state_hash: Some(lillux::sha256_hex(
+            lillux::canonical_json(&current_chain_state.to_value()).as_bytes(),
+        )),
         last_event_hash,
         last_chain_seq: first_chain_seq - 1,
         updated_at: lillux::time::iso8601_now(),
@@ -397,11 +382,8 @@ pub fn append_events(
     let chain_state_json = lillux::canonical_json(&chain_state_value);
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
-    lillux::atomic_write(
-        &chain_state_path,
-        chain_state_json.as_bytes(),
-    )
-    .context("failed to store new chain_state in CAS")?;
+    lillux::atomic_write(&chain_state_path, chain_state_json.as_bytes())
+        .context("failed to store new chain_state in CAS")?;
 
     // Write signed head ref
     let signed_ref = SignedRef::new(
@@ -456,9 +438,7 @@ pub fn add_thread_to_chain(
         );
     }
     if new_snapshot.thread_id == chain_root_id {
-        anyhow::bail!(
-            "use create_chain() for root threads, not add_thread_to_chain()"
-        );
+        anyhow::bail!("use create_chain() for root threads, not add_thread_to_chain()");
     }
 
     // Acquire lock
@@ -469,7 +449,10 @@ pub fn add_thread_to_chain(
         .context("failed to read current chain head")?;
 
     // Verify thread doesn't already exist
-    if current_chain_state.threads.contains_key(&new_snapshot.thread_id) {
+    if current_chain_state
+        .threads
+        .contains_key(&new_snapshot.thread_id)
+    {
         anyhow::bail!(
             "thread {} already exists in chain {}",
             new_snapshot.thread_id,
@@ -497,9 +480,8 @@ pub fn add_thread_to_chain(
         },
     );
 
-    let prev_hash = lillux::sha256_hex(
-        lillux::canonical_json(&current_chain_state.to_value()).as_bytes()
-    );
+    let prev_hash =
+        lillux::sha256_hex(lillux::canonical_json(&current_chain_state.to_value()).as_bytes());
 
     let new_chain_state = ChainState {
         schema: 1,
@@ -577,13 +559,12 @@ pub fn read_chain_head(
     }
     tracing::trace!(chain_root_id = %chain_root_id, source = "cas", "chain head read (cache miss)");
 
-    let signed_ref = refs::read_signed_ref(&ref_path)
-        .context("failed to read signed ref")?;
+    let signed_ref = refs::read_signed_ref(&ref_path).context("failed to read signed ref")?;
 
     // Load chain_state from CAS
     let cas_path = lillux::shard_path(cas_root, "objects", &signed_ref.target_hash, ".json");
-    let chain_state_json = std::fs::read_to_string(&cas_path)
-        .context("failed to read chain_state from CAS")?;
+    let chain_state_json =
+        std::fs::read_to_string(&cas_path).context("failed to read chain_state from CAS")?;
 
     let chain_state: ChainState =
         serde_json::from_str(&chain_state_json).context("failed to parse chain_state")?;
@@ -591,9 +572,8 @@ pub fn read_chain_head(
     chain_state.validate()?;
 
     // Populate cache before returning
-    let chain_state_hash = lillux::sha256_hex(
-        lillux::canonical_json(&chain_state.to_value()).as_bytes()
-    );
+    let chain_state_hash =
+        lillux::sha256_hex(lillux::canonical_json(&chain_state.to_value()).as_bytes());
     head_cache.insert(
         chain_root_id.to_string(),
         CachedHead::new(chain_state_hash, chain_state.clone()),
@@ -612,8 +592,7 @@ pub fn read_thread_snapshot(
     thread_id: &str,
     head_cache: &mut HeadCache,
 ) -> anyhow::Result<ReadSnapshotResult> {
-    let chain_state =
-        read_chain_head(cas_root, refs_root, chain_root_id, head_cache)?;
+    let chain_state = read_chain_head(cas_root, refs_root, chain_root_id, head_cache)?;
 
     let chain_state_hash =
         lillux::sha256_hex(lillux::canonical_json(&chain_state.to_value()).as_bytes());
@@ -631,8 +610,8 @@ pub fn read_thread_snapshot(
 
     // Load snapshot from CAS
     let cas_path = lillux::shard_path(cas_root, "objects", &thread_entry.snapshot_hash, ".json");
-    let snapshot_json = std::fs::read_to_string(&cas_path)
-        .context("failed to read snapshot from CAS")?;
+    let snapshot_json =
+        std::fs::read_to_string(&cas_path).context("failed to read snapshot from CAS")?;
 
     let snapshot: ThreadSnapshot =
         serde_json::from_str(&snapshot_json).context("failed to parse snapshot")?;
@@ -653,7 +632,7 @@ mod tests {
 
     fn make_test_snapshot(thread_id: &str) -> ThreadSnapshot {
         use crate::objects::thread_snapshot::ThreadSnapshotBuilder;
-        
+
         ThreadSnapshotBuilder::new(
             thread_id,
             thread_id,
@@ -667,7 +646,7 @@ mod tests {
 
     fn make_test_event(chain_root_id: &str, thread_id: &str) -> ThreadEvent {
         use crate::objects::thread_event::NewEvent;
-        
+
         NewEvent::new(chain_root_id, thread_id, "test_event")
             .payload(serde_json::json!({}))
             .build()
@@ -717,11 +696,13 @@ mod tests {
         .unwrap();
 
         // Verify snapshot object exists in CAS
-        let snapshot_path = lillux::shard_path(&cas_root, "objects", &result.snapshot_hash, ".json");
+        let snapshot_path =
+            lillux::shard_path(&cas_root, "objects", &result.snapshot_hash, ".json");
         assert!(snapshot_path.exists());
 
         // Verify chain_state object exists in CAS
-        let chain_state_path = lillux::shard_path(&cas_root, "objects", &result.chain_state_hash, ".json");
+        let chain_state_path =
+            lillux::shard_path(&cas_root, "objects", &result.chain_state_hash, ".json");
         assert!(chain_state_path.exists());
     }
 
@@ -855,7 +836,8 @@ mod tests {
         .unwrap();
 
         // Verify new chain_state exists in CAS
-        let chain_state_path = lillux::shard_path(&cas_root, "objects", &result.chain_state_hash, ".json");
+        let chain_state_path =
+            lillux::shard_path(&cas_root, "objects", &result.chain_state_hash, ".json");
         assert!(chain_state_path.exists());
     }
 
@@ -906,14 +888,9 @@ mod tests {
         .unwrap();
 
         // Read snapshot
-        let result = read_thread_snapshot(
-            &cas_root,
-            &refs_root,
-            "T-root",
-            "T-root",
-            &mut head_cache,
-        )
-        .unwrap();
+        let result =
+            read_thread_snapshot(&cas_root, &refs_root, "T-root", "T-root", &mut head_cache)
+                .unwrap();
 
         assert!(result.snapshot.is_some());
         let snapshot = result.snapshot.unwrap();
@@ -1186,15 +1163,29 @@ mod tests {
         let snapshot = make_test_snapshot("T-trace");
 
         let (_, spans) = test::capture_traces(|| {
-            let _ = create_chain(&cas_root, &refs_root, "T-trace", snapshot, &signer, &mut head_cache);
+            let _ = create_chain(
+                &cas_root,
+                &refs_root,
+                "T-trace",
+                snapshot,
+                &signer,
+                &mut head_cache,
+            );
         });
 
         let span = test::find_span(&spans, "state:chain_create");
-        assert!(span.is_some(), "expected state:chain_create span, got: {:?}", spans.iter().map(|s| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected state:chain_create span, got: {:?}",
+            spans.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
 
         let span = span.unwrap();
         let field_val = |name: &str| -> Option<&str> {
-            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+            span.fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
         };
         assert_eq!(field_val("chain_root_id"), Some("T-trace"));
     }
@@ -1208,27 +1199,45 @@ mod tests {
         let mut head_cache = HeadCache::new();
 
         let snapshot = make_test_snapshot("T-trace2");
-        create_chain(&cas_root, &refs_root, "T-trace2", snapshot, &signer, &mut head_cache).unwrap();
+        create_chain(
+            &cas_root,
+            &refs_root,
+            "T-trace2",
+            snapshot,
+            &signer,
+            &mut head_cache,
+        )
+        .unwrap();
 
         let event = make_test_event("T-trace2", "T-trace2");
         let (_, spans) = test::capture_traces(|| {
-            let _ = append_events(AppendEventsInput {
-                cas_root: &cas_root,
-                refs_root: &refs_root,
-                chain_root_id: "T-trace2",
-                thread_id: "T-trace2",
-                events: vec![event],
-                snapshot_updates: vec![],
-                signer: &signer,
-            }, &mut head_cache);
+            let _ = append_events(
+                AppendEventsInput {
+                    cas_root: &cas_root,
+                    refs_root: &refs_root,
+                    chain_root_id: "T-trace2",
+                    thread_id: "T-trace2",
+                    events: vec![event],
+                    snapshot_updates: vec![],
+                    signer: &signer,
+                },
+                &mut head_cache,
+            );
         });
 
         let span = test::find_span(&spans, "state:chain_append");
-        assert!(span.is_some(), "expected state:chain_append span, got: {:?}", spans.iter().map(|s| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected state:chain_append span, got: {:?}",
+            spans.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
 
         let span = span.unwrap();
         let field_val = |name: &str| -> Option<&str> {
-            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+            span.fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
         };
         assert_eq!(field_val("chain_root_id"), Some("T-trace2"));
         assert_eq!(field_val("thread_id"), Some("T-trace2"));

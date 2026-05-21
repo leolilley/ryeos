@@ -68,7 +68,10 @@ pub fn apply_operator(actual: Option<&Value>, op: &str, expected: &Value) -> any
                 _ => Cow::Owned(actual_val.to_string()),
             };
             let needle = expected.as_str().ok_or_else(|| {
-                anyhow::anyhow!("'contains' operator requires string value, got {}", expected)
+                anyhow::anyhow!(
+                    "'contains' operator requires string value, got {}",
+                    expected
+                )
             })?;
             Ok(s.contains(needle))
         }
@@ -98,9 +101,8 @@ pub fn matches(doc: &Value, condition: &Value) -> anyhow::Result<bool> {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("'any' must be an array"))?;
         for (idx, c) in arr.iter().enumerate() {
-            let result = matches(doc, c).map_err(|e| {
-                anyhow::anyhow!("'any' clause[{idx}] evaluation failed: {e:#}")
-            })?;
+            let result = matches(doc, c)
+                .map_err(|e| anyhow::anyhow!("'any' clause[{idx}] evaluation failed: {e:#}"))?;
             if result {
                 return Ok(true);
             }
@@ -113,9 +115,8 @@ pub fn matches(doc: &Value, condition: &Value) -> anyhow::Result<bool> {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("'all' must be an array"))?;
         for (idx, c) in arr.iter().enumerate() {
-            let result = matches(doc, c).map_err(|e| {
-                anyhow::anyhow!("'all' clause[{idx}] evaluation failed: {e:#}")
-            })?;
+            let result = matches(doc, c)
+                .map_err(|e| anyhow::anyhow!("'all' clause[{idx}] evaluation failed: {e:#}"))?;
             if !result {
                 return Ok(false);
             }
@@ -226,9 +227,15 @@ mod tests {
             {"path": "status", "op": "eq", "value": "running"}
         ]});
         let result = matches(&doc, &cond);
-        assert!(result.is_err(), "malformed operator in 'any' clause should propagate: {result:?}");
+        assert!(
+            result.is_err(),
+            "malformed operator in 'any' clause should propagate: {result:?}"
+        );
         let msg = format!("{:#}", result.unwrap_err());
-        assert!(msg.contains("unknown_op") || msg.contains("clause"), "error should mention the cause: {msg}");
+        assert!(
+            msg.contains("unknown_op") || msg.contains("clause"),
+            "error should mention the cause: {msg}"
+        );
     }
 
     #[test]
@@ -239,6 +246,9 @@ mod tests {
             {"not_a_real_field": true}
         ]});
         let result = matches(&doc, &cond);
-        assert!(result.is_err(), "malformed clause in 'all' should propagate: {result:?}");
+        assert!(
+            result.is_err(),
+            "malformed clause in 'all' should propagate: {result:?}"
+        );
     }
 }

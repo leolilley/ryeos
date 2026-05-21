@@ -12,11 +12,11 @@ use std::sync::Arc;
 use base64::Engine;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use crate::handler_error::{HandlerError, HandlerResult};
 use crate::handler_context::HandlerContext;
+use crate::handler_error::{HandlerError, HandlerResult};
+use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,17 +42,18 @@ pub struct Response {
     pub created_at: String,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> HandlerResult<Value> {
     // Caller identity used for scope delegation — must be verified.
     ctx.require_verified()?;
 
     // 1. Parse public_key: must be "ed25519:<b64>"
-    let key_b64 = req
-        .public_key
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| {
-            HandlerError::BadRequest("public_key must be in 'ed25519:<base64>' format".into())
-        })?;
+    let key_b64 = req.public_key.strip_prefix("ed25519:").ok_or_else(|| {
+        HandlerError::BadRequest("public_key must be in 'ed25519:<base64>' format".into())
+    })?;
 
     let key_bytes = base64::engine::general_purpose::STANDARD
         .decode(key_b64)
@@ -175,8 +176,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 /// Validate scope grammar — delegates to the centralized implementation
 /// in `ryeos_runtime::authorizer`.
 fn validate_scope_pattern(scope: &str) -> Result<(), HandlerError> {
-    ryeos_runtime::authorizer::validate_scope_pattern(scope)
-        .map_err(HandlerError::BadRequest)
+    ryeos_runtime::authorizer::validate_scope_pattern(scope).map_err(HandlerError::BadRequest)
 }
 
 #[cfg(test)]
@@ -234,7 +234,10 @@ mod tests {
         // Grammar layer accepts "*" — wildcard policy lives elsewhere.
         assert!(validate_scope_pattern("*").is_ok());
         // The handler's step-6 check rejects any list containing "*".
-        let normalized = vec!["ryeos.execute.service.bundle.install".to_string(), "*".to_string()];
+        let normalized = vec![
+            "ryeos.execute.service.bundle.install".to_string(),
+            "*".to_string(),
+        ];
         let has_wildcard = normalized.iter().any(|s| s == "*");
         assert!(has_wildcard, "handler must catch '*' in scope list");
     }

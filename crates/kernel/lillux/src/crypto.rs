@@ -2,10 +2,10 @@
 
 use anyhow::Context;
 
-pub use ed25519_dalek::{
-    Signature, Signer, SigningKey, Verifier, VerifyingKey,
+pub use ed25519_dalek::pkcs8::{
+    DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey,
 };
-pub use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
+pub use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 /// Load a signing key from a PEM file.
 pub fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {

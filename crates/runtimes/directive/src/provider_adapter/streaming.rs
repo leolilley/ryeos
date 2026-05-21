@@ -8,9 +8,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::directive::{
-    ExecutionConfig, FinishReason, ProtocolFamily, ProviderConfig, ProviderMessage,
-    SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema,
-    UsageUpdate, normalize_finish_reason,
+    normalize_finish_reason, ExecutionConfig, FinishReason, ProtocolFamily, ProviderConfig,
+    ProviderMessage, SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema,
+    UsageUpdate,
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
@@ -28,7 +28,11 @@ fn sha256_hex(data: &[u8]) -> String {
 fn safe_error_body(body: &str) -> String {
     let truncated: String = body.chars().take(512).collect();
     if truncated.len() < body.len() {
-        format!("{}… [truncated, sha256={}]", truncated, sha256_hex(body.as_bytes()))
+        format!(
+            "{}… [truncated, sha256={}]",
+            truncated,
+            sha256_hex(body.as_bytes())
+        )
     } else {
         truncated
     }
@@ -83,7 +87,10 @@ pub fn parse_sse_events_with_state(
 
     for (event_type, payload) in raw_events {
         if payload == "[DONE]" {
-            events.push(StreamEvent::Finish { reason: FinishReason::Stop, raw: None });
+            events.push(StreamEvent::Finish {
+                reason: FinishReason::Stop,
+                raw: None,
+            });
             continue;
         }
 
@@ -138,8 +145,7 @@ fn split_sse_events(data: &str) -> Vec<(String, String)> {
             }
             current_data.push_str(rest.trim());
         }
-        if line.strip_prefix("id:").is_some() || line.strip_prefix("retry:").is_some() {
-        }
+        if line.strip_prefix("id:").is_some() || line.strip_prefix("retry:").is_some() {}
     }
     if !current_data.is_empty() {
         events.push((current_event_type, current_data.trim().to_string()));
@@ -199,7 +205,9 @@ fn parse_event_typed(
                     other => {
                         events.push(StreamEvent::Warning {
                             code: "unknown_delta_type".into(),
-                            message: format!("anthropic content_block_delta type `{other}` not handled"),
+                            message: format!(
+                                "anthropic content_block_delta type `{other}` not handled"
+                            ),
                         });
                     }
                 }
@@ -232,45 +240,44 @@ fn parse_event_typed(
                 }
             }
         }
-        "content_block_stop"
-            if tool_call_state.contains_key("current_tool_id") => {
-                let id = tool_call_state
-                    .get("current_tool_id")
-                    .cloned()
-                    .unwrap_or_default();
-                let name = tool_call_state
-                    .get("current_tool_name")
-                    .cloned()
-                    .unwrap_or_default();
-                let arguments = tool_call_state
-                    .get("current_tool_args")
-                    .cloned()
-                    .unwrap_or_else(|| "{}".to_string());
-                let arguments_value: Value = serde_json::from_str(&arguments)
-                    .unwrap_or_else(|_| {
-                        tracing::warn!(
-                            tool_name = %name,
-                            args_len = arguments.len(),
-                            args_sha256 = %sha256_hex(arguments.as_bytes()),
-                            "malformed tool arguments — defaulting to empty object \
-                             (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
-                        );
-                        json!({})
-                    });
-                let id_opt = if id.is_empty() { None } else { Some(id) };
-                events.push(StreamEvent::ToolUse { id: id_opt, name, arguments: arguments_value });
-                tool_call_state.remove("current_tool_id");
-                tool_call_state.remove("current_tool_name");
-                tool_call_state.remove("current_tool_args");
-            }
+        "content_block_stop" if tool_call_state.contains_key("current_tool_id") => {
+            let id = tool_call_state
+                .get("current_tool_id")
+                .cloned()
+                .unwrap_or_default();
+            let name = tool_call_state
+                .get("current_tool_name")
+                .cloned()
+                .unwrap_or_default();
+            let arguments = tool_call_state
+                .get("current_tool_args")
+                .cloned()
+                .unwrap_or_else(|| "{}".to_string());
+            let arguments_value: Value = serde_json::from_str(&arguments).unwrap_or_else(|_| {
+                tracing::warn!(
+                    tool_name = %name,
+                    args_len = arguments.len(),
+                    args_sha256 = %sha256_hex(arguments.as_bytes()),
+                    "malformed tool arguments — defaulting to empty object \
+                     (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
+                );
+                json!({})
+            });
+            let id_opt = if id.is_empty() { None } else { Some(id) };
+            events.push(StreamEvent::ToolUse {
+                id: id_opt,
+                name,
+                arguments: arguments_value,
+            });
+            tool_call_state.remove("current_tool_id");
+            tool_call_state.remove("current_tool_name");
+            tool_call_state.remove("current_tool_args");
+        }
         "message_delta" => {
             // Capture stop_reason for use when message_stop arrives.
             if let Some(delta) = parsed.get("delta") {
                 if let Some(sr) = delta.get("stop_reason").and_then(|v| v.as_str()) {
-                    tool_call_state.insert(
-                        "last_stop_reason".to_string(),
-                        sr.to_string(),
-                    );
+                    tool_call_state.insert("last_stop_reason".to_string(), sr.to_string());
                 }
             }
             // Emit usage update from message_delta.usage (cumulative).
@@ -282,10 +289,16 @@ fn parse_event_typed(
                 if let Some(v) = usage_obj.get("output_tokens").and_then(|v| v.as_u64()) {
                     update.output_tokens = Some(v);
                 }
-                if let Some(v) = usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+                if let Some(v) = usage_obj
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
                     update.cache_read_tokens = Some(v);
                 }
-                if let Some(v) = usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                if let Some(v) = usage_obj
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
                     update.cache_write_tokens = Some(v);
                 }
                 events.push(StreamEvent::Usage(update));
@@ -293,10 +306,7 @@ fn parse_event_typed(
         }
         "message_start" => {
             // Initial usage from message_start.message.usage.
-            if let Some(usage_obj) = parsed
-                .get("message")
-                .and_then(|m| m.get("usage"))
-            {
+            if let Some(usage_obj) = parsed.get("message").and_then(|m| m.get("usage")) {
                 let mut update = UsageUpdate::default();
                 if let Some(v) = usage_obj.get("input_tokens").and_then(|v| v.as_u64()) {
                     update.input_tokens = Some(v);
@@ -304,10 +314,16 @@ fn parse_event_typed(
                 if let Some(v) = usage_obj.get("output_tokens").and_then(|v| v.as_u64()) {
                     update.output_tokens = Some(v);
                 }
-                if let Some(v) = usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()) {
+                if let Some(v) = usage_obj
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
                     update.cache_read_tokens = Some(v);
                 }
-                if let Some(v) = usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()) {
+                if let Some(v) = usage_obj
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                {
                     update.cache_write_tokens = Some(v);
                 }
                 events.push(StreamEvent::Usage(update));
@@ -356,7 +372,8 @@ fn parse_delta_merge(
                     }
                     if let Some(func) = tc.get("function") {
                         if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                            tool_call_state.insert(format!("tool_name_{}", index), name.to_string());
+                            tool_call_state
+                                .insert(format!("tool_name_{}", index), name.to_string());
                         }
                         if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
                             tool_call_state
@@ -368,12 +385,8 @@ fn parse_delta_merge(
                 }
             }
 
-            let finish_reason = choice
-                .get("finish_reason")
-                .and_then(|f| f.as_str());
-            let is_terminal = finish_reason
-                .map(|r| !r.is_empty())
-                .unwrap_or(false);
+            let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
+            let is_terminal = finish_reason.map(|r| !r.is_empty()).unwrap_or(false);
 
             if is_terminal {
                 // Flush accumulated tool calls BEFORE emitting Done.
@@ -402,19 +415,22 @@ fn parse_delta_merge(
                         .get(&format!("tool_args_{}", idx))
                         .cloned()
                         .unwrap_or_else(|| "{}".to_string());
-                    let args_value: Value = serde_json::from_str(&arguments)
-                        .unwrap_or_else(|_| {
-                            tracing::warn!(
-                                tool_name = %name,
-                                args_len = arguments.len(),
-                                args_sha256 = %sha256_hex(arguments.as_bytes()),
-                                "malformed tool arguments — defaulting to empty object \
-                                 (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
-                            );
-                            json!({})
-                        });
+                    let args_value: Value = serde_json::from_str(&arguments).unwrap_or_else(|_| {
+                        tracing::warn!(
+                            tool_name = %name,
+                            args_len = arguments.len(),
+                            args_sha256 = %sha256_hex(arguments.as_bytes()),
+                            "malformed tool arguments — defaulting to empty object \
+                             (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
+                        );
+                        json!({})
+                    });
                     let id_opt = if id.is_empty() { None } else { Some(id) };
-                    events.push(StreamEvent::ToolUse { id: id_opt, name, arguments: args_value });
+                    events.push(StreamEvent::ToolUse {
+                        id: id_opt,
+                        name,
+                        arguments: args_value,
+                    });
                 }
                 for idx in indices.iter() {
                     let idx_s = idx.to_string();
@@ -468,9 +484,7 @@ fn parse_complete_chunks(
 
     // No paths config → can't drive a schema-aware parse.
     let Some(p) = paths else {
-        tracing::warn!(
-            "SSE complete_chunks: no streaming.paths config; cannot parse frame"
-        );
+        tracing::warn!("SSE complete_chunks: no streaming.paths config; cannot parse frame");
         return;
     };
 
@@ -509,16 +523,14 @@ fn parse_complete_chunks(
                         .cloned()
                         .unwrap_or(Value::Object(Default::default()));
                     if name.is_empty() {
-                        tracing::warn!(
-                            "complete_chunks: tool_call block missing name; skipping"
-                        );
+                        tracing::warn!("complete_chunks: tool_call block missing name; skipping");
                         continue;
                     }
                     // Deduplicate: Gemini sends cumulative frames, so the
                     // same tool call may appear in multiple chunks. Use
                     // (name + arguments) as a dedupe key.
-                    let arguments = serde_json::to_string(&args)
-                        .unwrap_or_else(|_| "{}".to_string());
+                    let arguments =
+                        serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                     let dedupe_key = format!("seen_tc_{}:{}", name, arguments);
                     if tool_call_state.contains_key(&dedupe_key) {
                         continue; // already emitted this tool call
@@ -591,7 +603,10 @@ fn parse_complete_chunks(
                 update.input_tokens = Some(v);
                 has_any = true;
             }
-            if let Some(v) = usage_md.get("candidatesTokenCount").and_then(|v| v.as_u64()) {
+            if let Some(v) = usage_md
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+            {
                 update.output_tokens = Some(v);
                 has_any = true;
             }
@@ -617,7 +632,6 @@ fn parse_complete_chunks(
         }
     }
 }
-
 
 /// Streaming provider call. Issues a streaming POST (`stream: true` +
 /// `stream_options.include_usage: true` for OpenAI-compatible
@@ -659,7 +673,9 @@ pub struct StreamingCallInput<'a> {
     skip(input),
     fields(adapter_type = "stream", model = %input.model, turn = input.turn)
 )]
-pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(AdapterResponse, Vec<StreamEvent>)> {
+pub async fn call_provider_streaming(
+    input: StreamingCallInput<'_>,
+) -> Result<(AdapterResponse, Vec<StreamEvent>)> {
     let StreamingCallInput {
         client,
         provider,
@@ -673,7 +689,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         callback,
         turn,
         sampling,
-        cancel_flag: _,  // checked inside the stream loop
+        cancel_flag: _, // checked inside the stream loop
     } = input;
     let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
 
@@ -681,10 +697,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
 
     let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
-    let tools_val = crate::provider_adapter::tools::serialize_tools(
-        tools,
-        &tool_schema,
-    );
+    let tools_val = crate::provider_adapter::tools::serialize_tools(tools, &tool_schema);
 
     let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
     // Resolve {model} template in base_url (e.g. gemini profiles use
@@ -698,12 +711,13 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         Some(su) => format!(
             "{}{}",
             base_resolved.trim_end_matches('/'),
-            if su.starts_with('/') { su.to_string() } else { format!("/{}", su) }
+            if su.starts_with('/') {
+                su.to_string()
+            } else {
+                format!("/{}", su)
+            }
         ),
-        None => format!(
-            "{}/chat/completions",
-            base_resolved.trim_end_matches('/')
-        ),
+        None => format!("{}/chat/completions", base_resolved.trim_end_matches('/')),
     };
 
     let mut body = build_request_body(
@@ -779,8 +793,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         .as_ref()
         .and_then(|s| s.streaming.as_ref())
         .and_then(|st| st.mode.as_deref())
-         .unwrap_or("delta_merge")
-         .to_string();
+        .unwrap_or("delta_merge")
+        .to_string();
 
     let stream_paths = provider
         .schemas
@@ -813,7 +827,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         // guarantees cancellation latency is bounded by the polling
         // interval (~50ms), not the next chunk arrival.
         if cancelled(&input.cancel_flag) {
-            tracing::info!(turn = input.turn, "provider stream cancelled mid-flight (preemptive)");
+            tracing::info!(
+                turn = input.turn,
+                "provider stream cancelled mid-flight (preemptive)"
+            );
             break;
         }
 
@@ -848,10 +865,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                 let valid_up_to = e.valid_up_to();
                 // Safe by construction: valid_up_to is the prefix the
                 // validator already accepted as well-formed UTF-8.
-                let prefix = unsafe {
-                    std::str::from_utf8_unchecked(&utf8_carry[..valid_up_to])
-                }
-                .to_string();
+                let prefix = unsafe { std::str::from_utf8_unchecked(&utf8_carry[..valid_up_to]) }
+                    .to_string();
                 if let Some(invalid_len) = e.error_len() {
                     // A genuinely invalid byte sequence (not just a
                     // truncated multi-byte char) — fail loud.
@@ -869,7 +884,11 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
         loop {
             let cut = buffer.find("\n\n").or_else(|| buffer.find("\r\n\r\n"));
             let Some(idx) = cut else { break };
-            let sep_len = if buffer[idx..].starts_with("\r\n\r\n") { 4 } else { 2 };
+            let sep_len = if buffer[idx..].starts_with("\r\n\r\n") {
+                4
+            } else {
+                2
+            };
             let block: String = buffer[..idx].to_string();
             buffer.drain(..idx + sep_len);
 
@@ -940,7 +959,12 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                                 )
                             })?;
                     }
-                    StreamEvent::ToolUsePartial { id, name, delta, total_len } => {
+                    StreamEvent::ToolUsePartial {
+                        id,
+                        name,
+                        delta,
+                        total_len,
+                    } => {
                         callback
                             .append_event(
                                 "cognition_out",
@@ -969,7 +993,6 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                 }
                 all_events.push(ev);
             }
-
         }
     }
 
@@ -977,21 +1000,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
     if !buffer.trim().is_empty() {
         let framed = format!("{}\n\n", buffer);
         harvest_chunk_meta(&buffer, &mut last_usage, &mut last_finish, stream_paths);
-        let final_events = parse_sse_events_with_state(
-            &framed,
-            Some(&stream_mode),
-            stream_paths,
-            &mut tool_state,
-        );
+        let final_events =
+            parse_sse_events_with_state(&framed, Some(&stream_mode), stream_paths, &mut tool_state);
         for ev in final_events {
             match &ev {
                 StreamEvent::Delta(text) => {
                     accumulated_text.push_str(text);
                     callback
-                        .append_event(
-                            "cognition_out",
-                            json!({"turn": turn, "delta": text}),
-                        )
+                        .append_event("cognition_out", json!({"turn": turn, "delta": text}))
                         .await
                         .map_err(|e| {
                             anyhow!(
@@ -1000,7 +1016,11 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                             )
                         })?;
                 }
-                StreamEvent::ToolUse { id, name, arguments } => {
+                StreamEvent::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                } => {
                     accumulated_tools.push(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
@@ -1026,7 +1046,12 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<(A
                             )
                         })?;
                 }
-                StreamEvent::ToolUsePartial { id, name, delta, total_len } => {
+                StreamEvent::ToolUsePartial {
+                    id,
+                    name,
+                    delta,
+                    total_len,
+                } => {
                     callback
                         .append_event(
                             "cognition_out",
@@ -1111,7 +1136,10 @@ fn harvest_chunk_meta(
         let parsed: Value = match serde_json::from_str(rest) {
             Ok(v) => v,
             Err(e) => {
-                tracing::trace!("skipping malformed SSE data JSON: {e}; raw={}", &rest[..rest.len().min(120)]);
+                tracing::trace!(
+                    "skipping malformed SSE data JSON: {e}; raw={}",
+                    &rest[..rest.len().min(120)]
+                );
                 continue;
             }
         };
@@ -1121,11 +1149,15 @@ fn harvest_chunk_meta(
         if let Some(sp) = stream_paths {
             if let Some(ref usage_path) = sp.usage_path {
                 if let Some(u) = resolve_path(&parsed, usage_path) {
-                    let new_input = sp.input_tokens_field.as_ref()
+                    let new_input = sp
+                        .input_tokens_field
+                        .as_ref()
                         .and_then(|f| u.get(f))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let new_output = sp.output_tokens_field.as_ref()
+                    let new_output = sp
+                        .output_tokens_field
+                        .as_ref()
                         .and_then(|f| u.get(f))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
@@ -1185,11 +1217,7 @@ fn harvest_chunk_meta(
 
 /// Inject sampling fields into the request body, gated by provider
 /// capabilities. Unknown providers get no fields (fail-closed).
-fn inject_sampling(
-    body: &mut Value,
-    family: ProtocolFamily,
-    sampling: Option<&SamplingConfig>,
-) {
+fn inject_sampling(body: &mut Value, family: ProtocolFamily, sampling: Option<&SamplingConfig>) {
     if let Some(s) = sampling {
         let caps = family_capabilities(family);
         if caps.supports_temperature {
@@ -1258,7 +1286,7 @@ pub fn build_request_body(
 
     let template = provider.body_template.as_ref().unwrap_or_else(|| {
         unreachable!(
-             "ProviderConfig::validate() rejects providers without body_template \
+            "ProviderConfig::validate() rejects providers without body_template \
               at config-load time (preflight_resolve → bootstrap, launch). \
              If this fires, either:\n  \
              1. validate() was not called on the path that produced this config, OR\n  \
@@ -1271,7 +1299,10 @@ pub fn build_request_body(
 
     let mut ctx: HashMap<String, Value> = HashMap::new();
     ctx.insert("model".to_string(), Value::String(model.to_string()));
-    ctx.insert("messages".to_string(), Value::Array(converted_messages.to_vec()));
+    ctx.insert(
+        "messages".to_string(),
+        Value::Array(converted_messages.to_vec()),
+    );
     ctx.insert("tools".to_string(), tools_val.clone());
     ctx.insert("stream".to_string(), Value::Bool(true));
     ctx.insert("max_tokens".to_string(), Value::Number(4096.into()));
@@ -1393,9 +1424,17 @@ event: message_stop
 data: {"type":"message_stop"}
 "#;
         let events = parse_sse_events(data, Some("event_typed"));
-        let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
+        let tool_uses: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::ToolUse { .. }))
+            .collect();
         assert_eq!(tool_uses.len(), 1);
-        if let StreamEvent::ToolUse { id, name, arguments } = &tool_uses[0] {
+        if let StreamEvent::ToolUse {
+            id,
+            name,
+            arguments,
+        } = &tool_uses[0]
+        {
             assert_eq!(id, &Some("toolu_1".to_string()));
             assert_eq!(name, "bash");
             assert_eq!(arguments, &json!({"cmd": "ls"}));
@@ -1413,8 +1452,14 @@ data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"
 data: [DONE]
 "#;
         let events = parse_sse_events(data, Some("delta_merge"));
-        let deltas: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Delta(_))).collect();
-        let dones: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Finish { .. })).collect();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Delta(_)))
+            .collect();
+        let dones: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Finish { .. }))
+            .collect();
         assert_eq!(deltas.len(), 2);
         assert!(matches!(&deltas[0], StreamEvent::Delta(s) if s == "Hello"));
         assert!(matches!(&deltas[1], StreamEvent::Delta(s) if s == " world"));
@@ -1432,14 +1477,22 @@ data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\
 data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
 "#;
         let events = parse_sse_events(data, Some("delta_merge"));
-        let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
+        let tool_uses: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::ToolUse { .. }))
+            .collect();
         assert_eq!(tool_uses.len(), 1);
-        if let StreamEvent::ToolUse { id, name, arguments } = &tool_uses[0] {
+        if let StreamEvent::ToolUse {
+            id,
+            name,
+            arguments,
+        } = &tool_uses[0]
+        {
             assert_eq!(id, &Some("call_1".to_string()));
             assert_eq!(name, "bash");
             assert_eq!(arguments, &json!({"cmd": "ls"}));
         }
-     }
+    }
 
     #[test]
     fn openai_streamed_tool_calls_flush_on_tool_calls_finish_reason() {
@@ -1455,18 +1508,35 @@ data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"argu
 data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 "#;
         let events = parse_sse_events(data, Some("delta_merge"));
-        let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
+        let tool_uses: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::ToolUse { .. }))
+            .collect();
         assert_eq!(tool_uses.len(), 1, "must emit exactly one ToolUse");
-        if let StreamEvent::ToolUse { id, name, arguments } = &tool_uses[0] {
+        if let StreamEvent::ToolUse {
+            id,
+            name,
+            arguments,
+        } = &tool_uses[0]
+        {
             assert_eq!(id, &Some("call_abc".to_string()));
             assert_eq!(name, "search");
             assert_eq!(arguments, &json!({"q": "rust"}));
         }
-        let dones: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::Finish { .. })).collect();
+        let dones: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Finish { .. }))
+            .collect();
         assert_eq!(dones.len(), 1, "must emit Finish after tool calls");
         // ToolUse must come before Finish.
-        let tu_idx = events.iter().position(|e| matches!(e, StreamEvent::ToolUse { .. })).unwrap();
-        let done_idx = events.iter().position(|e| matches!(e, StreamEvent::Finish { .. })).unwrap();
+        let tu_idx = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::ToolUse { .. }))
+            .unwrap();
+        let done_idx = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::Finish { .. }))
+            .unwrap();
         assert!(tu_idx < done_idx, "ToolUse must precede Finish");
     }
 
@@ -1530,7 +1600,14 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         });
 
         let span = trace_test::find_span(&spans, "provider:parse_sse");
-        assert!(span.is_some(), "expected provider:parse_sse span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected provider:parse_sse span, got: {:?}",
+            spans
+                .iter()
+                .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1575,9 +1652,16 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             temperature: Some(0.7),
             seed: Some(99),
         };
-        inject_sampling(&mut body, ProtocolFamily::AnthropicMessages, Some(&sampling));
+        inject_sampling(
+            &mut body,
+            ProtocolFamily::AnthropicMessages,
+            Some(&sampling),
+        );
         assert_eq!(body["temperature"].as_f64(), Some(0.7));
-        assert!(body.get("seed").is_none(), "anthropic body must not contain seed");
+        assert!(
+            body.get("seed").is_none(),
+            "anthropic body must not contain seed"
+        );
     }
 
     #[test]
@@ -1587,9 +1671,16 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             temperature: Some(0.5),
             seed: Some(1),
         };
-        inject_sampling(&mut body, ProtocolFamily::GoogleGenerateContent, Some(&sampling));
+        inject_sampling(
+            &mut body,
+            ProtocolFamily::GoogleGenerateContent,
+            Some(&sampling),
+        );
         assert_eq!(body["temperature"].as_f64(), Some(0.5));
-        assert!(body.get("seed").is_none(), "google body must not contain seed");
+        assert!(
+            body.get("seed").is_none(),
+            "google body must not contain seed"
+        );
     }
 
     #[test]
@@ -1621,7 +1712,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
-        let body = super::build_request_body(&provider, "gemini-3-flash", &msgs, None, &json!([]), false);
+        let body =
+            super::build_request_body(&provider, "gemini-3-flash", &msgs, None, &json!([]), false);
         assert_eq!(body["model_pinned"], "gemini-3-flash");
         assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
         // No legacy keys when template is used.
@@ -1643,7 +1735,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_extra: Some(json!({"generationConfig": {"maxOutputTokens": 1024}})),
             profiles: vec![],
         };
-        let body = super::build_request_body(&provider, "gemini-3-flash", &[], None, &json!([]), false);
+        let body =
+            super::build_request_body(&provider, "gemini-3-flash", &[], None, &json!([]), false);
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 1024);
         assert!(body["contents"].is_array());
     }
@@ -1690,9 +1783,13 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
-        let body = super::build_request_body(&provider, "gemini-3-flash", &msgs, None, &json!([]), false);
-        assert!(body.get("tools").is_none(),
-            "Gemini empty-tools must omit the field entirely, got: {:?}", body.get("tools"));
+        let body =
+            super::build_request_body(&provider, "gemini-3-flash", &msgs, None, &json!([]), false);
+        assert!(
+            body.get("tools").is_none(),
+            "Gemini empty-tools must omit the field entirely, got: {:?}",
+            body.get("tools")
+        );
     }
 
     #[test]
@@ -1947,10 +2044,13 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         });
         super::parse_complete_chunks(&frame2, &mut events, Some(&paths), &mut state);
 
-        let deltas: Vec<&str> = events.iter().filter_map(|e| match e {
-            StreamEvent::Delta(s) => Some(s.as_str()),
-            _ => None,
-        }).collect();
+        let deltas: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Delta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
         // Must be ["Hello", ", world"], NOT ["Hello", "Hello, world"]
         assert_eq!(deltas, vec!["Hello", ", world"]);
     }
@@ -1987,14 +2087,17 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let mut events = vec![];
         let mut state = HashMap::new();
         super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
-        let combined: String = events.iter()
+        let combined: String = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::Delta(s) => Some(s.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(combined, "Hello, world",
-            "multi-part frame text must concatenate correctly; got: {combined:?}");
+        assert_eq!(
+            combined, "Hello, world",
+            "multi-part frame text must concatenate correctly; got: {combined:?}"
+        );
     }
 
     #[test]
@@ -2031,14 +2134,17 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         let mut state = HashMap::new();
         super::parse_complete_chunks(&f1, &mut events, Some(&paths), &mut state);
         super::parse_complete_chunks(&f2, &mut events, Some(&paths), &mut state);
-        let combined: String = events.iter()
+        let combined: String = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::Delta(s) => Some(s.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(combined, "Hi there, how are you?",
-            "cumulative multi-part frames must produce the full text exactly once");
+        assert_eq!(
+            combined, "Hi there, how are you?",
+            "cumulative multi-part frames must produce the full text exactly once"
+        );
     }
 
     #[test]
@@ -2075,8 +2181,15 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         });
         super::parse_complete_chunks(&frame2, &mut events, Some(&paths), &mut state);
 
-        let tool_uses: Vec<_> = events.iter().filter(|e| matches!(e, StreamEvent::ToolUse { .. })).collect();
-        assert_eq!(tool_uses.len(), 1, "cumulative frame must not duplicate tool calls");
+        let tool_uses: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::ToolUse { .. }))
+            .collect();
+        assert_eq!(
+            tool_uses.len(),
+            1,
+            "cumulative frame must not duplicate tool calls"
+        );
     }
 
     // ── Real golden-wire tests ────────────────────────────────────────
@@ -2092,9 +2205,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     //
     // If a bundle YAML edit breaks one of these, CI catches it here.
 
-    use ryeos_runtime::model_resolution::{
-        DirectiveModelHeader, ModelSpec, preflight_resolve,
-    };
+    use ryeos_runtime::model_resolution::{preflight_resolve, DirectiveModelHeader, ModelSpec};
     use ryeos_runtime::verified_loader::VerifiedLoader;
 
     /// Path to the bundled standard root in the workspace.
@@ -2158,10 +2269,18 @@ owner = "ryeos-dev"
         messages: &[ProviderMessage],
         tools: &[ToolSchema],
     ) -> Value {
-        let schemas = snapshot.provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
+        let schemas = snapshot
+            .provider
+            .schemas
+            .as_ref()
+            .and_then(|s| s.messages.as_ref());
         let (converted, system_prompt) =
             crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
-        let tool_schema = snapshot.provider.schemas.as_ref().and_then(|s| s.tools.clone());
+        let tool_schema = snapshot
+            .provider
+            .schemas
+            .as_ref()
+            .and_then(|s| s.tools.clone());
         let tools_val = crate::provider_adapter::tools::serialize_tools(tools, &tool_schema);
         super::build_request_body(
             &snapshot.provider,
@@ -2216,14 +2335,12 @@ owner = "ryeos-dev"
     }
 
     fn canonical_transcript_no_tools() -> Vec<ProviderMessage> {
-        vec![
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("hi")),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ]
+        vec![ProviderMessage {
+            role: "user".to_string(),
+            content: Some(json!("hi")),
+            tool_calls: None,
+            tool_call_id: None,
+        }]
     }
 
     fn canonical_tool_schemas() -> Vec<ToolSchema> {
@@ -2251,8 +2368,10 @@ owner = "ryeos-dev"
         ] {
             let snapshot = resolve(provider, model);
             assert_eq!(snapshot.provider_id, provider);
-            assert!(!snapshot.config_hash.is_empty(),
-                "config_hash must be populated for {provider}");
+            assert!(
+                !snapshot.config_hash.is_empty(),
+                "config_hash must be populated for {provider}"
+            );
         }
     }
 
@@ -2268,18 +2387,24 @@ owner = "ryeos-dev"
         assert_eq!(body["model"], "gpt-4o-mini");
 
         let messages = body["messages"].as_array().expect("messages must be array");
-        let assistant = messages.iter()
+        let assistant = messages
+            .iter()
             .find(|m| m["role"] == "assistant")
             .expect("must have assistant message");
 
         // tool_calls must be a top-level array, not inline in content
-        assert!(assistant["tool_calls"].is_array(),
-            "OpenAI tool_calls must be top-level array on assistant message; got: {assistant}");
+        assert!(
+            assistant["tool_calls"].is_array(),
+            "OpenAI tool_calls must be top-level array on assistant message; got: {assistant}"
+        );
         assert_eq!(assistant["tool_calls"][0]["function"]["name"], "calculator");
 
         // Content must be a plain string, not a block array
-        assert!(assistant["content"].is_string(),
-            "OpenAI assistant content must be plain string, got: {:?}", assistant["content"]);
+        assert!(
+            assistant["content"].is_string(),
+            "OpenAI assistant content must be plain string, got: {:?}",
+            assistant["content"]
+        );
     }
 
     #[test]
@@ -2293,23 +2418,33 @@ owner = "ryeos-dev"
         );
 
         // System must be a top-level body field, not in messages
-        assert!(body["system"].is_string(),
-            "Anthropic system must be top-level body field");
+        assert!(
+            body["system"].is_string(),
+            "Anthropic system must be top-level body field"
+        );
 
         let messages = body["messages"].as_array().expect("messages must be array");
-        let assistant = messages.iter()
+        let assistant = messages
+            .iter()
             .find(|m| m["role"] == "assistant")
             .expect("must have assistant message");
 
         // Content MUST be an array of typed blocks — no raw strings
-        let content = assistant["content"].as_array()
+        let content = assistant["content"]
+            .as_array()
             .expect("Anthropic assistant content must be array, not raw string");
-        assert!(content.iter().all(|b| b.is_object()),
-            "Anthropic content blocks must all be objects, not raw strings");
-        assert!(content.iter().any(|b| b["type"] == "text"),
-            "must contain at least one text block");
-        assert!(content.iter().any(|b| b["type"] == "tool_use"),
-            "must contain at least one tool_use block");
+        assert!(
+            content.iter().all(|b| b.is_object()),
+            "Anthropic content blocks must all be objects, not raw strings"
+        );
+        assert!(
+            content.iter().any(|b| b["type"] == "text"),
+            "must contain at least one text block"
+        );
+        assert!(
+            content.iter().any(|b| b["type"] == "tool_use"),
+            "must contain at least one tool_use block"
+        );
     }
 
     #[test]
@@ -2317,13 +2452,12 @@ owner = "ryeos-dev"
         // Gemini provider comes through zen's gemini profile.
         // zen.yaml matches gemini-* to the gemini profile.
         let snapshot = resolve("zen", "gemini-3-flash");
-        let body = build_golden_body(
-            &snapshot,
-            &canonical_transcript_no_tools(),
-            &[],
+        let body = build_golden_body(&snapshot, &canonical_transcript_no_tools(), &[]);
+        assert!(
+            body.get("tools").is_none(),
+            "Gemini empty-tools must omit the field; got: {:?}",
+            body.get("tools")
         );
-        assert!(body.get("tools").is_none(),
-            "Gemini empty-tools must omit the field; got: {:?}", body.get("tools"));
     }
 
     #[test]
@@ -2335,7 +2469,8 @@ owner = "ryeos-dev"
             &canonical_tool_schemas(),
         );
         let contents = body["contents"].as_array().expect("Gemini contents array");
-        let function_response = contents.iter()
+        let function_response = contents
+            .iter()
             .flat_map(|c| c["parts"].as_array().cloned().unwrap_or_default())
             .find(|p| p.get("functionResponse").is_some())
             .expect("must have a functionResponse part");
@@ -2382,7 +2517,7 @@ owner = "ryeos-dev"
 
     #[test]
     fn cancelled_returns_true_when_flag_set() {
-        use std::sync::atomic::{AtomicBool};
+        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
         let flag = Arc::new(AtomicBool::new(true));
         assert!(cancelled(&Some(flag)));
@@ -2400,7 +2535,9 @@ data: {"type":"message_stop"}
 
 "#;
         let events = parse_sse_events(data, Some("event_typed"));
-        let finish = events.iter().find(|e| matches!(e, StreamEvent::Finish { .. }));
+        let finish = events
+            .iter()
+            .find(|e| matches!(e, StreamEvent::Finish { .. }));
         assert!(finish.is_some(), "must have a Finish event");
         match finish.unwrap() {
             StreamEvent::Finish { reason, raw } => {
@@ -2418,7 +2555,8 @@ data: {"type":"message_delta","delta":{},"usage":{"input_tokens":25,"output_toke
 
 "#;
         let events = parse_sse_events(data, Some("event_typed"));
-        let usage_events: Vec<_> = events.iter()
+        let usage_events: Vec<_> = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::Usage(u) => Some(u.clone()),
                 _ => None,
@@ -2436,7 +2574,8 @@ data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","usage"
 
 "#;
         let events = parse_sse_events(data, Some("event_typed"));
-        let usage_events: Vec<_> = events.iter()
+        let usage_events: Vec<_> = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::Usage(u) => Some(u.clone()),
                 _ => None,
@@ -2453,7 +2592,8 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
 "#;
         let events = parse_sse_events(data, Some("event_typed"));
-        let reasoning: Vec<_> = events.iter()
+        let reasoning: Vec<_> = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::ReasoningDelta(s) => Some(s.clone()),
                 _ => None,
@@ -2491,7 +2631,8 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
         let mut events = vec![];
         let mut state = HashMap::new();
         super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
-        let usage_events: Vec<_> = events.iter()
+        let usage_events: Vec<_> = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::Usage(u) => Some(u.clone()),
                 _ => None,
@@ -2529,7 +2670,8 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
         let mut events = vec![];
         let mut state = HashMap::new();
         super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
-        let reasoning: Vec<_> = events.iter()
+        let reasoning: Vec<_> = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::ReasoningDelta(s) => Some(s.clone()),
                 _ => None,
@@ -2538,7 +2680,8 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
         assert_eq!(reasoning.len(), 1);
         assert_eq!(reasoning[0], "reasoning step 1");
         // Also verify the visible text was emitted
-        let deltas: Vec<_> = events.iter()
+        let deltas: Vec<_> = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::Delta(s) => Some(s.clone()),
                 _ => None,
@@ -2571,12 +2714,17 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
         let mut events = vec![];
         let mut state = HashMap::new();
         super::parse_complete_chunks(&frame, &mut events, Some(&paths), &mut state);
-        let finish = events.iter().find(|e| matches!(e, StreamEvent::Finish { .. }));
+        let finish = events
+            .iter()
+            .find(|e| matches!(e, StreamEvent::Finish { .. }));
         assert!(finish.is_some());
         match finish.unwrap() {
             StreamEvent::Finish { reason, raw } => {
-                assert_eq!(*reason, FinishReason::Stop,
-                    "uppercase STOP must normalize to Stop");
+                assert_eq!(
+                    *reason,
+                    FinishReason::Stop,
+                    "uppercase STOP must normalize to Stop"
+                );
                 assert_eq!(raw.as_deref(), Some("STOP"));
             }
             other => panic!("expected Finish, got {:?}", other),
@@ -2589,7 +2737,8 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
 "#;
         let events = parse_sse_events(data, Some("delta_merge"));
-        let usage_events: Vec<_> = events.iter()
+        let usage_events: Vec<_> = events
+            .iter()
             .filter_map(|e| match e {
                 StreamEvent::Usage(u) => Some(u.clone()),
                 _ => None,
@@ -2607,9 +2756,21 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
         assert_eq!(normalize_finish_reason(Some("stop")), FinishReason::Stop);
         assert_eq!(normalize_finish_reason(Some("STOP")), FinishReason::Stop);
         assert_eq!(normalize_finish_reason(Some("Stop")), FinishReason::Stop);
-        assert_eq!(normalize_finish_reason(Some("end_turn")), FinishReason::Stop);
-        assert_eq!(normalize_finish_reason(Some("tool_use")), FinishReason::ToolCalls);
-        assert_eq!(normalize_finish_reason(Some("SAFETY")), FinishReason::ContentFilter);
-        assert_eq!(normalize_finish_reason(Some("MAX_TOKENS")), FinishReason::Length);
+        assert_eq!(
+            normalize_finish_reason(Some("end_turn")),
+            FinishReason::Stop
+        );
+        assert_eq!(
+            normalize_finish_reason(Some("tool_use")),
+            FinishReason::ToolCalls
+        );
+        assert_eq!(
+            normalize_finish_reason(Some("SAFETY")),
+            FinishReason::ContentFilter
+        );
+        assert_eq!(
+            normalize_finish_reason(Some("MAX_TOKENS")),
+            FinishReason::Length
+        );
     }
 }

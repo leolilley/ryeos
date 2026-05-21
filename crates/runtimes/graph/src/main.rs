@@ -78,10 +78,8 @@ fn main() -> anyhow::Result<()> {
     let resolved = resolve_from_envelope(&stdin_data, &cli)?;
 
     let raw = std::fs::read_to_string(&resolved.graph_path)?;
-    let graph = model::GraphDefinition::from_yaml(
-        &raw,
-        Some(&resolved.graph_path.to_string_lossy()),
-    )?;
+    let graph =
+        model::GraphDefinition::from_yaml(&raw, Some(&resolved.graph_path.to_string_lossy()))?;
 
     tracing::info!(
         thread_id = %resolved.thread_id,
@@ -145,23 +143,19 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let replay_state: Option<resume::ResumeState> = if resume_requested
-        && local_checkpoint.is_none()
-    {
-        // D12: replay resume keys on thread_id only, not graph_run_id.
-        // The launcher doesn't supply graph_run_id; thread is the actual
-        // partition; matched event payload reconstructs the run_id.
-        tracing::warn!(
-            thread_id = %resolved.thread_id,
-            "RYEOS_RESUME=1 but no local checkpoint; falling back to replay-events resume"
-        );
-        rt.block_on(resume::load_resume_state(
-            &callback,
-            &resolved.thread_id,
-        ))?
-    } else {
-        None
-    };
+    let replay_state: Option<resume::ResumeState> =
+        if resume_requested && local_checkpoint.is_none() {
+            // D12: replay resume keys on thread_id only, not graph_run_id.
+            // The launcher doesn't supply graph_run_id; thread is the actual
+            // partition; matched event payload reconstructs the run_id.
+            tracing::warn!(
+                thread_id = %resolved.thread_id,
+                "RYEOS_RESUME=1 but no local checkpoint; falling back to replay-events resume"
+            );
+            rt.block_on(resume::load_resume_state(&callback, &resolved.thread_id))?
+        } else {
+            None
+        };
 
     let resume_state: Option<resume::ResumeState> = match resume::decide_resume_source(
         resume_requested,
@@ -177,10 +171,10 @@ fn main() -> anyhow::Result<()> {
                     .expect("LocalCheckpoint variant requires payload"),
             )?)
         }
-        resume::ResumeSource::ReplayFallback => Some(
-            replay_state.expect("ReplayFallback variant requires replay state"),
-        ),
-        resume::        ResumeSource::NoSourceAvailable => {
+        resume::ResumeSource::ReplayFallback => {
+            Some(replay_state.expect("ReplayFallback variant requires replay state"))
+        }
+        resume::ResumeSource::NoSourceAvailable => {
             anyhow::bail!(
                 "RYEOS_RESUME=1 but no resume source is available for thread '{}': \
                  local checkpoint absent and replay-events reconstruction found \
@@ -265,10 +259,12 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
-    let envelope: ryeos_runtime::envelope::LaunchEnvelope = serde_json::from_slice(stdin_data)
-        .map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
+    let envelope: ryeos_runtime::envelope::LaunchEnvelope =
+        serde_json::from_slice(stdin_data).map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
 
-    let graph_path = cli.graph_path.clone()
+    let graph_path = cli
+        .graph_path
+        .clone()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| envelope.resolution.root.source_path.clone());
 
@@ -419,7 +415,10 @@ mod tests {
         let mut params = json!({"inputs": {"count": "not a number"}});
         let result = normalize_inputs_against_schema(&mut params, &schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected type 'integer'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected type 'integer'"));
     }
 
     #[test]
@@ -455,8 +454,10 @@ mod tests {
         // with a non-zero exit before main runs).
         let cli = Cli::try_parse_from([
             "graph-runtime",
-            "--project-path", "/tmp/test-project",
-            "--thread-id", "T-f1-test",
+            "--project-path",
+            "/tmp/test-project",
+            "--thread-id",
+            "T-f1-test",
             "--pre-registered",
         ]);
         assert!(cli.is_ok(), "graph CLI must accept --project-path");
@@ -469,12 +470,17 @@ mod tests {
         // F1 pin: the full set of flags the daemon passes must parse clean.
         let cli = Cli::try_parse_from([
             "graph-runtime",
-            "--project-path", "/tmp/project",
-            "--thread-id", "T-full",
+            "--project-path",
+            "/tmp/project",
+            "--thread-id",
+            "T-full",
             "--pre-registered",
-            "--graph-path", "/tmp/graph.yaml",
-            "--graph-run-id", "GR-42",
-            "--daemon-socket", "/tmp/daemon.sock",
+            "--graph-path",
+            "/tmp/graph.yaml",
+            "--graph-run-id",
+            "GR-42",
+            "--daemon-socket",
+            "/tmp/daemon.sock",
         ]);
         assert!(cli.is_ok(), "graph CLI must accept all daemon flags");
     }

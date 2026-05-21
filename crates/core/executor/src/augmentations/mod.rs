@@ -61,22 +61,18 @@ impl From<LaunchAugmentationError> for DispatchError {
         match &e {
             LaunchAugmentationError::BadRef { .. }
             | LaunchAugmentationError::ProjectionInvariant { .. }
-            | LaunchAugmentationError::ParseRef(_) => DispatchError::InvalidRef(
-                "launch_augmentation".to_string(),
-                e.to_string(),
-            ),
-            LaunchAugmentationError::ResolutionFailed { .. } => DispatchError::InvalidRef(
-                "launch_augmentation".to_string(),
-                e.to_string(),
-            ),
+            | LaunchAugmentationError::ParseRef(_) => {
+                DispatchError::InvalidRef("launch_augmentation".to_string(), e.to_string())
+            }
+            LaunchAugmentationError::ResolutionFailed { .. } => {
+                DispatchError::InvalidRef("launch_augmentation".to_string(), e.to_string())
+            }
             LaunchAugmentationError::ChildBootstrap { .. }
             | LaunchAugmentationError::ChildFailed { .. }
-            | LaunchAugmentationError::RuntimeRegistry(_) => {
-                DispatchError::SubprocessRunFailed {
-                    item_ref: "launch_augmentation".to_string(),
-                    detail: e.to_string(),
-                }
-            }
+            | LaunchAugmentationError::RuntimeRegistry(_) => DispatchError::SubprocessRunFailed {
+                item_ref: "launch_augmentation".to_string(),
+                detail: e.to_string(),
+            },
             LaunchAugmentationError::Threads(_) | LaunchAugmentationError::Serde(_) => {
                 DispatchError::Internal(anyhow::anyhow!("{e}"))
             }

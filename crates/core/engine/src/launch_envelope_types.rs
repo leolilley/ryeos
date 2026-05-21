@@ -348,9 +348,7 @@ mod tests {
                 references_edges: vec![],
                 step_outputs: std::collections::HashMap::new(),
                 executor_trust_class: crate::resolution::TrustClass::Unsigned,
-                composed: crate::resolution::KindComposedView::identity(
-                    serde_json::json!({}),
-                ),
+                composed: crate::resolution::KindComposedView::identity(serde_json::json!({})),
                 referenced_items: vec![],
             },
         };
@@ -407,16 +405,13 @@ mod tests {
                 added_by: crate::resolution::ResolutionStepName::PipelineInit,
                 raw_content: String::new(),
                 raw_content_digest:
-                    "0000000000000000000000000000000000000000000000000000000000000000"
-                        .to_string(),
+                    "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             },
             ancestors: vec![],
             references_edges: vec![],
             step_outputs: std::collections::HashMap::new(),
             executor_trust_class: crate::resolution::TrustClass::Unsigned,
-            composed: crate::resolution::KindComposedView::identity(
-                serde_json::json!({}),
-            ),
+            composed: crate::resolution::KindComposedView::identity(serde_json::json!({})),
             referenced_items: vec![],
         };
 
@@ -429,14 +424,8 @@ mod tests {
                 system_roots: vec![],
             },
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
-            EnvelopePolicy::new(
-                vec!["ryeos.execute.*".to_string()],
-                HardLimits::default(),
-            ),
-            EnvelopeCallback::new(
-                PathBuf::from("/tmp/ryeosd.sock"),
-                "token-abc".to_string(),
-            ),
+            EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),
+            EnvelopeCallback::new(PathBuf::from("/tmp/ryeosd.sock"), "token-abc".to_string()),
             resolution,
         )
         .build();
@@ -446,7 +435,10 @@ mod tests {
         assert_eq!(envelope.request.depth, 0);
         assert!(envelope.request.previous_thread_id.is_none());
         assert_eq!(envelope.policy.effective_caps, vec!["ryeos.execute.*"]);
-        assert_eq!(envelope.callback.socket_path, PathBuf::from("/tmp/ryeosd.sock"));
+        assert_eq!(
+            envelope.callback.socket_path,
+            PathBuf::from("/tmp/ryeosd.sock")
+        );
         assert!(envelope.inventory.is_empty());
 
         // Round-trip through JSON

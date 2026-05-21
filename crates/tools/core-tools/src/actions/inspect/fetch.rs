@@ -54,7 +54,9 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
             scopes: vec!["bundle.read".to_string()],
         }),
         project_context: project_path
-            .map(|p| ProjectContext::LocalPath { path: p.to_path_buf() })
+            .map(|p| ProjectContext::LocalPath {
+                path: p.to_path_buf(),
+            })
             .unwrap_or(ProjectContext::None),
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
@@ -98,8 +100,12 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
         None
     };
 
-    let content = std::fs::read_to_string(&resolved.source_path)
-        .with_context(|| format!("failed to read item content from {:?}", resolved.source_path))?;
+    let content = std::fs::read_to_string(&resolved.source_path).with_context(|| {
+        format!(
+            "failed to read item content from {:?}",
+            resolved.source_path
+        )
+    })?;
 
     let report = FetchReport {
         item_ref: params.item_ref,
@@ -111,7 +117,11 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
         signature_status,
         shadowed_count: resolved.shadowed.len(),
         fetch_status: "SUCCESS".into(),
-        content: if params.with_content { Some(content) } else { None },
+        content: if params.with_content {
+            Some(content)
+        } else {
+            None
+        },
         error: None,
     };
 

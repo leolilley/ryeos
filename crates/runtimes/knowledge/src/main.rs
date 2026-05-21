@@ -21,7 +21,10 @@ use types::{KnowledgeError, KnowledgeRequest};
 
 fn parse_request(envelope: &BatchOpEnvelope) -> Result<KnowledgeRequest, KnowledgeError> {
     let mut tagged = serde_json::Map::new();
-    tagged.insert("operation".into(), serde_json::Value::String(envelope.op.clone()));
+    tagged.insert(
+        "operation".into(),
+        serde_json::Value::String(envelope.op.clone()),
+    );
     if let Some(obj) = envelope.payload.as_object() {
         for (k, v) in obj {
             tagged.insert(k.clone(), v.clone());

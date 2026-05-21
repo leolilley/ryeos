@@ -20,7 +20,9 @@ pub struct Request {
     pub project: PathBuf,
 }
 
-fn default_remote() -> String { "default".to_string() }
+fn default_remote() -> String {
+    "default".to_string()
+}
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let remotes = config::load_remotes(&state.config.system_space_dir)?;

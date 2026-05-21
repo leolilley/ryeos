@@ -110,17 +110,13 @@ pub struct BuildRequest<'a> {
 /// Errors produced by the builder.
 #[derive(Debug, Error)]
 pub enum BuildError {
-    #[error(
-        "descriptor `{0}` declared opaque stdin but caller supplied a launch envelope"
-    )]
+    #[error("descriptor `{0}` declared opaque stdin but caller supplied a launch envelope")]
     OpaqueStdinWithEnvelope(String),
 
     #[error("descriptor `{0}` requires a launch envelope; caller supplied none")]
     EnvelopeRequired(String),
 
-    #[error(
-        "env injection `{key}` declared twice in descriptor `{descriptor}`"
-    )]
+    #[error("env injection `{key}` declared twice in descriptor `{descriptor}`")]
     DuplicateEnvKey { descriptor: String, key: String },
 
     #[error("env injection failed: {0}")]
@@ -143,16 +139,12 @@ pub fn build_subprocess_spec(
 
     // 1. Build stdin bytes from the descriptor's stdin shape.
     let stdin_data = match descriptor.stdin.shape {
-        StdinShape::LaunchEnvelopeV1 => {
-            match request.launch_envelope {
-                Some(envelope) => serde_json::to_vec(envelope).map_err(|e| {
-                    BuildError::StdinSerialize(format!(
-                        "launch_envelope_v1 serialize failed: {e}"
-                    ))
-                })?,
-                None => return Err(BuildError::EnvelopeRequired(descriptor_id)),
-            }
-        }
+        StdinShape::LaunchEnvelopeV1 => match request.launch_envelope {
+            Some(envelope) => serde_json::to_vec(envelope).map_err(|e| {
+                BuildError::StdinSerialize(format!("launch_envelope_v1 serialize failed: {e}"))
+            })?,
+            None => return Err(BuildError::EnvelopeRequired(descriptor_id)),
+        },
         StdinShape::ParametersJson => {
             if request.launch_envelope.is_some() {
                 return Err(BuildError::OpaqueStdinWithEnvelope(descriptor_id));
@@ -189,15 +181,12 @@ pub fn build_subprocess_spec(
         // Produce the value based on the source.
         let value = match injection.source {
             EnvInjectionSource::CallbackTokenUrl => {
-                request
-                    .callback
-                    .map(|cb| cb.token.clone())
-                    .ok_or_else(|| {
-                        VocabularyError::UnknownEnvInjection(
-                            injection.name.clone(),
-                            "callback_token_url (no callback bindings)".into(),
-                        )
-                    })?
+                request.callback.map(|cb| cb.token.clone()).ok_or_else(|| {
+                    VocabularyError::UnknownEnvInjection(
+                        injection.name.clone(),
+                        "callback_token_url (no callback bindings)".into(),
+                    )
+                })?
             }
             EnvInjectionSource::CallbackSocketPath => request
                 .callback
@@ -208,25 +197,24 @@ pub fn build_subprocess_spec(
                         "callback_socket_path (no callback bindings)".into(),
                     )
                 })?,
-            EnvInjectionSource::CallbackToken => request
-                .callback
-                .map(|cb| cb.token.clone())
-                .ok_or_else(|| {
+            EnvInjectionSource::CallbackToken => {
+                request.callback.map(|cb| cb.token.clone()).ok_or_else(|| {
                     VocabularyError::UnknownEnvInjection(
                         injection.name.clone(),
                         "callback_token (no callback bindings)".into(),
                     )
-                })?,
+                })?
+            }
             // For vocabulary sources that go through SubprocessBuildRequest,
             // build a synthetic request. This avoids duplicating the
             // production logic while keeping the builder pure.
             EnvInjectionSource::ThreadId => request.thread_id.to_string(),
-            EnvInjectionSource::ProjectPath => {
-                request.project_path.to_string_lossy().to_string()
-            }
+            EnvInjectionSource::ProjectPath => request.project_path.to_string_lossy().to_string(),
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request.cas_root.to_string_lossy().to_string(),
-            EnvInjectionSource::SystemSpaceDir => request.system_space_dir.to_string_lossy().to_string(),
+            EnvInjectionSource::SystemSpaceDir => {
+                request.system_space_dir.to_string_lossy().to_string()
+            }
             EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.to_string(),
             EnvInjectionSource::VaultHandle => {
                 // Look up the vault handle from vault_bindings.
@@ -361,21 +349,13 @@ mod tests {
     }
 
     /// Returns owned values so lifetimes work in tests.
-    fn make_test_fixtures() -> (
-        CanonicalRef,
-        CallbackBindings,
-        Vec<String>,
-        LaunchEnvelope,
-    ) {
+    fn make_test_fixtures() -> (CanonicalRef, CallbackBindings, Vec<String>, LaunchEnvelope) {
         let item_ref = CanonicalRef::parse("runtime:spawn").unwrap();
         let cb = CallbackBindings {
             socket_path: "/tmp/ryeos-callback.sock".to_string(),
             token: "tok-test-123".to_string(),
         };
-        let args = vec![
-            "--project-path".to_string(),
-            "/project".to_string(),
-        ];
+        let args = vec!["--project-path".to_string(), "/project".to_string()];
         let envelope = make_minimal_envelope();
         (item_ref, cb, args, envelope)
     }
@@ -463,7 +443,10 @@ mod tests {
         let mut req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
         req.launch_envelope = Some(&envelope);
         let result = build_subprocess_spec(&desc, &req);
-        assert!(matches!(result, Err(BuildError::OpaqueStdinWithEnvelope(_))));
+        assert!(matches!(
+            result,
+            Err(BuildError::OpaqueStdinWithEnvelope(_))
+        ));
     }
 
     #[test]

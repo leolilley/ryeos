@@ -58,7 +58,9 @@ mod tests {
     fn kind_returns_kind_portion() {
         assert_eq!(ParsedItemRef::parse("tool:hello").unwrap().kind(), "tool");
         assert_eq!(
-            ParsedItemRef::parse("fictional_kind:any/path").unwrap().kind(),
+            ParsedItemRef::parse("fictional_kind:any/path")
+                .unwrap()
+                .kind(),
             "fictional_kind"
         );
     }

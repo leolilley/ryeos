@@ -106,8 +106,8 @@ pub fn rebuild_bundle_manifest(
                 .to_string();
             let item_ref = format!("bin/{triple}/{bare}");
 
-            let bytes = fs::read(bin_path)
-                .with_context(|| format!("read {}", bin_path.display()))?;
+            let bytes =
+                fs::read(bin_path).with_context(|| format!("read {}", bin_path.display()))?;
             let blob_hash = cas.store_blob(&bytes)?;
 
             let mode = unix_mode(bin_path)?;
@@ -145,8 +145,7 @@ pub fn rebuild_bundle_manifest(
 
     // Refs file: hex hash + newline.
     let refs_dir = bundle_root.join(".ai/refs/bundles");
-    fs::create_dir_all(&refs_dir)
-        .with_context(|| format!("create {}", refs_dir.display()))?;
+    fs::create_dir_all(&refs_dir).with_context(|| format!("create {}", refs_dir.display()))?;
     let refs_path = refs_dir.join("manifest");
     atomic_write_str(&refs_path, &format!("{manifest_hash}\n"))?;
 
@@ -159,8 +158,7 @@ pub fn rebuild_bundle_manifest(
 
 fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp, content.as_bytes())
-        .with_context(|| format!("write tmp {}", tmp.display()))?;
+    fs::write(&tmp, content.as_bytes()).with_context(|| format!("write tmp {}", tmp.display()))?;
     fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
@@ -169,11 +167,9 @@ fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
 #[cfg(unix)]
 fn unix_mode(path: &Path) -> Result<u32> {
     use std::os::unix::fs::PermissionsExt;
-    let meta = fs::metadata(path)
-        .with_context(|| format!("metadata {}", path.display()))?;
+    let meta = fs::metadata(path).with_context(|| format!("metadata {}", path.display()))?;
     Ok(meta.permissions().mode() & 0o7777)
 }
-
 
 #[cfg(not(unix))]
 fn unix_mode(_path: &Path) -> Result<u32> {

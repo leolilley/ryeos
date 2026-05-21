@@ -41,20 +41,14 @@ const DEFAULT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
         compact = params.compact,
     )
 )]
-pub async fn run_maintenance_gc(
-    state: &AppState,
-    params: &GcParams,
-) -> Result<GcResult> {
+pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<GcResult> {
     let state_root = state.config.system_space_dir.join(".ai").join("state");
     let cas_root = state_root.join("objects");
     let refs_root = state_root.join("refs");
 
     // Step 1: Acquire GC lock
-    let _gc_lock = gc::GcLock::acquire(
-        &state_root,
-        state.identity.fingerprint(),
-    )
-    .context("failed to acquire GC lock (another GC may be running)")?;
+    let _gc_lock = gc::GcLock::acquire(&state_root, state.identity.fingerprint())
+        .context("failed to acquire GC lock (another GC may be running)")?;
 
     tracing::info!(
         dry_run = params.dry_run,
@@ -77,7 +71,13 @@ pub async fn run_maintenance_gc(
     let state_root_for_log = state_root.clone();
 
     let gc_result = tokio::task::spawn_blocking(move || {
-        run_gc_and_log(&cas_root, &refs_root, &signer, &params_clone, &state_root_for_log)
+        run_gc_and_log(
+            &cas_root,
+            &refs_root,
+            &signer,
+            &params_clone,
+            &state_root_for_log,
+        )
     })
     .await;
 
@@ -98,13 +98,8 @@ fn run_gc_and_log(
     params: &GcParams,
     state_root: &std::path::Path,
 ) -> Result<GcResult> {
-    let result = gc::run_gc(
-        cas_root,
-        refs_root,
-        Some(signer),
-        params,
-    )
-    .context("GC pipeline failed")?;
+    let result =
+        gc::run_gc(cas_root, refs_root, Some(signer), params).context("GC pipeline failed")?;
 
     // Log the event (best-effort)
     if let Err(err) = gc::event_log::append_event(

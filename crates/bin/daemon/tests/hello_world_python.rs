@@ -74,13 +74,12 @@ sys.exit(0)
 
 fn build_engine_against_bundle() -> Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store =
-        TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
-    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store)
-        .expect("live bundle kinds load");
+    let kinds =
+        KindRegistry::load_base(&[kinds_dir], &trust_store).expect("live bundle kinds load");
 
     let (parser_tools, _dups) =
         ParserRegistry::load_base(std::slice::from_ref(&bundle_root), &trust_store, &kinds)
@@ -171,7 +170,9 @@ fn daemon_executes_python_hello_world_end_to_end() {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
         }),
-        project_context: ProjectContext::LocalPath { path: project_dir.clone() },
+        project_context: ProjectContext::LocalPath {
+            path: project_dir.clone(),
+        },
         launch_mode: LaunchMode::Inline,
     };
 
@@ -294,5 +295,3 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
         names
     );
 }
-
-

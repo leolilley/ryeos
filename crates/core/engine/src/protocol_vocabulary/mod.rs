@@ -6,9 +6,8 @@ pub use stdin_shape::{build_stdin, StdinShape};
 
 mod stdout_shape;
 pub use stdout_shape::{
-    decode_stdout_frame, decode_stdout_terminal, read_all_frames,
-    DecodedFrame, DecodedStdout, FrameReadError, StdoutShape, StreamingChunk,
-    StreamingChunkKind, MAX_FRAME_BYTES,
+    decode_stdout_frame, decode_stdout_terminal, read_all_frames, DecodedFrame, DecodedStdout,
+    FrameReadError, StdoutShape, StreamingChunk, StreamingChunkKind, MAX_FRAME_BYTES,
 };
 
 mod stdout_mode;
@@ -16,8 +15,8 @@ pub use stdout_mode::{is_compatible_shape_mode, StdoutMode};
 
 mod env_injection;
 pub use env_injection::{
-    is_reserved_env_name, produce_env_value, validate_env_name,
-    EnvInjection, EnvInjectionSource, RESERVED_ENV_NAMES,
+    is_reserved_env_name, produce_env_value, validate_env_name, EnvInjection, EnvInjectionSource,
+    RESERVED_ENV_NAMES,
 };
 
 mod lifecycle;

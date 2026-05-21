@@ -28,10 +28,17 @@ pub(crate) fn run_handler_subprocess(
     timeout: Duration,
 ) -> Result<HandlerResponse, EngineError> {
     let (canonical_ref, binary_path) = match handler {
-        VerifiedHandler::Resolved { canonical_ref, resolved_binary_path, .. } => {
-            (canonical_ref.clone(), resolved_binary_path.clone())
-        }
-        VerifiedHandler::Unresolved { canonical_ref, reason, descriptor, .. } => {
+        VerifiedHandler::Resolved {
+            canonical_ref,
+            resolved_binary_path,
+            ..
+        } => (canonical_ref.clone(), resolved_binary_path.clone()),
+        VerifiedHandler::Unresolved {
+            canonical_ref,
+            reason,
+            descriptor,
+            ..
+        } => {
             return Err(EngineError::HandlerBinaryMissing {
                 handler: canonical_ref.clone(),
                 binary_ref: descriptor.binary_ref.clone(),

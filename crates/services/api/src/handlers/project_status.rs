@@ -26,9 +26,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     if !path.is_absolute() {
         anyhow::bail!("project_path '{}' is not absolute", req.project_path);
     }
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("cannot canonicalize project_path '{}'; ensure it exists", req.project_path))?;
+    let canonical = path.canonicalize().with_context(|| {
+        format!(
+            "cannot canonicalize project_path '{}'; ensure it exists",
+            req.project_path
+        )
+    })?;
     let canonical_project_path = canonical.to_string_lossy().to_string();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
 
@@ -45,13 +48,21 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     };
 
     let cas = CasStore::new(state.state_store.cas_root()?);
-    let snapshot_obj = cas
-        .get_object(&deployed.target_hash)?
-        .ok_or_else(|| anyhow!("deployed snapshot {} not found in CAS", deployed.target_hash))?;
+    let snapshot_obj = cas.get_object(&deployed.target_hash)?.ok_or_else(|| {
+        anyhow!(
+            "deployed snapshot {} not found in CAS",
+            deployed.target_hash
+        )
+    })?;
     let snapshot = ProjectSnapshot::from_value(&snapshot_obj)?;
     let manifest_obj = cas
         .get_object(&snapshot.project_manifest_hash)?
-        .ok_or_else(|| anyhow!("manifest {} not found in CAS", snapshot.project_manifest_hash))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "manifest {} not found in CAS",
+                snapshot.project_manifest_hash
+            )
+        })?;
     let manifest = SourceManifest::from_value(&manifest_obj)?;
 
     Ok(serde_json::json!({

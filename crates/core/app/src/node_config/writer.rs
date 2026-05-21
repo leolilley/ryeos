@@ -43,22 +43,16 @@ pub fn write_signed_node_item(
             }
             yaml_map.insert(
                 serde_yaml::Value::String(k.clone()),
-                serde_yaml::to_value(v)
-                    .context("failed to serialize body field to YAML")?,
+                serde_yaml::to_value(v).context("failed to serialize body field to YAML")?,
             );
         }
     }
 
-    let yaml_str = serde_yaml::to_string(&yaml_map)
-        .context("failed to serialize node config body to YAML")?;
+    let yaml_str =
+        serde_yaml::to_string(&yaml_map).context("failed to serialize node config body to YAML")?;
 
     // Sign with node identity
-    let signed = lillux::signature::sign_content(
-        &yaml_str,
-        identity.signing_key(),
-        "#",
-        None,
-    );
+    let signed = lillux::signature::sign_content(&yaml_str, identity.signing_key(), "#", None);
 
     // Compute output path
     let section_dir = base_dir.join(section);

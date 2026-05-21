@@ -12,12 +12,14 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use crate::remote::client::RemoteClient;
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
+use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
-fn default_remote() -> String { "default".to_string() }
+fn default_remote() -> String {
+    "default".to_string()
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,7 +36,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     crate::handlers::bundle_install::validate_name(&req.bundle_name)?;
 
     // Check bundle doesn't already exist locally.
-    let bundles_root = state.config.system_space_dir
+    let bundles_root = state
+        .config
+        .system_space_dir
         .join(ryeos_engine::AI_DIR)
         .join("bundles");
     let local_target = bundles_root.join(&req.bundle_name);
@@ -51,7 +55,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // 1. Call bundle_export on the remote.
     let export_resp = client.bundle_export(&req.bundle_name).await?;
 
-    let entries = export_resp["entries"].as_array()
+    let entries = export_resp["entries"]
+        .as_array()
         .cloned()
         .unwrap_or_default();
 
@@ -60,7 +65,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     // 2. Collect all hashes and fetch from remote CAS.
-    let hashes: Vec<String> = entries.iter()
+    let hashes: Vec<String> = entries
+        .iter()
         .filter_map(|e| e["hash"].as_str().map(String::from))
         .collect();
 
@@ -68,7 +74,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let get_resp = client.objects_get(&hashes).await?;
 
     // Index CAS entries by hash for quick lookup.
-    let mut blob_data: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    let mut blob_data: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
     for entry in &get_resp.entries {
         if entry.kind == "blob" {
             if let Some(ref b64) = entry.data {
@@ -129,11 +136,16 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     // 6. Write signed node-config bundle registration.
-    let canonical_target = local_target.canonicalize()
+    let canonical_target = local_target
+        .canonicalize()
         .context("canonicalize installed bundle path")?;
 
     ryeos_app::node_config::writer::write_signed_node_item(
-        &state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("node"),
+        &state
+            .config
+            .system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node"),
         "bundles",
         &req.bundle_name,
         &serde_json::json!({ "path": canonical_target }),
@@ -170,7 +182,8 @@ fn materialize_files(
         let rel_path = entry["path"].as_str().unwrap_or("");
         let hash = entry["hash"].as_str().unwrap_or("");
 
-        let bytes = blob_data.get(hash)
+        let bytes = blob_data
+            .get(hash)
             .ok_or_else(|| anyhow::anyhow!("blob {} missing after pre-check", hash))?;
 
         let file_path = local_target.join(rel_path);

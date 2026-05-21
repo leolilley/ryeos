@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-use ryeos_engine::trust::{TrustedSigner, TrustStore};
+use ryeos_engine::trust::{TrustStore, TrustedSigner};
 use ryeos_engine::AI_DIR;
 
 /// Report returned by [`sign_bundle_items`].
@@ -79,7 +79,9 @@ pub fn sign_bundle_items(
     //    The registry_root provides base kinds (core); the source bundle may provide
     //    additional kinds (e.g. standard provides knowledge, directive, graph).
     let mut schema_roots = Vec::new();
-    let registry_schema_root = registry_root.join(AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
+    let registry_schema_root = registry_root
+        .join(AI_DIR)
+        .join(ryeos_engine::KIND_SCHEMAS_DIR);
     if registry_schema_root.is_dir() {
         schema_roots.push(registry_schema_root);
     }
@@ -88,9 +90,7 @@ pub fn sign_bundle_items(
         schema_roots.push(source_schema_root);
     }
     if schema_roots.is_empty() {
-        bail!(
-            "no kind schemas found in registry root or source bundle"
-        );
+        bail!("no kind schemas found in registry root or source bundle");
     }
     let kinds =
         KindRegistry::load_base(&schema_roots, &trust_store).context("load kind schemas")?;
@@ -103,12 +103,17 @@ pub fn sign_bundle_items(
     if source != registry_root {
         parser_roots.push(source.to_path_buf());
     }
-    let (parser_tools, _dups) =
-        ParserRegistry::load_base(&parser_roots, &trust_store, &kinds)
-            .context("load parser tools")?;
-    let mut handler_roots = vec![(registry_root.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem)];
+    let (parser_tools, _dups) = ParserRegistry::load_base(&parser_roots, &trust_store, &kinds)
+        .context("load parser tools")?;
+    let mut handler_roots = vec![(
+        registry_root.to_path_buf(),
+        ryeos_engine::resolution::TrustClass::TrustedSystem,
+    )];
     if source != registry_root {
-        handler_roots.push((source.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedSystem));
+        handler_roots.push((
+            source.to_path_buf(),
+            ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ));
     }
     let handlers = HandlerRegistry::load_base(&handler_roots, &trust_store)
         .context("load handler descriptors")?;
@@ -139,10 +144,7 @@ pub fn sign_bundle_items(
         collect_files_recursive(&kind_dir, &mut files);
 
         for file_path in files {
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
             if kind_schema.spec_for(&format!(".{ext}")).is_none() {
                 continue;
@@ -180,8 +182,8 @@ fn sign_one_item(
     parsers: &ParserDispatcher,
     signing_key: &lillux::crypto::SigningKey,
 ) -> Result<()> {
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("read {}", file_path.display()))?;
+    let content =
+        fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
 
     let ext = file_path
         .extension()
@@ -189,14 +191,12 @@ fn sign_one_item(
         .map(|e| format!(".{e}"))
         .ok_or_else(|| anyhow::anyhow!("file has no extension: {}", file_path.display()))?;
 
-    let source_format = kind_schema
-        .resolved_format_for(&ext)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "extension `{ext}` not registered for kind `{}`",
-                kind_schema.directory
-            )
-        })?;
+    let source_format = kind_schema.resolved_format_for(&ext).ok_or_else(|| {
+        anyhow::anyhow!(
+            "extension `{ext}` not registered for kind `{}`",
+            kind_schema.directory
+        )
+    })?;
 
     // Parse
     let parsed = parsers
@@ -262,7 +262,9 @@ fn derive_bare_id(
 
 /// Recursively collect all files under a directory.
 fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

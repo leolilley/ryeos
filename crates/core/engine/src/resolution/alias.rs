@@ -1,6 +1,6 @@
 use crate::resolution::types::{AliasHop, ResolutionError};
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Resolves @ aliases to their canonical refs recursively.
 /// Detects cycles and enforces depth limits.
@@ -37,18 +37,13 @@ impl AliasResolver {
                 // Cycle detected — include the offending hop in the report
                 // so the chain reads like ["@a", "@b", "@a"].
                 expansion.push(current.clone());
-                return Err(ResolutionError::AliasCycle {
-                    expansion,
-                });
+                return Err(ResolutionError::AliasCycle { expansion });
             }
             expansion.push(current.clone());
 
             if !current.starts_with('@') {
                 // Resolved to a non-alias; we're done.
-                let alias_hop = AliasHop {
-                    expansion,
-                    depth,
-                };
+                let alias_hop = AliasHop { expansion, depth };
                 return Ok((current, Some(alias_hop)));
             }
 
@@ -84,7 +79,9 @@ mod tests {
     #[test]
     fn resolve_non_alias() {
         let resolver = AliasResolver::new(HashMap::new(), 8);
-        let (ref_str, hop) = resolver.resolve("tool:ryeos/core/foo", "directive").unwrap();
+        let (ref_str, hop) = resolver
+            .resolve("tool:ryeos/core/foo", "directive")
+            .unwrap();
         assert_eq!(ref_str, "tool:ryeos/core/foo");
         assert!(hop.is_none());
     }
@@ -107,7 +104,10 @@ mod tests {
     fn resolve_chained_alias() {
         let mut aliases = HashMap::new();
         aliases.insert("@core".to_string(), "@base".to_string());
-        aliases.insert("@base".to_string(), "directive:ryeos/agent/core/base".to_string());
+        aliases.insert(
+            "@base".to_string(),
+            "directive:ryeos/agent/core/base".to_string(),
+        );
         let resolver = AliasResolver::new(aliases, 8);
 
         let (ref_str, hop) = resolver.resolve("@core", "directive").unwrap();

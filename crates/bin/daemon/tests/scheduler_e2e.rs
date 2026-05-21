@@ -45,13 +45,18 @@ async fn scheduler_register_and_list() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Register an interval schedule
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "test-interval",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "3600",
-        "timezone": "UTC",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "test-interval",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "3600",
+            "timezone": "UTC",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.register");
     assert_eq!(result["schedule_id"], "test-interval");
     assert_eq!(result["schedule_type"], "interval");
@@ -62,7 +67,9 @@ async fn scheduler_register_and_list() {
     let result = unwrap_result(status, &body, "scheduler.list");
     let schedules = result["schedules"].as_array().expect("schedules array");
     assert!(
-        schedules.iter().any(|s| s["schedule_id"] == "test-interval"),
+        schedules
+            .iter()
+            .any(|s| s["schedule_id"] == "test-interval"),
         "list should contain test-interval; got {result}"
     );
 }
@@ -74,21 +81,31 @@ async fn scheduler_register_update_existing() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Create
-    let (status, _) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "update-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "60",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "update-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "60",
+        }),
+    )
+    .await;
     assert!(status.is_success());
 
     // Update with different expression
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "update-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "120",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "update-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "120",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.register update");
     assert_eq!(result["created"], false, "should be update, not create");
     assert_eq!(result["expression"], "120");
@@ -101,25 +118,40 @@ async fn scheduler_pause_and_resume() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Create
-    exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "pause-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "60",
-    })).await;
+    exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "pause-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "60",
+        }),
+    )
+    .await;
 
     // Pause
-    let (status, body) = exec(&h, "service:scheduler/pause", json!({
-        "schedule_id": "pause-test",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/pause",
+        json!({
+            "schedule_id": "pause-test",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.pause");
     assert_eq!(result["schedule_id"], "pause-test");
     assert_eq!(result["enabled"], false);
 
     // Resume
-    let (status, body) = exec(&h, "service:scheduler/resume", json!({
-        "schedule_id": "pause-test",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/resume",
+        json!({
+            "schedule_id": "pause-test",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.resume");
     assert_eq!(result["schedule_id"], "pause-test");
     assert_eq!(result["enabled"], true);
@@ -131,16 +163,26 @@ async fn scheduler_pause_and_resume() {
 async fn scheduler_show_fires_empty() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "fires-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "86400",
-    })).await;
+    exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "fires-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "86400",
+        }),
+    )
+    .await;
 
-    let (status, body) = exec(&h, "service:scheduler/show_fires", json!({
-        "schedule_id": "fires-test",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/show_fires",
+        json!({
+            "schedule_id": "fires-test",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.show_fires");
     assert_eq!(result["total"], 0);
     assert!(result["fires"].as_array().unwrap().is_empty());
@@ -153,17 +195,27 @@ async fn scheduler_deregister_removes_schedule() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Create
-    exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "deleteme",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "60",
-    })).await;
+    exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "deleteme",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "60",
+        }),
+    )
+    .await;
 
     // Deregister
-    let (status, body) = exec(&h, "service:scheduler/deregister", json!({
-        "schedule_id": "deleteme",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/deregister",
+        json!({
+            "schedule_id": "deleteme",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.deregister");
     assert_eq!(result["schedule_id"], "deleteme");
 
@@ -183,15 +235,20 @@ async fn scheduler_deregister_removes_schedule() {
 async fn scheduler_register_cron_schedule() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "cron-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "cron",
-        "expression": "0 0 * * * *",
-        "timezone": "America/New_York",
-        "overlap_policy": "cancel_previous",
-        "misfire_policy": "fire_once_now",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "cron-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "cron",
+            "expression": "0 0 * * * *",
+            "timezone": "America/New_York",
+            "overlap_policy": "cancel_previous",
+            "misfire_policy": "fire_once_now",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.register cron");
     assert_eq!(result["schedule_type"], "cron");
     assert_eq!(result["timezone"], "America/New_York");
@@ -205,12 +262,17 @@ async fn scheduler_register_cron_schedule() {
 async fn scheduler_register_rejects_bad_expression() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "bad-expr",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "cron",
-        "expression": "not a cron expression",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "bad-expr",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "cron",
+            "expression": "not a cron expression",
+        }),
+    )
+    .await;
     assert!(
         !status.is_success(),
         "expected error for bad expression, got {status}; body={body}"
@@ -221,12 +283,17 @@ async fn scheduler_register_rejects_bad_expression() {
 async fn scheduler_register_rejects_past_at() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "past-at",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "at",
-        "expression": "2020-01-01T00:00:00Z",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "past-at",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "at",
+            "expression": "2020-01-01T00:00:00Z",
+        }),
+    )
+    .await;
     assert!(
         !status.is_success(),
         "expected error for past at timestamp, got {status}; body={body}"
@@ -239,9 +306,14 @@ async fn scheduler_register_rejects_past_at() {
 async fn scheduler_deregister_nonexistent_fails() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, _) = exec(&h, "service:scheduler/deregister", json!({
-        "schedule_id": "no-exist",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/deregister",
+        json!({
+            "schedule_id": "no-exist",
+        }),
+    )
+    .await;
     assert!(
         !status.is_success(),
         "expected error for deregistering nonexistent schedule"
@@ -254,9 +326,14 @@ async fn scheduler_deregister_nonexistent_fails() {
 async fn scheduler_pause_nonexistent_fails() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, _) = exec(&h, "service:scheduler/pause", json!({
-        "schedule_id": "no-exist",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/pause",
+        json!({
+            "schedule_id": "no-exist",
+        }),
+    )
+    .await;
     assert!(
         !status.is_success(),
         "expected error for pausing nonexistent schedule"
@@ -279,12 +356,17 @@ async fn scheduler_at_schedule_fires() {
     let fire_at_str = fire_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     // Register at-schedule
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "at-fire-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "at",
-        "expression": fire_at_str,
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "at-fire-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "at",
+            "expression": fire_at_str,
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.register at");
     assert_eq!(result["schedule_type"], "at");
 
@@ -301,7 +383,10 @@ async fn scheduler_at_schedule_fires() {
         "expected fire status dispatched or failed, got: {status_str}"
     );
     assert!(
-        fire["fire_id"].as_str().unwrap_or("").starts_with("at-fire-test"),
+        fire["fire_id"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("at-fire-test"),
         "fire_id should start with schedule_id"
     );
     assert!(
@@ -318,20 +403,29 @@ async fn scheduler_at_schedule_fires() {
 async fn scheduler_interval_schedule_fires() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "interval-fire-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "2",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "interval-fire-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "2",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "scheduler.register interval");
 
     // Debug: verify the schedule is in the list (proves DB write worked)
     let (status, body) = exec(&h, "service:scheduler/list", json!({})).await;
     let list_result = unwrap_result(status, &body, "scheduler.list");
-    let schedules = list_result["schedules"].as_array().expect("schedules array");
+    let schedules = list_result["schedules"]
+        .as_array()
+        .expect("schedules array");
     assert!(
-        schedules.iter().any(|s| s["schedule_id"] == "interval-fire-test"),
+        schedules
+            .iter()
+            .any(|s| s["schedule_id"] == "interval-fire-test"),
         "schedule should be in list after register; got {list_result}"
     );
 
@@ -339,12 +433,15 @@ async fn scheduler_interval_schedule_fires() {
     eprintln!("[test] schedule registered, waiting for fire...");
 
     // Poll for first fire (2s interval + timer sleep margin)
-    let fire = poll_for_fires(&h, "interval-fire-test", 1, Duration::from_secs(8))
-        .await;
+    let fire = poll_for_fires(&h, "interval-fire-test", 1, Duration::from_secs(8)).await;
 
     if fire.is_none() {
         // Dump trace log for debugging
-        let trace_path = h.state_path.join(".ai").join("state").join("trace-events.ndjson");
+        let trace_path = h
+            .state_path
+            .join(".ai")
+            .join("state")
+            .join("trace-events.ndjson");
         if trace_path.exists() {
             let trace_content = std::fs::read_to_string(&trace_path).unwrap_or_default();
             eprintln!("[test] daemon trace (last 50 lines):");
@@ -375,12 +472,17 @@ async fn scheduler_interval_schedule_fires() {
 async fn scheduler_interval_fires_twice() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "multi-fire-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "2",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "multi-fire-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "2",
+        }),
+    )
+    .await;
     unwrap_result(status, &body, "scheduler.register interval");
 
     // Wait for at least 2 fires (2 fires × 2s interval + margin)
@@ -405,12 +507,17 @@ async fn scheduler_interval_fires_twice() {
 async fn scheduler_pause_prevents_fires() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, _) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "pause-no-fire",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "2",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "pause-no-fire",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "2",
+        }),
+    )
+    .await;
     assert!(status.is_success());
 
     // Wait for first fire
@@ -419,15 +526,23 @@ async fn scheduler_pause_prevents_fires() {
         .expect("first fire should appear");
 
     // Pause
-    let (status, _) = exec(&h, "service:scheduler/pause", json!({
-        "schedule_id": "pause-no-fire",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/pause",
+        json!({
+            "schedule_id": "pause-no-fire",
+        }),
+    )
+    .await;
     assert!(status.is_success());
 
     // Observe show_fires for 3 consecutive checks over 3s — count should
     // stay at 1, proving no new fires appeared after pause.
     let stable = observe_fire_count_stable(&h, "pause-no-fire", 1, 3, Duration::from_secs(3)).await;
-    assert!(stable, "paused schedule should not produce additional fires");
+    assert!(
+        stable,
+        "paused schedule should not produce additional fires"
+    );
 }
 
 // ── Deregister stops fires ────────────────────────────────────────────────
@@ -439,12 +554,17 @@ async fn scheduler_pause_prevents_fires() {
 async fn scheduler_deregister_stops_fires() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
-    let (status, _) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "dereg-stop",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "2",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "dereg-stop",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "2",
+        }),
+    )
+    .await;
     assert!(status.is_success());
 
     // Wait for first fire
@@ -453,9 +573,14 @@ async fn scheduler_deregister_stops_fires() {
         .expect("first fire should appear");
 
     // Deregister
-    let (status, _) = exec(&h, "service:scheduler/deregister", json!({
-        "schedule_id": "dereg-stop",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/deregister",
+        json!({
+            "schedule_id": "dereg-stop",
+        }),
+    )
+    .await;
     assert!(status.is_success());
 
     // The schedule is gone from the list
@@ -470,7 +595,10 @@ async fn scheduler_deregister_stops_fires() {
     // Observe show_fires for 3 consecutive checks over 3s — count should
     // stay at 1, proving no new fires appeared after deregister.
     let stable = observe_fire_count_stable(&h, "dereg-stop", 1, 3, Duration::from_secs(3)).await;
-    assert!(stable, "deregistered schedule should not produce additional fires");
+    assert!(
+        stable,
+        "deregistered schedule should not produce additional fires"
+    );
 }
 
 // ── Schedule ID reuse blocked ──────────────────────────────────────────────
@@ -484,12 +612,17 @@ async fn scheduler_reuse_blocked_after_deregister() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Register with a short interval so a fire happens quickly
-    let (status, _) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "reuse-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "2",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "reuse-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "2",
+        }),
+    )
+    .await;
     assert!(status.is_success(), "first register should succeed");
 
     // Wait for a fire so JSONL history exists on disk
@@ -498,18 +631,28 @@ async fn scheduler_reuse_blocked_after_deregister() {
         .expect("expected at least 1 fire");
 
     // Deregister
-    let (status, _) = exec(&h, "service:scheduler/deregister", json!({
-        "schedule_id": "reuse-test",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/deregister",
+        json!({
+            "schedule_id": "reuse-test",
+        }),
+    )
+    .await;
     assert!(status.is_success(), "deregister should succeed");
 
     // Attempt to re-register same schedule_id — should be blocked
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "reuse-test",
-        "item_ref": "directive:test/different",
-        "schedule_type": "interval",
-        "expression": "120",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "reuse-test",
+            "item_ref": "directive:test/different",
+            "schedule_type": "interval",
+            "expression": "120",
+        }),
+    )
+    .await;
     assert!(
         !status.is_success(),
         "re-registration after deregister should be blocked; got {status}; body={body}"
@@ -531,12 +674,17 @@ async fn scheduler_survives_restart() {
     let (mut h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Register a short-interval schedule
-    let (status, _) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "restart-test",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "2",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "restart-test",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "2",
+        }),
+    )
+    .await;
     assert!(status.is_success());
 
     // Wait for a fire
@@ -557,12 +705,20 @@ async fn scheduler_survives_restart() {
     );
 
     // Fire history should still be accessible
-    let (status, body) = exec(&h, "service:scheduler/show_fires", json!({
-        "schedule_id": "restart-test",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/show_fires",
+        json!({
+            "schedule_id": "restart-test",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "show_fires after restart");
     let total = result["total"].as_u64().unwrap_or(0);
-    assert!(total >= 1, "fire history should survive restart; total={total}");
+    assert!(
+        total >= 1,
+        "fire history should survive restart; total={total}"
+    );
 }
 
 // ── Fire ID determinism across restart ──────────────────────────────────────
@@ -575,12 +731,17 @@ async fn scheduler_fire_id_deterministic() {
     let (mut h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Register a 2-second interval schedule
-    let (status, _) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "det-fire",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "2",
-    })).await;
+    let (status, _) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "det-fire",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "2",
+        }),
+    )
+    .await;
     assert!(status.is_success());
 
     // Wait for first fire
@@ -595,13 +756,20 @@ async fn scheduler_fire_id_deterministic() {
     h.restart().await.expect("restart daemon");
 
     // Fire history should show the same fire_id
-    let (status, body) = exec(&h, "service:scheduler/show_fires", json!({
-        "schedule_id": "det-fire",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/show_fires",
+        json!({
+            "schedule_id": "det-fire",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "show_fires after restart");
     let fires = result["fires"].as_array().expect("fires array");
     assert!(
-        fires.iter().any(|f| f["fire_id"].as_str() == Some(first_fire_id.as_str())),
+        fires
+            .iter()
+            .any(|f| f["fire_id"].as_str() == Some(first_fire_id.as_str())),
         "fire_id '{first_fire_id}' should be in history after restart; got {result}"
     );
 }
@@ -616,12 +784,17 @@ async fn scheduler_registered_at_preserved_on_update() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // Register
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "ts-drift",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "60",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "ts-drift",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "60",
+        }),
+    )
+    .await;
     let result = unwrap_result(status, &body, "first register");
 
     // Get the schedule from list (to see registered_at in the YAML)
@@ -630,23 +803,33 @@ async fn scheduler_registered_at_preserved_on_update() {
     // still recognized as an update (not new creation).
 
     // Update with different expression
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "ts-drift",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "120",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "ts-drift",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "120",
+        }),
+    )
+    .await;
     let result2 = unwrap_result(status, &body, "update register");
     assert_eq!(result2["created"], false, "should be update not create");
     assert_eq!(result2["expression"], "120");
 
     // Update again — registered_at should still be stable (not drifted)
-    let (status, body) = exec(&h, "service:scheduler/register", json!({
-        "schedule_id": "ts-drift",
-        "item_ref": "directive:test/hello",
-        "schedule_type": "interval",
-        "expression": "180",
-    })).await;
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "ts-drift",
+            "item_ref": "directive:test/hello",
+            "schedule_type": "interval",
+            "expression": "180",
+        }),
+    )
+    .await;
     let result3 = unwrap_result(status, &body, "second update");
     assert_eq!(result3["created"], false, "should still be update");
     assert_eq!(result3["expression"], "180");
@@ -676,9 +859,14 @@ async fn poll_for_fires_count(
 ) -> Option<Vec<Value>> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let (status, body) = exec(h, "service:scheduler/show_fires", json!({
-            "schedule_id": schedule_id,
-        })).await;
+        let (status, body) = exec(
+            h,
+            "service:scheduler/show_fires",
+            json!({
+                "schedule_id": schedule_id,
+            }),
+        )
+        .await;
 
         if status.is_success() {
             if let Some(result) = body.get("result") {
@@ -710,13 +898,19 @@ async fn observe_fire_count_stable(
     let interval = window / consecutive as u32;
     for _ in 0..consecutive {
         tokio::time::sleep(interval).await;
-        let (status, body) = exec(h, "service:scheduler/show_fires", json!({
-            "schedule_id": schedule_id,
-        })).await;
+        let (status, body) = exec(
+            h,
+            "service:scheduler/show_fires",
+            json!({
+                "schedule_id": schedule_id,
+            }),
+        )
+        .await;
         if !status.is_success() {
             continue;
         }
-        let total = body.get("result")
+        let total = body
+            .get("result")
             .and_then(|r| r["total"].as_u64())
             .unwrap_or(u64::MAX);
         if total != expected_count {

@@ -73,7 +73,9 @@ pub struct VaultSecretKey(StaticSecret);
 
 impl std::fmt::Debug for VaultSecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("VaultSecretKey").field(&"<redacted>").finish()
+        f.debug_tuple("VaultSecretKey")
+            .field(&"<redacted>")
+            .finish()
     }
 }
 
@@ -181,8 +183,7 @@ pub fn decode_public_key(s: &str) -> Result<VaultPublicKey> {
 
 /// Read a secret key from a file written by [`write_secret_key`].
 pub fn read_secret_key(path: &Path) -> Result<VaultSecretKey> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     decode_secret_key(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -194,8 +195,7 @@ pub fn write_secret_key(path: &Path, sk: &VaultSecretKey) -> Result<()> {
             .with_context(|| format!("create parent {}", parent.display()))?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body.as_bytes())
-        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -215,8 +215,7 @@ pub fn write_public_key(path: &Path, pk: &VaultPublicKey) -> Result<()> {
             .with_context(|| format!("create parent {}", parent.display()))?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body.as_bytes())
-        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
@@ -224,8 +223,7 @@ pub fn write_public_key(path: &Path, pk: &VaultPublicKey) -> Result<()> {
 
 /// Read a public key from a file.
 pub fn read_public_key(path: &Path) -> Result<VaultPublicKey> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     decode_public_key(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -465,9 +463,11 @@ mod tests {
         ct[last] = if ct[last] == b'A' { b'B' } else { b'A' };
         env.ciphertext = String::from_utf8(ct).unwrap();
         let err = open(&sk, &env).unwrap_err();
-        assert!(format!("{err:#}").to_lowercase().contains("aead") ||
-                format!("{err:#}").to_lowercase().contains("decryption"),
-                "expected AEAD failure, got: {err}");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("aead")
+                || format!("{err:#}").to_lowercase().contains("decryption"),
+            "expected AEAD failure, got: {err}"
+        );
     }
 
     #[test]

@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
-use ryeos_handler_protocol::{
-    ComposeRequest, ComposeSuccess, ResolutionStepNameWire,
-};
+use ryeos_handler_protocol::{ComposeRequest, ComposeSuccess, ResolutionStepNameWire};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -84,7 +82,10 @@ pub fn compose(
     request: &ComposeRequest,
 ) -> Result<ComposeSuccess, (ResolutionStepNameWire, String)> {
     let cfg: ExtendsChainConfig = serde_json::from_value(config.clone()).map_err(|e| {
-        (ResolutionStepNameWire::PipelineInit, format!("invalid composer_config: {e}"))
+        (
+            ResolutionStepNameWire::PipelineInit,
+            format!("invalid composer_config: {e}"),
+        )
     })?;
 
     let root_parsed = &request.root.parsed;
@@ -203,20 +204,14 @@ fn validate_field_shape(
             let arr = items.as_array().ok_or_else(|| {
                 (
                     ResolutionStepNameWire::PipelineInit,
-                    format!(
-                        "{ref_label}: `{}.{key}` must be an array",
-                        rule.name
-                    ),
+                    format!("{ref_label}: `{}.{key}` must be an array", rule.name),
                 )
             })?;
             for (i, v) in arr.iter().enumerate() {
                 if !v.is_string() {
                     return Err((
                         ResolutionStepNameWire::PipelineInit,
-                        format!(
-                            "{ref_label}: `{}.{key}[{i}]` must be a string",
-                            rule.name
-                        ),
+                        format!("{ref_label}: `{}.{key}[{i}]` must be a string", rule.name),
                     ));
                 }
             }
@@ -326,7 +321,10 @@ fn apply_strategy(
                     .iter()
                     .find_map(|p| p.get(&rule.name).filter(|v| !v.is_null()));
 
-                let narrowed = match (child_val.as_object(), parent_val.and_then(|v| v.as_object())) {
+                let narrowed = match (
+                    child_val.as_object(),
+                    parent_val.and_then(|v| v.as_object()),
+                ) {
                     (Some(child_map), Some(parent_map)) => {
                         let mut result = Map::new();
                         let all_verbs: HashSet<&str> = child_map
@@ -358,7 +356,8 @@ fn apply_strategy(
 
                             if child_map.contains_key(verb) {
                                 // Child declared this verb — narrow against parent
-                                let narrowed_caps = narrow_verb(&child_verb_caps, &parent_verb_caps);
+                                let narrowed_caps =
+                                    narrow_verb(&child_verb_caps, &parent_verb_caps);
                                 result.insert(
                                     verb.to_string(),
                                     Value::Array(
@@ -530,9 +529,7 @@ enum PolicyFactShape {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_handler_protocol::{
-        ComposeInput, ComposeItemContext, TrustClassWire,
-    };
+    use ryeos_handler_protocol::{ComposeInput, ComposeItemContext, TrustClassWire};
     use serde_json::json;
 
     fn demo_config() -> Value {
@@ -619,7 +616,9 @@ mod tests {
     }
 
     fn derived_string(view: &ComposeSuccess, name: &str) -> Option<String> {
-        view.derived.get(name).and_then(|v| v.as_str().map(String::from))
+        view.derived
+            .get(name)
+            .and_then(|v| v.as_str().map(String::from))
     }
 
     fn derived_string_seq_map(view: &ComposeSuccess, name: &str) -> HashMap<String, Vec<String>> {
@@ -870,10 +869,7 @@ mod tests {
         let r = json!({ "ext": "p" });
         let p = json!({ "f": { "any": "shape" } });
         let view = run(cfg, r, vec![ancestor_input("p", p)]).unwrap();
-        assert_eq!(
-            view.composed.get("f").unwrap(),
-            &json!({ "any": "shape" })
-        );
+        assert_eq!(view.composed.get("f").unwrap(), &json!({ "any": "shape" }));
     }
 
     #[test]
@@ -1121,7 +1117,10 @@ mod tests {
         let view = run(
             demo_config(),
             r,
-            vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
+            vec![
+                ancestor_input("parent", p),
+                ancestor_input("grandparent", gp),
+            ],
         )
         .unwrap();
         // Child narrows against immediate parent (ryeos.execute.tool.*),
@@ -1156,7 +1155,10 @@ mod tests {
         let view = run(
             demo_config(),
             r,
-            vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
+            vec![
+                ancestor_input("parent", p),
+                ancestor_input("grandparent", gp),
+            ],
         )
         .unwrap();
         // Child inherits from immediate parent (parent), not grandparent
@@ -1191,7 +1193,10 @@ mod tests {
         let view = run(
             demo_config(),
             r,
-            vec![ancestor_input("parent", p), ancestor_input("grandparent", gp)],
+            vec![
+                ancestor_input("parent", p),
+                ancestor_input("grandparent", gp),
+            ],
         )
         .unwrap();
         // Child's ryeos.* narrowed against parent's effective (inherited from gp: ryeos.execute.tool.read)

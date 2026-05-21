@@ -24,20 +24,18 @@ use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, PlanContext, ProjectContext};
-use ryeos_engine::protocol_vocabulary::{
-    produce_env_value, EnvInjectionSource,
-};
+use ryeos_engine::protocol_vocabulary::{produce_env_value, EnvInjectionSource};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
+use ryeos_app::callback_token::compute_ttl;
+use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
+use ryeos_app::state::AppState;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::temp_dir_guard::TempDirGuard;
-use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::thread_lifecycle::{
     self, ResolvedExecutionRequest, ThreadAttachProcessParams, ThreadFinalizeParams,
 };
-use ryeos_app::state::AppState;
-use ryeos_app::callback_token::compute_ttl;
 
 // ── Resume-specific error type ────────────────────────────────────
 
@@ -274,15 +272,16 @@ fn prepare_cas_context(
             Ok((effective_path.clone(), None, None))
         }
         ExecutionProvenance::RootLiveFs { project_path, .. } => {
-            let _permit = state.write_barrier.try_acquire()
+            let _permit = state
+                .write_barrier
+                .try_acquire()
                 .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit for ingest: {e}"))?;
             let cas_root = state.state_store.cas_root()?;
-            let items = super::ingest::ingest_directory(
-                &cas_root,
-                project_path,
-                &state.ignore_matcher,
-            )?;
-            let manifest = ryeos_state::objects::SourceManifest { item_source_hashes: items };
+            let items =
+                super::ingest::ingest_directory(&cas_root, project_path, &state.ignore_matcher)?;
+            let manifest = ryeos_state::objects::SourceManifest {
+                item_source_hashes: items,
+            };
             let cas = lillux::cas::CasStore::new(cas_root);
             let manifest_hash = cas.store_object(&manifest.to_value())?;
             tracing::trace!(
@@ -389,14 +388,18 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
     };
 
     // Fold back changes
-    let output_manifest_hash =
-        match crate::execution::fold_back_outputs(&cas_root, working_dir, manifest_hash, &state.ignore_matcher) {
-            Ok(hash) => hash,
-            Err(err) => {
-                tracing::warn!(error = %err, "fold-back failed");
-                None
-            }
-        };
+    let output_manifest_hash = match crate::execution::fold_back_outputs(
+        &cas_root,
+        working_dir,
+        manifest_hash,
+        &state.ignore_matcher,
+    ) {
+        Ok(hash) => hash,
+        Err(err) => {
+            tracing::warn!(error = %err, "fold-back failed");
+            None
+        }
+    };
 
     // Advance HEAD if there were changes and we have a base snapshot
     // AND a LocalPath project (HEAD ref is keyed off the LocalPath).
@@ -421,9 +424,7 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
                 }
             }
         } else {
-            tracing::debug!(
-                "skipping HEAD advance: missing base snapshot hash or LocalPath"
-            );
+            tracing::debug!("skipping HEAD advance: missing base snapshot hash or LocalPath");
         }
     }
 }
@@ -592,24 +593,22 @@ fn mint_callback_env(
         provenance,
     );
 
-    let thread_auth = state.thread_auth.mint(
-        thread_id,
-        acting_principal.to_string(),
-        caller_scopes,
-        ttl,
-    );
+    let thread_auth =
+        state
+            .thread_auth
+            .mint(thread_id, acting_principal.to_string(), caller_scopes, ttl);
 
     let request = SubprocessBuildRequest {
         cmd: PathBuf::new(),
         args: Vec::new(),
-        cwd: project_path.unwrap_or_else(|| std::path::Path::new("/")).to_path_buf(),
+        cwd: project_path
+            .unwrap_or_else(|| std::path::Path::new("/"))
+            .to_path_buf(),
         timeout: std::time::Duration::from_secs(0),
         item_ref: CanonicalRef::parse("runtime:spawn")
             .map_err(|e| anyhow::anyhow!("canonical ref parse: {e}"))?,
         thread_id: thread_id.to_string(),
-        project_path: project_path
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default(),
+        project_path: project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
         acting_principal: acting_principal.to_string(),
         cas_root: state.config.system_space_dir.join("cas"),
         callback_token: Some(cap.token.clone()),
@@ -626,7 +625,10 @@ fn mint_callback_env(
         (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN"),
         (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID"),
         (EnvInjectionSource::SystemSpaceDir, "RYEOS_SYSTEM_SPACE_DIR"),
-        (EnvInjectionSource::ThreadAuthToken, "RYEOSD_THREAD_AUTH_TOKEN"),
+        (
+            EnvInjectionSource::ThreadAuthToken,
+            "RYEOSD_THREAD_AUTH_TOKEN",
+        ),
     ];
 
     let mut bindings = HashMap::new();
@@ -661,10 +663,7 @@ fn mint_callback_env(
         item_ref = %params.resolved.item_ref,
     )
 )]
-pub async fn run_inline(
-    state: AppState,
-    mut params: ExecutionParams,
-) -> Result<InlineResult> {
+pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<InlineResult> {
     let mut guard = ExecutionGuard::new(state.clone());
 
     // Create and track thread.
@@ -673,14 +672,21 @@ pub async fn run_inline(
     // so the persistence-first contract holds: the very first
     // `thread_started` event lands under the id the subscriber sees.
     let created = match params.pre_minted_thread_id.as_deref() {
-        Some(id) => state.threads.create_root_thread_with_id(id, &params.resolved),
+        Some(id) => state
+            .threads
+            .create_root_thread_with_id(id, &params.resolved),
         None => state.threads.create_root_thread(&params.resolved),
     }
-    .inspect_err(|_e| { guard.cleanup(); })?;
+    .inspect_err(|_e| {
+        guard.cleanup();
+    })?;
     let running = state
         .threads
         .mark_running(&created.thread_id)
-        .inspect_err(|_e| { guard.fail_thread("create_failed"); guard.cleanup(); })?;
+        .inspect_err(|_e| {
+            guard.fail_thread("create_failed");
+            guard.cleanup();
+        })?;
     guard.track_thread(&running.thread_id);
     tracing::Span::current().record("thread_id", running.thread_id.as_str());
 
@@ -698,7 +704,9 @@ pub async fn run_inline(
     // Update project context if CAS checkout changed the path
     if effective_path != params.provenance.effective_path() {
         params.resolved.plan_context.project_context =
-            ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
+            ryeos_engine::contracts::ProjectContext::LocalPath {
+                path: effective_path.clone(),
+            };
     }
 
     // Spawn — use the per-request engine (pushed_head overlay or
@@ -717,7 +725,10 @@ pub async fn run_inline(
     // explicit cleanup call would leak both tokens until TTL expiry.
     let child_provenance = params.provenance.clone_for_borrowed_child();
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
-        &state, &tid, Some(&effective_path), None,
+        &state,
+        &tid,
+        Some(&effective_path),
+        None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
@@ -730,25 +741,21 @@ pub async fn run_inline(
     // NOT live under the (ephemeral, CAS-checkout) working directory,
     // so checkpoints survive working-dir cleanup and daemon restart.
     // See `launch_metadata::daemon_thread_state_dir`.
-    let thread_state_dir = ryeos_app::launch_metadata::daemon_thread_state_dir(
-        &state.config.system_space_dir,
-        &tid,
-    );
+    let thread_state_dir =
+        ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.system_space_dir, &tid);
     let inline_snapshot = base_snapshot_hash.clone();
     let mut spawned = match task::spawn_blocking(move || {
-        thread_lifecycle::spawn_item(
-            thread_lifecycle::SpawnItemParams {
-                engine: &engine,
-                resolved: &resolved,
-                thread_id: &tid,
-                chain_root_id: &crid,
-                vault_bindings: vault,
-                daemon_callback_env: cb_bindings,
-                thread_state_dir: Some(thread_state_dir.as_path()),
-                is_resume: false,
-                original_snapshot_hash: inline_snapshot.as_deref(),
-            },
-        )
+        thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
+            engine: &engine,
+            resolved: &resolved,
+            thread_id: &tid,
+            chain_root_id: &crid,
+            vault_bindings: vault,
+            daemon_callback_env: cb_bindings,
+            thread_state_dir: Some(thread_state_dir.as_path()),
+            is_resume: false,
+            original_snapshot_hash: inline_snapshot.as_deref(),
+        })
     })
     .await
     {
@@ -833,18 +840,16 @@ pub async fn run_inline(
 
     if !params.provenance.is_borrowed_child() {
         let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
-        post_execution_foldback(
-            PostExecutionFoldbackParams {
-                state: &state,
-                thread_id: &running.thread_id,
-                acting_principal: &params.acting_principal,
-                pre_manifest_hash: &pre_manifest_hash,
-                base_snapshot_hash: &base_snapshot_hash,
-                project_path: Some(params.provenance.original_project_path()),
-                execution_dir: guard_exec_dir.as_deref(),
-                completion: &completion,
-            },
-        );
+        post_execution_foldback(PostExecutionFoldbackParams {
+            state: &state,
+            thread_id: &running.thread_id,
+            acting_principal: &params.acting_principal,
+            pre_manifest_hash: &pre_manifest_hash,
+            base_snapshot_hash: &base_snapshot_hash,
+            project_path: Some(params.provenance.original_project_path()),
+            execution_dir: guard_exec_dir.as_deref(),
+            completion: &completion,
+        });
     }
 
     // Finalize
@@ -860,9 +865,7 @@ pub async fn run_inline(
         }
     };
 
-    let result = state
-        .threads
-        .build_execute_result(&finalized.thread_id)?;
+    let result = state.threads.build_execute_result(&finalized.thread_id)?;
 
     guard.cleanup();
 
@@ -889,23 +892,27 @@ pub async fn run_inline(
         item_ref = %params.resolved.item_ref,
     )
 )]
-pub async fn run_detached(
-    state: AppState,
-    mut params: ExecutionParams,
-) -> Result<DetachedResult> {
+pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Result<DetachedResult> {
     let mut guard = ExecutionGuard::new(state.clone());
 
     // Create and track thread.
     // See `run_inline` for why pre_minted_thread_id is honored.
     let created = match params.pre_minted_thread_id.as_deref() {
-        Some(id) => state.threads.create_root_thread_with_id(id, &params.resolved),
+        Some(id) => state
+            .threads
+            .create_root_thread_with_id(id, &params.resolved),
         None => state.threads.create_root_thread(&params.resolved),
     }
-    .inspect_err(|_e| { guard.cleanup(); })?;
+    .inspect_err(|_e| {
+        guard.cleanup();
+    })?;
     let running = state
         .threads
         .mark_running(&created.thread_id)
-        .inspect_err(|_e| { guard.fail_thread("create_failed"); guard.cleanup(); })?;
+        .inspect_err(|_e| {
+            guard.fail_thread("create_failed");
+            guard.cleanup();
+        })?;
     guard.track_thread(&running.thread_id);
     tracing::Span::current().record("thread_id", running.thread_id.as_str());
 
@@ -923,7 +930,9 @@ pub async fn run_detached(
     // Update project context if CAS checkout changed the path
     if effective_path != params.provenance.effective_path() {
         params.resolved.plan_context.project_context =
-            ryeos_engine::contracts::ProjectContext::LocalPath { path: effective_path.clone() };
+            ryeos_engine::contracts::ProjectContext::LocalPath {
+                path: effective_path.clone(),
+            };
     }
 
     // Capture thread details before moving guard
@@ -934,7 +943,10 @@ pub async fn run_detached(
     // CbTokenGuard / TatTokenGuard on wait completion, error, or panic).
     let child_provenance = params.provenance.clone_for_borrowed_child();
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
-        &state, &running.thread_id, Some(effective_path.as_path()), None,
+        &state,
+        &running.thread_id,
+        Some(effective_path.as_path()),
+        None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],
@@ -1074,19 +1086,17 @@ async fn dispatch_detached_bg_task(
     let snap_for_spawn = bg_base_snapshot_hash.clone();
 
     let spawn_result = task::spawn_blocking(move || {
-        thread_lifecycle::spawn_item(
-            thread_lifecycle::SpawnItemParams {
-                engine: &eng_for_spawn,
-                resolved: &res_for_spawn,
-                thread_id: &tid_for_spawn,
-                chain_root_id: &crid_for_spawn,
-                vault_bindings: vault_for_spawn,
-                daemon_callback_env: cb_for_spawn,
-                thread_state_dir: Some(thread_state_dir.as_path()),
-                is_resume,
-                original_snapshot_hash: snap_for_spawn.as_deref(),
-            },
-        )
+        thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
+            engine: &eng_for_spawn,
+            resolved: &res_for_spawn,
+            thread_id: &tid_for_spawn,
+            chain_root_id: &crid_for_spawn,
+            vault_bindings: vault_for_spawn,
+            daemon_callback_env: cb_for_spawn,
+            thread_state_dir: Some(thread_state_dir.as_path()),
+            is_resume,
+            original_snapshot_hash: snap_for_spawn.as_deref(),
+        })
     })
     .await;
 
@@ -1183,18 +1193,16 @@ async fn dispatch_detached_bg_task(
     match wait_result {
         Ok(completion) => {
             if !bg_skip_snapshot_lifecycle {
-                post_execution_foldback(
-                    PostExecutionFoldbackParams {
-                        state: &bg_state,
-                        thread_id: &bg_thread_id,
-                        acting_principal: &bg_acting_principal,
-                        pre_manifest_hash: &bg_pre_manifest_hash,
-                        base_snapshot_hash: &bg_base_snapshot_hash,
-                        project_path: bg_project_path.as_deref(),
-                        execution_dir: bg_exec_dir_path.as_deref(),
-                        completion: &completion,
-                    },
-                );
+                post_execution_foldback(PostExecutionFoldbackParams {
+                    state: &bg_state,
+                    thread_id: &bg_thread_id,
+                    acting_principal: &bg_acting_principal,
+                    pre_manifest_hash: &bg_pre_manifest_hash,
+                    base_snapshot_hash: &bg_base_snapshot_hash,
+                    project_path: bg_project_path.as_deref(),
+                    execution_dir: bg_exec_dir_path.as_deref(),
+                    completion: &completion,
+                });
             }
             if let Err(err) = finalize_completion(&bg_state, &bg_thread_id, completion) {
                 tracing::error!(
@@ -1255,7 +1263,11 @@ struct CbTokenGuard {
 
 impl CbTokenGuard {
     fn new(state: AppState, thread_id: String, token: Option<String>) -> Self {
-        Self { state, thread_id, token }
+        Self {
+            state,
+            thread_id,
+            token,
+        }
     }
 }
 
@@ -1265,7 +1277,11 @@ impl Drop for CbTokenGuard {
     }
 }
 
-fn defer_cb_token_revocation(state: &AppState, thread_id: &str, token: &Option<String>) -> CbTokenGuard {
+fn defer_cb_token_revocation(
+    state: &AppState,
+    thread_id: &str,
+    token: &Option<String>,
+) -> CbTokenGuard {
     CbTokenGuard::new(state.clone(), thread_id.to_string(), token.clone())
 }
 
@@ -1294,7 +1310,11 @@ struct TatTokenGuard {
 
 impl TatTokenGuard {
     fn new(state: AppState, thread_id: String, token: Option<String>) -> Self {
-        Self { state, thread_id, token }
+        Self {
+            state,
+            thread_id,
+            token,
+        }
     }
 }
 
@@ -1362,16 +1382,12 @@ pub fn execution_params_from_resume_context(
         .resolve(&plan_ctx, &canonical)
         .map_err(|e| anyhow::anyhow!("resume: resolve failed: {e}"))?;
 
-    let executor_ref = resolved_item
-        .metadata
-        .executor_id
-        .clone()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "resume: item {} does not declare an executor_id",
-                resume.item_ref
-            )
-        })?;
+    let executor_ref = resolved_item.metadata.executor_id.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "resume: item {} does not declare an executor_id",
+            resume.item_ref
+        )
+    })?;
 
     let resolved = ResolvedExecutionRequest {
         kind: resume.kind.clone(),
@@ -1467,19 +1483,15 @@ pub async fn run_existing_detached(
     guard.track_thread(&thread_id);
 
     // Prepare CAS context.
-    let (effective_path, pre_manifest_hash, base_snapshot_hash) = match prepare_cas_context(
-        &state,
-        &params.provenance,
-        &thread_id,
-        &mut guard,
-    ) {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            guard.fail_thread("cas_context_failed");
-            guard.cleanup();
-            return Err(ResumeError::CasContext(err));
-        }
-    };
+    let (effective_path, pre_manifest_hash, base_snapshot_hash) =
+        match prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard) {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                guard.fail_thread("cas_context_failed");
+                guard.cleanup();
+                return Err(ResumeError::CasContext(err));
+            }
+        };
 
     // Update plan_context to point at the materialized path so the
     // engine resolves item refs from there.
@@ -1540,7 +1552,9 @@ pub async fn run_existing_detached(
         .map_err(|e| {
             guard.fail_thread("preflight_failed");
             guard.cleanup();
-            ResumeError::Other(anyhow::anyhow!("resume: resolution pipeline for preflight: {e}"))
+            ResumeError::Other(anyhow::anyhow!(
+                "resume: resolution pipeline for preflight: {e}"
+            ))
         })?;
 
         let mut vault_bindings = vault_bindings;
@@ -1559,13 +1573,14 @@ pub async fn run_existing_detached(
                     env_var,
                     ..
                 } => {
-                    let payload = crate::structured_error::StructuredErrorPayload::required_secret_missing(
-                        e.to_string(),
-                        env_var,
-                        "provider",
-                        provider_id,
-                        format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
-                    );
+                    let payload =
+                        crate::structured_error::StructuredErrorPayload::required_secret_missing(
+                            e.to_string(),
+                            env_var,
+                            "provider",
+                            provider_id,
+                            format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
+                        );
                     guard.fail_thread_with_error("required_secret_missing", payload.to_value());
                     guard.cleanup();
                     return ResumeError::Preflight(e);
@@ -1586,7 +1601,10 @@ pub async fn run_existing_detached(
     // TatTokenGuard drops).
     let child_provenance = params.provenance.clone_for_borrowed_child();
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
-        &state, &thread_id, Some(effective_path.as_path()), None,
+        &state,
+        &thread_id,
+        Some(effective_path.as_path()),
+        None,
         params.effective_caps.clone(),
         &params.acting_principal,
         vec!["execute".to_string()],

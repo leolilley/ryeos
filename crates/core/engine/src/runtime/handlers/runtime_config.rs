@@ -64,17 +64,17 @@ impl RuntimeHandler for RuntimeConfigHandler {
         // Singleton: a previous chain element already wrote to spec
         // overrides ⇒ collision.
         if ctx.spec_overrides.command.is_some() {
-            let chain_strs: Vec<String> =
-                ctx.chain.iter().map(|c| c.executor_id.clone()).collect();
+            let chain_strs: Vec<String> = ctx.chain.iter().map(|c| c.executor_id.clone()).collect();
             return Err(EngineError::MultipleRuntimeConfigs { chain: chain_strs });
         }
 
         let intermediate = &ctx.chain[ctx.current_index];
-        let config: RuntimeConfig =
-            serde_json::from_value(block.clone()).map_err(|e| EngineError::InvalidRuntimeConfig {
+        let config: RuntimeConfig = serde_json::from_value(block.clone()).map_err(|e| {
+            EngineError::InvalidRuntimeConfig {
                 path: intermediate.source_path.display().to_string(),
                 reason: format!("{e}"),
-            })?;
+            }
+        })?;
 
         ctx.spec_overrides.command = Some(config.command);
         ctx.spec_overrides.args = Some(config.args);

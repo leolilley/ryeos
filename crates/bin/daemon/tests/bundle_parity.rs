@@ -23,9 +23,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::item_resolution::ResolutionRoots;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::parsers::{
-    ParserDispatcher, ParserRegistry,
-};
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::resolution::run_resolution_pipeline;
 use ryeos_engine::trust::TrustStore;
 
@@ -56,8 +54,7 @@ fn fixture_trust_store() -> TrustStore {
         "trusted-signers fixture missing at {}",
         trusted_dir.display()
     );
-    let trust_store = TrustStore::load_from_dir(&trusted_dir)
-        .expect("load fixture trust store");
+    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
     assert!(
         !trust_store.is_empty(),
         "fixture trust store has no signers — fixture is empty"
@@ -71,17 +68,30 @@ fn fixture_trust_store() -> TrustStore {
 fn core_bundle_owns_engine_kinds_only() {
     let trust_store = fixture_trust_store();
     let kinds_dir = core_kinds_dir();
-    assert!(kinds_dir.is_dir(), "core kinds dir missing at {}", kinds_dir.display());
+    assert!(
+        kinds_dir.is_dir(),
+        "core kinds dir missing at {}",
+        kinds_dir.display()
+    );
 
-    let registry = KindRegistry::load_base(&[kinds_dir], &trust_store)
-        .expect("core kinds load");
+    let registry = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("core kinds load");
 
     let kinds: Vec<&str> = registry.kinds().collect();
-    for expected in ["config", "handler", "parser", "protocol", "service",
-                     "node", "tool", "streaming_tool", "runtime"] {
+    for expected in [
+        "config",
+        "handler",
+        "parser",
+        "protocol",
+        "service",
+        "node",
+        "tool",
+        "streaming_tool",
+        "runtime",
+    ] {
         assert!(
             registry.contains(expected),
-            "core must own `{expected}` kind; got: {:?}", kinds
+            "core must own `{expected}` kind; got: {:?}",
+            kinds
         );
     }
 
@@ -99,10 +109,14 @@ fn core_bundle_owns_engine_kinds_only() {
 fn standard_bundle_owns_workflow_kinds() {
     let trust_store = fixture_trust_store();
     let kinds_dir = standard_kinds_dir();
-    assert!(kinds_dir.is_dir(), "standard kinds dir missing at {}", kinds_dir.display());
+    assert!(
+        kinds_dir.is_dir(),
+        "standard kinds dir missing at {}",
+        kinds_dir.display()
+    );
 
-    let registry = KindRegistry::load_base(&[kinds_dir], &trust_store)
-        .expect("standard kinds load");
+    let registry =
+        KindRegistry::load_base(&[kinds_dir], &trust_store).expect("standard kinds load");
 
     for expected in ["directive", "graph", "knowledge"] {
         assert!(
@@ -125,10 +139,9 @@ fn live_bundle_kind_registry_loads_with_pinned_signer() {
         assert!(dir.is_dir(), "kinds dir missing at {}", dir.display());
     }
 
-    let registry = KindRegistry::load_base(&kinds_dirs, &trust_store)
-        .unwrap_or_else(|e| {
-            panic!("live bundle kind registry failed to load: {e}");
-        });
+    let registry = KindRegistry::load_base(&kinds_dirs, &trust_store).unwrap_or_else(|e| {
+        panic!("live bundle kind registry failed to load: {e}");
+    });
 
     // Every kind shipped in the live bundles must be present after load.
     for required in ["directive", "graph", "knowledge", "parser", "tool"] {
@@ -141,7 +154,10 @@ fn live_bundle_kind_registry_loads_with_pinned_signer() {
 
     // Directive kind must be executable with extends-chain resolution.
     let directive = registry.get("directive").expect("directive kind present");
-    assert!(directive.is_executable(), "directive kind must be executable");
+    assert!(
+        directive.is_executable(),
+        "directive kind must be executable"
+    );
 
     let directive_exec = directive
         .execution
@@ -198,8 +214,7 @@ fn run_pipeline_against_bundle(directive_body: &str) -> ryeos_engine::resolution
 
     // Load kinds from BOTH bundles — directive kind lives in standard.
     let kinds_dirs = vec![core_kinds_dir(), standard_kinds_dir()];
-    let kinds = KindRegistry::load_base(&kinds_dirs, &trust_store)
-        .expect("live bundle kinds load");
+    let kinds = KindRegistry::load_base(&kinds_dirs, &trust_store).expect("live bundle kinds load");
     let parsers = live_parser_dispatcher(&trust_store, &kinds);
     let composers = ComposerRegistry::from_kinds(
         &kinds,

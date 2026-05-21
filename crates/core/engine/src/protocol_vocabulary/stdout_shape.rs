@@ -134,17 +134,13 @@ pub fn decode_stdout_terminal(
         StdoutShape::OpaqueBytes => Ok(DecodedStdout::Opaque(raw_bytes.to_vec())),
         StdoutShape::RuntimeResultV1 => {
             let parsed: RuntimeResult = serde_json::from_slice(raw_bytes).map_err(|e| {
-                EngineError::Internal(format!(
-                    "failed to parse RuntimeResult from stdout: {e}"
-                ))
+                EngineError::Internal(format!("failed to parse RuntimeResult from stdout: {e}"))
             })?;
             Ok(DecodedStdout::RuntimeResult(parsed))
         }
-        StdoutShape::StreamingChunksV1 => {
-            Err(EngineError::Internal(
-                "StreamingChunksV1 cannot be decoded as terminal; use frame reader".into(),
-            ))
-        }
+        StdoutShape::StreamingChunksV1 => Err(EngineError::Internal(
+            "StreamingChunksV1 cannot be decoded as terminal; use frame reader".into(),
+        )),
     }
 }
 
@@ -157,9 +153,7 @@ pub fn decode_stdout_frame(
     match shape {
         StdoutShape::StreamingChunksV1 => {
             let chunk: StreamingChunk = serde_json::from_slice(frame_bytes).map_err(|e| {
-                EngineError::Internal(format!(
-                    "failed to parse StreamingChunk frame: {e}"
-                ))
+                EngineError::Internal(format!("failed to parse StreamingChunk frame: {e}"))
             })?;
             Ok(DecodedFrame::Streaming(chunk))
         }
@@ -186,9 +180,7 @@ pub fn decode_stdout_frame(
 ///
 /// A stream MAY emit zero `Stdout`/`Stderr` frames before its terminal
 /// `Exit` — that is "succeed silently" and is permitted.
-pub fn read_all_frames<R: Read>(
-    mut reader: R,
-) -> Result<Vec<StreamingChunk>, FrameReadError> {
+pub fn read_all_frames<R: Read>(mut reader: R) -> Result<Vec<StreamingChunk>, FrameReadError> {
     let mut chunks = Vec::new();
     let mut expected_seq: u64 = 0;
     let mut seen_terminal = false;
@@ -241,10 +233,7 @@ pub fn read_all_frames<R: Read>(
         match kind {
             StreamingChunkKind::Stdout | StreamingChunkKind::Stderr => {
                 if raw.data.is_none() {
-                    return Err(FrameReadError::ChunkMissingData {
-                        kind,
-                        seq: raw.seq,
-                    });
+                    return Err(FrameReadError::ChunkMissingData { kind, seq: raw.seq });
                 }
             }
             StreamingChunkKind::Exit => {
@@ -269,10 +258,7 @@ pub fn read_all_frames<R: Read>(
 
         if raw.terminal {
             if kind != StreamingChunkKind::Exit {
-                return Err(FrameReadError::NonExitTerminal {
-                    seq: raw.seq,
-                    kind,
-                });
+                return Err(FrameReadError::NonExitTerminal { seq: raw.seq, kind });
             }
             seen_terminal = true;
         }
@@ -652,8 +638,7 @@ mod tests {
 
         let mut buf = Vec::new();
         for i in 0..5u64 {
-            let payload = base64::engine::general_purpose::STANDARD
-                .encode(format!("chunk {i}\n"));
+            let payload = base64::engine::general_purpose::STANDARD.encode(format!("chunk {i}\n"));
             buf.extend_from_slice(&write_frame(&StreamingChunk {
                 seq: i,
                 kind: StreamingChunkKind::Stdout,
@@ -664,8 +649,7 @@ mod tests {
         }
         // Stderr chunk emitted alongside stdout to exercise the Stderr
         // variant in the production frame path.
-        let stderr_payload = base64::engine::general_purpose::STANDARD
-            .encode("done\n");
+        let stderr_payload = base64::engine::general_purpose::STANDARD.encode("done\n");
         buf.extend_from_slice(&write_frame(&StreamingChunk {
             seq: 5,
             kind: StreamingChunkKind::Stderr,
@@ -691,10 +675,7 @@ mod tests {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(chunk.data.as_ref().unwrap())
                 .unwrap();
-            assert_eq!(
-                String::from_utf8(decoded).unwrap(),
-                format!("chunk {i}\n")
-            );
+            assert_eq!(String::from_utf8(decoded).unwrap(), format!("chunk {i}\n"));
         }
 
         assert_eq!(chunks[5].kind, StreamingChunkKind::Stderr);

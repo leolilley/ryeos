@@ -20,9 +20,9 @@ use ryeos_engine::contracts::SignatureEnvelope;
 use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindSchema};
 use ryeos_engine::parsers::ParserDispatcher;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 /// Where to look for the item to sign. Restricted to `system` for
 /// daemon-internal `kind: node` items only.
@@ -92,10 +92,9 @@ pub struct SignatureReport {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let report = tokio::task::spawn_blocking(move || -> Result<BatchReport> {
-        run_node_sign(&req, &state)
-    })
-    .await??;
+    let report =
+        tokio::task::spawn_blocking(move || -> Result<BatchReport> { run_node_sign(&req, &state) })
+            .await??;
     serde_json::to_value(report).map_err(Into::into)
 }
 
@@ -272,13 +271,15 @@ fn sign_one(
         .and_then(|e| e.to_str())
         .map(|e| format!(".{e}"))
         .ok_or_else(|| anyhow!("file {} has no extension", file_path.display()))?;
-    let source_format = kind_schema.resolved_format_for(&matched_ext).ok_or_else(|| {
-        anyhow!(
-            "extension `{}` not registered for kind — kind schema declares: {:?}",
-            matched_ext,
-            kind_schema.extension_strs()
-        )
-    })?;
+    let source_format = kind_schema
+        .resolved_format_for(&matched_ext)
+        .ok_or_else(|| {
+            anyhow!(
+                "extension `{}` not registered for kind — kind schema declares: {:?}",
+                matched_ext,
+                kind_schema.extension_strs()
+            )
+        })?;
 
     let parsed = parsers
         .dispatch(
@@ -296,9 +297,19 @@ fn sign_one(
         ai_root,
         file_path,
     )
-    .map_err(|e| anyhow!("path-anchoring validator refused {}: {e}", file_path.display()))?;
+    .map_err(|e| {
+        anyhow!(
+            "path-anchoring validator refused {}: {e}",
+            file_path.display()
+        )
+    })?;
 
-    sign_in_place(file_path, &source_format.signature, signing_key, fingerprint)
+    sign_in_place(
+        file_path,
+        &source_format.signature,
+        signing_key,
+        fingerprint,
+    )
 }
 
 fn sign_in_place(
@@ -307,8 +318,8 @@ fn sign_in_place(
     signing_key: &lillux::crypto::SigningKey,
     fingerprint: &str,
 ) -> Result<SignatureReport> {
-    let body = std::fs::read_to_string(input)
-        .with_context(|| format!("read {}", input.display()))?;
+    let body =
+        std::fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?;
 
     let stripped = lillux::signature::strip_signature_lines(&body);
     let signed = lillux::signature::sign_content(
@@ -319,8 +330,7 @@ fn sign_in_place(
     );
 
     let tmp = input.with_extension(format!("signed.tmp.{}", std::process::id()));
-    std::fs::write(&tmp, &signed)
-        .with_context(|| format!("write tmp {}", tmp.display()))?;
+    std::fs::write(&tmp, &signed).with_context(|| format!("write tmp {}", tmp.display()))?;
     std::fs::rename(&tmp, input)
         .with_context(|| format!("rename {} -> {}", tmp.display(), input.display()))?;
 

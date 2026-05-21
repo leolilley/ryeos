@@ -94,6 +94,8 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
         scheduled_at: i64,
         trigger_reason: &str,
     ) -> Result<()> {
-        (**self).dispatch_scheduled_item(spec, fire_id, thread_id, scheduled_at, trigger_reason).await
+        (**self)
+            .dispatch_scheduled_item(spec, fire_id, thread_id, scheduled_at, trigger_reason)
+            .await
     }
 }

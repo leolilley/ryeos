@@ -82,7 +82,8 @@ pub fn strip_signed_yaml_frontmatter(content: &str) -> String {
     let mut lines = content.lines();
     // Skip the signature line
     if let Some(first) = lines.next() {
-        if first.trim().starts_with("# ryeos:signed:") || first.trim().starts_with("# ryeos: cas:") {
+        if first.trim().starts_with("# ryeos:signed:") || first.trim().starts_with("# ryeos: cas:")
+        {
             return lines.collect::<Vec<_>>().join("\n");
         }
     }
@@ -99,27 +100,25 @@ pub fn strip_frontmatter(content: &str, item_id: &str) -> Result<String, Knowled
 
     // Markdown --- frontmatter
     if trimmed.starts_with("---") {
-        return strip_markdown_frontmatter(content)
-            .map_err(|e| KnowledgeError::FrontmatterParse {
-                item_id: item_id.to_string(),
-                reason: match e {
-                    KnowledgeError::FrontmatterParse { reason, .. } => reason,
-                    _ => "unknown frontmatter parse error".to_string(),
-                },
-            });
+        return strip_markdown_frontmatter(content).map_err(|e| KnowledgeError::FrontmatterParse {
+            item_id: item_id.to_string(),
+            reason: match e {
+                KnowledgeError::FrontmatterParse { reason, .. } => reason,
+                _ => "unknown frontmatter parse error".to_string(),
+            },
+        });
     }
 
     // Fenced ```yaml block at doc start (after optional signature)
     let after_sig = skip_signature_comment(content);
     if after_sig.trim_start().starts_with("```yaml") {
-        return strip_fenced_yaml_block(content)
-            .map_err(|e| KnowledgeError::FrontmatterParse {
-                item_id: item_id.to_string(),
-                reason: match e {
-                    KnowledgeError::FrontmatterParse { reason, .. } => reason,
-                    _ => "unknown frontmatter parse error".to_string(),
-                },
-            });
+        return strip_fenced_yaml_block(content).map_err(|e| KnowledgeError::FrontmatterParse {
+            item_id: item_id.to_string(),
+            reason: match e {
+                KnowledgeError::FrontmatterParse { reason, .. } => reason,
+                _ => "unknown frontmatter parse error".to_string(),
+            },
+        });
     }
 
     // Signed YAML frontmatter

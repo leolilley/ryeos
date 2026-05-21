@@ -20,10 +20,7 @@ pub fn preflight_verify_bundle(
 ) -> Result<()> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     if !ai_dir.is_dir() {
-        bail!(
-            "preflight: source has no .ai/ at {}",
-            source_path.display()
-        );
+        bail!("preflight: source has no .ai/ at {}", source_path.display());
     }
 
     // ── Discover installed bundle roots (Model B) ──
@@ -36,7 +33,9 @@ pub fn preflight_verify_bundle(
 
     let mut schema_roots = Vec::new();
     for root in &installed_bundle_roots {
-        let kinds_dir = root.join(ryeos_engine::AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
+        let kinds_dir = root
+            .join(ryeos_engine::AI_DIR)
+            .join(ryeos_engine::KIND_SCHEMAS_DIR);
         if kinds_dir.is_dir() {
             schema_roots.push(kinds_dir);
         }
@@ -68,9 +67,9 @@ pub fn preflight_verify_bundle(
     let mut parser_search_roots: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = Vec::new();
     let mut seen_roots: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let push_unique = |path: PathBuf,
-                           trust: ryeos_engine::resolution::TrustClass,
-                           roots: &mut Vec<(PathBuf, ryeos_engine::resolution::TrustClass)>,
-                           seen: &mut std::collections::HashSet<PathBuf>| {
+                       trust: ryeos_engine::resolution::TrustClass,
+                       roots: &mut Vec<(PathBuf, ryeos_engine::resolution::TrustClass)>,
+                       seen: &mut std::collections::HashSet<PathBuf>| {
         let key = path.canonicalize().unwrap_or_else(|_| path.clone());
         if seen.insert(key) {
             roots.push((path, trust));
@@ -78,13 +77,28 @@ pub fn preflight_verify_bundle(
     };
     // Installed bundles are trusted system roots (mirrors daemon's Model B).
     for root in &installed_bundle_roots {
-        push_unique(root.clone(), ryeos_engine::resolution::TrustClass::TrustedSystem, &mut parser_search_roots, &mut seen_roots);
+        push_unique(
+            root.clone(),
+            ryeos_engine::resolution::TrustClass::TrustedSystem,
+            &mut parser_search_roots,
+            &mut seen_roots,
+        );
     }
     if let Some(ur) = user_root {
-        push_unique(ur.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser, &mut parser_search_roots, &mut seen_roots);
+        push_unique(
+            ur.to_path_buf(),
+            ryeos_engine::resolution::TrustClass::TrustedUser,
+            &mut parser_search_roots,
+            &mut seen_roots,
+        );
     }
     // Candidate bundle being verified (last, so installed content takes precedence).
-    push_unique(source_path.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser, &mut parser_search_roots, &mut seen_roots);
+    push_unique(
+        source_path.to_path_buf(),
+        ryeos_engine::resolution::TrustClass::TrustedUser,
+        &mut parser_search_roots,
+        &mut seen_roots,
+    );
 
     let legacy_trust = source_path
         .join(ryeos_engine::AI_DIR)
@@ -97,13 +111,18 @@ pub fn preflight_verify_bundle(
              instead"
         );
     }
-    let (parser_tools, _dups) =
-        ParserRegistry::load_base(&parser_search_roots.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), &trust_store, &kinds)
-            .context("preflight: load parser tools")?;
+    let (parser_tools, _dups) = ParserRegistry::load_base(
+        &parser_search_roots
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect::<Vec<_>>(),
+        &trust_store,
+        &kinds,
+    )
+    .context("preflight: load parser tools")?;
     let handler_registry = HandlerRegistry::load_base(&parser_search_roots, &trust_store)
         .context("preflight: load handler descriptors")?;
-    let parser_dispatcher =
-        ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
+    let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
 
     let mut failures: Vec<String> = Vec::new();
     for kind_name in kinds.kinds() {
@@ -120,10 +139,7 @@ pub fn preflight_verify_bundle(
         collect_files_recursive(&kind_dir, &mut files);
 
         for file_path in files {
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if kind_schema.spec_for(&format!(".{ext}")).is_none() {
                 continue;
             }
@@ -289,8 +305,8 @@ pub fn verify_manifest_signature(
         );
     }
 
-    let actual_kinds = derive_provides_kinds(ai_dir)
-        .context("derive actual provides_kinds from kind schemas")?;
+    let actual_kinds =
+        derive_provides_kinds(ai_dir).context("derive actual provides_kinds from kind schemas")?;
     let mut claimed = manifest.provides_kinds.clone();
     claimed.sort();
     claimed.dedup();
@@ -316,7 +332,9 @@ pub fn verify_manifest_signature(
 }
 
 fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -333,9 +351,7 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Returns an empty Vec if the bundles directory doesn't exist or is empty —
 /// this is valid for a clean first-bundle install.
 fn discover_installed_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
-    let bundles_dir = system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("bundles");
+    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
 
     let Ok(entries) = fs::read_dir(&bundles_dir) else {
         return Vec::new();
@@ -412,15 +428,13 @@ mod tests {
         }
 
         fn write_signed_manifest(&self, body: &str) {
-            let signed =
-                lillux::signature::sign_content(body, &self.signing_key, "#", None);
+            let signed = lillux::signature::sign_content(body, &self.signing_key, "#", None);
             fs::write(self.ai_dir.join("manifest.yaml"), &signed).unwrap();
         }
 
         fn write_manifest_signed_by_other(&self, body: &str) {
             let other_key = SigningKey::generate(&mut OsRng);
-            let signed =
-                lillux::signature::sign_content(body, &other_key, "#", None);
+            let signed = lillux::signature::sign_content(body, &other_key, "#", None);
             fs::write(self.ai_dir.join("manifest.yaml"), &signed).unwrap();
         }
 
@@ -457,8 +471,7 @@ mod tests {
             "name: test-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\n",
         );
         let ts = layout.trust_store();
-        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
-            .unwrap_err();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("no valid signature header"),
@@ -474,8 +487,7 @@ mod tests {
             "name: test-bundle\nversion: '1.0'\nprovides_kinds:\n  - mykind\nrequires_kinds: []\n",
         );
         let ts = layout.trust_store();
-        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
-            .unwrap_err();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("signature verification failed"),
@@ -491,8 +503,7 @@ mod tests {
             "name: test-bundle\nversion: '1.0'\nprovides_kinds:\n  - mykind\nrequires_kinds: []\n",
         );
         let ts = layout.trust_store();
-        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
-            .unwrap_err();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("not in operator trust store"),
@@ -508,8 +519,7 @@ mod tests {
             "name: wrong-name\nversion: '1.0'\nprovides_kinds:\n  - mykind\nrequires_kinds: []\n",
         );
         let ts = layout.trust_store();
-        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
-            .unwrap_err();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("identity mismatch"),
@@ -529,8 +539,7 @@ mod tests {
             "name: test-bundle\nversion: '1.0'\nprovides_kinds:\n  - fake-kind\nrequires_kinds: []\n",
         );
         let ts = layout.trust_store();
-        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
-            .unwrap_err();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("provides_kinds mismatch"),

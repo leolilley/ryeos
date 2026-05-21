@@ -39,10 +39,8 @@ pub fn build_stdin(
     request: &SubprocessBuildRequest,
 ) -> Result<Vec<u8>, EngineError> {
     match shape {
-        StdinShape::ParametersJson => {
-            Ok(serde_json::to_vec(&request.params)
-                .map_err(|e| EngineError::Internal(format!("stdin serialize failed: {e}")))?)
-        }
+        StdinShape::ParametersJson => Ok(serde_json::to_vec(&request.params)
+            .map_err(|e| EngineError::Internal(format!("stdin serialize failed: {e}")))?),
         StdinShape::Opaque => {
             // Opaque stdin: no data. The builder produces empty bytes.
             Ok(Vec::new())

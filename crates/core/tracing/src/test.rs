@@ -357,9 +357,8 @@ pub fn prime_callsites() {
     use tracing_subscriber::Registry;
     static PRIMED: Once = Once::new();
     PRIMED.call_once(|| {
-        let subscriber = Registry::default().with(
-            tracing_subscriber::fmt::layer().with_writer(std::io::sink),
-        );
+        let subscriber =
+            Registry::default().with(tracing_subscriber::fmt::layer().with_writer(std::io::sink));
         let _ = set_global_default(subscriber);
     });
 }
@@ -412,7 +411,13 @@ where
         .filter_map(|id| build_recorded(id, &mut nodes))
         .collect();
 
-    (result, Capture { roots, orphan_events })
+    (
+        result,
+        Capture {
+            roots,
+            orphan_events,
+        },
+    )
 }
 
 fn build_recorded(id: u64, nodes: &mut HashMap<u64, SpanNode>) -> Option<RecordedSpan> {
@@ -568,10 +573,7 @@ mod tests {
 
         let p = find_span(&spans, "p").unwrap();
         assert!(find_child(p, "c").is_some());
-        assert!(
-            find_child(p, "gc").is_none(),
-            "find_child must not recurse"
-        );
+        assert!(find_child(p, "gc").is_none(), "find_child must not recurse");
     }
 
     #[test]

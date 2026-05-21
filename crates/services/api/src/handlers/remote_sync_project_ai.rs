@@ -25,7 +25,9 @@ pub struct Request {
     pub force: bool,
 }
 
-fn default_remote() -> String { "default".to_string() }
+fn default_remote() -> String {
+    "default".to_string()
+}
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let remotes = config::load_remotes(&state.config.system_space_dir)?;
@@ -53,7 +55,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 status
                     .get("deployed_snapshot_hash")
                     .and_then(|v| v.as_str())
-                    .context("project.status reported deployed=true without deployed_snapshot_hash")?
+                    .context(
+                        "project.status reported deployed=true without deployed_snapshot_hash",
+                    )?
                     .to_string(),
             )
         } else {

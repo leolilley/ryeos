@@ -55,9 +55,7 @@ enum StepOutcome {
         elapsed_ms: u64,
     },
     /// Gate node: condition evaluation picked `target`.
-    GateTaken {
-        target: Option<String>,
-    },
+    GateTaken { target: Option<String> },
     /// Foreach node completed all iterations.
     ForeachDone {
         results: Vec<Value>,
@@ -245,11 +243,7 @@ impl Walker {
             thread_id = %self.thread_id,
         )
     )]
-    pub async fn execute(
-        &self,
-        params: Value,
-        graph_run_id: Option<String>,
-    ) -> GraphResult {
+    pub async fn execute(&self, params: Value, graph_run_id: Option<String>) -> GraphResult {
         tracing::info!(
             graph_id = %self.graph.graph_id,
             version = %self.graph.version,
@@ -260,9 +254,18 @@ impl Walker {
         let mut guard = RunGuard { finalized: false };
 
         let graph_run_id = graph_run_id.unwrap_or_else(|| {
-            format!("gr-{}", &lillux::cas::sha256_hex(
-                format!("{}{}{}", self.graph.graph_id, lillux::time::timestamp_millis(), rand::random::<u32>()).as_bytes()
-            )[..12])
+            format!(
+                "gr-{}",
+                &lillux::cas::sha256_hex(
+                    format!(
+                        "{}{}{}",
+                        self.graph.graph_id,
+                        lillux::time::timestamp_millis(),
+                        rand::random::<u32>()
+                    )
+                    .as_bytes()
+                )[..12]
+            )
         });
 
         let validation = analyze_graph(&self.graph);
@@ -292,7 +295,10 @@ impl Walker {
         // source of truth, one gate (the daemon).
 
         let exec_ctx = context::execution_context_from_envelope(
-            params.get("parent_thread_id").and_then(|v| v.as_str()).map(String::from),
+            params
+                .get("parent_thread_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             params.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             json!({}),
         );
@@ -321,7 +327,10 @@ impl Walker {
         if let Some(resume_val) = params.get("resume_state") {
             if let Some(node) = resume_val.get("current_node").and_then(|v| v.as_str()) {
                 current = node.to_string();
-                step = resume_val.get("step_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                step = resume_val
+                    .get("step_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
                 state = resume_val.get("state").cloned().unwrap_or(json!({}));
                 tracing::info!(
                     node = %current,
@@ -359,8 +368,8 @@ impl Walker {
                         status: "error",
                         error: Some(format!("node '{current}' not found")),
                     };
-                     match self.commit_step(
-                        CommitStepInput {
+                    match self
+                        .commit_step(CommitStepInput {
                             graph_run_id: &graph_run_id,
                             step,
                             current: &current,
@@ -371,16 +380,17 @@ impl Walker {
                             guard: &mut guard,
                             hook_list: &hook_list,
                             inputs: &inputs,
-                        },
-                    ).await {
+                        })
+                        .await
+                    {
                         CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
                         CommitResult::Terminate(result) => return result,
                     }
                 }
             };
 
-            let outcome = self.run_node_body(
-                RunNodeBodyContext {
+            let outcome = self
+                .run_node_body(RunNodeBodyContext {
                     current: &current,
                     node,
                     cfg,
@@ -391,11 +401,11 @@ impl Walker {
                     cache: &cache,
                     graph_run_id: &graph_run_id,
                     suppressed_errors: &mut suppressed_errors,
-                },
-            ).await;
+                })
+                .await;
 
-            match self.commit_step(
-                CommitStepInput {
+            match self
+                .commit_step(CommitStepInput {
                     graph_run_id: &graph_run_id,
                     step,
                     current: &current,
@@ -406,9 +416,13 @@ impl Walker {
                     guard: &mut guard,
                     hook_list: &hook_list,
                     inputs: &inputs,
-                },
-            ).await {
-                CommitResult::Advance { next_node, next_step } => {
+                })
+                .await
+            {
+                CommitResult::Advance {
+                    next_node,
+                    next_step,
+                } => {
                     current = next_node;
                     step = next_step;
                 }
@@ -421,8 +435,8 @@ impl Walker {
             status: "max_steps_exceeded",
             error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
         };
-        match self.commit_step(
-            CommitStepInput {
+        match self
+            .commit_step(CommitStepInput {
                 graph_run_id: &graph_run_id,
                 step,
                 current: "",
@@ -433,8 +447,9 @@ impl Walker {
                 guard: &mut guard,
                 hook_list: &hook_list,
                 inputs: &inputs,
-            },
-        ).await {
+            })
+            .await
+        {
             CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
             CommitResult::Terminate(result) => result,
         }
@@ -459,12 +474,10 @@ impl Walker {
         let start = Instant::now();
 
         match node.node_type {
-            NodeType::Return => {
-                StepOutcome::Terminal {
-                    status: "completed",
-                    error: None,
-                }
-            }
+            NodeType::Return => StepOutcome::Terminal {
+                status: "completed",
+                error: None,
+            },
 
             NodeType::Gate => {
                 // Gate: evaluate conditions and pick a branch target.
@@ -498,7 +511,9 @@ impl Walker {
                     Value::Array(arr) => arr,
                     Value::String(s) => {
                         if s.contains(',') {
-                            s.split(',').map(|x| Value::String(x.trim().to_string())).collect()
+                            s.split(',')
+                                .map(|x| Value::String(x.trim().to_string()))
+                                .collect()
                         } else {
                             vec![Value::String(s)]
                         }
@@ -512,26 +527,41 @@ impl Walker {
                 let results = if parallel {
                     foreach::run_foreach_parallel(
                         foreach::ForeachContext {
-                            items: &items, var: &var, node,
-                            thread_id: &self.thread_id, project_path: &self.project_path,
-                            client: &self.client, exec_ctx: Some(exec_ctx),
+                            items: &items,
+                            var: &var,
+                            node,
+                            thread_id: &self.thread_id,
+                            project_path: &self.project_path,
+                            client: &self.client,
+                            exec_ctx: Some(exec_ctx),
                             suppressed_errors: &mut *suppressed_errors,
-                            step, current_node: &current,
+                            step,
+                            current_node: &current,
                         },
-                        state, inputs,
-                        self.client.clone(), Arc::new(exec_ctx.clone()),
-                    ).await
+                        state,
+                        inputs,
+                        self.client.clone(),
+                        Arc::new(exec_ctx.clone()),
+                    )
+                    .await
                 } else {
                     foreach::run_foreach_sequential(
                         foreach::ForeachContext {
-                            items: &items, var: &var, node,
-                            thread_id: &self.thread_id, project_path: &self.project_path,
-                            client: &self.client, exec_ctx: Some(exec_ctx),
+                            items: &items,
+                            var: &var,
+                            node,
+                            thread_id: &self.thread_id,
+                            project_path: &self.project_path,
+                            client: &self.client,
+                            exec_ctx: Some(exec_ctx),
                             suppressed_errors: &mut *suppressed_errors,
-                            step, current_node: &current,
+                            step,
+                            current_node: &current,
                         },
-                        &mut state.clone(), inputs,
-                    ).await
+                        &mut state.clone(),
+                        inputs,
+                    )
+                    .await
                 };
 
                 let next = edges::evaluate_next(node, state, inputs);
@@ -544,9 +574,22 @@ impl Walker {
             }
 
             NodeType::Action => {
-                self.run_action_body(RunNodeBodyContext {
-                    current, node, cfg, step, state, inputs, exec_ctx, cache, graph_run_id, suppressed_errors,
-                }, start).await
+                self.run_action_body(
+                    RunNodeBodyContext {
+                        current,
+                        node,
+                        cfg,
+                        step,
+                        state,
+                        inputs,
+                        exec_ctx,
+                        cache,
+                        graph_run_id,
+                        suppressed_errors,
+                    },
+                    start,
+                )
+                .await
             }
         }
     }
@@ -588,7 +631,8 @@ impl Walker {
             }
         };
 
-        let item_id = action.get("item_id")
+        let item_id = action
+            .get("item_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -605,18 +649,15 @@ impl Walker {
             result: None,
         };
 
-        let interpolated_action = ryeos_runtime::interpolate_action(
-            &action, &ctx.as_context(),
-        )
-            .unwrap_or(action.clone());
+        let interpolated_action =
+            ryeos_runtime::interpolate_action(&action, &ctx.as_context()).unwrap_or(action.clone());
 
         let stripped_action = strip_none_values(&interpolated_action);
 
         // Env preflight
-        if let Err(env_err) = env_preflight::check_env_requires(
-            &self.graph.config.env_requires,
-            &node.env_requires,
-        ) {
+        if let Err(env_err) =
+            env_preflight::check_env_requires(&self.graph.config.env_requires, &node.env_requires)
+        {
             let err_msg = format!("env preflight failed: {env_err}");
             return StepOutcome::DispatchHardError {
                 item_id: Some(item_id),
@@ -630,11 +671,7 @@ impl Walker {
         let mut cache_hit = false;
         let mut dispatch_err: Option<String> = None;
         let result = if node.is_cacheable() {
-            let cache_key = compute_cache_key(
-                &self.graph.graph_id,
-                current,
-                &stripped_action,
-            );
+            let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
             if let Some(cached) = cache.lookup(&cache_key) {
                 cache_hit = true;
                 Some(cached)
@@ -645,7 +682,8 @@ impl Walker {
                     &self.thread_id,
                     &self.project_path,
                     Some(exec_ctx),
-                ).await;
+                )
+                .await;
                 match &res {
                     Ok(val) => {
                         let is_error = val.get("status")
@@ -675,7 +713,8 @@ impl Walker {
                 &self.thread_id,
                 &self.project_path,
                 Some(exec_ctx),
-            ).await;
+            )
+            .await;
             if let Err(e) = &res {
                 dispatch_err = Some(format!("{e:#}"));
             }
@@ -707,7 +746,8 @@ impl Walker {
                     });
 
                 if is_error {
-                    let err_str = val.get("error")
+                    let err_str = val
+                        .get("error")
                         .and_then(|e| e.as_str())
                         .unwrap_or("dispatch returned error status")
                         .to_string();
@@ -754,26 +794,28 @@ impl Walker {
         } = input;
         match outcome {
             StepOutcome::Terminal { status, error } => {
-                self.commit_terminal(
-                    CommitTerminalInput {
-                        graph_run_id,
-                        steps: step,
-                        state,
-                        suppressed_errors,
-                        base_status: status,
-                        error: error.as_deref(),
-                        guard,
-                        hook_list,
-                        current_node_id: current,
-                    },
-                ).await
+                self.commit_terminal(CommitTerminalInput {
+                    graph_run_id,
+                    steps: step,
+                    state,
+                    suppressed_errors,
+                    base_status: status,
+                    error: error.as_deref(),
+                    guard,
+                    hook_list,
+                    current_node_id: current,
+                })
+                .await
             }
 
             StepOutcome::GateTaken { target } => {
                 // Gate lifecycle: graph_step_started → graph_branch_taken → graph_step_completed → checkpoint
-                self.emit_graph_step_started(graph_run_id, step, current).await;
-                self.emit_graph_branch_taken(graph_run_id, step, current, target.as_deref()).await;
-                self.emit_graph_step_completed(graph_run_id, step, current, "ok", None).await;
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
+                self.emit_graph_branch_taken(graph_run_id, step, current, target.as_deref())
+                    .await;
+                self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
+                    .await;
 
                 match target {
                     Some(next_node) => {
@@ -785,22 +827,22 @@ impl Walker {
                             state,
                             guard,
                             hook_list,
-                        ).await
+                        )
+                        .await
                     }
                     None => {
-                        self.commit_terminal(
-                            CommitTerminalInput {
-                                graph_run_id,
-                                steps: step + 1,
-                                state,
-                                suppressed_errors,
-                                base_status: "completed",
-                                error: None,
-                                guard,
-                                hook_list,
-                                current_node_id: current,
-                            },
-                        ).await
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step + 1,
+                            state,
+                            suppressed_errors,
+                            base_status: "completed",
+                            error: None,
+                            guard,
+                            hook_list,
+                            current_node_id: current,
+                        })
+                        .await
                     }
                 }
             }
@@ -814,7 +856,8 @@ impl Walker {
                 // Foreach lifecycle: graph_step_started → (per-iteration
                 // graph_foreach_iteration events) → graph_step_completed →
                 // checkpoint
-                self.emit_graph_step_started(graph_run_id, step, current).await;
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
 
                 // Emit per-iteration events from the aggregated results.
                 // Each result corresponds to one item that was iterated over.
@@ -846,13 +889,8 @@ impl Walker {
                     obj.remove(var_name);
                 }
 
-                self.emit_graph_step_completed(
-                    graph_run_id,
-                    step,
-                    current,
-                    "ok",
-                    None,
-                ).await;
+                self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
+                    .await;
 
                 match next {
                     Some(next_node) => {
@@ -864,22 +902,22 @@ impl Walker {
                             state,
                             guard,
                             hook_list,
-                        ).await
+                        )
+                        .await
                     }
                     None => {
-                        self.commit_terminal(
-                            CommitTerminalInput {
-                                graph_run_id,
-                                steps: step + 1,
-                                state,
-                                suppressed_errors,
-                                base_status: "completed",
-                                error: None,
-                                guard,
-                                hook_list,
-                                current_node_id: current,
-                            },
-                        ).await
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step + 1,
+                            state,
+                            suppressed_errors,
+                            base_status: "completed",
+                            error: None,
+                            guard,
+                            hook_list,
+                            current_node_id: current,
+                        })
+                        .await
                     }
                 }
             }
@@ -894,9 +932,12 @@ impl Walker {
                 // R3 fence order:
                 // graph_step_started → tool_call_start → (dispatch in run_node_body) →
                 // tool_call_result → state mutation → receipt → graph_step_completed → checkpoint
-                self.emit_graph_step_started(graph_run_id, step, current).await;
-                self.emit_tool_call_start(graph_run_id, step, current, item_id).await;
-                self.emit_tool_call_result(graph_run_id, step, current, item_id, "ok").await;
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
+                self.emit_tool_call_start(graph_run_id, step, current, item_id)
+                    .await;
+                self.emit_tool_call_result(graph_run_id, step, current, item_id, "ok")
+                    .await;
 
                 // State mutation
                 if let Some(node) = self.graph.config.nodes.get(current) {
@@ -906,19 +947,18 @@ impl Walker {
                             inputs: inputs.clone(),
                             result: Some(result.clone()),
                         };
-                        let interpolated = match ryeos_runtime::interpolate(
-                            assign, &assign_ctx.as_context(),
-                        ) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                suppressed_errors.push(ErrorRecord {
-                                    step,
-                                    node: current.to_string(),
-                                    error: format!("interpolation error in `assign`: {e:#}"),
-                                });
-                                assign.clone()
-                            }
-                        };
+                        let interpolated =
+                            match ryeos_runtime::interpolate(assign, &assign_ctx.as_context()) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    suppressed_errors.push(ErrorRecord {
+                                        step,
+                                        node: current.to_string(),
+                                        error: format!("interpolation error in `assign`: {e:#}"),
+                                    });
+                                    assign.clone()
+                                }
+                            };
                         merge_into(state, &interpolated);
                     }
                 }
@@ -936,10 +976,12 @@ impl Walker {
                     &self.client,
                     graph_run_id,
                     receipts.last().unwrap(),
-                ).await;
+                )
+                .await;
                 self.record_callback_warning("write_node_receipt", r.map(|_| ()));
 
-                self.emit_graph_step_completed(graph_run_id, step, current, "ok", None).await;
+                self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
+                    .await;
 
                 match next {
                     Some(next_node) => {
@@ -951,22 +993,22 @@ impl Walker {
                             state,
                             guard,
                             hook_list,
-                        ).await
+                        )
+                        .await
                     }
                     None => {
-                        self.commit_terminal(
-                            CommitTerminalInput {
-                                graph_run_id,
-                                steps: step + 1,
-                                state,
-                                suppressed_errors,
-                                base_status: "completed",
-                                error: None,
-                                guard,
-                                hook_list,
-                                current_node_id: current,
-                            },
-                        ).await
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step + 1,
+                            state,
+                            suppressed_errors,
+                            base_status: "completed",
+                            error: None,
+                            guard,
+                            hook_list,
+                            current_node_id: current,
+                        })
+                        .await
                     }
                 }
             }
@@ -979,9 +1021,12 @@ impl Walker {
             } => {
                 // Soft error: dispatch succeeded but leaf returned error.
                 // graph_step_started → tool_call_start → tool_call_result(error) → graph_step_completed(error) → [redirect/continue/fail]
-                self.emit_graph_step_started(graph_run_id, step, current).await;
-                self.emit_tool_call_start(graph_run_id, step, current, item_id).await;
-                self.emit_tool_call_result(graph_run_id, step, current, item_id, "error").await;
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
+                self.emit_tool_call_start(graph_run_id, step, current, item_id)
+                    .await;
+                self.emit_tool_call_result(graph_run_id, step, current, item_id, "error")
+                    .await;
 
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
@@ -992,15 +1037,14 @@ impl Walker {
                     error: Some(error.clone()),
                 });
 
-                self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error)).await;
+                self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error))
+                    .await;
 
                 match next_on_error {
-                    NextOnError::Redirect(target) => {
-                        CommitResult::Advance {
-                            next_node: target.clone(),
-                            next_step: step + 1,
-                        }
-                    }
+                    NextOnError::Redirect(target) => CommitResult::Advance {
+                        next_node: target.clone(),
+                        next_step: step + 1,
+                    },
                     NextOnError::PolicyContinue => {
                         suppressed_errors.push(ErrorRecord {
                             step,
@@ -1022,39 +1066,38 @@ impl Walker {
                                     state,
                                     guard,
                                     hook_list,
-                                ).await
+                                )
+                                .await
                             }
                             None => {
-                                self.commit_terminal(
-                                    CommitTerminalInput {
-                                        graph_run_id,
-                                        steps: step + 1,
-                                        state,
-                                        suppressed_errors,
-                                        base_status: "completed",
-                                        error: None,
-                                        guard,
-                                        hook_list,
-                                        current_node_id: current,
-                                    },
-                                ).await
+                                self.commit_terminal(CommitTerminalInput {
+                                    graph_run_id,
+                                    steps: step + 1,
+                                    state,
+                                    suppressed_errors,
+                                    base_status: "completed",
+                                    error: None,
+                                    guard,
+                                    hook_list,
+                                    current_node_id: current,
+                                })
+                                .await
                             }
                         }
                     }
                     NextOnError::PolicyFail => {
-                        self.commit_terminal(
-                            CommitTerminalInput {
-                                graph_run_id,
-                                steps: step,
-                                state,
-                                suppressed_errors,
-                                base_status: "error",
-                                error: Some(&format!("node '{}' failed: {}", current, error)),
-                                guard,
-                                hook_list,
-                                current_node_id: current,
-                            },
-                        ).await
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step,
+                            state,
+                            suppressed_errors,
+                            base_status: "error",
+                            error: Some(&format!("node '{}' failed: {}", current, error)),
+                            guard,
+                            hook_list,
+                            current_node_id: current,
+                        })
+                        .await
                     }
                 }
             }
@@ -1068,12 +1111,21 @@ impl Walker {
                 // Hard error: dispatch failed before leaf returned.
                 // graph_step_started → tool_call_start → tool_call_result(dispatch_failed) → graph_step_completed(error)
                 let item_str = item_id.as_deref().unwrap_or("");
-                self.emit_graph_step_started(graph_run_id, step, current).await;
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
                 if !item_str.is_empty() {
-                    self.emit_tool_call_start(graph_run_id, step, current, item_str).await;
+                    self.emit_tool_call_start(graph_run_id, step, current, item_str)
+                        .await;
                 }
                 if !item_str.is_empty() {
-                    self.emit_tool_call_result(graph_run_id, step, current, item_str, "dispatch_failed").await;
+                    self.emit_tool_call_result(
+                        graph_run_id,
+                        step,
+                        current,
+                        item_str,
+                        "dispatch_failed",
+                    )
+                    .await;
                 }
 
                 receipts.push(NodeReceipt {
@@ -1085,15 +1137,14 @@ impl Walker {
                     error: Some(error.clone()),
                 });
 
-                self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error)).await;
+                self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error))
+                    .await;
 
                 match next_on_error {
-                    NextOnError::Redirect(target) => {
-                        CommitResult::Advance {
-                            next_node: target.clone(),
-                            next_step: step + 1,
-                        }
-                    }
+                    NextOnError::Redirect(target) => CommitResult::Advance {
+                        next_node: target.clone(),
+                        next_step: step + 1,
+                    },
                     NextOnError::PolicyContinue => {
                         suppressed_errors.push(ErrorRecord {
                             step,
@@ -1114,39 +1165,38 @@ impl Walker {
                                     state,
                                     guard,
                                     hook_list,
-                                ).await
+                                )
+                                .await
                             }
                             None => {
-                                self.commit_terminal(
-                                    CommitTerminalInput {
-                                        graph_run_id,
-                                        steps: step + 1,
-                                        state,
-                                        suppressed_errors,
-                                        base_status: "completed",
-                                        error: None,
-                                        guard,
-                                        hook_list,
-                                        current_node_id: current,
-                                    },
-                                ).await
+                                self.commit_terminal(CommitTerminalInput {
+                                    graph_run_id,
+                                    steps: step + 1,
+                                    state,
+                                    suppressed_errors,
+                                    base_status: "completed",
+                                    error: None,
+                                    guard,
+                                    hook_list,
+                                    current_node_id: current,
+                                })
+                                .await
                             }
                         }
                     }
                     NextOnError::PolicyFail => {
-                        self.commit_terminal(
-                            CommitTerminalInput {
-                                graph_run_id,
-                                steps: step,
-                                state,
-                                suppressed_errors,
-                                base_status: "error",
-                                error: Some(&format!("node '{}' failed: {}", current, error)),
-                                guard,
-                                hook_list,
-                                current_node_id: current,
-                            },
-                        ).await
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step,
+                            state,
+                            suppressed_errors,
+                            base_status: "error",
+                            error: Some(&format!("node '{}' failed: {}", current, error)),
+                            guard,
+                            hook_list,
+                            current_node_id: current,
+                        })
+                        .await
                     }
                 }
             }
@@ -1203,10 +1253,8 @@ impl Walker {
                         inputs: Value::Object(Default::default()),
                         result: None,
                     };
-                    match ryeos_runtime::interpolate(
-                        &Value::String(tpl.clone()),
-                        &ctx.as_context(),
-                    ) {
+                    match ryeos_runtime::interpolate(&Value::String(tpl.clone()), &ctx.as_context())
+                    {
                         Ok(v) => v,
                         Err(e) => {
                             // Return-node output interpolation error —
@@ -1273,10 +1321,13 @@ impl Walker {
         self.record_callback_warning("write_knowledge_transcript", r);
 
         // Publish artifact.
-        let r = self.client.publish_artifact(json!({
-            "artifact_type": "graph_transcript",
-            "uri": format!("graph://{}/runs/{}", self.graph.graph_id, graph_run_id),
-        })).await;
+        let r = self
+            .client
+            .publish_artifact(json!({
+                "artifact_type": "graph_transcript",
+                "uri": format!("graph://{}/runs/{}", self.graph.graph_id, graph_run_id),
+            }))
+            .await;
         self.record_callback_warning("publish_artifact", r.map(|_| ()));
 
         // Finalize thread.
@@ -1361,7 +1412,13 @@ impl Walker {
         self.record_callback_warning("graph_step_started", r);
     }
 
-    async fn emit_tool_call_start(&self, graph_run_id: &str, step: u32, current: &str, item_id: &str) {
+    async fn emit_tool_call_start(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        current: &str,
+        item_id: &str,
+    ) {
         let r = self
             .client
             .append_runtime_event(
@@ -1377,7 +1434,14 @@ impl Walker {
         self.record_callback_warning("tool_call_start", r);
     }
 
-    async fn emit_tool_call_result(&self, graph_run_id: &str, step: u32, current: &str, item_id: &str, status: &str) {
+    async fn emit_tool_call_result(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        current: &str,
+        item_id: &str,
+        status: &str,
+    ) {
         let r = self
             .client
             .append_runtime_event(
@@ -1394,7 +1458,14 @@ impl Walker {
         self.record_callback_warning("tool_call_result", r);
     }
 
-    async fn emit_graph_step_completed(&self, graph_run_id: &str, step: u32, current: &str, status: &str, error: Option<&str>) {
+    async fn emit_graph_step_completed(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        current: &str,
+        status: &str,
+        error: Option<&str>,
+    ) {
         let mut payload = json!({
             "graph_run_id": graph_run_id,
             "node": current,
@@ -1411,7 +1482,13 @@ impl Walker {
         self.record_callback_warning("graph_step_completed", r);
     }
 
-    async fn emit_graph_branch_taken(&self, graph_run_id: &str, step: u32, current: &str, target: Option<&str>) {
+    async fn emit_graph_branch_taken(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        current: &str,
+        target: Option<&str>,
+    ) {
         if let Some(t) = target {
             let r = self
                 .client
@@ -1437,7 +1514,9 @@ impl Walker {
         next_step: u32,
         state: &Value,
     ) -> anyhow::Result<()> {
-        let Some(writer) = &self.checkpoint else { return Ok(()); };
+        let Some(writer) = &self.checkpoint else {
+            return Ok(());
+        };
 
         writer.write(&json!({
             "graph_run_id": graph_run_id,
@@ -1480,9 +1559,7 @@ fn strip_none_values(val: &Value) -> Value {
                 .collect();
             Value::Object(cleaned)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(strip_none_values).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.iter().map(strip_none_values).collect()),
         other => other.clone(),
     }
 }
@@ -1530,22 +1607,58 @@ mod tests {
                 Ok(json!({"thread": {}, "result": results.remove(0)}))
             }
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
     }
 
     fn make_callback(results: Vec<Value>) -> CallbackClient {
-        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(MockClient::new(results));
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+            Arc::new(MockClient::new(results));
         CallbackClient::from_inner(inner, "thread-test", "/tmp/test-project", "tat-test")
     }
 
@@ -1665,11 +1778,7 @@ config:
         to: loop
 "#;
         let graph = make_graph(yaml);
-        let w = make_walker(graph, vec![
-            json!({}),
-            json!({}),
-            json!({}),
-        ]);
+        let w = make_walker(graph, vec![json!({}), json!({}), json!({})]);
         let result = w.execute(json!({}), None).await;
         assert!(!result.success);
         assert_eq!(result.status, "max_steps_exceeded");
@@ -1713,14 +1822,23 @@ config:
       node_type: return
 "#;
         let graph = make_graph(yaml);
-        let w = make_walker(graph, vec![
-            json!({"value": "a"}),
-            json!({"value": "b"}),
-            json!({"value": "c"}),
-        ]);
-        let result = w.execute(json!({"inject_state": {"items": ["a", "b", "c"]}}), None).await;
+        let w = make_walker(
+            graph,
+            vec![
+                json!({"value": "a"}),
+                json!({"value": "b"}),
+                json!({"value": "c"}),
+            ],
+        );
+        let result = w
+            .execute(json!({"inject_state": {"items": ["a", "b", "c"]}}), None)
+            .await;
         assert!(result.success);
-        let results = result.state.get("results").and_then(|v| v.as_array()).unwrap();
+        let results = result
+            .state
+            .get("results")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -1742,9 +1860,10 @@ config:
       node_type: return
 "#;
         let graph = make_graph(yaml);
-        let w = make_walker(graph, vec![
-            json!({"status": "error", "error": "forced failure"}),
-        ]);
+        let w = make_walker(
+            graph,
+            vec![json!({"status": "error", "error": "forced failure"})],
+        );
         let result = w.execute(json!({}), None).await;
         assert!(result.success);
         assert_eq!(result.status, "completed_with_errors");
@@ -1869,7 +1988,12 @@ config:
             elapsed_ms: 42,
         };
         match outcome {
-            StepOutcome::ActionOk { ref item_id, ref next, elapsed_ms, .. } => {
+            StepOutcome::ActionOk {
+                ref item_id,
+                ref next,
+                elapsed_ms,
+                ..
+            } => {
                 assert_eq!(item_id, "tool:test/echo");
                 assert_eq!(next.as_deref(), Some("done"));
                 assert_eq!(elapsed_ms, 42);
@@ -1887,7 +2011,11 @@ config:
             elapsed_ms: 10,
         };
         match outcome {
-            StepOutcome::LeafSoftError { ref error, ref next_on_error, .. } => {
+            StepOutcome::LeafSoftError {
+                ref error,
+                ref next_on_error,
+                ..
+            } => {
                 assert_eq!(error, "boom");
                 assert!(matches!(next_on_error, NextOnError::PolicyFail));
             }
@@ -1904,7 +2032,12 @@ config:
             elapsed_ms: 1,
         };
         match outcome {
-            StepOutcome::DispatchHardError { item_id, ref error, ref next_on_error, .. } => {
+            StepOutcome::DispatchHardError {
+                item_id,
+                ref error,
+                ref next_on_error,
+                ..
+            } => {
                 assert!(item_id.is_none());
                 assert_eq!(error, "permission denied");
                 assert!(matches!(next_on_error, NextOnError::Redirect(_)));
@@ -1935,7 +2068,11 @@ config:
             next: Some("done".to_string()),
         };
         match outcome {
-            StepOutcome::ForeachDone { ref next, ref collect_key, .. } => {
+            StepOutcome::ForeachDone {
+                ref next,
+                ref collect_key,
+                ..
+            } => {
                 assert_eq!(next.as_deref(), Some("done"));
                 assert_eq!(collect_key.as_deref(), Some("items"));
             }
@@ -2035,14 +2172,29 @@ config:
                 Ok(json!({"thread": {}, "result": results.remove(0)}))
             }
         }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, thread_id: &str, status: &str) -> Result<Value, CallbackError> {
-            self.finalizations.lock().unwrap().push((thread_id.to_string(), status.to_string()));
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            thread_id: &str,
+            status: &str,
+        ) -> Result<Value, CallbackError> {
+            self.finalizations
+                .lock()
+                .unwrap()
+                .push((thread_id.to_string(), status.to_string()));
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
         async fn append_event(
             &self,
             thread_id: &str,
@@ -2058,24 +2210,48 @@ config:
             ));
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
         async fn publish_artifact(&self, _: &str, artifact: Value) -> Result<Value, CallbackError> {
             self.artifacts.lock().unwrap().push(artifact);
             Ok(json!({}))
         }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
     }
 
     fn make_recording_callback(results: Vec<Value>) -> (CallbackClient, Arc<RecordingMockClient>) {
         let inner: Arc<RecordingMockClient> = Arc::new(RecordingMockClient::new(results));
-        let client = CallbackClient::from_inner(inner.clone(), "thread-test", "/tmp/test-project", "tat-test");
+        let client = CallbackClient::from_inner(
+            inner.clone(),
+            "thread-test",
+            "/tmp/test-project",
+            "tat-test",
+        );
         (client, inner)
     }
 
-    fn make_recording_walker(graph: GraphDefinition, results: Vec<Value>, checkpoint_dir: Option<&std::path::Path>) -> (Walker, Arc<RecordingMockClient>) {
+    fn make_recording_walker(
+        graph: GraphDefinition,
+        results: Vec<Value>,
+        checkpoint_dir: Option<&std::path::Path>,
+    ) -> (Walker, Arc<RecordingMockClient>) {
         let (client, recorder) = make_recording_callback(results);
         let checkpoint = checkpoint_dir.map(|d| CheckpointWriter::new(d.to_path_buf()));
         let w = Walker::new(
@@ -2110,9 +2286,12 @@ config:
 "#;
         let graph = make_graph(yaml);
         let tmp = tempfile::tempdir().unwrap();
-        let (w, recorder) = make_recording_walker(graph, vec![json!({"msg": "hello"})], Some(tmp.path()));
+        let (w, recorder) =
+            make_recording_walker(graph, vec![json!({"msg": "hello"})], Some(tmp.path()));
 
-        let result = w.execute(json!({}), Some("gr-fence-test".to_string())).await;
+        let result = w
+            .execute(json!({}), Some("gr-fence-test".to_string()))
+            .await;
         assert!(result.success);
 
         let events = recorder.recorded_events();
@@ -2122,20 +2301,42 @@ config:
         let idx = types.iter().position(|&t| t == "graph_started").unwrap();
 
         // Step 1: action node — R3 fence order
-        assert_eq!(types[idx + 1], "graph_step_started", "fence: graph_step_started first");
-        assert_eq!(types[idx + 2], "tool_call_start", "fence: tool_call_start second");
-        assert_eq!(types[idx + 3], "tool_call_result", "fence: tool_call_result third");
-        assert_eq!(types[idx + 4], "graph_step_completed", "fence: graph_step_completed fourth");
+        assert_eq!(
+            types[idx + 1],
+            "graph_step_started",
+            "fence: graph_step_started first"
+        );
+        assert_eq!(
+            types[idx + 2],
+            "tool_call_start",
+            "fence: tool_call_start second"
+        );
+        assert_eq!(
+            types[idx + 3],
+            "tool_call_result",
+            "fence: tool_call_result third"
+        );
+        assert_eq!(
+            types[idx + 4],
+            "graph_step_completed",
+            "fence: graph_step_completed fourth"
+        );
 
         // Return node is terminal — goes through commit_terminal directly,
         // which emits GraphCompleted but no graph_step_started for the
         // terminal step itself.
-        assert_eq!(types[idx + 5], "graph_completed",
-            "after step_completed, terminal emits graph_completed directly");
+        assert_eq!(
+            types[idx + 5],
+            "graph_completed",
+            "after step_completed, terminal emits graph_completed directly"
+        );
 
         // GraphCompleted must appear exactly once
         let completed_count = types.iter().filter(|&&t| t == "graph_completed").count();
-        assert_eq!(completed_count, 1, "GraphCompleted must be emitted exactly once, got {completed_count}");
+        assert_eq!(
+            completed_count, 1,
+            "GraphCompleted must be emitted exactly once, got {completed_count}"
+        );
     }
 
     /// Every non-terminal `Advance` must write a checkpoint. For a
@@ -2178,11 +2379,20 @@ config:
         // After step2 completes, checkpoint points at "done" (the return node).
         // The return node itself is terminal — no checkpoint is written for it.
         let checkpoint_file = tmp.path().join("latest.json");
-        assert!(checkpoint_file.exists(), "checkpoint file must exist after graph completes");
+        assert!(
+            checkpoint_file.exists(),
+            "checkpoint file must exist after graph completes"
+        );
         let contents = std::fs::read_to_string(&checkpoint_file).unwrap();
         let cp: Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(cp["current_node"], "done", "checkpoint must point at the next cursor (done)");
-        assert_eq!(cp["step_count"], 2, "checkpoint step_count must be 2 (two action steps, return is terminal)");
+        assert_eq!(
+            cp["current_node"], "done",
+            "checkpoint must point at the next cursor (done)"
+        );
+        assert_eq!(
+            cp["step_count"], 2,
+            "checkpoint step_count must be 2 (two action steps, return is terminal)"
+        );
     }
 
     /// Gate node must produce: graph_step_started → graph_branch_taken → graph_step_completed → checkpoint.
@@ -2212,26 +2422,46 @@ config:
         let tmp = tempfile::tempdir().unwrap();
         let (w, recorder) = make_recording_walker(graph, vec![], Some(tmp.path()));
 
-        let result = w.execute(json!({"inject_state": {"mode": "fast"}}), Some("gr-gate-test".to_string())).await;
+        let result = w
+            .execute(
+                json!({"inject_state": {"mode": "fast"}}),
+                Some("gr-gate-test".to_string()),
+            )
+            .await;
         assert!(result.success);
 
         let events = recorder.recorded_events();
         let types: Vec<&str> = events.iter().map(|(_, et, _, _)| et.as_str()).collect();
 
         // Gate lifecycle: graph_step_started → graph_branch_taken → graph_step_completed
-        let step_started_idx = types.iter().position(|&t| t == "graph_step_started").unwrap();
-        assert_eq!(types[step_started_idx + 1], "graph_branch_taken",
-            "gate must emit graph_branch_taken after graph_step_started");
-        assert_eq!(types[step_started_idx + 2], "graph_step_completed",
-            "gate must emit graph_step_completed after graph_branch_taken");
+        let step_started_idx = types
+            .iter()
+            .position(|&t| t == "graph_step_started")
+            .unwrap();
+        assert_eq!(
+            types[step_started_idx + 1],
+            "graph_branch_taken",
+            "gate must emit graph_branch_taken after graph_step_started"
+        );
+        assert_eq!(
+            types[step_started_idx + 2],
+            "graph_step_completed",
+            "gate must emit graph_step_completed after graph_branch_taken"
+        );
 
         // Verify the branch target is correct
-        let branch_event = events.iter().find(|(_, et, _, _)| et == "graph_branch_taken").unwrap();
+        let branch_event = events
+            .iter()
+            .find(|(_, et, _, _)| et == "graph_branch_taken")
+            .unwrap();
         assert_eq!(branch_event.2["target"], "fast_path");
 
         // Checkpoint must exist pointing at the next node
         let checkpoint_file = tmp.path().join("latest.json");
-        assert!(checkpoint_file.exists(), "checkpoint must exist after gate step");
+        assert!(
+            checkpoint_file.exists(),
+            "checkpoint must exist after gate step"
+        );
         let contents = std::fs::read_to_string(&checkpoint_file).unwrap();
         let cp: Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(cp["current_node"], "fast_path");
@@ -2270,17 +2500,22 @@ config:
             None,
         );
 
-        let result = w.execute(
-            json!({"inject_state": {"items": ["a", "b", "c"]}}),
-            Some("gr-fe-test".to_string()),
-        ).await;
+        let result = w
+            .execute(
+                json!({"inject_state": {"items": ["a", "b", "c"]}}),
+                Some("gr-fe-test".to_string()),
+            )
+            .await;
         assert!(result.success);
 
         let events = recorder.recorded_events();
         let types: Vec<&str> = events.iter().map(|(_, et, _, _)| et.as_str()).collect();
 
         // Foreach must emit per-iteration events
-        let iteration_count = types.iter().filter(|&&t| t == "graph_foreach_iteration").count();
+        let iteration_count = types
+            .iter()
+            .filter(|&&t| t == "graph_foreach_iteration")
+            .count();
         assert_eq!(iteration_count, 3,
             "foreach must emit exactly 3 graph_foreach_iteration events for 3 items, got {iteration_count}");
 
@@ -2288,9 +2523,18 @@ config:
         // The return node is terminal — commit_terminal does NOT emit
         // graph_step_started for terminal steps.
         let step_started = types.iter().filter(|&&t| t == "graph_step_started").count();
-        let step_completed = types.iter().filter(|&&t| t == "graph_step_completed").count();
-        assert_eq!(step_started, 1, "1 foreach step (return node is terminal, no step_started)");
-        assert_eq!(step_completed, 1, "1 foreach step (return node is terminal, no step_completed)");
+        let step_completed = types
+            .iter()
+            .filter(|&&t| t == "graph_step_completed")
+            .count();
+        assert_eq!(
+            step_started, 1,
+            "1 foreach step (return node is terminal, no step_started)"
+        );
+        assert_eq!(
+            step_completed, 1,
+            "1 foreach step (return node is terminal, no step_completed)"
+        );
     }
 
     /// Terminal outcomes must emit GraphCompleted exactly once.
@@ -2320,7 +2564,10 @@ config:
         let events_ok = recorder_ok.recorded_events();
         let types_ok: Vec<&str> = events_ok.iter().map(|(_, et, _, _)| et.as_str()).collect();
         let completed_ok = types_ok.iter().filter(|&&t| t == "graph_completed").count();
-        assert_eq!(completed_ok, 1, "success path: exactly 1 GraphCompleted, got {completed_ok}");
+        assert_eq!(
+            completed_ok, 1,
+            "success path: exactly 1 GraphCompleted, got {completed_ok}"
+        );
 
         // Error path: on_error: fail with a leaf that returns status=error
         let yaml_err = r#"
@@ -2349,12 +2596,21 @@ config:
         assert!(!result_err.success);
         let events_err = recorder_err.recorded_events();
         let types_err: Vec<&str> = events_err.iter().map(|(_, et, _, _)| et.as_str()).collect();
-        let completed_err = types_err.iter().filter(|&&t| t == "graph_completed").count();
-        assert_eq!(completed_err, 1, "error path: exactly 1 GraphCompleted, got {completed_err}");
+        let completed_err = types_err
+            .iter()
+            .filter(|&&t| t == "graph_completed")
+            .count();
+        assert_eq!(
+            completed_err, 1,
+            "error path: exactly 1 GraphCompleted, got {completed_err}"
+        );
 
         // Verify the error path's GraphCompleted carries status=error
         let events_err_full = recorder_err.recorded_events();
-        let gc = events_err_full.iter().find(|(_, et, _, _)| et == "graph_completed").unwrap();
+        let gc = events_err_full
+            .iter()
+            .find(|(_, et, _, _)| et == "graph_completed")
+            .unwrap();
         assert_eq!(gc.2["status"], "error");
     }
 }

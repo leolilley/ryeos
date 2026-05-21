@@ -109,8 +109,7 @@ impl TrustStore {
                             owner = %key.owner,
                             "loaded trusted key"
                         );
-                        keys.entry(key.fingerprint.clone())
-                            .or_insert(key);
+                        keys.entry(key.fingerprint.clone()).or_insert(key);
                     }
                 }
             }
@@ -159,15 +158,11 @@ impl TrustStore {
                 continue;
             }
             if let Some(val) = trimmed.strip_prefix("fingerprint") {
-                let val = val.trim_start_matches(['=', ' '])
-                    .trim()
-                    .trim_matches('"');
+                let val = val.trim_start_matches(['=', ' ']).trim().trim_matches('"');
                 fingerprint = Some(val.to_string());
             }
             if let Some(val) = trimmed.strip_prefix("owner") {
-                let val = val.trim_start_matches(['=', ' '])
-                    .trim()
-                    .trim_matches('"');
+                let val = val.trim_start_matches(['=', ' ']).trim().trim_matches('"');
                 owner = val.to_string();
             }
             // Accept both `pem` and `public_key` as field names for the
@@ -177,10 +172,7 @@ impl TrustStore {
                 .strip_prefix("pem")
                 .or_else(|| trimmed.strip_prefix("public_key"));
             if let Some(val) = maybe_key {
-                let val = val
-                    .trim_start_matches(['=', ' '])
-                    .trim()
-                    .trim_matches('"');
+                let val = val.trim_start_matches(['=', ' ']).trim().trim_matches('"');
                 if let Some(b64) = val.strip_prefix("ed25519:") {
                     inline_key_b64 = Some(b64.to_string());
                 }
@@ -275,11 +267,8 @@ impl VerifiedLoader {
         user_root: Option<PathBuf>,
         system_roots: Vec<PathBuf>,
     ) -> Self {
-        let trust_store = TrustStore::load_from_roots(
-            &project_root,
-            user_root.as_deref(),
-            system_roots.clone(),
-        );
+        let trust_store =
+            TrustStore::load_from_roots(&project_root, user_root.as_deref(), system_roots.clone());
         Self {
             project_root,
             user_root,
@@ -312,7 +301,11 @@ impl VerifiedLoader {
 
     pub fn resolve_item(&self, kind: &str, item_id: &str) -> Result<ResolvedPath> {
         let (effective_kind, bare_id) = Self::strip_kind_prefix(item_id);
-        let kind = if effective_kind != bare_id { effective_kind } else { kind };
+        let kind = if effective_kind != bare_id {
+            effective_kind
+        } else {
+            kind
+        };
         let subdir = Self::kind_subdir(kind);
 
         let item_path = PathBuf::from(format!("{subdir}{bare_id}.md"));
@@ -363,8 +356,8 @@ impl VerifiedLoader {
         path: &Path,
         strictness: LoadStrictness,
     ) -> Result<VerifiedContent> {
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
         let content = lillux::signature::strip_signature_lines(&raw);
 
@@ -517,12 +510,12 @@ impl VerifiedLoader {
 
         if candidate_paths.len() == 1 {
             let path = &candidate_paths[0];
-            let verified = self
-                .load_verified("config", path)
-                .map_err(|e| ConfigLoadError::VerifyFailed {
-                    path: path.clone(),
-                    source: e,
-                })?;
+            let verified =
+                self.load_verified("config", path)
+                    .map_err(|e| ConfigLoadError::VerifyFailed {
+                        path: path.clone(),
+                        source: e,
+                    })?;
             // Parse raw YAML first, then type-convert — same as the
             // merged path. This ensures YAML syntax errors always surface
             // as RawYamlParseFailed and type-shape errors as TypedParseFailed,
@@ -545,18 +538,19 @@ impl VerifiedLoader {
 
         let mut merged = serde_yaml::Value::Null;
         for path in &candidate_paths {
-            let verified = self
-                .load_verified("config", path)
-                .map_err(|e| ConfigLoadError::VerifyFailed {
-                    path: path.clone(),
-                    source: e,
+            let verified =
+                self.load_verified("config", path)
+                    .map_err(|e| ConfigLoadError::VerifyFailed {
+                        path: path.clone(),
+                        source: e,
+                    })?;
+            let value =
+                serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(|e| {
+                    ConfigLoadError::RawYamlParseFailed {
+                        path: path.clone(),
+                        source: e,
+                    }
                 })?;
-            let value = serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(
-                |e| ConfigLoadError::RawYamlParseFailed {
-                    path: path.clone(),
-                    source: e,
-                },
-            )?;
             merged = deep_merge_yaml(merged, value);
         }
 
@@ -568,12 +562,11 @@ impl VerifiedLoader {
             .last()
             .cloned()
             .unwrap_or_else(|| item_path.clone());
-        let value = serde_yaml::from_value::<T>(merged).map_err(|e| {
-            ConfigLoadError::TypedParseFailed {
+        let value =
+            serde_yaml::from_value::<T>(merged).map_err(|e| ConfigLoadError::TypedParseFailed {
                 path: last_path,
                 source: e,
-            }
-        })?;
+            })?;
         Ok(Some(value))
     }
 
@@ -680,12 +673,13 @@ impl VerifiedLoader {
                     path: path.clone(),
                     source: e,
                 })?;
-            let value = serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(
-                |e| ConfigLoadError::RawYamlParseFailed {
-                    path: path.clone(),
-                    source: e,
-                },
-            )?;
+            let value =
+                serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(|e| {
+                    ConfigLoadError::RawYamlParseFailed {
+                        path: path.clone(),
+                        source: e,
+                    }
+                })?;
             merged = deep_merge_yaml(merged, value);
         }
 
@@ -693,12 +687,11 @@ impl VerifiedLoader {
             .last()
             .map(|(p, _)| p.clone())
             .unwrap_or_else(|| item_path.clone());
-        let value = serde_yaml::from_value::<T>(merged).map_err(|e| {
-            ConfigLoadError::TypedParseFailed {
+        let value =
+            serde_yaml::from_value::<T>(merged).map_err(|e| ConfigLoadError::TypedParseFailed {
                 path: last_path,
                 source: e,
-            }
-        })?;
+            })?;
         Ok(Some((value, contributors)))
     }
 
@@ -725,8 +718,8 @@ impl VerifiedLoader {
                 continue;
             }
 
-            let entries = fs::read_dir(&dir)
-                .with_context(|| format!("scanning {}", dir.display()))?;
+            let entries =
+                fs::read_dir(&dir).with_context(|| format!("scanning {}", dir.display()))?;
 
             for entry in entries {
                 let entry = entry?;
@@ -780,7 +773,9 @@ mod tests {
 
     fn create_file(dir: &Path, relative: &str, content: &str) -> PathBuf {
         let p = dir.join(relative);
-        if let Some(d) = p.parent() { fs::create_dir_all(d).unwrap() }
+        if let Some(d) = p.parent() {
+            fs::create_dir_all(d).unwrap()
+        }
         fs::write(&p, content).unwrap();
         p
     }
@@ -790,8 +785,7 @@ mod tests {
         let vk_bytes = signing_key.verifying_key().to_bytes();
         let pem_b64 = base64::engine::general_purpose::STANDARD.encode(
             [
-                0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70,
-                0x03, 0x21, 0x00,
+                0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
             ]
             .as_slice()
             .iter()
@@ -830,16 +824,8 @@ pem = """
         let project = tmp.path().join("project");
         let system = tmp.path().join("system");
 
-        create_file(
-            &project,
-            ".ai/directives/hello.md",
-            "# Project Hello\n",
-        );
-        create_file(
-            &system,
-            ".ai/directives/hello.md",
-            "# System Hello\n",
-        );
+        create_file(&project, ".ai/directives/hello.md", "# Project Hello\n");
+        create_file(&system, ".ai/directives/hello.md", "# System Hello\n");
 
         let loader = VerifiedLoader::new(project, None, vec![system]);
         let resolved = loader.resolve_item("directive", "hello").unwrap();
@@ -855,16 +841,8 @@ pem = """
         let user = tmp.path().join("user");
         let system = tmp.path().join("system");
 
-        create_file(
-            &user,
-            ".ai/directives/shared.md",
-            "# User Shared\n",
-        );
-        create_file(
-            &system,
-            ".ai/directives/shared.md",
-            "# System Shared\n",
-        );
+        create_file(&user, ".ai/directives/shared.md", "# User Shared\n");
+        create_file(&system, ".ai/directives/shared.md", "# System Shared\n");
 
         let loader = VerifiedLoader::new(project, Some(user), vec![system]);
         let resolved = loader.resolve_item("directive", "shared").unwrap();
@@ -879,11 +857,7 @@ pem = """
         let user = tmp.path().join("user");
         let system = tmp.path().join("system");
 
-        create_file(
-            &system,
-            ".ai/tools/run.md",
-            "# System Tool\n",
-        );
+        create_file(&system, ".ai/tools/run.md", "# System Tool\n");
 
         let loader = VerifiedLoader::new(project, Some(user), vec![system]);
         let resolved = loader.resolve_item("tool", "run").unwrap();
@@ -896,11 +870,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        create_file(
-            &project,
-            ".ai/directives/agent.md",
-            "# Agent Directive\n",
-        );
+        create_file(&project, ".ai/directives/agent.md", "# Agent Directive\n");
 
         let loader = VerifiedLoader::new(project, None, vec![]);
         let resolved = loader.resolve_item("directive", "directive:agent").unwrap();
@@ -955,7 +925,9 @@ pem = """
         let project = tmp.path().join("project");
 
         let loader = VerifiedLoader::new(project, None, vec![]);
-        let config = loader.load_config_strict::<serde_yaml::Value>("nonexistent").unwrap();
+        let config = loader
+            .load_config_strict::<serde_yaml::Value>("nonexistent")
+            .unwrap();
 
         assert!(config.is_none());
     }
@@ -974,7 +946,10 @@ pem = """
         let loader = VerifiedLoader::new(project, None, vec![]);
         let result = loader.load_config_strict::<serde_yaml::Value>("bad");
 
-        assert!(result.is_err(), "bad YAML should fail, not silently return None");
+        assert!(
+            result.is_err(),
+            "bad YAML should fail, not silently return None"
+        );
     }
 
     #[test]
@@ -1044,7 +1019,10 @@ pem = """
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("content hash mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("content hash mismatch"));
     }
 
     #[test]
@@ -1066,7 +1044,10 @@ pem = """
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("signature verification failed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("signature verification failed"));
     }
 
     #[test]
@@ -1091,11 +1072,8 @@ pem = """
         let system = tmp.path().join("system");
         create_trust_store(&system, &sk);
 
-        let store = TrustStore::load_from_roots(
-            &tmp.path().join("project"),
-            None,
-            vec![system.clone()],
-        );
+        let store =
+            TrustStore::load_from_roots(&tmp.path().join("project"), None, vec![system.clone()]);
 
         assert_eq!(store.len(), 1);
         let fp = lillux::signature::compute_fingerprint(&sk.verifying_key());
@@ -1104,11 +1082,7 @@ pem = """
 
     #[test]
     fn trust_store_empty_when_no_dirs() {
-        let store = TrustStore::load_from_roots(
-            Path::new("/nonexistent"),
-            None,
-            vec![],
-        );
+        let store = TrustStore::load_from_roots(Path::new("/nonexistent"), None, vec![]);
         assert!(store.is_empty());
     }
 
@@ -1133,31 +1107,11 @@ pem = """
         let user = tmp.path().join("user");
         let system = tmp.path().join("system");
 
-        create_file(
-            &system,
-            ".ai/tools/sys_tool.md",
-            "# System Tool\n",
-        );
-        create_file(
-            &system,
-            ".ai/tools/shared.md",
-            "# System Shared\n",
-        );
-        create_file(
-            &user,
-            ".ai/tools/user_tool.md",
-            "# User Tool\n",
-        );
-        create_file(
-            &user,
-            ".ai/tools/shared.md",
-            "# User Shared\n",
-        );
-        create_file(
-            &project,
-            ".ai/tools/proj_tool.md",
-            "# Project Tool\n",
-        );
+        create_file(&system, ".ai/tools/sys_tool.md", "# System Tool\n");
+        create_file(&system, ".ai/tools/shared.md", "# System Shared\n");
+        create_file(&user, ".ai/tools/user_tool.md", "# User Tool\n");
+        create_file(&user, ".ai/tools/shared.md", "# User Shared\n");
+        create_file(&project, ".ai/tools/proj_tool.md", "# Project Tool\n");
 
         let system_clone = system.clone();
         let loader = VerifiedLoader::new(project, Some(user), vec![system]);
@@ -1201,9 +1155,8 @@ pem = """
         let trust_dir = root.join(".ai/config/keys/trusted");
         std::fs::create_dir_all(&trust_dir).unwrap();
         let vk_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-        let toml = format!(
-            "fingerprint = \"{fp}\"\npem = \"ed25519:{vk_b64}\"\nowner = \"test\"\n"
-        );
+        let toml =
+            format!("fingerprint = \"{fp}\"\npem = \"ed25519:{vk_b64}\"\nowner = \"test\"\n");
         std::fs::write(trust_dir.join("test.toml"), toml).unwrap();
         signed
     }
@@ -1221,14 +1174,8 @@ pem = """
         )
         .unwrap();
 
-        let loader = VerifiedLoader::new(
-            tmp.path().join("project"),
-            None,
-            vec![system],
-        );
-        let res = loader.load_config_strict_signed::<serde_yaml::Value>(
-            "model-providers/test",
-        );
+        let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
+        let res = loader.load_config_strict_signed::<serde_yaml::Value>("model-providers/test");
         assert!(res.is_err(), "strict mode must reject unsigned config");
         let msg = format!("{:#}", res.unwrap_err());
         assert!(
@@ -1247,19 +1194,12 @@ pem = """
         // Sign with a throwaway key that is NOT in the trust store.
         let yaml_body = "base_url: https://example.com/v1\n";
         let sk = ed25519_dalek::SigningKey::from_bytes(&[77u8; 32]);
-        let signed = lillux::signature::sign_content_at(
-            yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z",
-        );
+        let signed =
+            lillux::signature::sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(
-            tmp.path().join("project"),
-            None,
-            vec![system],
-        );
-        let res = loader.load_config_strict_signed::<serde_yaml::Value>(
-            "model-providers/test",
-        );
+        let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
+        let res = loader.load_config_strict_signed::<serde_yaml::Value>("model-providers/test");
         assert!(res.is_err(), "strict mode must reject unknown signer");
         let msg = format!("{:#}", res.unwrap_err());
         assert!(
@@ -1279,14 +1219,8 @@ pem = """
         let signed = sign_and_pin(yaml_body, &system);
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(
-            tmp.path().join("project"),
-            None,
-            vec![system],
-        );
-        let res = loader.load_config_strict_signed::<serde_yaml::Value>(
-            "model-providers/test",
-        );
+        let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
+        let res = loader.load_config_strict_signed::<serde_yaml::Value>("model-providers/test");
         assert!(res.is_ok(), "strict mode must accept trusted-signed config");
         let val = res.unwrap().expect("should have a value");
         assert_eq!(val["base_url"].as_str(), Some("https://example.com/v1"));

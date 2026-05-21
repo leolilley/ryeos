@@ -7,10 +7,9 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
     match config {
         Value::Null => Ok(()),
         Value::Object(obj) if obj.is_empty() => Ok(()),
-        Value::Object(_) => Err(
-            "identity composer takes no config: composer_config must be null or {}"
-                .to_string(),
-        ),
+        Value::Object(_) => {
+            Err("identity composer takes no config: composer_config must be null or {}".to_string())
+        }
         other => Err(format!(
             "identity composer takes no config: composer_config must be null or {{}} \
              (got {})",
@@ -101,7 +100,10 @@ mod tests {
     #[test]
     fn validate_config_rejects_non_empty_object() {
         let err = validate_config(&json!({ "anything": 1 })).unwrap_err();
-        assert!(err.contains("identity composer takes no config"), "got: {err}");
+        assert!(
+            err.contains("identity composer takes no config"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ impl TestSigner {
         let signing_key = lillux::crypto::SigningKey::from_bytes(&seed);
         let verifying_key = signing_key.verifying_key();
         let fingerprint = lillux::sha256_hex(verifying_key.as_bytes());
-        
+
         Self {
             signing_key,
             fingerprint,
@@ -85,12 +85,11 @@ mod tests {
         let signer = TestSigner::new();
         let data = b"hello world";
         let sig = signer.sign(data);
-        
+
         // Verify the signature using the public key
         let verifying_key = signer.verifying_key();
-        let signature = lillux::crypto::Signature::from_bytes(
-            &sig.as_slice()[..64].try_into().unwrap()
-        );
+        let signature =
+            lillux::crypto::Signature::from_bytes(&sig.as_slice()[..64].try_into().unwrap());
         assert!(
             verifying_key.verify(data, &signature).is_ok(),
             "Signature must be valid"
@@ -135,6 +134,9 @@ mod tests {
         let signer = TestSigner::new();
         let sig1 = signer.sign(b"data1");
         let sig2 = signer.sign(b"data2");
-        assert_ne!(sig1, sig2, "Different data should produce different signatures");
+        assert_ne!(
+            sig1, sig2,
+            "Different data should produce different signatures"
+        );
     }
 }

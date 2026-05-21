@@ -27,7 +27,6 @@ pub struct HookEvent {
 }
 
 #[cfg(test)]
-
 #[tracing::instrument(
     level = "debug",
     name = "graph:hook",
@@ -38,11 +37,7 @@ pub struct HookEvent {
         step = ctx.step,
     )
 )]
-pub fn fire_hook(
-    hooks: &[Value],
-    event: &str,
-    ctx: &HookContext,
-) -> Vec<Value> {
+pub fn fire_hook(hooks: &[Value], event: &str, ctx: &HookContext) -> Vec<Value> {
     let mut results = Vec::new();
     for hook in hooks {
         let hook_event = hook.get("event").and_then(|e| e.as_str());
@@ -50,9 +45,9 @@ pub fn fire_hook(
 
         let hook_events = hook.get("events").and_then(|e| e.as_array());
         let matches_any = hook_events.is_some_and(|events| {
-            events.iter().any(|e| {
-                e.as_str().is_some_and(|s| s == event || s == "*")
-            })
+            events
+                .iter()
+                .any(|e| e.as_str().is_some_and(|s| s == event || s == "*"))
         });
 
         if !matches_event && !matches_any {
@@ -194,11 +189,21 @@ mod tests {
         });
 
         let span = trace_test::find_span(&spans, "graph:hook");
-        assert!(span.is_some(), "expected graph:hook span, got: {:?}", spans.iter().map(|s: &ryeos_tracing::test::RecordedSpan| &s.name).collect::<Vec<_>>());
+        assert!(
+            span.is_some(),
+            "expected graph:hook span, got: {:?}",
+            spans
+                .iter()
+                .map(|s: &ryeos_tracing::test::RecordedSpan| &s.name)
+                .collect::<Vec<_>>()
+        );
 
         let span = span.unwrap();
         let field_val = |name: &str| -> Option<&str> {
-            span.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+            span.fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
         };
         assert_eq!(field_val("event"), Some("after_step"));
         assert_eq!(field_val("node"), Some("n-trace"));

@@ -94,11 +94,17 @@ impl Config {
         let file_cfg = if let Some(path) = &sources.config_file {
             Some(Self::load_file(path)?)
         } else {
-            let lookup_dir = ssd_explicit.as_deref().unwrap_or(&defaults.system_space_dir);
+            let lookup_dir = ssd_explicit
+                .as_deref()
+                .unwrap_or(&defaults.system_space_dir);
             let default_config = lookup_dir.join(".ai").join("node").join("config.yaml");
             if default_config.exists() {
-                Some(Self::load_file(&default_config)
-                    .with_context(|| format!("failed to load existing config at {}", default_config.display()))?)
+                Some(Self::load_file(&default_config).with_context(|| {
+                    format!(
+                        "failed to load existing config at {}",
+                        default_config.display()
+                    )
+                })?)
             } else {
                 None
             }
@@ -132,7 +138,11 @@ impl Config {
 
         // Final system_space_dir: explicit CLI/env > config file > default
         let system_space_dir = ssd_explicit
-            .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.system_space_dir.clone()))
+            .or_else(|| {
+                file_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.system_space_dir.clone())
+            })
             .unwrap_or_else(|| defaults.system_space_dir.clone());
 
         let cfg = Self {
@@ -141,7 +151,12 @@ impl Config {
                 .db_path
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.db_path.clone()))
-                .unwrap_or_else(|| system_space_dir.join(".ai").join("state").join("runtime.sqlite3")),
+                .unwrap_or_else(|| {
+                    system_space_dir
+                        .join(".ai")
+                        .join("state")
+                        .join("runtime.sqlite3")
+                }),
             uds_path: sources
                 .uds_path
                 .clone()
@@ -152,7 +167,11 @@ impl Config {
                 .as_ref()
                 .and_then(|cfg| cfg.node_signing_key_path.clone())
                 .unwrap_or_else(|| {
-                    system_space_dir.join(".ai").join("node").join("identity").join("private_key.pem")
+                    system_space_dir
+                        .join(".ai")
+                        .join("node")
+                        .join("identity")
+                        .join("private_key.pem")
                 }),
             user_signing_key_path: file_cfg
                 .as_ref()
@@ -172,7 +191,13 @@ impl Config {
                         .as_ref()
                         .and_then(|cfg| cfg.authorized_keys_dir.clone())
                 })
-                .unwrap_or_else(|| system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys")),
+                .unwrap_or_else(|| {
+                    system_space_dir
+                        .join(".ai")
+                        .join("node")
+                        .join("auth")
+                        .join("authorized_keys")
+                }),
         };
 
         // Only create minimal runtime directories (db parent, socket parent).
@@ -188,7 +213,12 @@ impl Config {
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                    .with_context(|| format!("failed to set runtime dir permissions on {}", parent.display()))?;
+                    .with_context(|| {
+                        format!(
+                            "failed to set runtime dir permissions on {}",
+                            parent.display()
+                        )
+                    })?;
             }
         }
 
@@ -204,9 +234,7 @@ impl Config {
 
     fn default_paths(bind: SocketAddr) -> Result<Self> {
         let base_dirs = BaseDirs::new().context("could not determine base directories")?;
-        let system_space_dir = base_dirs
-            .data_dir()
-            .join("ryeos");
+        let system_space_dir = base_dirs.data_dir().join("ryeos");
 
         let runtime_root = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -220,7 +248,10 @@ impl Config {
 
         Ok(Self {
             bind,
-            db_path: system_space_dir.join(".ai").join("state").join("runtime.sqlite3"),
+            db_path: system_space_dir
+                .join(".ai")
+                .join("state")
+                .join("runtime.sqlite3"),
             uds_path: runtime_root.join("ryeosd.sock"),
             system_space_dir: system_space_dir.clone(),
             node_signing_key_path: system_space_dir
@@ -235,7 +266,11 @@ impl Config {
                 .join("signing")
                 .join("private_key.pem"),
             require_auth: false,
-            authorized_keys_dir: system_space_dir.join(".ai").join("node").join("auth").join("authorized_keys"),
+            authorized_keys_dir: system_space_dir
+                .join(".ai")
+                .join("node")
+                .join("auth")
+                .join("authorized_keys"),
         })
     }
 }

@@ -45,18 +45,26 @@ impl RemoteClient {
     pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
         let remotes = super::config::load_remotes(&state.config.system_space_dir)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
-        Ok(Self::new(&remote.url, &remote.principal_id, state.identity.clone()))
+        Ok(Self::new(
+            &remote.url,
+            &remote.principal_id,
+            state.identity.clone(),
+        ))
     }
 
     /// GET /public-key (no auth required).
     pub async fn get_public_key(&self) -> Result<PublicKeyResponse> {
         let url = format!("{}/public-key", self.base_url);
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
         let status = resp.status();
-        let body: Value = resp.json().await
+        let body: Value = resp
+            .json()
+            .await
             .with_context(|| format!("failed to parse /public-key response from {}", url))?;
         if !status.is_success() {
             anyhow::bail!("GET {} returned {}: {}", url, status, body);
@@ -80,7 +88,9 @@ impl RemoteClient {
     /// GET /health (no auth required).
     pub async fn get_health(&self) -> Result<Value> {
         let url = format!("{}/health", self.base_url);
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
@@ -97,12 +107,16 @@ impl RemoteClient {
     /// Returns the remote node's ingest ignore config as a typed struct.
     pub async fn get_ingest_ignore(&self) -> Result<IgnoreConfig> {
         let url = format!("{}/ingest-ignore", self.base_url);
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
         let status = resp.status();
-        let body: Value = resp.json().await
+        let body: Value = resp
+            .json()
+            .await
             .with_context(|| format!("failed to parse /ingest-ignore response from {}", url))?;
         if !status.is_success() {
             anyhow::bail!("GET {} returned {}: {}", url, status, body);
@@ -118,11 +132,21 @@ impl RemoteClient {
         let body = serde_json::json!({ "hashes": hashes });
         let resp = self.signed_post("/objects/has", &body).await?;
         Ok(ObjectsHasResponse {
-            found: resp["found"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            found: resp["found"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
-            missing: resp["missing"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            missing: resp["missing"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
@@ -147,11 +171,21 @@ impl RemoteClient {
         });
         let resp = self.signed_post("/objects/put", &body).await?;
         Ok(ObjectsPutResponse {
-            blob_hashes: resp["blob_hashes"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            blob_hashes: resp["blob_hashes"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
-            object_hashes: resp["object_hashes"].as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            object_hashes: resp["object_hashes"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
@@ -162,7 +196,8 @@ impl RemoteClient {
     pub async fn objects_get(&self, hashes: &[String]) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({ "hashes": hashes });
         let resp = self.signed_post("/objects/get", &body).await?;
-        let entries = resp.get("entries")
+        let entries = resp
+            .get("entries")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default()
@@ -170,18 +205,19 @@ impl RemoteClient {
             .filter_map(|entry| {
                 let hash = entry.get("hash")?.as_str()?.to_string();
                 let kind = entry.get("kind")?.as_str()?.to_string();
-                Some(CasEntry { hash, kind, data: entry.get("data").and_then(|v| v.as_str()).map(String::from), value: entry.get("value").cloned() })
+                Some(CasEntry {
+                    hash,
+                    kind,
+                    data: entry.get("data").and_then(|v| v.as_str()).map(String::from),
+                    value: entry.get("value").cloned(),
+                })
             })
             .collect();
         Ok(ObjectsGetResponse { entries })
     }
 
     /// POST /push-head (authenticated).
-    pub async fn push_head(
-        &self,
-        project_path: &str,
-        snapshot_hash: &str,
-    ) -> Result<Value> {
+    pub async fn push_head(&self, project_path: &str, snapshot_hash: &str) -> Result<Value> {
         let body = serde_json::json!({
             "project_path": project_path,
             "snapshot_hash": snapshot_hash,
@@ -261,16 +297,14 @@ impl RemoteClient {
                 .to_string(),
             scopes: resp["scopes"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
-            granted_by: resp["granted_by"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
-            created_at: resp["created_at"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            granted_by: resp["granted_by"].as_str().unwrap_or("").to_string(),
+            created_at: resp["created_at"].as_str().unwrap_or("").to_string(),
         })
     }
 
@@ -315,7 +349,9 @@ impl RemoteClient {
         // sign_request will sort query params to match server-side.
         let headers = self.sign_request("GET", path, &[])?;
 
-        let resp = self.http.get(&url)
+        let resp = self
+            .http
+            .get(&url)
             .header("x-ryeos-key-id", &headers.key_id)
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
@@ -325,7 +361,9 @@ impl RemoteClient {
             .with_context(|| format!("GET {} failed", url))?;
 
         let status = resp.status();
-        let resp_body: Value = resp.json().await
+        let resp_body: Value = resp
+            .json()
+            .await
             .with_context(|| format!("failed to parse response from GET {}", url))?;
 
         if !status.is_success() {
@@ -340,7 +378,9 @@ impl RemoteClient {
         let body_bytes = serde_json::to_vec(body)?;
         let headers = self.sign_request("POST", path, &body_bytes)?;
 
-        let resp = self.http.post(&url)
+        let resp = self
+            .http
+            .post(&url)
             .header("content-type", "application/json")
             .header("x-ryeos-key-id", &headers.key_id)
             .header("x-ryeos-timestamp", &headers.timestamp)
@@ -352,7 +392,9 @@ impl RemoteClient {
             .with_context(|| format!("POST {} failed", url))?;
 
         let status = resp.status();
-        let resp_body: Value = resp.json().await
+        let resp_body: Value = resp
+            .json()
+            .await
             .with_context(|| format!("failed to parse response from POST {}", url))?;
 
         if !status.is_success() {
@@ -396,7 +438,8 @@ impl RemoteClient {
         );
 
         let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
-        let sig = lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
+        let sig =
+            lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
         Ok(SignedHeaders {
@@ -422,15 +465,25 @@ fn canonicalize_path(path_and_query: &str) -> String {
     if let Some((path, query)) = path_and_query.split_once('?') {
         let mut params: Vec<(&str, &str)> = query
             .split('&')
-            .filter_map(|pair| pair.split_once('=').or_else(|| {
-                if pair.is_empty() { None } else { Some((pair, "")) }
-            }))
+            .filter_map(|pair| {
+                pair.split_once('=').or_else(|| {
+                    if pair.is_empty() {
+                        None
+                    } else {
+                        Some((pair, ""))
+                    }
+                })
+            })
             .collect();
         params.sort();
         let sorted: Vec<String> = params
             .iter()
             .map(|(k, v)| {
-                if v.is_empty() { k.to_string() } else { format!("{k}={v}") }
+                if v.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{k}={v}")
+                }
             })
             .collect();
         format!("{}?{}", path, sorted.join("&"))
@@ -482,7 +535,8 @@ impl ObjectsGetResponse {
     /// Find an entry by hash, returning its value (for objects) or
     /// decoded blob data.
     pub fn find_object(&self, hash: &str) -> Option<Value> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .find(|e| e.hash == hash && e.kind == "object")
             .and_then(|e| e.value.clone())
     }
@@ -490,7 +544,8 @@ impl ObjectsGetResponse {
     /// Find a blob entry by hash, returning decoded bytes.
     pub fn find_blob(&self, hash: &str) -> Option<Vec<u8>> {
         use base64::Engine;
-        self.entries.iter()
+        self.entries
+            .iter()
             .find(|e| e.hash == hash && e.kind == "blob")
             .and_then(|e| e.data.as_ref())
             .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
@@ -571,9 +626,6 @@ mod tests {
         let path_with_repeats = "/objects/get?hashes=def&hashes=abc&hashes=ghi";
         let canonical = canonicalize_path(path_with_repeats);
         // Sorted by key, then value:
-        assert_eq!(
-            canonical,
-            "/objects/get?hashes=abc&hashes=def&hashes=ghi"
-        );
+        assert_eq!(canonical, "/objects/get?hashes=abc&hashes=def&hashes=ghi");
     }
 }

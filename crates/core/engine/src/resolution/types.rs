@@ -250,24 +250,16 @@ pub enum ResolutionError {
         expansion: Vec<String>,
     },
     /// Cyclic alias reference detected.
-    AliasCycle {
-        expansion: Vec<String>,
-    },
+    AliasCycle { expansion: Vec<String> },
     /// Alias not found in kind's execution.aliases.
-    UnknownAlias {
-        alias: String,
-        kind: String,
-    },
+    UnknownAlias { alias: String, kind: String },
     /// Referenced item does not exist.
     MissingItem {
         item_ref: String,
         referenced_by: String,
     },
     /// Item signature invalid or missing.
-    IntegrityFailure {
-        item_ref: String,
-        reason: String,
-    },
+    IntegrityFailure { item_ref: String, reason: String },
     /// Path-anchoring validator caught a mismatch between metadata
     /// and on-disk location, OR a `required: true` rule found no
     /// value. Distinct from `IntegrityFailure` (signature/hash) and
@@ -278,9 +270,7 @@ pub enum ResolutionError {
         source: Box<crate::kind_registry::MetadataAnchoringError>,
     },
     /// Kind has no execution block (not executable).
-    KindNotExecutable {
-        kind: String,
-    },
+    KindNotExecutable { kind: String },
     /// Generic step failure.
     StepFailed {
         step: ResolutionStepName,
@@ -297,17 +287,21 @@ impl std::fmt::Display for ResolutionError {
                     "cycle detected in {} chain at depth {}: {} -> ...",
                     edge_type,
                     chain.len(),
-                    chain.first().map(|h| &h.requested_id).unwrap_or(&"?".to_string())
+                    chain
+                        .first()
+                        .map(|h| &h.requested_id)
+                        .unwrap_or(&"?".to_string())
                 )
             }
             ResolutionError::MaxDepthExceeded { step, depth } => {
                 write!(f, "{} exceeded max depth ({})", step, depth)
             }
-            ResolutionError::AliasMaxDepthExceeded {
-                alias,
-                expansion,
-            } => {
-                write!(f, "alias {} expansion chain too deep: {:?}", alias, expansion)
+            ResolutionError::AliasMaxDepthExceeded { alias, expansion } => {
+                write!(
+                    f,
+                    "alias {} expansion chain too deep: {:?}",
+                    alias, expansion
+                )
             }
             ResolutionError::AliasCycle { expansion } => {
                 write!(f, "cyclic alias reference: {:?}", expansion)
@@ -319,7 +313,11 @@ impl std::fmt::Display for ResolutionError {
                 item_ref,
                 referenced_by,
             } => {
-                write!(f, "item {} referenced by {} not found", item_ref, referenced_by)
+                write!(
+                    f,
+                    "item {} referenced by {} not found",
+                    item_ref, referenced_by
+                )
             }
             ResolutionError::IntegrityFailure { item_ref, reason } => {
                 write!(f, "integrity check failed for {}: {}", item_ref, reason)
@@ -436,9 +434,21 @@ mod tests {
     fn execution_trust_ranking_order() {
         // TrustedSystem > TrustedUser > UntrustedUserSpace > Unsigned
         let cases = [
-            (TrustClass::TrustedSystem, TrustClass::TrustedUser, TrustClass::TrustedUser),
-            (TrustClass::TrustedUser, TrustClass::UntrustedUserSpace, TrustClass::UntrustedUserSpace),
-            (TrustClass::UntrustedUserSpace, TrustClass::Unsigned, TrustClass::Unsigned),
+            (
+                TrustClass::TrustedSystem,
+                TrustClass::TrustedUser,
+                TrustClass::TrustedUser,
+            ),
+            (
+                TrustClass::TrustedUser,
+                TrustClass::UntrustedUserSpace,
+                TrustClass::UntrustedUserSpace,
+            ),
+            (
+                TrustClass::UntrustedUserSpace,
+                TrustClass::Unsigned,
+                TrustClass::Unsigned,
+            ),
         ];
         for (a, b, expected) in cases {
             assert_eq!(execution_trust(a, &[ancestor(b)]), expected);

@@ -25,12 +25,23 @@ fn main() {
 
     let kinds_dir = PathBuf::from("bundles/core/.ai/node/engine/kinds");
     let kinds = [
-        "config", "directive", "graph", "handler", "knowledge",
-        "node", "parser", "runtime", "service", "tool",
+        "config",
+        "directive",
+        "graph",
+        "handler",
+        "knowledge",
+        "node",
+        "parser",
+        "runtime",
+        "service",
+        "tool",
     ];
 
     let mappings = [
-        ("ryeos/core/extends_chain", "handler:ryeos/core/extends-chain"),
+        (
+            "ryeos/core/extends_chain",
+            "handler:ryeos/core/extends-chain",
+        ),
         (
             "ryeos/core/graph_permissions",
             "handler:ryeos/core/graph-permissions",
@@ -42,8 +53,8 @@ fn main() {
         let path = kinds_dir
             .join(kind)
             .join(format!("{kind}.kind-schema.yaml"));
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let raw =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let body = strip_signature_lines(&raw);
 
         let mut new_body = body.clone();

@@ -13,9 +13,9 @@ use anyhow::Result;
 use base64::Engine as _;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +44,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let cas_root = state.state_store.cas_root()?;
     let cas = lillux::cas::CasStore::new(cas_root);
 
-    let _permit = state.write_barrier.try_acquire()
+    let _permit = state
+        .write_barrier
+        .try_acquire()
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
 
     let mut blob_hashes = Vec::with_capacity(req.blobs.len());

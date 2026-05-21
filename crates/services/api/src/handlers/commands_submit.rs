@@ -10,11 +10,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
 use crate::handler_context::HandlerContext;
+use crate::registry::ServiceDescriptor;
 use ryeos_app::command_service::CommandSubmitParams;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +79,9 @@ mod tests {
             "command_type": "cancel",
             "requested_by": "fp:attacker",
         }));
-        assert!(result.is_err(), "spoofed requested_by should be rejected by deny_unknown_fields");
+        assert!(
+            result.is_err(),
+            "spoofed requested_by should be rejected by deny_unknown_fields"
+        );
     }
 }

@@ -29,24 +29,36 @@ fn parse_rfc3339_to_epoch_secs(s: &str) -> Result<i64, EngineError> {
             reason: format!("invalid expires_at timestamp `{}`: too short", s),
         });
     }
-    let year: i32 = s[0..4].parse().map_err(|_| EngineError::DelegationValidationFailed {
-        reason: format!("invalid expires_at timestamp `{}`: bad year", s),
-    })?;
-    let month: u32 = s[5..7].parse().map_err(|_| EngineError::DelegationValidationFailed {
-        reason: format!("invalid expires_at timestamp `{}`: bad month", s),
-    })?;
-    let day: u32 = s[8..10].parse().map_err(|_| EngineError::DelegationValidationFailed {
-        reason: format!("invalid expires_at timestamp `{}`: bad day", s),
-    })?;
-    let hour: u32 = s[11..13].parse().map_err(|_| EngineError::DelegationValidationFailed {
-        reason: format!("invalid expires_at timestamp `{}`: bad hour", s),
-    })?;
-    let minute: u32 = s[14..16].parse().map_err(|_| EngineError::DelegationValidationFailed {
-        reason: format!("invalid expires_at timestamp `{}`: bad minute", s),
-    })?;
-    let second: u32 = s[17..19].parse().map_err(|_| EngineError::DelegationValidationFailed {
-        reason: format!("invalid expires_at timestamp `{}`: bad second", s),
-    })?;
+    let year: i32 = s[0..4]
+        .parse()
+        .map_err(|_| EngineError::DelegationValidationFailed {
+            reason: format!("invalid expires_at timestamp `{}`: bad year", s),
+        })?;
+    let month: u32 = s[5..7]
+        .parse()
+        .map_err(|_| EngineError::DelegationValidationFailed {
+            reason: format!("invalid expires_at timestamp `{}`: bad month", s),
+        })?;
+    let day: u32 = s[8..10]
+        .parse()
+        .map_err(|_| EngineError::DelegationValidationFailed {
+            reason: format!("invalid expires_at timestamp `{}`: bad day", s),
+        })?;
+    let hour: u32 = s[11..13]
+        .parse()
+        .map_err(|_| EngineError::DelegationValidationFailed {
+            reason: format!("invalid expires_at timestamp `{}`: bad hour", s),
+        })?;
+    let minute: u32 = s[14..16]
+        .parse()
+        .map_err(|_| EngineError::DelegationValidationFailed {
+            reason: format!("invalid expires_at timestamp `{}`: bad minute", s),
+        })?;
+    let second: u32 = s[17..19]
+        .parse()
+        .map_err(|_| EngineError::DelegationValidationFailed {
+            reason: format!("invalid expires_at timestamp `{}`: bad second", s),
+        })?;
 
     let days = days_from_civil(year, month, day);
     Ok(days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64)
@@ -123,7 +135,11 @@ mod tests {
     use super::*;
     use crate::contracts::DelegatedPrincipal;
 
-    fn make_delegation(audience: &str, expires_at: &str, non_redelegable: bool) -> DelegatedPrincipal {
+    fn make_delegation(
+        audience: &str,
+        expires_at: &str,
+        non_redelegable: bool,
+    ) -> DelegatedPrincipal {
         DelegatedPrincipal {
             protocol_version: "1".to_string(),
             delegation_id: "del-001".to_string(),
@@ -159,7 +175,10 @@ mod tests {
         let err = validate_delegation(&d, "local-node").unwrap_err();
         match &err {
             EngineError::DelegationValidationFailed { reason } => {
-                assert!(reason.contains("audience mismatch"), "unexpected reason: {reason}");
+                assert!(
+                    reason.contains("audience mismatch"),
+                    "unexpected reason: {reason}"
+                );
                 assert!(reason.contains("local-node"));
                 assert!(reason.contains("other-node"));
             }
@@ -200,7 +219,10 @@ mod tests {
         let err = validate_delegation(&d, "local-node").unwrap_err();
         match &err {
             EngineError::DelegationValidationFailed { reason } => {
-                assert!(reason.contains("invalid expires_at"), "unexpected reason: {reason}");
+                assert!(
+                    reason.contains("invalid expires_at"),
+                    "unexpected reason: {reason}"
+                );
             }
             other => panic!("expected DelegationValidationFailed, got: {other:?}"),
         }

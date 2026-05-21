@@ -45,17 +45,16 @@ pub struct AliasRegistry {
 /// Errors from alias registry operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AliasRegistryError {
-    #[error("duplicate alias tokens {tokens:?}: first routes to '{first}', second routes to '{second}'")]
+    #[error(
+        "duplicate alias tokens {tokens:?}: first routes to '{first}', second routes to '{second}'"
+    )]
     DuplicateAlias {
         tokens: Vec<String>,
         first: String,
         second: String,
     },
     #[error("alias tokens {tokens:?} references unknown verb '{verb}'")]
-    UnknownVerb {
-        tokens: Vec<String>,
-        verb: String,
-    },
+    UnknownVerb { tokens: Vec<String>, verb: String },
 }
 
 impl AliasRegistry {
@@ -256,9 +255,13 @@ mod tests {
     #[test]
     fn match_argv_longest_prefix() {
         let reg = test_registry();
-        let (verb, consumed) = reg.match_argv(
-            &["bundle".to_string(), "install".to_string(), "extra".to_string()],
-        ).unwrap();
+        let (verb, consumed) = reg
+            .match_argv(&[
+                "bundle".to_string(),
+                "install".to_string(),
+                "extra".to_string(),
+            ])
+            .unwrap();
         assert_eq!(verb, "bundle-install");
         assert_eq!(consumed, 2);
     }
@@ -266,9 +269,9 @@ mod tests {
     #[test]
     fn match_argv_single_token() {
         let reg = test_registry();
-        let (verb, consumed) = reg.match_argv(
-            &["sign".to_string(), "extra".to_string()],
-        ).unwrap();
+        let (verb, consumed) = reg
+            .match_argv(&["sign".to_string(), "extra".to_string()])
+            .unwrap();
         assert_eq!(verb, "sign");
         assert_eq!(consumed, 1);
     }
@@ -282,9 +285,9 @@ mod tests {
     #[test]
     fn match_argv_exact_match() {
         let reg = test_registry();
-        let (verb, consumed) = reg.match_argv(
-            &["bundle".to_string(), "install".to_string()],
-        ).unwrap();
+        let (verb, consumed) = reg
+            .match_argv(&["bundle".to_string(), "install".to_string()])
+            .unwrap();
         assert_eq!(verb, "bundle-install");
         assert_eq!(consumed, 2);
     }
@@ -305,7 +308,8 @@ mod tests {
     #[test]
     fn aliases_for_verb() {
         let reg = test_registry();
-        let mut names: Vec<&str> = reg.aliases_for_verb("sign")
+        let mut names: Vec<&str> = reg
+            .aliases_for_verb("sign")
             .iter()
             .map(|a| a.tokens[0].as_str())
             .collect();
@@ -369,10 +373,20 @@ mod tests {
         use crate::verb_registry::{VerbDef, VerbRegistry};
         let reg = test_registry();
         let verbs = VerbRegistry::from_records(&[
-            VerbDef { name: "sign".into(), execute: None },
-            VerbDef { name: "fetch".into(), execute: None },
-            VerbDef { name: "bundle-install".into(), execute: None },
-        ]).unwrap();
+            VerbDef {
+                name: "sign".into(),
+                execute: None,
+            },
+            VerbDef {
+                name: "fetch".into(),
+                execute: None,
+            },
+            VerbDef {
+                name: "bundle-install".into(),
+                execute: None,
+            },
+        ])
+        .unwrap();
         assert!(reg.validate_all_verbs_known(&verbs).is_ok());
     }
 

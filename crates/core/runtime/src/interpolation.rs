@@ -88,17 +88,16 @@ fn interpolate_string(template: &str, context: &Value) -> anyhow::Result<Value> 
             let expr = &caps[1];
             result.push_str(&remaining[..match_start]);
             match resolve_expression(expr, context) {
-                Some(val) => {
-                    match stringify_value(&val) {
-                        Some(s) => result.push_str(&s),
-                        None => {
-                            anyhow::bail!(
-                                "interpolation: ${{{}}} resolved to {} which cannot be stringified",
-                                expr, val
-                            );
-                        }
+                Some(val) => match stringify_value(&val) {
+                    Some(s) => result.push_str(&s),
+                    None => {
+                        anyhow::bail!(
+                            "interpolation: ${{{}}} resolved to {} which cannot be stringified",
+                            expr,
+                            val
+                        );
                     }
-                }
+                },
                 None => {
                     anyhow::bail!(
                         "interpolation: ${{{}}} could not be resolved — \
@@ -147,14 +146,12 @@ fn resolve_input(name: &str, modifier: &str, context: &Value) -> anyhow::Result<
             // produce confusing results in template expansion. Operators
             // who need non-string inputs should use ${...} expressions with
             // the inputs path instead.
-            val.as_str()
-                .map(|s| Ok(s.to_string()))
-                .unwrap_or_else(|| {
-                    anyhow::bail!(
-                        "interpolation: {{input:{name}}} resolved to {val} which is not a string — \
+            val.as_str().map(|s| Ok(s.to_string())).unwrap_or_else(|| {
+                anyhow::bail!(
+                    "interpolation: {{input:{name}}} resolved to {val} which is not a string — \
                          use ${{inputs.{name}}} for non-string input access"
-                    )
-                })
+                )
+            })
         }
         None => match modifier {
             "?" => Ok(String::new()),
@@ -263,14 +260,17 @@ fn apply_pipes(val: Value, pipes: &[String]) -> Option<Value> {
                 let s = result.as_str()?;
                 Value::String(s.to_lowercase())
             }
-            "type" => Value::String(match &result {
-                Value::Null => "null",
-                Value::Bool(_) => "bool",
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::Array(_) => "array",
-                Value::Object(_) => "object",
-            }.to_string()),
+            "type" => Value::String(
+                match &result {
+                    Value::Null => "null",
+                    Value::Bool(_) => "bool",
+                    Value::Number(_) => "number",
+                    Value::String(_) => "string",
+                    Value::Array(_) => "array",
+                    Value::Object(_) => "object",
+                }
+                .to_string(),
+            ),
             _ => return None, // Unknown pipe → expression unresolvable
         };
     }

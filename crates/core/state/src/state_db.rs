@@ -44,8 +44,8 @@ impl StateDb {
         std::fs::create_dir_all(&refs_root).context("creating refs root")?;
         std::fs::create_dir_all(&locators_root).context("creating locators root")?;
 
-        let projection = ProjectionDb::open(&projection_path)
-            .context("opening projection database")?;
+        let projection =
+            ProjectionDb::open(&projection_path).context("opening projection database")?;
 
         Ok(Self {
             cas_root,
@@ -99,11 +99,8 @@ impl StateDb {
             )?
         };
 
-        projection::project_thread_snapshot(
-            &self.projection,
-            &snapshot,
-            chain_root_id,
-        ).context("projection failed after CAS write for create_chain")?;
+        projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
+            .context("projection failed after CAS write for create_chain")?;
 
         Ok(result)
     }
@@ -130,11 +127,8 @@ impl StateDb {
             )?
         };
 
-        projection::project_thread_snapshot(
-            &self.projection,
-            &snapshot,
-            chain_root_id,
-        ).context("projection failed after CAS write for add_thread")?;
+        projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
+            .context("projection failed after CAS write for add_thread")?;
 
         Ok(result)
     }
@@ -168,19 +162,23 @@ impl StateDb {
         };
 
         for event in &result.events {
-            projection::project_event(&self.projection, event)
-                .with_context(|| format!(
-                    "projection failed for event chain_seq={}",
-                    event.chain_seq
-                ))?;
+            projection::project_event(&self.projection, event).with_context(|| {
+                format!("projection failed for event chain_seq={}", event.chain_seq)
+            })?;
         }
 
         for update in &snapshot_updates {
-            projection::project_thread_snapshot(&self.projection, &update.new_snapshot, chain_root_id)
-                .with_context(|| format!(
+            projection::project_thread_snapshot(
+                &self.projection,
+                &update.new_snapshot,
+                chain_root_id,
+            )
+            .with_context(|| {
+                format!(
                     "projection failed for snapshot update thread_id={}",
                     update.thread_id
-                ))?;
+                )
+            })?;
         }
 
         Ok(result)
@@ -207,7 +205,11 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<()> {
         crate::refs::write_project_head_ref(
-            &self.refs_root, principal_key, project_hash, project_snapshot_hash, signer,
+            &self.refs_root,
+            principal_key,
+            project_hash,
+            project_snapshot_hash,
+            signer,
         )
     }
 
@@ -221,8 +223,12 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<()> {
         crate::refs::advance_project_head_ref(
-            &self.refs_root, principal_key, project_hash,
-            new_snapshot_hash, expected_current_hash, signer,
+            &self.refs_root,
+            principal_key,
+            project_hash,
+            new_snapshot_hash,
+            expected_current_hash,
+            signer,
         )
     }
 
@@ -232,7 +238,10 @@ impl StateDb {
         queries::get_thread(&self.projection, thread_id)
     }
 
-    pub fn list_threads_by_chain(&self, chain_root_id: &str) -> anyhow::Result<Vec<queries::ThreadRow>> {
+    pub fn list_threads_by_chain(
+        &self,
+        chain_root_id: &str,
+    ) -> anyhow::Result<Vec<queries::ThreadRow>> {
         queries::list_threads_by_chain(&self.projection, chain_root_id)
     }
 }
@@ -279,7 +288,10 @@ mod tests {
         assert!(!result.chain_state_hash.is_empty());
         assert!(!result.snapshot_hash.is_empty());
 
-        let row = db.get_thread("T-root").unwrap().expect("thread should exist in projection");
+        let row = db
+            .get_thread("T-root")
+            .unwrap()
+            .expect("thread should exist in projection");
         assert_eq!(row.thread_id, "T-root");
         assert_eq!(row.chain_root_id, "T-root");
         assert_eq!(row.kind, "directive");
@@ -358,7 +370,10 @@ mod tests {
 
         db.add_thread("T-root", child_snapshot, &signer).unwrap();
 
-        let row = db.get_thread("T-child").unwrap().expect("child thread in projection");
+        let row = db
+            .get_thread("T-child")
+            .unwrap()
+            .expect("child thread in projection");
         assert_eq!(row.thread_id, "T-child");
         assert_eq!(row.chain_root_id, "T-root");
         assert_eq!(row.kind, "tool");

@@ -149,16 +149,27 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
 
     // ── Layout dirs (mirrors bootstrap::create_directory_layout) ──
     for d in [
-        state_path.join(AI_DIR).join("node").join("auth").join("authorized_keys"),
+        state_path
+            .join(AI_DIR)
+            .join("node")
+            .join("auth")
+            .join("authorized_keys"),
         state_path.join(AI_DIR).join("node").join("vault"),
         state_path.join(AI_DIR).join("node").join("identity"),
         state_path.join(AI_DIR).join("state").join("objects"),
         state_path.join(AI_DIR).join("state").join("refs"),
-        user_space.join(AI_DIR).join("config").join("keys").join("signing"),
-        user_space.join(AI_DIR).join("config").join("keys").join("trusted"),
+        user_space
+            .join(AI_DIR)
+            .join("config")
+            .join("keys")
+            .join("signing"),
+        user_space
+            .join(AI_DIR)
+            .join("config")
+            .join("keys")
+            .join("trusted"),
     ] {
-        fs::create_dir_all(&d)
-            .with_context(|| format!("create {}", d.display()))?;
+        fs::create_dir_all(&d).with_context(|| format!("create {}", d.display()))?;
     }
 
     // ── Node Ed25519 identity ──
@@ -205,14 +216,20 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
         .map(|p| format!("  - {:?}", p))
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(ignore_dir.join("ignore.yaml"), format!("patterns:\n{}\n", patterns_yaml))
-        .context("write ignore config")?;
+    fs::write(
+        ignore_dir.join("ignore.yaml"),
+        format!("patterns:\n{}\n", patterns_yaml),
+    )
+    .context("write ignore config")?;
 
     // ── Self-signed trust docs (publisher + node + user) ──
-    let trust_dir = user_space.join(AI_DIR).join("config").join("keys").join("trusted");
+    let trust_dir = user_space
+        .join(AI_DIR)
+        .join("config")
+        .join("keys")
+        .join("trusted");
     for sk in [&publisher, &node, &user] {
-        write_self_signed_trust_doc(&trust_dir, sk)
-            .context("write self-signed trust doc")?;
+        write_self_signed_trust_doc(&trust_dir, sk).context("write self-signed trust doc")?;
     }
 
     // ── Trust the system-bundle signer (signs `bundles/core` items) ──
@@ -223,7 +240,12 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     // `populate_user_space()` helper does on the slow path.
     super::populate_user_space(user_space);
 
-    Ok(FastFixture { publisher, node, user, vault })
+    Ok(FastFixture {
+        publisher,
+        node,
+        user,
+        vault,
+    })
 }
 
 /// Write a `kind: node, section: bundles` record registering the core
@@ -232,11 +254,9 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
 /// `system_space_dir`). `bootstrap::verify_initialized` requires at
 /// least one registered bundle, so the harness calls this before
 /// spawning the daemon.
-pub fn register_core_bundle_at_state(
-    state_path: &Path,
-    fixture: &FastFixture,
-) -> Result<()> {
-    let abs = state_path.canonicalize()
+pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    let abs = state_path
+        .canonicalize()
         .with_context(|| format!("canonicalize {}", state_path.display()))?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
@@ -244,9 +264,8 @@ pub fn register_core_bundle_at_state(
         "kind: node\nsection: bundles\nid: core\npath: {}\n",
         abs.display()
     );
-    let signed = lillux::signature::sign_content_at(
-        &body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME,
-    );
+    let signed =
+        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("core.yaml"), signed)?;
     Ok(())
 }
@@ -259,10 +278,7 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     super::ensure_bundles_fresh();
     let standard = super::workspace_root().join("bundles/standard");
     if !standard.is_dir() {
-        anyhow::bail!(
-            "bundles/standard does not exist at {}",
-            standard.display()
-        );
+        anyhow::bail!("bundles/standard does not exist at {}", standard.display());
     }
     let abs = standard.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
@@ -271,7 +287,8 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
         "kind: node\nsection: bundles\nid: standard\npath: {}\n",
         abs.display()
     );
-    let signed = lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+    let signed =
+        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
     Ok(())
 }
@@ -306,13 +323,8 @@ scopes = ["*"]
 label = "fast-fixture-authorized-key"
 "#
     );
-    let signed = lillux::signature::sign_content_at(
-        &toml_body,
-        signer_sk,
-        "#",
-        None,
-        FAST_FIXTURE_TIME,
-    );
+    let signed =
+        lillux::signature::sign_content_at(&toml_body, signer_sk, "#", None, FAST_FIXTURE_TIME);
     fs::write(auth_dir.join(format!("{fp}.toml")), signed)?;
     Ok(())
 }
@@ -326,8 +338,7 @@ fn write_pem_signing_key(path: &Path, sk: &SigningKey) -> Result<()> {
     let pem = sk
         .to_pkcs8_pem(Default::default())
         .context("encode signing key to PKCS8 PEM")?;
-    fs::write(path, pem.as_bytes())
-        .with_context(|| format!("write {}", path.display()))?;
+    fs::write(path, pem.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

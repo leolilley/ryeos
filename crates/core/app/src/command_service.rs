@@ -4,9 +4,9 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::event_store_service::EventStoreService;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{CommandRecord, NewCommandRecord, StateStore};
-use crate::event_store_service::EventStoreService;
 
 #[derive(Debug, Clone)]
 pub struct CommandService {
@@ -54,7 +54,11 @@ impl CommandService {
         kind_profiles: Arc<KindProfileRegistry>,
         _events: Arc<EventStoreService>,
     ) -> Self {
-        Self { state_store, kind_profiles, _events }
+        Self {
+            state_store,
+            kind_profiles,
+            _events,
+        }
     }
 
     #[tracing::instrument(
@@ -124,9 +128,11 @@ impl CommandService {
             other => bail!("invalid command completion status: {other}"),
         }
 
-        let command =
-            self.state_store
-                .complete_command(params.command_id, &params.status, params.result.as_ref())?;
+        let command = self.state_store.complete_command(
+            params.command_id,
+            &params.status,
+            params.result.as_ref(),
+        )?;
         Ok(command)
     }
 }

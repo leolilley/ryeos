@@ -26,7 +26,7 @@ use subtle::ConstantTimeEq;
 
 use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContract, RouteInvocationContext,
+    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
     RouteInvocationOutput, RouteInvocationResult, RoutePrincipal,
 };
 use crate::routes::webhook_dedupe::{DedupeConfig, DedupeOutcome};
@@ -395,7 +395,8 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
 
         // 4. Timestamp window (optional).
         if let Some(ts_spec) = &self.timestamp {
-            let v = match self.extract_value(headers, body_raw, &ts_spec.extract, raw_header_value) {
+            let v = match self.extract_value(headers, body_raw, &ts_spec.extract, raw_header_value)
+            {
                 Ok(v) => v,
                 Err(reason) => {
                     tracing::warn!(route_id = %route_id, error = %reason, "hmac timestamp extract failed");
@@ -552,8 +553,7 @@ impl CompiledHmacVerifier {
                             out.push_str(pv);
                         }
                         TemplatePart::SignaturePrefix(n) => {
-                            let prefix: String =
-                                raw_signature_header.chars().take(*n).collect();
+                            let prefix: String = raw_signature_header.chars().take(*n).collect();
                             out.push_str(&prefix);
                         }
                     }
@@ -580,7 +580,10 @@ fn validate_header_name(
     name: &str,
 ) -> Result<axum::http::HeaderName, RouteConfigError> {
     if name.is_empty() {
-        return Err(cfg_err(route_id, &format!("{field_label} must not be empty")));
+        return Err(cfg_err(
+            route_id,
+            &format!("{field_label} must not be empty"),
+        ));
     }
     if name.bytes().any(|b| b.is_ascii_uppercase()) {
         return Err(cfg_err(
@@ -619,10 +622,7 @@ fn compile_signed_payload_item(
         ));
     }
     if let Some(literal) = &raw.literal {
-        if raw.header.is_some()
-            || raw.key.is_some()
-            || raw.path.is_some()
-            || raw.template.is_some()
+        if raw.header.is_some() || raw.key.is_some() || raw.path.is_some() || raw.template.is_some()
         {
             return Err(cfg_err(
                 route_id,
@@ -783,16 +783,10 @@ fn compile_signature_spec(
                 ));
             }
             let key = raw.select.key.as_ref().ok_or_else(|| {
-                cfg_err(
-                    route_id,
-                    "signature.select kind=pair_values requires `key`",
-                )
+                cfg_err(route_id, "signature.select kind=pair_values requires `key`")
             })?;
             if key.is_empty() {
-                return Err(cfg_err(
-                    route_id,
-                    "signature.select.key must not be empty",
-                ));
+                return Err(cfg_err(route_id, "signature.select.key must not be empty"));
             }
             SignatureSelect::PairValues { key: key.clone() }
         }
@@ -939,17 +933,13 @@ fn compile_value_extract(
                 )
             })?;
             validate_json_path(route_id, &format!("{label}.path"), path)?;
-            Ok(ValueExtract::BodyJsonPath {
-                path: path.clone(),
-            })
+            Ok(ValueExtract::BodyJsonPath { path: path.clone() })
         }
         "synthesized" => {
             if !allow_synthesized {
                 return Err(cfg_err(
                     route_id,
-                    &format!(
-                        "{label} from=synthesized is only allowed for delivery_id"
-                    ),
+                    &format!("{label} from=synthesized is only allowed for delivery_id"),
                 ));
             }
             if raw.header.is_some() || raw.key.is_some() || raw.path.is_some() {
@@ -968,13 +958,15 @@ fn compile_value_extract(
                 parse_synthesized_template(route_id, &format!("{label}.template"), template)?;
             Ok(ValueExtract::Synthesized(parts))
         }
-        other => Err(cfg_err(
-            route_id,
-            &format!(
+        other => {
+            Err(cfg_err(
+                route_id,
+                &format!(
                 "{label} unknown `from` '{other}'; allowed: header, header_pair, body_json_path{}",
                 if allow_synthesized { ", synthesized" } else { "" }
             ),
-        )),
+            ))
+        }
     }
 }
 
@@ -1020,11 +1012,7 @@ fn parse_template_variable(
     inner: &str,
 ) -> Result<TemplatePart, RouteConfigError> {
     if let Some(rest) = inner.strip_prefix("header.") {
-        let h = validate_header_name(
-            route_id,
-            &format!("{label} variable `header.{rest}`"),
-            rest,
-        )?;
+        let h = validate_header_name(route_id, &format!("{label} variable `header.{rest}`"), rest)?;
         return Ok(TemplatePart::Header(h));
     }
     if let Some(rest) = inner.strip_prefix("header_pair.") {
@@ -1146,8 +1134,8 @@ fn extract_pair_value<'a>(header_value: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn extract_body_json_string(body: &[u8], path: &str) -> Result<String, String> {
-    let v: Value = serde_json::from_slice(body)
-        .map_err(|e| format!("body is not valid JSON: {e}"))?;
+    let v: Value =
+        serde_json::from_slice(body).map_err(|e| format!("body is not valid JSON: {e}"))?;
     let obj = v
         .as_object()
         .ok_or_else(|| "body is not a JSON object".to_string())?;
@@ -1282,12 +1270,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let kind_profiles = std::sync::Arc::new(
-            ryeos_app::kind_profiles::KindProfileRegistry::load_defaults(),
-        );
-        let events = std::sync::Arc::new(
-            ryeos_app::event_store_service::EventStoreService::new(state_store.clone()),
-        );
+        let kind_profiles =
+            std::sync::Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::load_defaults());
+        let events = std::sync::Arc::new(ryeos_app::event_store_service::EventStoreService::new(
+            state_store.clone(),
+        ));
         let threads = std::sync::Arc::new(
             ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
                 state_store.clone(),
@@ -1296,13 +1283,11 @@ mod tests {
             )
             .expect("HOSTNAME not set in test environment"),
         );
-        let commands = std::sync::Arc::new(
-            ryeos_app::command_service::CommandService::new(
-                state_store.clone(),
-                kind_profiles,
-                events.clone(),
-            ),
-        );
+        let commands = std::sync::Arc::new(ryeos_app::command_service::CommandService::new(
+            state_store.clone(),
+            kind_profiles,
+            events.clone(),
+        ));
         let engine = ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -1318,13 +1303,28 @@ mod tests {
             verbs: vec![],
             aliases: vec![],
         };
-        let test_vr = std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-            ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-            ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
-        ]).unwrap());
-        let test_ar = std::sync::Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
-        let test_auth = std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
+        let test_vr = std::sync::Arc::new(
+            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "fetch".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "sign".into(),
+                    execute: Some("tool:ryeos/core/sign".into()),
+                },
+            ])
+            .unwrap(),
+        );
+        let test_ar = std::sync::Arc::new(
+            ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap(),
+        );
+        let test_auth =
+            std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
         let state = ryeos_app::state::AppState {
             config: std::sync::Arc::new(config),
             state_store,
@@ -1340,9 +1340,7 @@ mod tests {
             callback_tokens: std::sync::Arc::new(
                 ryeos_app::callback_token::CallbackCapabilityStore::new(),
             ),
-            thread_auth: std::sync::Arc::new(
-                ryeos_app::callback_token::ThreadAuthStore::new(),
-            ),
+            thread_auth: std::sync::Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
             write_barrier: std::sync::Arc::new(write_barrier),
             started_at: std::time::Instant::now(),
             started_at_iso: String::new(),
@@ -1357,7 +1355,9 @@ mod tests {
             verb_registry: test_vr,
             alias_registry: test_ar,
             authorizer: test_auth,
-            scheduler_db: std::sync::Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap()),
+            scheduler_db: std::sync::Arc::new(
+                ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap(),
+            ),
             scheduler_reload_tx: None,
             ignore_matcher: std::sync::Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
@@ -1523,12 +1523,14 @@ mod tests {
                 ("x-github-event", "push"),
             ]);
             let (_tmp, state) = build_test_state();
-            let dedupe = std::sync::Arc::new(
-                crate::routes::webhook_dedupe::WebhookDedupeStore::new(),
-            );
+            let dedupe =
+                std::sync::Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new());
 
             let ctx = make_invocation_ctx_with_dedupe(
-                state.clone(), headers.clone(), body, dedupe.clone(),
+                state.clone(),
+                headers.clone(),
+                body,
+                dedupe.clone(),
             );
             let result = compiled.invoke(ctx).await.unwrap();
             match result {
@@ -1549,7 +1551,8 @@ mod tests {
             let ctx2 = make_invocation_ctx_with_dedupe(state, headers, body, dedupe);
             let err = expect_dispatch_err(compiled.invoke(ctx2).await);
             assert!(matches!(err, RouteDispatchError::Unauthorized));
-        }).await;
+        })
+        .await;
     }
 
     // ── Compile-time validation ────────────────────────────────
@@ -1747,7 +1750,10 @@ mod tests {
                 },
             });
             let err = expect_err(compile_hmac_verifier("r1", &cfg));
-            assert!(format!("{err}").contains("must be lowercase ASCII"), "got: {err}");
+            assert!(
+                format!("{err}").contains("must be lowercase ASCII"),
+                "got: {err}"
+            );
         });
     }
 
@@ -1852,7 +1858,10 @@ mod tests {
                 },
             });
             let err = expect_err(compile_hmac_verifier("r1", &cfg));
-            assert!(format!("{err}").contains("select.kind 'magic'"), "got: {err}");
+            assert!(
+                format!("{err}").contains("select.kind 'magic'"),
+                "got: {err}"
+            );
         });
     }
 
@@ -2145,21 +2154,26 @@ mod tests {
             let sig = hex_encode(&hmac_sha256(b"secret", body), false);
             let headers = header_map(&[("x-sig", &sig), ("x-id", "evt_1")]);
             let (_tmp, state) = build_test_state();
-            let dedupe = std::sync::Arc::new(
-                crate::routes::webhook_dedupe::WebhookDedupeStore::new(),
-            );
+            let dedupe =
+                std::sync::Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new());
 
             // Same delivery_id on two unrelated routes — both fresh.
             // Each context uses the correct route_id so dedupe is isolated.
             let mut ctx_a = make_invocation_ctx_with_dedupe(
-                state.clone(), headers.clone(), body, dedupe.clone(),
+                state.clone(),
+                headers.clone(),
+                body,
+                dedupe.clone(),
             );
             ctx_a.route_id = "route_a".into();
             let result_a = compiled_a.invoke(ctx_a).await.unwrap();
             assert!(matches!(result_a, RouteInvocationResult::Principal(_)));
 
             let mut ctx_b = make_invocation_ctx_with_dedupe(
-                state.clone(), headers.clone(), body, dedupe.clone(),
+                state.clone(),
+                headers.clone(),
+                body,
+                dedupe.clone(),
             );
             ctx_b.route_id = "route_b".into();
             let result_b = compiled_b.invoke(ctx_b).await.unwrap();
@@ -2170,6 +2184,7 @@ mod tests {
             ctx_a2.route_id = "route_a".into();
             let err = expect_dispatch_err(compiled_a.invoke(ctx_a2).await);
             assert!(matches!(err, RouteDispatchError::Unauthorized));
-        }).await;
+        })
+        .await;
     }
 }

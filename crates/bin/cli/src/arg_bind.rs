@@ -69,13 +69,13 @@ fn read_input_source(source: &str) -> Result<String, CliDispatchError> {
     if source == "-" {
         use std::io::Read;
         let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
+        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+            CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
                 path: "<stdin>".into(),
                 item_ref: "--input".into(),
                 detail: format!("failed to read stdin: {e}"),
-            }))?;
+            })
+        })?;
         Ok(buf)
     } else {
         std::fs::read_to_string(source).map_err(|e| {
@@ -116,11 +116,7 @@ mod tests {
 
     #[test]
     fn bind_mixed() {
-        let tail = vec![
-            "--seed".into(),
-            "119".into(),
-            "./bundles/standard".into(),
-        ];
+        let tail = vec!["--seed".into(), "119".into(), "./bundles/standard".into()];
         let result = bind_tail(&tail).unwrap();
         assert_eq!(result.get("seed").unwrap(), "119");
         assert_eq!(result.get("_args").unwrap().as_array().unwrap().len(), 1);
@@ -152,12 +148,13 @@ mod tests {
     fn input_reads_file() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("params.json");
-        std::fs::write(&file_path, r#"{"public_key":"ed25519:abc","scopes":["a","b"]}"#).unwrap();
+        std::fs::write(
+            &file_path,
+            r#"{"public_key":"ed25519:abc","scopes":["a","b"]}"#,
+        )
+        .unwrap();
 
-        let tail = vec![
-            "--input".into(),
-            file_path.to_string_lossy().into_owned(),
-        ];
+        let tail = vec!["--input".into(), file_path.to_string_lossy().into_owned()];
         let result = parse_input_arg(&tail).unwrap().unwrap();
         assert_eq!(result["public_key"], "ed25519:abc");
         assert_eq!(result["scopes"].as_array().unwrap().len(), 2);
@@ -188,10 +185,7 @@ mod tests {
         let file_path = dir.path().join("bad.json");
         std::fs::write(&file_path, "not valid json {{{").unwrap();
 
-        let tail = vec![
-            "--input".into(),
-            file_path.to_string_lossy().into_owned(),
-        ];
+        let tail = vec!["--input".into(), file_path.to_string_lossy().into_owned()];
         let result = parse_input_arg(&tail);
         assert!(result.is_err());
     }
@@ -212,12 +206,12 @@ mod tests {
         let file_path = dir.path().join("array.json");
         std::fs::write(&file_path, r#"[1,2,3]"#).unwrap();
 
-        let tail = vec![
-            "--input".into(),
-            file_path.to_string_lossy().into_owned(),
-        ];
+        let tail = vec!["--input".into(), file_path.to_string_lossy().into_owned()];
         let result = parse_input_arg(&tail).unwrap().unwrap();
-        assert!(result.is_array(), "raw array is valid JSON, caller must validate shape");
+        assert!(
+            result.is_array(),
+            "raw array is valid JSON, caller must validate shape"
+        );
     }
 
     #[test]

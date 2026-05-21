@@ -8,11 +8,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
-use crate::handler_error::HandlerError;
 use crate::handler_context::HandlerContext;
+use crate::handler_error::HandlerError;
+use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,7 +20,11 @@ pub struct Request {
     pub thread_id: String,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value, HandlerError> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
@@ -30,13 +34,21 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         Some(detail) => {
             ctx.require_owner(detail.requested_by.as_deref())?;
 
-            let facets = state.state_store.get_facets(&req.thread_id)
+            let facets = state
+                .state_store
+                .get_facets(&req.thread_id)
                 .map_err(|e| HandlerError::Internal(e.to_string()))?;
-            let facets_map: std::collections::HashMap<&str, &str> =
-                facets.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-            let result = state.threads.get_thread_result(&req.thread_id)
+            let facets_map: std::collections::HashMap<&str, &str> = facets
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let result = state
+                .threads
+                .get_thread_result(&req.thread_id)
                 .map_err(|e| HandlerError::Internal(e.to_string()))?;
-            let artifacts = state.threads.list_thread_artifacts(&req.thread_id)
+            let artifacts = state
+                .threads
+                .list_thread_artifacts(&req.thread_id)
                 .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
             serde_json::to_value(serde_json::json!({

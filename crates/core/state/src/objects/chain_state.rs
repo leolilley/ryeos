@@ -282,9 +282,7 @@ impl ChainStateBuilder {
             prev_chain_state_hash: self.prev_chain_state_hash,
             last_event_hash: self.last_event_hash,
             last_chain_seq: self.last_chain_seq,
-            updated_at: self
-                .updated_at
-                .unwrap_or_else(lillux::time::iso8601_now),
+            updated_at: self.updated_at.unwrap_or_else(lillux::time::iso8601_now),
             threads: self.threads,
         }
     }
@@ -297,8 +295,16 @@ mod tests {
     fn make_thread_entry(hash_suffix: &str) -> ChainThreadEntry {
         // Produce a valid 64-char hex hash
         let suffix_len = hash_suffix.len().min(64);
-        let snapshot_hash = format!("{}{}", "a".repeat(64 - suffix_len), &hash_suffix[..suffix_len]);
-        let last_event_hash = format!("{}{}", "b".repeat(64 - suffix_len), &hash_suffix[..suffix_len]);
+        let snapshot_hash = format!(
+            "{}{}",
+            "a".repeat(64 - suffix_len),
+            &hash_suffix[..suffix_len]
+        );
+        let last_event_hash = format!(
+            "{}{}",
+            "b".repeat(64 - suffix_len),
+            &hash_suffix[..suffix_len]
+        );
         ChainThreadEntry {
             snapshot_hash,
             last_event_hash: Some(last_event_hash),

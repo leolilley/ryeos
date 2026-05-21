@@ -23,8 +23,8 @@ mod common;
 use std::path::Path;
 
 use base64::Engine;
-use common::DaemonHarness;
 use common::fast_fixture::register_standard_bundle;
+use common::DaemonHarness;
 use lillux::crypto::Signer as _;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -41,7 +41,10 @@ fn pin_test_signing_key() -> lillux::crypto::SigningKey {
 /// `<user_space>/.ai/config/keys/trusted/<fp>.toml`. Mirrors the
 /// `bootstrap::write_self_trust` format so the engine's `TrustStore`
 /// loader picks it up alongside the fixture trusted signers.
-fn write_trusted_signer(user_space: &Path, vk: &lillux::crypto::VerifyingKey) -> anyhow::Result<()> {
+fn write_trusted_signer(
+    user_space: &Path,
+    vk: &lillux::crypto::VerifyingKey,
+) -> anyhow::Result<()> {
     use base64::engine::Engine as _;
 
     let fp = lillux::signature::compute_fingerprint(vk);
@@ -106,10 +109,7 @@ metadata:
   rules: {}
 "##;
     let signed_kind = lillux::signature::sign_content(kind_body, &sk, "#", None);
-    std::fs::write(
-        kind_dir.join("pin_fake_kind.kind-schema.yaml"),
-        signed_kind,
-    )?;
+    std::fs::write(kind_dir.join("pin_fake_kind.kind-schema.yaml"), signed_kind)?;
 
     let runtimes_dir = user_space.join(".ai/runtimes");
     std::fs::create_dir_all(&runtimes_dir)?;
@@ -299,10 +299,7 @@ async fn pin_service_validate_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_native_runtime_with_detached() {
-    let (status, body) = native_synth_request(
-        serde_json::json!({"launch_mode": "detached"}),
-    )
-    .await;
+    let (status, body) = native_synth_request(serde_json::json!({"launch_mode": "detached"})).await;
     assert_eq!(
         status,
         reqwest::StatusCode::BAD_REQUEST,
@@ -322,10 +319,8 @@ async fn pin_native_runtime_with_detached() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_native_runtime_with_target_site_id() {
-    let (status, body) = native_synth_request(
-        serde_json::json!({"target_site_id": "site:other"}),
-    )
-    .await;
+    let (status, body) =
+        native_synth_request(serde_json::json!({"target_site_id": "site:other"})).await;
     assert_eq!(
         status,
         reqwest::StatusCode::BAD_REQUEST,
@@ -356,10 +351,8 @@ async fn pin_native_runtime_with_target_site_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_native_runtime_with_pushed_head() {
-    let (status, body) = native_synth_request(
-        serde_json::json!({"project_source": {"kind": "pushed_head"}}),
-    )
-    .await;
+    let (status, body) =
+        native_synth_request(serde_json::json!({"project_source": {"kind": "pushed_head"}})).await;
     assert_eq!(
         status,
         reqwest::StatusCode::CONFLICT,
@@ -418,7 +411,10 @@ async fn pin_service_over_tcp_succeeds() {
         "thread.trust_class: {body}"
     );
     assert!(
-        thread.get("effective_caps").and_then(|v| v.as_array()).is_some(),
+        thread
+            .get("effective_caps")
+            .and_then(|v| v.as_array())
+            .is_some(),
         "thread.effective_caps array present: {body}"
     );
     assert!(
@@ -581,10 +577,7 @@ async fn help_for_verb_with_required_fields_prints_schema_not_error() {
         "validated flag: {body}"
     );
     // Schema info must be present
-    assert!(
-        body.get("schema").is_some(),
-        "schema field present: {body}"
-    );
+    assert!(body.get("schema").is_some(), "schema field present: {body}");
 }
 
 /// validate_only on a service with no required fields also returns schema

@@ -70,15 +70,18 @@ impl Clone for CallbackClient {
 }
 
 impl CallbackClient {
-    pub fn new(callback: &EnvelopeCallback, thread_id: &str, project_path: &str, thread_auth_token: &str) -> Self {
+    pub fn new(
+        callback: &EnvelopeCallback,
+        thread_id: &str,
+        project_path: &str,
+        thread_auth_token: &str,
+    ) -> Self {
         let inner: Option<Arc<dyn RuntimeCallbackAPI>> = if callback.socket_path.exists() {
-            Some(Arc::new(
-                crate::callback_uds::UdsRuntimeClient::new(
-                    callback.socket_path.clone(),
-                    callback.token.clone(),
-                    thread_auth_token.to_string(),
-                )
-            ))
+            Some(Arc::new(crate::callback_uds::UdsRuntimeClient::new(
+                callback.socket_path.clone(),
+                callback.token.clone(),
+                thread_auth_token.to_string(),
+            )))
         } else {
             None
         };
@@ -145,7 +148,9 @@ impl CallbackClient {
         );
         match &self.inner {
             Some(client) => {
-                client.append_event(&self.thread_id, event_type, payload, storage_class).await
+                client
+                    .append_event(&self.thread_id, event_type, payload, storage_class)
+                    .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
             }
@@ -172,12 +177,7 @@ impl CallbackClient {
         match &self.inner {
             Some(client) => {
                 client
-                    .append_event(
-                        &self.thread_id,
-                        event_type.as_str(),
-                        payload,
-                        storage_class,
-                    )
+                    .append_event(&self.thread_id, event_type.as_str(), payload, storage_class)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
@@ -194,7 +194,9 @@ impl CallbackClient {
                  (socket missing); cannot mark thread as running"
             )
         })?;
-        client.mark_running(&self.thread_id).await
+        client
+            .mark_running(&self.thread_id)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
@@ -207,7 +209,9 @@ impl CallbackClient {
                  (socket missing); cannot finalize thread"
             )
         })?;
-        client.finalize_thread(&self.thread_id, status).await
+        client
+            .finalize_thread(&self.thread_id, status)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
@@ -215,7 +219,9 @@ impl CallbackClient {
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn request_continuation(&self, prompt: &str) -> Result<Value> {
         match &self.inner {
-            Some(client) => Ok(client.request_continuation(&self.thread_id, prompt).await
+            Some(client) => Ok(client
+                .request_continuation(&self.thread_id, prompt)
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?),
             None => Ok(Value::Null),
         }
@@ -225,7 +231,9 @@ impl CallbackClient {
     pub async fn publish_artifact(&self, artifact: Value) -> Result<()> {
         match &self.inner {
             Some(client) => {
-                client.publish_artifact(&self.thread_id, artifact).await
+                client
+                    .publish_artifact(&self.thread_id, artifact)
+                    .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
             }
@@ -236,7 +244,9 @@ impl CallbackClient {
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread(&self) -> Result<Value> {
         match &self.inner {
-            Some(client) => Ok(client.get_thread(&self.thread_id).await
+            Some(client) => Ok(client
+                .get_thread(&self.thread_id)
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?),
             None => Ok(Value::Null),
         }
@@ -245,7 +255,9 @@ impl CallbackClient {
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread_by_id(&self, thread_id: &str) -> Result<Value> {
         match &self.inner {
-            Some(client) => Ok(client.get_thread(thread_id).await
+            Some(client) => Ok(client
+                .get_thread(thread_id)
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?),
             None => Ok(Value::Null),
         }
@@ -259,7 +271,9 @@ impl CallbackClient {
                  (socket missing); runtime cannot replay events for resume"
             )
         })?;
-        let raw: Value = client.replay_events(thread_id).await
+        let raw: Value = client
+            .replay_events(thread_id)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         serde_json::from_value::<ReplayResponse>(raw)
             .map_err(|e| anyhow::anyhow!("invalid ReplayResponse from daemon: {e}"))
@@ -268,7 +282,9 @@ impl CallbackClient {
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_facets(&self) -> Result<Value> {
         match &self.inner {
-            Some(client) => Ok(client.get_facets(&self.thread_id).await
+            Some(client) => Ok(client
+                .get_facets(&self.thread_id)
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?),
             None => Ok(Value::Null),
         }
@@ -279,7 +295,8 @@ impl CallbackClient {
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to the validator-accepted `cognition_in` event.
     pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
-        self.append_event("cognition_in", serde_json::json!({"turn": turn})).await
+        self.append_event("cognition_in", serde_json::json!({"turn": turn}))
+            .await
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
@@ -297,7 +314,12 @@ impl CallbackClient {
     /// Maps to `tool_call_start`. Includes the thread's effective
     /// capabilities so event consumers can see what the thread was
     /// authorized to do at dispatch time.
-    pub async fn emit_tool_dispatch(&self, tool: &str, call_id: Option<&str>, effective_caps: &[String]) -> Result<()> {
+    pub async fn emit_tool_dispatch(
+        &self,
+        tool: &str,
+        call_id: Option<&str>,
+        effective_caps: &[String],
+    ) -> Result<()> {
         let mut data = serde_json::json!({"tool": tool});
         if let Some(id) = call_id {
             data["call_id"] = serde_json::json!(id);
@@ -332,11 +354,12 @@ impl CallbackClient {
             "result_size_bytes": result_size_bytes,
         });
         if let Some(body_str) = body {
-            let parsed = serde_json::from_str::<serde_json::Value>(body_str)
-                .unwrap_or_else(|e| panic!(
+            let parsed = serde_json::from_str::<serde_json::Value>(body_str).unwrap_or_else(|e| {
+                panic!(
                     "emit_tool_result: body for call_id {call_id} is not valid JSON \
                      (this is a programmer error — all callers produce JSON): {e}"
-                ));
+                )
+            });
             data["result"] = parsed;
         }
         if let Some(reason) = truncated_reason {
@@ -348,7 +371,8 @@ impl CallbackClient {
     /// Advisory: warn-and-continue OK when disconnected.
     /// Maps to `thread_failed`.
     pub async fn emit_error(&self, error: &str) -> Result<()> {
-        self.append_event("thread_failed", serde_json::json!({"message": error})).await
+        self.append_event("thread_failed", serde_json::json!({"message": error}))
+            .await
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -356,7 +380,8 @@ impl CallbackClient {
         self.append_event(
             "thread_continued",
             serde_json::json!({"previous_thread_id": previous_id}),
-        ).await
+        )
+        .await
     }
 
     /// Resume-critical: must hard-fail on disconnect.
@@ -373,14 +398,17 @@ impl CallbackClient {
         let storage_class = storage_class_for("thread_usage");
         let payload = serde_json::to_value(usage)
             .map_err(|e| anyhow::anyhow!("serialize ThreadUsage: {e}"))?;
-        client.append_event(&self.thread_id, "thread_usage", payload, storage_class).await
+        client
+            .append_event(&self.thread_id, "thread_usage", payload, storage_class)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn stream_opened(&self, turn: u32) -> Result<()> {
-        self.append_event("stream_opened", serde_json::json!({"turn": turn})).await
+        self.append_event("stream_opened", serde_json::json!({"turn": turn}))
+            .await
     }
 
     // ── native_async streaming contract ─────────────────────────────
@@ -473,19 +501,31 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn attach_process(&self, _thread_id: &str, _pid: u32) -> Result<Value, CallbackError> {
+        async fn attach_process(
+            &self,
+            _thread_id: &str,
+            _pid: u32,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn mark_running(&self, _thread_id: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn finalize_thread(&self, _thread_id: &str, _status: &str) -> Result<Value, CallbackError> {
+        async fn finalize_thread(
+            &self,
+            _thread_id: &str,
+            _status: &str,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn get_thread(&self, _thread_id: &str) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
-        async fn request_continuation(&self, _thread_id: &str, _prompt: &str) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _thread_id: &str,
+            _prompt: &str,
+        ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
         async fn append_event(
@@ -522,7 +562,11 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn publish_artifact(&self, _thread_id: &str, _artifact: Value) -> Result<Value, CallbackError> {
+        async fn publish_artifact(
+            &self,
+            _thread_id: &str,
+            _artifact: Value,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn get_facets(&self, _thread_id: &str) -> Result<Value, CallbackError> {
@@ -553,7 +597,9 @@ mod tests {
             false,
             None,
             58,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["call_id"], "call_1");
@@ -568,8 +614,16 @@ mod tests {
     #[tokio::test]
     async fn emit_tool_result_omits_body_when_size_capped() {
         let (cb, recorder) = make_recorder_client();
-        cb.emit_tool_result("call_2", "test/search", None, true, Some("size_cap_exceeded"), 524_288)
-            .await.unwrap();
+        cb.emit_tool_result(
+            "call_2",
+            "test/search",
+            None,
+            true,
+            Some("size_cap_exceeded"),
+            524_288,
+        )
+        .await
+        .unwrap();
 
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["truncated"], true);
@@ -584,12 +638,22 @@ mod tests {
     async fn emit_tool_result_inlines_body_with_nested_json() {
         let (cb, recorder) = make_recorder_client();
         let body = r#"{"ok":true,"data":{"nested":[1,2,3]}}"#;
-        cb.emit_tool_result("call_4", "test/nested", Some(body), false, None, body.len() as u64)
-            .await.unwrap();
+        cb.emit_tool_result(
+            "call_4",
+            "test/nested",
+            Some(body),
+            false,
+            None,
+            body.len() as u64,
+        )
+        .await
+        .unwrap();
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["result"]["data"]["nested"][2], 3);
-        assert!(evt.get("result_text").is_none(),
-                "result_text must never appear — all callers produce JSON");
+        assert!(
+            evt.get("result_text").is_none(),
+            "result_text must never appear — all callers produce JSON"
+        );
     }
 
     // ── Existing tests ───────────────────────────────────────────────
@@ -702,8 +766,7 @@ mod tests {
         let client = make_client();
         client
             .emit_progress(
-                crate::progress::ProgressEvent::new("download", "fetching")
-                    .with_percent(10.0),
+                crate::progress::ProgressEvent::new("download", "fetching").with_percent(10.0),
             )
             .await
             .unwrap();
@@ -776,19 +839,19 @@ mod tests {
         // Every event the runtime can emit, post-P2.2:
         let runtime_emits: &[&str] = &[
             // Typed emitters in CallbackClient
-            "cognition_in",          // emit_turn_start
-            "cognition_out",         // emit_turn_complete
-            "tool_call_start",       // emit_tool_dispatch
-            "tool_call_result",      // emit_tool_result
-            "thread_failed",         // emit_error
-            "thread_continued",      // emit_thread_continued
-            "stream_snapshot",       // emit_progress / emit_status
+            "cognition_in",     // emit_turn_start
+            "cognition_out",    // emit_turn_complete
+            "tool_call_start",  // emit_tool_dispatch
+            "tool_call_result", // emit_tool_result
+            "thread_failed",    // emit_error
+            "thread_continued", // emit_thread_continued
+            "stream_snapshot",  // emit_progress / emit_status
             // Bare append_event calls in crates/runtimes/directive/runner.rs
-            "stream_opened",         // State::Streaming
-            "cognition_reasoning",   // FiringHooks
-            "thread_usage",          // emit_thread_usage
-            // tool_call_result(blocked) re-uses the validator name
-            // already covered above.
+            "stream_opened",       // State::Streaming
+            "cognition_reasoning", // FiringHooks
+            "thread_usage",        // emit_thread_usage
+                                   // tool_call_result(blocked) re-uses the validator name
+                                   // already covered above.
         ];
 
         for ev in runtime_emits {

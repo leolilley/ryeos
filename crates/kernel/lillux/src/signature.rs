@@ -63,7 +63,13 @@ pub fn sign_content(
     prefix: &str,
     suffix: Option<&str>,
 ) -> String {
-    sign_content_at(body, signing_key, prefix, suffix, &crate::time::iso8601_now())
+    sign_content_at(
+        body,
+        signing_key,
+        prefix,
+        suffix,
+        &crate::time::iso8601_now(),
+    )
 }
 
 pub fn parse_signature_line(

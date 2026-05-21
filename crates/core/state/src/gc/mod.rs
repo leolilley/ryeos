@@ -75,13 +75,11 @@ pub fn run_gc(
 
     // Phase 1: Compact (opt-in)
     if params.compact {
-        let compact_signer = signer
-            .ok_or_else(|| anyhow::anyhow!("--compact requires a signer (use --key to provide one)"))?;
+        let compact_signer = signer.ok_or_else(|| {
+            anyhow::anyhow!("--compact requires a signer (use --key to provide one)")
+        })?;
 
-        let policy = params
-            .policy
-            .clone()
-            .unwrap_or_default();
+        let policy = params.policy.clone().unwrap_or_default();
 
         tracing::info!(
             dry_run = params.dry_run,
@@ -114,8 +112,22 @@ pub fn run_gc(
     result.reachable_objects = reachable.object_hashes.len();
     result.reachable_blobs = reachable.blob_hashes.len();
 
-    sweep_sharded_dir(cas_root, "objects", ".json", &reachable.object_hashes, params.dry_run, &mut result)?;
-    sweep_sharded_dir(cas_root, "blobs", "", &reachable.blob_hashes, params.dry_run, &mut result)?;
+    sweep_sharded_dir(
+        cas_root,
+        "objects",
+        ".json",
+        &reachable.object_hashes,
+        params.dry_run,
+        &mut result,
+    )?;
+    sweep_sharded_dir(
+        cas_root,
+        "blobs",
+        "",
+        &reachable.blob_hashes,
+        params.dry_run,
+        &mut result,
+    )?;
 
     result.duration_ms = started.elapsed().as_millis() as u64;
 
@@ -150,8 +162,8 @@ fn sweep_sharded_dir(
         return Ok(());
     }
 
-    for shard1 in std::fs::read_dir(&dir)
-        .with_context(|| format!("failed to read {}", namespace))?
+    for shard1 in
+        std::fs::read_dir(&dir).with_context(|| format!("failed to read {}", namespace))?
     {
         let shard1 = shard1.context("failed to read shard entry")?;
         if !shard1.file_type()?.is_dir() {
@@ -195,8 +207,9 @@ fn sweep_sharded_dir(
                             "would delete (dry run)"
                         );
                     } else {
-                        std::fs::remove_file(file_entry.path())
-                            .with_context(|| format!("failed to delete {}", file_entry.path().display()))?;
+                        std::fs::remove_file(file_entry.path()).with_context(|| {
+                            format!("failed to delete {}", file_entry.path().display())
+                        })?;
                     }
 
                     if namespace == "blobs" {
@@ -268,8 +281,8 @@ mod tests {
     /// then runs a full GC. The removed snapshots should be swept as unreachable.
     #[test]
     fn compact_then_sweep_cleans_victims() {
-        use crate::signer::TestSigner;
         use crate::refs;
+        use crate::signer::TestSigner;
         use std::fs;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -340,7 +353,14 @@ mod tests {
         }
 
         // Set HEAD to snap5
-        refs::write_project_head_ref(&refs_root, "fp:test-principal", "victim-proj", &hashes[4], &signer).unwrap();
+        refs::write_project_head_ref(
+            &refs_root,
+            "fp:test-principal",
+            "victim-proj",
+            &hashes[4],
+            &signer,
+        )
+        .unwrap();
 
         // Count objects before GC
         let count_before = count_objects(&cas_root);
@@ -351,11 +371,13 @@ mod tests {
             manual_pushes: 10,
             auto_snapshots: 1,
         };
-        let dry_compact = compact::compact_projects(
-            &cas_root, &refs_root, &signer, &policy, true,
-        ).unwrap();
+        let dry_compact =
+            compact::compact_projects(&cas_root, &refs_root, &signer, &policy, true).unwrap();
         assert_eq!(dry_compact.projects_scanned, 1);
-        assert_eq!(dry_compact.snapshots_removed, 3, "dry run should remove 3 snapshots");
+        assert_eq!(
+            dry_compact.snapshots_removed, 3,
+            "dry run should remove 3 snapshots"
+        );
 
         // Run GC with compact (keep HEAD + 1 auto = 2 snapshots, remove 3)
         let params = GcParams {
@@ -369,13 +391,18 @@ mod tests {
         assert!(result.compaction.is_some());
         let compaction = result.compaction.unwrap();
         assert_eq!(compaction.snapshots_removed, 3);
-        assert!(result.deleted_objects >= 3, "should have deleted at least 3 unreachable snapshots");
+        assert!(
+            result.deleted_objects >= 3,
+            "should have deleted at least 3 unreachable snapshots"
+        );
 
         let count_after = count_objects(&cas_root);
         assert!(
             count_after < count_before,
             "expected fewer objects after GC: before={}, after={}, deleted={}",
-            count_before, count_after, result.deleted_objects
+            count_before,
+            count_after,
+            result.deleted_objects
         );
     }
 
@@ -459,16 +486,34 @@ mod tests {
         let reachable_blobs: HashSet<String> = HashSet::new();
         let mut result = GcResult::default();
 
-        sweep_sharded_dir(&cas_root, "objects", ".json", &reachable_objects, false, &mut result).unwrap();
+        sweep_sharded_dir(
+            &cas_root,
+            "objects",
+            ".json",
+            &reachable_objects,
+            false,
+            &mut result,
+        )
+        .unwrap();
         sweep_sharded_dir(&cas_root, "blobs", "", &reachable_blobs, false, &mut result).unwrap();
 
-        assert_eq!(result.deleted_objects, 3, "sweep should find all 3 objects created by shard_path");
-        assert_eq!(result.deleted_blobs, 1, "sweep should find the blob created by shard_path");
+        assert_eq!(
+            result.deleted_objects, 3,
+            "sweep should find all 3 objects created by shard_path"
+        );
+        assert_eq!(
+            result.deleted_blobs, 1,
+            "sweep should find the blob created by shard_path"
+        );
 
         // Verify files are actually gone
         for hash in &object_hashes {
             let path = lillux::shard_path(&cas_root, "objects", hash, ".json");
-            assert!(!path.exists(), "object file should be deleted: {}", path.display());
+            assert!(
+                !path.exists(),
+                "object file should be deleted: {}",
+                path.display()
+            );
         }
         assert!(!blob_path.exists(), "blob file should be deleted");
     }
@@ -497,7 +542,15 @@ mod tests {
         // Sweep with empty reachable — deletes the file and cleans dirs
         let reachable: HashSet<String> = HashSet::new();
         let mut result = GcResult::default();
-        sweep_sharded_dir(&cas_root, "objects", ".json", &reachable, false, &mut result).unwrap();
+        sweep_sharded_dir(
+            &cas_root,
+            "objects",
+            ".json",
+            &reachable,
+            false,
+            &mut result,
+        )
+        .unwrap();
 
         assert_eq!(result.deleted_objects, 1);
         assert!(!path.exists(), "file should be gone");

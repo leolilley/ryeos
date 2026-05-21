@@ -114,29 +114,20 @@ pub fn run_sign(
         roots::system_roots(&additional)
     };
 
-    let trust_store = TrustStore::load_three_tier(
-        project_path,
-        user_root.as_deref(),
-        &system_roots,
-    )
-    .with_context(|| "load trust store")?;
+    let trust_store =
+        TrustStore::load_three_tier(project_path, user_root.as_deref(), &system_roots)
+            .with_context(|| "load trust store")?;
 
     let kinds = build_kind_registry(&system_roots, &trust_store)?;
-    let kind_schema = kinds
-        .get(&canonical.kind)
-        .ok_or_else(|| {
-            anyhow!(
-                "unknown kind `{}` — no kind schema registered",
-                canonical.kind
-            )
-        })?;
+    let kind_schema = kinds.get(&canonical.kind).ok_or_else(|| {
+        anyhow!(
+            "unknown kind `{}` — no kind schema registered",
+            canonical.kind
+        )
+    })?;
 
-    let parsers = build_parser_dispatcher(
-        &system_roots,
-        user_root.as_deref(),
-        &kinds,
-        &trust_store,
-    )?;
+    let parsers =
+        build_parser_dispatcher(&system_roots, user_root.as_deref(), &kinds, &trust_store)?;
 
     let kind_dir = source_kind_dir(kind_schema, source, project_path, user_root.as_deref())?;
     let ai_root = source_ai_root(source, project_path, user_root.as_deref())?;
@@ -213,20 +204,22 @@ fn sign_one(
     ai_root: &Path,
     parsers: &ParserDispatcher,
 ) -> Result<SignatureReport> {
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("read {}", file_path.display()))?;
+    let content =
+        fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
     let matched_ext = file_path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{e}"))
         .ok_or_else(|| anyhow!("file {} has no extension", file_path.display()))?;
-    let source_format = kind_schema.resolved_format_for(&matched_ext).ok_or_else(|| {
-        anyhow!(
-            "extension `{}` not registered for kind — kind schema declares: {:?}",
-            matched_ext,
-            kind_schema.extension_strs()
-        )
-    })?;
+    let source_format = kind_schema
+        .resolved_format_for(&matched_ext)
+        .ok_or_else(|| {
+            anyhow!(
+                "extension `{}` not registered for kind — kind schema declares: {:?}",
+                matched_ext,
+                kind_schema.extension_strs()
+            )
+        })?;
 
     let parsed = parsers
         .dispatch(
@@ -244,7 +237,12 @@ fn sign_one(
         ai_root,
         file_path,
     )
-    .map_err(|e| anyhow!("path-anchoring validator refused {}: {e}", file_path.display()))?;
+    .map_err(|e| {
+        anyhow!(
+            "path-anchoring validator refused {}: {e}",
+            file_path.display()
+        )
+    })?;
 
     sign_in_place(file_path, &source_format.signature)
 }
@@ -337,12 +335,13 @@ fn source_ai_root(
 ) -> Result<PathBuf> {
     match source {
         SignSource::Project => {
-            let p = project_path.ok_or_else(|| anyhow!("source=project requires --project path"))?;
+            let p =
+                project_path.ok_or_else(|| anyhow!("source=project requires --project path"))?;
             Ok(p.join(".ai"))
         }
         SignSource::User => {
-            let h = user_root
-                .ok_or_else(|| anyhow!("source=user but $HOME (user root) is not set"))?;
+            let h =
+                user_root.ok_or_else(|| anyhow!("source=user but $HOME (user root) is not set"))?;
             Ok(h.join(".ai"))
         }
     }
@@ -385,10 +384,7 @@ pub struct ItemOutcome {
     pub error: Option<String>,
 }
 
-fn build_kind_registry(
-    system_roots: &[PathBuf],
-    trust_store: &TrustStore,
-) -> Result<KindRegistry> {
+fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
     // Kind schemas are node-tier items: they live exclusively under
     // `<bundle-root>/.ai/node/engine/kinds/` in node bundles laid down
     // at the system roots. They do NOT participate in the
@@ -421,11 +417,19 @@ fn build_parser_dispatcher(
     let mut search: Vec<PathBuf> = system_roots.to_vec();
     let mut tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = system_roots
         .iter()
-        .map(|r| (r.clone(), ryeos_engine::resolution::TrustClass::TrustedSystem))
+        .map(|r| {
+            (
+                r.clone(),
+                ryeos_engine::resolution::TrustClass::TrustedSystem,
+            )
+        })
         .collect();
     if let Some(u) = user_root {
         search.push(u.to_path_buf());
-        tagged_search.push((u.to_path_buf(), ryeos_engine::resolution::TrustClass::TrustedUser));
+        tagged_search.push((
+            u.to_path_buf(),
+            ryeos_engine::resolution::TrustClass::TrustedUser,
+        ));
     }
     let (parser_tools, _duplicates) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
@@ -437,8 +441,7 @@ fn build_parser_dispatcher(
 /// Sign a file in place using the kind's signature envelope. Loads
 /// the user signing key from `~/.ryeos/.ai/config/keys/signing/private_key.pem`.
 fn sign_in_place(input: &Path, envelope: &SignatureEnvelope) -> Result<SignatureReport> {
-    let body = fs::read_to_string(input)
-        .with_context(|| format!("read {}", input.display()))?;
+    let body = fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?;
 
     let signing_key = load_user_signing_key()?;
     let fingerprint = lillux::sha256_hex(signing_key.verifying_key().as_bytes());
@@ -507,8 +510,7 @@ mod tests {
     fn sign_source_rejects_system() {
         let err = SignSource::parse("system").unwrap_err();
         assert!(
-            err.to_string().contains("system")
-                && err.to_string().contains("rejected"),
+            err.to_string().contains("system") && err.to_string().contains("rejected"),
             "expected system-rejected error, got: {err}"
         );
     }

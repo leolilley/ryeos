@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::contracts::{ItemMetadata, ResolvedSourceFormat, SignatureEnvelope, ValueShape};
 use crate::error::EngineError;
-use crate::trust::TrustStore;
 use crate::resolution::decl::ResolutionStepDecl;
+use crate::trust::TrustStore;
 
 /// Apply extraction rules to a parser-produced `Value`, populating an
 /// `ItemMetadata`. Lives in `kind_registry` because the rules ARE part
@@ -58,9 +58,7 @@ fn extract_rule_value(
                 .map(|s| s.to_owned()),
         ),
         ExtractionRule::Constant { value } => RuleResult::String(Some(value.clone())),
-        ExtractionRule::Path { key } => {
-            RuleResult::String(extract_string_from_value(parsed, key))
-        }
+        ExtractionRule::Path { key } => RuleResult::String(extract_string_from_value(parsed, key)),
         ExtractionRule::PathStringSeq { key } => {
             RuleResult::StringSeq(extract_string_seq_from_value(parsed, key))
         }
@@ -246,10 +244,7 @@ pub enum MetadataAnchoringError {
         "required metadata field `{field}` missing on `{}`",
         file.display()
     )]
-    MissingRequired {
-        file: PathBuf,
-        field: String,
-    },
+    MissingRequired { file: PathBuf, field: String },
 
     /// `match: filename` rule produced a value that disagrees with
     /// the file stem.
@@ -445,9 +440,7 @@ pub struct RuntimeSpec {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminatorDecl {
     /// Daemon calls a registered Rust fn in a named registry.
-    InProcess {
-        registry: InProcessRegistryKind,
-    },
+    InProcess { registry: InProcessRegistryKind },
     /// Daemon spawns a child binary; envelope shape comes from the
     /// referenced protocol descriptor.
     Subprocess {
@@ -1000,11 +993,10 @@ fn load_and_verify_kind_schema(
     yaml_path: &Path,
     trust_store: &TrustStore,
 ) -> Result<KindSchema, EngineError> {
-    let content = std::fs::read_to_string(yaml_path).map_err(|e| {
-        EngineError::SchemaLoaderError {
+    let content =
+        std::fs::read_to_string(yaml_path).map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("cannot read {}: {e}", yaml_path.display()),
-        }
-    })?;
+        })?;
 
     let prefix = "#";
     let suffix: Option<&str> = None;
@@ -1171,11 +1163,13 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     let extraction_rules = parse_extraction_rules(&data, display)?;
 
     let composed_value_contract = match data.get("composed_value_contract") {
-        Some(v) if !v.is_null() => serde_yaml::from_value::<ValueShape>(v.clone()).map_err(
-            |e| EngineError::SchemaLoaderError {
-                reason: format!("{display}: invalid `composed_value_contract`: {e}"),
-            },
-        )?,
+        Some(v) if !v.is_null() => {
+            serde_yaml::from_value::<ValueShape>(v.clone()).map_err(|e| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `composed_value_contract`: {e}"),
+                }
+            })?
+        }
         _ => {
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
@@ -1211,13 +1205,11 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     };
 
     let runtime = match data.get("runtime") {
-        Some(v) if !v.is_null() => Some(
-            serde_yaml::from_value::<RuntimeSpec>(v.clone()).map_err(|e| {
-                EngineError::SchemaLoaderError {
-                    reason: format!("{display}: invalid `runtime` block: {e}"),
-                }
-            })?,
-        ),
+        Some(v) if !v.is_null() => Some(serde_yaml::from_value::<RuntimeSpec>(v.clone()).map_err(
+            |e| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid `runtime` block: {e}"),
+            },
+        )?),
         _ => None,
     };
 
@@ -1226,8 +1218,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     // When present, they MUST be sequences of plain strings; a wrong
     // shape is a hard schema error rather than a silent default.
     let inventory_kinds = parse_optional_string_seq(&data, "inventory_kinds", display)?;
-    let inventory_schema_keys =
-        parse_optional_string_seq(&data, "inventory_schema_keys", display)?;
+    let inventory_schema_keys = parse_optional_string_seq(&data, "inventory_schema_keys", display)?;
 
     Ok(KindSchema {
         directory,
@@ -1257,9 +1248,7 @@ fn parse_optional_string_seq(
                     Some(s) => out.push(s.to_owned()),
                     None => {
                         return Err(EngineError::SchemaLoaderError {
-                            reason: format!(
-                                "{display}: `{key}[{i}]` must be a string, got {v:?}"
-                            ),
+                            reason: format!("{display}: `{key}[{i}]` must be a string, got {v:?}"),
                         })
                     }
                 }
@@ -1267,9 +1256,7 @@ fn parse_optional_string_seq(
             Ok(out)
         }
         Some(other) => Err(EngineError::SchemaLoaderError {
-            reason: format!(
-                "{display}: `{key}` must be a sequence of strings, got {other:?}"
-            ),
+            reason: format!("{display}: `{key}` must be a sequence of strings, got {other:?}"),
         }),
     }
 }
@@ -1363,9 +1350,7 @@ fn parse_extraction_rules(
         // schema closed without sprinkling per-key validation.
         for (rk, _) in rule_map {
             let name = rk.as_str().ok_or_else(|| EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{display}: non-string key in metadata.rules.{field}"
-                ),
+                reason: format!("{display}: non-string key in metadata.rules.{field}"),
             })?;
             if !ACCEPTED_KEYS.contains(&name) {
                 return Err(EngineError::SchemaLoaderError {
@@ -1474,23 +1459,19 @@ fn parse_extraction_rules(
             })
             .map(|v| {
                 v.as_bool().ok_or_else(|| EngineError::SchemaLoaderError {
-                    reason: format!(
-                        "{display}: metadata.rules.{field}.required must be a bool"
-                    ),
+                    reason: format!("{display}: metadata.rules.{field}.required must be a bool"),
                 })
             })
             .transpose()?
             .unwrap_or(false);
 
-        let match_kind = match rule_map
-            .iter()
-            .find_map(|(rk, rv)| {
-                if rk.as_str() == Some("match") {
-                    Some(rv)
-                } else {
-                    None
-                }
-            }) {
+        let match_kind = match rule_map.iter().find_map(|(rk, rv)| {
+            if rk.as_str() == Some("match") {
+                Some(rv)
+            } else {
+                None
+            }
+        }) {
             Some(v) => {
                 let s = v.as_str().ok_or_else(|| EngineError::SchemaLoaderError {
                     reason: format!(
@@ -1592,9 +1573,11 @@ fn parse_execution_schema(
     if let Some(res_value) = execution_value.get("resolution") {
         if let Some(res_seq) = res_value.as_sequence() {
             for item in res_seq {
-                let step: ResolutionStepDecl = serde_yaml::from_value(item.clone())
-                    .map_err(|e| EngineError::SchemaLoaderError {
-                        reason: format!("{display}: invalid resolution step: {e}"),
+                let step: ResolutionStepDecl =
+                    serde_yaml::from_value(item.clone()).map_err(|e| {
+                        EngineError::SchemaLoaderError {
+                            reason: format!("{display}: invalid resolution step: {e}"),
+                        }
                     })?;
                 resolution.push(step);
             }
@@ -1629,10 +1612,11 @@ fn parse_execution_schema(
     if let Some(ops_value) = execution_value.get("operations") {
         if let Some(ops_seq) = ops_value.as_sequence() {
             for item in ops_seq {
-                let op: OperationDecl = serde_yaml::from_value(item.clone())
-                    .map_err(|e| EngineError::SchemaLoaderError {
+                let op: OperationDecl = serde_yaml::from_value(item.clone()).map_err(|e| {
+                    EngineError::SchemaLoaderError {
                         reason: format!("{display}: invalid operation declaration: {e}"),
-                    })?;
+                    }
+                })?;
                 operations.push(op);
             }
         }
@@ -1669,9 +1653,11 @@ fn parse_execution_schema(
     if let Some(la_value) = execution_value.get("launch_augmentations") {
         if let Some(la_seq) = la_value.as_sequence() {
             for item in la_seq {
-                let aug: LaunchAugmentationDecl = serde_yaml::from_value(item.clone())
-                    .map_err(|e| EngineError::SchemaLoaderError {
-                        reason: format!("{display}: invalid launch_augmentations entry: {e}"),
+                let aug: LaunchAugmentationDecl =
+                    serde_yaml::from_value(item.clone()).map_err(|e| {
+                        EngineError::SchemaLoaderError {
+                            reason: format!("{display}: invalid launch_augmentations entry: {e}"),
+                        }
                     })?;
                 launch_augmentations.push(aug);
             }
@@ -1680,7 +1666,11 @@ fn parse_execution_schema(
 
     // Mixed-dispatch reject: operations + terminator or operations + delegate
     if !operations.is_empty() && (terminator.is_some() || delegate.is_some()) {
-        let conflict = if terminator.is_some() { "terminator" } else { "delegate" };
+        let conflict = if terminator.is_some() {
+            "terminator"
+        } else {
+            "delegate"
+        };
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
                 "{display}: kind declares operations and {conflict}; mixed dispatch is forbidden"
@@ -1715,10 +1705,8 @@ fn parse_execution_schema(
     // (terminator > `@<own_kind>` alias > delegate); a schema author
     // declaring more than one is exercising different mechanisms,
     // not creating dispatcher ambiguity.
-    let has_routing_primitive = terminator.is_some()
-        || !aliases.is_empty()
-        || delegate.is_some()
-        || !operations.is_empty();
+    let has_routing_primitive =
+        terminator.is_some() || !aliases.is_empty() || delegate.is_some() || !operations.is_empty();
     if !has_routing_primitive {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
@@ -1790,7 +1778,7 @@ fn parse_delegation_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trust::{TrustedSigner, TrustStore};
+    use crate::trust::{TrustStore, TrustedSigner};
     use base64::Engine;
     use lillux::crypto::SigningKey;
     use std::fs;
@@ -1950,7 +1938,9 @@ metadata:
 
         let reg = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts).unwrap();
 
-        let svc = reg.get("service").expect("service kind should be registered");
+        let svc = reg
+            .get("service")
+            .expect("service kind should be registered");
         assert_eq!(svc.directory, "services");
         let exts = svc.extension_strs();
         assert!(exts.contains(&".yaml"));
@@ -1986,7 +1976,10 @@ metadata:
         let dir = reg.get("directive").unwrap();
         assert_eq!(dir.directory, "directives");
         assert_eq!(
-            dir.execution.as_ref().and_then(|e| e.aliases.get("@directive")).map(|s| s.as_str()),
+            dir.execution
+                .as_ref()
+                .and_then(|e| e.aliases.get("@directive"))
+                .map(|s| s.as_str()),
             Some("tool:ryeos/directive-runtime/runtime")
         );
         assert_eq!(dir.extension_strs(), vec![".md"]);
@@ -2023,11 +2016,21 @@ metadata:
         assert_eq!(reg.directory("tool"), Some("tools"));
         assert_eq!(reg.directory("directive"), Some("directives"));
         assert_eq!(
-            reg.get("directive").unwrap().execution.as_ref().and_then(|e| e.aliases.get("@directive")).map(|s| s.as_str()),
+            reg.get("directive")
+                .unwrap()
+                .execution
+                .as_ref()
+                .and_then(|e| e.aliases.get("@directive"))
+                .map(|s| s.as_str()),
             Some("tool:ryeos/directive-runtime/runtime")
         );
         assert_eq!(
-            reg.get("tool").unwrap().execution.as_ref().and_then(|e| e.aliases.get("@subprocess")).map(|s| s.as_str()),
+            reg.get("tool")
+                .unwrap()
+                .execution
+                .as_ref()
+                .and_then(|e| e.aliases.get("@subprocess"))
+                .map(|s| s.as_str()),
             None
         );
 
@@ -2148,11 +2151,7 @@ metadata:
         let bad_sig = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
         let bad_line = format!(
             "{} ryeos:signed:{}:{}:{}:{}",
-            "#",
-            prefix_and_ts,
-            hash,
-            bad_sig,
-            fp
+            "#", prefix_and_ts, hash, bad_sig, fp
         );
         let mut new_content = bad_line;
         for line in &lines[1..] {
@@ -2277,7 +2276,9 @@ formats:
             })
         );
         assert_eq!(
-            tool.extraction_rules.get("executor_id").map(|r| &r.extractor),
+            tool.extraction_rules
+                .get("executor_id")
+                .map(|r| &r.extractor),
             Some(&ExtractionRule::Path {
                 key: "__executor_id__".into()
             })
@@ -2287,7 +2288,9 @@ formats:
         let dir = reg.get("directive").unwrap();
         assert_eq!(dir.extraction_rules.len(), 2);
         assert_eq!(
-            dir.extraction_rules.get("executor_id").map(|r| &r.extractor),
+            dir.extraction_rules
+                .get("executor_id")
+                .map(|r| &r.extractor),
             Some(&ExtractionRule::Constant {
                 value: "native:directive_orchestrator".into()
             })
@@ -2331,10 +2334,7 @@ formats:
 
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let dir = reg.get("directive").unwrap();
-        assert_eq!(
-            dir.execution.as_ref().map(|e| e.resolution.len()),
-            Some(2)
-        );
+        assert_eq!(dir.execution.as_ref().map(|e| e.resolution.len()), Some(2));
     }
 
     #[test]
@@ -2346,7 +2346,10 @@ formats:
 
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let tool = reg.get("tool").unwrap();
-        assert!(tool.execution.as_ref().is_none_or(|e| e.resolution.is_empty()));
+        assert!(tool
+            .execution
+            .as_ref()
+            .is_none_or(|e| e.resolution.is_empty()));
     }
 
     // Removed: `project_overlay_replaces_resolution` — kind schemas are
@@ -2646,10 +2649,7 @@ execution:
         let pos = compose.inputs.get("position").unwrap();
         assert_eq!(pos.ty, InputType::String);
         let expected_enum: Vec<String> = vec!["system".into(), "before".into(), "after".into()];
-        assert_eq!(
-            pos.enum_values.as_deref(),
-            Some(expected_enum.as_slice())
-        );
+        assert_eq!(pos.enum_values.as_deref(), Some(expected_enum.as_slice()));
     }
 
     #[test]
@@ -2925,7 +2925,9 @@ metadata:
         let cat_rule = tool.extraction_rules.get("category").unwrap();
         assert_eq!(
             cat_rule.extractor,
-            ExtractionRule::Path { key: "category".into() }
+            ExtractionRule::Path {
+                key: "category".into()
+            }
         );
         assert!(cat_rule.required);
         assert_eq!(cat_rule.match_kind, Some(MatchKind::Path));
@@ -3026,8 +3028,16 @@ metadata:
 
     // ── validate_metadata_anchoring direct tests ───────────────────
 
-    fn anchor_rule(extractor: ExtractionRule, required: bool, match_kind: Option<MatchKind>) -> MetadataRule {
-        MetadataRule { extractor, required, match_kind }
+    fn anchor_rule(
+        extractor: ExtractionRule,
+        required: bool,
+        match_kind: Option<MatchKind>,
+    ) -> MetadataRule {
+        MetadataRule {
+            extractor,
+            required,
+            match_kind,
+        }
     }
 
     #[test]
@@ -3045,7 +3055,9 @@ metadata:
         rules.insert(
             "category".to_string(),
             anchor_rule(
-                ExtractionRule::Path { key: "category".into() },
+                ExtractionRule::Path {
+                    key: "category".into(),
+                },
                 true,
                 Some(MatchKind::Path),
             ),
@@ -3067,7 +3079,9 @@ metadata:
         rules.insert(
             "category".to_string(),
             anchor_rule(
-                ExtractionRule::Path { key: "category".into() },
+                ExtractionRule::Path {
+                    key: "category".into(),
+                },
                 true,
                 Some(MatchKind::Path),
             ),
@@ -3091,8 +3105,8 @@ metadata:
                 Some(MatchKind::Filename),
             ),
         );
-        let err = validate_metadata_anchoring(&parsed, &rules, "directives", ai_root, file)
-            .unwrap_err();
+        let err =
+            validate_metadata_anchoring(&parsed, &rules, "directives", ai_root, file).unwrap_err();
         assert!(
             matches!(err, MetadataAnchoringError::FilenameMismatch {
                 ref filename,
@@ -3113,13 +3127,14 @@ metadata:
         rules.insert(
             "category".to_string(),
             anchor_rule(
-                ExtractionRule::Path { key: "category".into() },
+                ExtractionRule::Path {
+                    key: "category".into(),
+                },
                 true,
                 Some(MatchKind::Path),
             ),
         );
-        let err =
-            validate_metadata_anchoring(&parsed, &rules, "tools", ai_root, file).unwrap_err();
+        let err = validate_metadata_anchoring(&parsed, &rules, "tools", ai_root, file).unwrap_err();
         assert!(
             matches!(err, MetadataAnchoringError::PathMismatch {
                 ref path_value,
@@ -3145,8 +3160,8 @@ metadata:
                 Some(MatchKind::Filename),
             ),
         );
-        let err = validate_metadata_anchoring(&parsed, &rules, "directives", ai_root, file)
-            .unwrap_err();
+        let err =
+            validate_metadata_anchoring(&parsed, &rules, "directives", ai_root, file).unwrap_err();
         assert!(
             matches!(err, MetadataAnchoringError::MissingRequired { ref field, .. }
                 if field == "name"),
@@ -3164,13 +3179,14 @@ metadata:
         rules.insert(
             "category".to_string(),
             anchor_rule(
-                ExtractionRule::Path { key: "category".into() },
+                ExtractionRule::Path {
+                    key: "category".into(),
+                },
                 true,
                 Some(MatchKind::Path),
             ),
         );
-        let err =
-            validate_metadata_anchoring(&parsed, &rules, "tools", ai_root, file).unwrap_err();
+        let err = validate_metadata_anchoring(&parsed, &rules, "tools", ai_root, file).unwrap_err();
         assert!(
             matches!(err, MetadataAnchoringError::OutsideKindDirectory { .. }),
             "expected OutsideKindDirectory, got: {err:?}"
@@ -3185,7 +3201,13 @@ metadata:
         let mut rules = HashMap::new();
         rules.insert(
             "version".to_string(),
-            anchor_rule(ExtractionRule::Path { key: "version".into() }, false, None),
+            anchor_rule(
+                ExtractionRule::Path {
+                    key: "version".into(),
+                },
+                false,
+                None,
+            ),
         );
         validate_metadata_anchoring(&parsed, &rules, "directives", ai_root, file)
             .expect("optional field absent is fine");

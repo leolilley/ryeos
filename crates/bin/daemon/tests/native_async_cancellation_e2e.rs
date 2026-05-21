@@ -97,8 +97,7 @@ description: "native_async demo"
 
 fn build_engine_against_bundle() -> Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store =
-        TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -148,7 +147,12 @@ fn build_and_extract_cancellation(
     let resolved = engine.resolve(&ctx, &item).map_err(|e| e.to_string())?;
     let verified = engine.verify(&ctx, resolved).map_err(|e| e.to_string())?;
     let plan = engine
-        .build_plan(&ctx, &verified, &serde_json::Value::Null, &ctx.execution_hints)
+        .build_plan(
+            &ctx,
+            &verified,
+            &serde_json::Value::Null,
+            &ctx.execution_hints,
+        )
         .map_err(|e| e.to_string())?;
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -162,7 +166,11 @@ fn build_and_extract_cancellation(
         })
         .ok_or_else(|| "no DispatchSubprocess node in plan".to_string())?;
 
-    Ok(spec.execution.native_async.as_ref().map(|a| a.cancellation_mode))
+    Ok(spec
+        .execution
+        .native_async
+        .as_ref()
+        .map(|a| a.cancellation_mode))
 }
 
 #[test]
@@ -184,8 +192,7 @@ fn bool_true_shorthand_yields_graceful_default() {
 
 #[test]
 fn rich_hard_form_yields_hard_cancellation() {
-    let mode = build_and_extract_cancellation(r#"{"cancel_mode": "hard"}"#)
-        .expect("plan builds");
+    let mode = build_and_extract_cancellation(r#"{"cancel_mode": "hard"}"#).expect("plan builds");
     assert_eq!(mode, Some(CancellationMode::Hard));
 }
 

@@ -43,7 +43,7 @@ pub fn verify_chain_integrity(chain_state: &ChainState, prev_hash: Option<&str>)
     // If we expect a previous hash, verify it matches
     if let Some(expected_prev) = prev_hash {
         match &chain_state.prev_chain_state_hash {
-            Some(actual_prev) if actual_prev == expected_prev => {},
+            Some(actual_prev) if actual_prev == expected_prev => {}
             Some(actual_prev) => {
                 issues.push(format!(
                     "prev_chain_state_hash mismatch: expected {}, got {}",
@@ -88,7 +88,7 @@ pub fn reconcile_chain_heads(
 ) -> anyhow::Result<ReconcileStats> {
     // Phase 0.5F: This will enumerate refs, read signed heads, and compare to projection
     // For now, it's a stub that just initializes an empty cache
-    
+
     head_cache.clear();
 
     Ok(ReconcileStats {
@@ -101,8 +101,8 @@ pub fn reconcile_chain_heads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use crate::objects::{ChainThreadEntry, ThreadStatus};
+    use std::collections::BTreeMap;
 
     fn make_chain_state() -> ChainState {
         let mut threads = BTreeMap::new();
@@ -143,7 +143,10 @@ mod tests {
 
         let result = verify_chain_integrity(&chain, None);
         assert!(!result.valid);
-        assert!(result.issues.iter().any(|i| i.contains("should have prev_chain_state_hash=None")));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.contains("should have prev_chain_state_hash=None")));
     }
 
     #[test]
@@ -163,7 +166,10 @@ mod tests {
 
         let result = verify_chain_integrity(&chain, Some(&("03".repeat(32))));
         assert!(!result.valid);
-        assert!(result.issues.iter().any(|i| i.contains("prev_chain_state_hash mismatch")));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.contains("prev_chain_state_hash mismatch")));
     }
 
     #[test]
@@ -171,6 +177,9 @@ mod tests {
         let chain = make_chain_state();
         let result = verify_chain_integrity(&chain, Some(&("02".repeat(32))));
         assert!(!result.valid);
-        assert!(result.issues.iter().any(|i| i.contains("expected prev_chain_state_hash") && i.contains("found None")));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.contains("expected prev_chain_state_hash") && i.contains("found None")));
     }
 }

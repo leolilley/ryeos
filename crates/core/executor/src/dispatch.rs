@@ -48,23 +48,22 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    DelegationVia, ExecutionSchema, InProcessRegistryKind, OperationDecl,
-    TerminatorDecl,
+    DelegationVia, ExecutionSchema, InProcessRegistryKind, OperationDecl, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
-use ryeos_app::execution_provenance::ProjectSourceKind;
 
 use crate::dispatch_error::DispatchError;
-use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
+use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
 use crate::execution::launch;
 use crate::executor::{
     self as service_executor, ExecutionContext, ExecutionMode, ServiceExecutionResult,
 };
-use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 use ryeos_app::state::AppState;
+use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 
 /// Single source of truth for the `runtime:` ref kind discriminator.
 /// Used in two narrow places (B1 cap gate, B4 resolve special-case)
@@ -134,7 +133,10 @@ fn check_dispatch_capabilities(
     caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
     request: &DispatchRequest<'_>,
 ) -> Result<(), DispatchError> {
-    let is_pushed = matches!(request.provenance.project_source(), ProjectSourceKind::PushedHead);
+    let is_pushed = matches!(
+        request.provenance.project_source(),
+        ProjectSourceKind::PushedHead
+    );
     if is_pushed && !caps.allows_pushed_head {
         return Err(DispatchError::CapabilityRejected {
             reason: "pushed_head not yet supported for native runtimes".into(),
@@ -304,12 +306,7 @@ pub(crate) fn resolve_dispatch_hop(
     let thread_profile: Option<String>;
 
     let schema = ctx.engine.kinds.get(&schema_kind).ok_or_else(|| {
-        let mut available: Vec<String> = ctx
-            .engine
-            .kinds
-            .kinds()
-            .map(|k| k.to_string())
-            .collect();
+        let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
         available.sort();
         DispatchError::SchemaMisconfigured {
             kind: schema_kind.clone(),
@@ -320,12 +317,13 @@ pub(crate) fn resolve_dispatch_hop(
         }
     })?;
 
-    let exec: &ExecutionSchema = schema.execution().ok_or_else(|| {
-        DispatchError::NotRootExecutable {
-            kind: schema_kind.clone(),
-            detail: "schema has no `execution:` block".into(),
-        }
-    })?;
+    let exec: &ExecutionSchema =
+        schema
+            .execution()
+            .ok_or_else(|| DispatchError::NotRootExecutable {
+                kind: schema_kind.clone(),
+                detail: "schema has no `execution:` block".into(),
+            })?;
 
     thread_profile = exec.thread_profile.clone();
 
@@ -372,12 +370,12 @@ pub(crate) fn resolve_dispatch_hop(
         // this for any executable schema, but we re-check defensively
         // so an out-of-band schema mutation cannot silently degrade
         // the audit trail.
-        let tp = thread_profile.as_deref().ok_or_else(|| {
-            DispatchError::SchemaMisconfigured {
+        let tp = thread_profile
+            .as_deref()
+            .ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: schema_kind.clone(),
                 detail: "schema declares a terminator but no `execution.thread_profile`".into(),
-            }
-        })?;
+            })?;
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
@@ -390,14 +388,13 @@ pub(crate) fn resolve_dispatch_hop(
     // No terminator — follow the kind's `@<kind>` alias if present.
     let alias_key = format!("@{schema_kind}");
     if let Some(alias_target) = exec.aliases.get(&alias_key) {
-        let next_ref = CanonicalRef::parse(alias_target).map_err(|e| {
-            DispatchError::SchemaMisconfigured {
+        let next_ref =
+            CanonicalRef::parse(alias_target).map_err(|e| DispatchError::SchemaMisconfigured {
                 kind: schema_kind.clone(),
                 detail: format!(
                     "alias '{alias_key}' → '{alias_target}' is not a valid canonical ref: {e}"
                 ),
-            }
-        })?;
+            })?;
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
@@ -415,9 +412,7 @@ pub(crate) fn resolve_dispatch_hop(
     if let Some(delegation) = exec.delegate.as_ref() {
         match &delegation.via {
             DelegationVia::RuntimeRegistry { serves_kind } => {
-                let lookup_kind = serves_kind
-                    .as_deref()
-                    .unwrap_or(schema_kind.as_str());
+                let lookup_kind = serves_kind.as_deref().unwrap_or(schema_kind.as_str());
                 let rt = ctx.engine.runtimes.lookup_for(lookup_kind).map_err(|_| {
                     let mut serves: Vec<String> = ctx
                         .engine
@@ -510,10 +505,7 @@ fn resolve_requested_op(
 /// the declared type. Optional inputs with defaults are filled in.
 ///
 /// Returns the validated+defaulted inputs as a `serde_json::Value::Object`.
-fn validate_op_inputs(
-    inputs: Option<&Value>,
-    op: &OperationDecl,
-) -> Result<Value, DispatchError> {
+fn validate_op_inputs(inputs: Option<&Value>, op: &OperationDecl) -> Result<Value, DispatchError> {
     let mut inputs_map = match inputs {
         Some(Value::Object(map)) => map.clone(),
         Some(other) => {
@@ -567,11 +559,7 @@ fn validate_input_type(
     if !ok {
         return Err(DispatchError::OpInvalidInput {
             op: op_name.to_string(),
-            reason: format!(
-                "input '{name}' expected type {:?}, got {}",
-                ty,
-                val
-            ),
+            reason: format!("input '{name}' expected type {:?}, got {}", ty, val),
         });
     }
     Ok(())
@@ -593,13 +581,11 @@ fn project_single_root(
     let ancestor_to_verified = |a: &ryeos_engine::resolution::ResolvedAncestor| VerifiedItem {
         raw_content: a.raw_content.clone(),
         raw_content_digest: a.raw_content_digest.clone(),
-        metadata: serde_json::to_value(
-            serde_json::json!({
-                "source_path": a.source_path,
-                "trust_class": format!("{:?}", a.trust_class),
-                "requested_id": a.requested_id,
-            }),
-        )
+        metadata: serde_json::to_value(serde_json::json!({
+            "source_path": a.source_path,
+            "trust_class": format!("{:?}", a.trust_class),
+            "requested_id": a.requested_id,
+        }))
         .unwrap_or(Value::Null),
         trust_class: match a.trust_class {
             ryeos_engine::resolution::TrustClass::TrustedSystem => TrustClass::TrustedSystem,
@@ -654,10 +640,7 @@ fn project_single_root(
     for edge in &edges {
         if !items_by_ref.contains_key(&edge.from) || !items_by_ref.contains_key(&edge.to) {
             return Err(DispatchError::ProjectionInvariant {
-                reason: format!(
-                    "edge endpoint missing: {} -> {}",
-                    edge.from, edge.to
-                ),
+                reason: format!("edge endpoint missing: {} -> {}", edge.from, edge.to),
             });
         }
     }
@@ -721,14 +704,15 @@ pub(crate) async fn dispatch_op(
 
     // 3. Run the engine resolution pipeline to get a full
     //    ResolutionOutput (extends chain + references + content).
-    let engine_roots = ctx.engine.resolution_roots(Some(request.project_path.to_path_buf()));
+    let engine_roots = ctx
+        .engine
+        .resolution_roots(Some(request.project_path.to_path_buf()));
     let effective_parsers = ctx
         .engine
         .effective_parser_dispatcher(Some(request.project_path))
-        .map_err(|e| DispatchError::InvalidRef(
-            canonical_ref.to_string(),
-            format!("parser dispatcher: {e}"),
-        ))?;
+        .map_err(|e| {
+            DispatchError::InvalidRef(canonical_ref.to_string(), format!("parser dispatcher: {e}"))
+        })?;
     let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
         canonical_ref,
         &ctx.engine.kinds,
@@ -737,18 +721,20 @@ pub(crate) async fn dispatch_op(
         &ctx.engine.trust_store,
         &ctx.engine.composers,
     )
-    .map_err(|e| DispatchError::InvalidRef(
-        canonical_ref.to_string(),
-        format!("resolution pipeline failed: {e}"),
-    ))?;
+    .map_err(|e| {
+        DispatchError::InvalidRef(
+            canonical_ref.to_string(),
+            format!("resolution pipeline failed: {e}"),
+        )
+    })?;
 
     // 4. Project the resolution output to a SingleRootPayload.
     let single_root = project_single_root(&resolution_output)?;
 
     // 5. Build the envelope payload: merge root + inputs.
     let op_name = &op_decl.name;
-    let mut payload = serde_json::to_value(&single_root)
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+    let mut payload =
+        serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?;
     if let Value::Object(ref mut map) = payload {
         if let Value::Object(inputs) = validated_inputs {
             map.extend(inputs);
@@ -756,9 +742,7 @@ pub(crate) async fn dispatch_op(
     }
 
     // 6. Mint thread record + callback token.
-    let thread_profile_str = thread_profile
-        .as_deref()
-        .unwrap_or("op_run");
+    let thread_profile_str = thread_profile.as_deref().unwrap_or("op_run");
     let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     let chain_root_id = thread_id.clone(); // top-level, chain_root == self
 
@@ -776,9 +760,7 @@ pub(crate) async fn dispatch_op(
             upstream_thread_id: None,
             requested_by: Some(request.acting_principal.to_string()),
         })
-        .map_err(|e| DispatchError::Internal(
-            anyhow::anyhow!("thread creation failed: {e}")
-        ))?;
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
 
     // Generate callback token. The op child borrows the dispatch
     // provenance instead of minting an unprovenanced token.
@@ -807,8 +789,8 @@ pub(crate) async fn dispatch_op(
         payload,
     };
 
-    let stdin_data = serde_json::to_string(&envelope)
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+    let stdin_data =
+        serde_json::to_string(&envelope).map_err(|e| DispatchError::Internal(e.into()))?;
 
     // 7. Resolve the native executor path and spawn via lillux.
     let system_roots: Vec<std::path::PathBuf> = engine_roots
@@ -822,7 +804,11 @@ pub(crate) async fn dispatch_op(
                 .unwrap_or(r.ai_root.clone())
         })
         .collect();
-    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
+    let cache_root = state
+        .config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
         &system_roots,
         &executor_ref,
@@ -836,11 +822,8 @@ pub(crate) async fn dispatch_op(
     })?;
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
-    let envs = ryeos_app::process::build_subprocess_envs(
-        &std::collections::BTreeMap::new(),
-        &[],
-    )
-    .map_err(|e| DispatchError::Internal(e.into()))?;
+    let envs = ryeos_app::process::build_subprocess_envs(&std::collections::BTreeMap::new(), &[])
+        .map_err(|e| DispatchError::Internal(e.into()))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
@@ -861,15 +844,15 @@ pub(crate) async fn dispatch_op(
         {
             if let Some(error) = batch_result.error {
                 // Finalize thread as failed.
-                let _ = state.threads.finalize_thread(
-                    &finalize_params(&thread_id, "failed", None),
-                );
+                let _ = state
+                    .threads
+                    .finalize_thread(&finalize_params(&thread_id, "failed", None));
                 return Err(map_batch_error(kind, op_name, error));
             }
         }
-        let _ = state.threads.finalize_thread(
-            &finalize_params(&thread_id, "failed", None),
-        );
+        let _ = state
+            .threads
+            .finalize_thread(&finalize_params(&thread_id, "failed", None));
         return Err(DispatchError::OpFailed {
             kind: kind.to_string(),
             op: op_name.clone(),
@@ -882,11 +865,11 @@ pub(crate) async fn dispatch_op(
     }
 
     // 8. Parse BatchOpResult.
-    let batch_result: ryeos_runtime::op_wire::BatchOpResult =
-        serde_json::from_str(&result.stdout).map_err(|e| {
-            let _ = state.threads.finalize_thread(
-                &finalize_params(&thread_id, "failed", None),
-            );
+    let batch_result: ryeos_runtime::op_wire::BatchOpResult = serde_json::from_str(&result.stdout)
+        .map_err(|e| {
+            let _ = state
+                .threads
+                .finalize_thread(&finalize_params(&thread_id, "failed", None));
             DispatchError::OpFailed {
                 kind: kind.to_string(),
                 op: op_name.clone(),
@@ -895,9 +878,9 @@ pub(crate) async fn dispatch_op(
         })?;
 
     if !batch_result.success {
-        let _ = state.threads.finalize_thread(
-            &finalize_params(&thread_id, "failed", None),
-        );
+        let _ = state
+            .threads
+            .finalize_thread(&finalize_params(&thread_id, "failed", None));
         return Err(match batch_result.error {
             Some(error) => map_batch_error(kind, op_name, error),
             None => DispatchError::OpFailed {
@@ -909,9 +892,11 @@ pub(crate) async fn dispatch_op(
     }
 
     // Finalize thread as completed.
-    let _ = state.threads.finalize_thread(
-        &finalize_params(&thread_id, "completed", batch_result.output.clone()),
-    );
+    let _ = state.threads.finalize_thread(&finalize_params(
+        &thread_id,
+        "completed",
+        batch_result.output.clone(),
+    ));
 
     Ok(json!({
         "thread": {
@@ -941,7 +926,11 @@ fn map_batch_error(
             op: op.to_string(),
             reason,
         },
-        BatchOpError::UnknownOp { requested, declared, .. } => DispatchError::UnknownOp {
+        BatchOpError::UnknownOp {
+            requested,
+            declared,
+            ..
+        } => DispatchError::UnknownOp {
             kind: kind.to_string(),
             requested,
             declared: declared.join(", "),
@@ -956,7 +945,11 @@ fn map_batch_error(
 
 /// Helper to build a `ThreadFinalizeParams` with only the required fields
 /// set and all optional fields defaulted to `None` / empty.
-pub(crate) fn finalize_params(thread_id: &str, status: &str, result: Option<Value>) -> ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+pub(crate) fn finalize_params(
+    thread_id: &str,
+    status: &str,
+    result: Option<Value>,
+) -> ryeos_app::thread_lifecycle::ThreadFinalizeParams {
     use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
     ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
@@ -987,12 +980,10 @@ pub async fn dispatch_service(
     state: &AppState,
 ) -> Result<Value, DispatchError> {
     let params = request.params.clone();
-    let canonical = CanonicalRef::parse(item_ref).map_err(|e| {
-        DispatchError::InvalidRef(item_ref.to_string(), e.to_string())
-    })?;
+    let canonical = CanonicalRef::parse(item_ref)
+        .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
     let schema = ctx.engine.kinds.get(&canonical.kind).ok_or_else(|| {
-        let mut available: Vec<String> =
-            ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
+        let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
         available.sort();
         DispatchError::SchemaMisconfigured {
             kind: canonical.kind.clone(),
@@ -1002,18 +993,19 @@ pub async fn dispatch_service(
             ),
         }
     })?;
-    let exec = schema.execution().ok_or_else(|| {
-        DispatchError::NotRootExecutable {
+    let exec = schema
+        .execution()
+        .ok_or_else(|| DispatchError::NotRootExecutable {
             kind: canonical.kind.clone(),
             detail: "schema has no `execution:` block".into(),
-        }
-    })?;
-    let terminator = exec.terminator.as_ref().ok_or_else(|| {
-        DispatchError::SchemaMisconfigured {
-            kind: canonical.kind.clone(),
-            detail: "dispatch_service called on a schema with no terminator".into(),
-        }
-    })?;
+        })?;
+    let terminator =
+        exec.terminator
+            .as_ref()
+            .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: canonical.kind.clone(),
+                detail: "dispatch_service called on a schema with no terminator".into(),
+            })?;
     match terminator {
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
@@ -1123,7 +1115,9 @@ fn enforce_runtime_caps(
         })
 }
 
-pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> Result<Value, DispatchError> {
+pub(crate) async fn dispatch_subprocess(
+    sctx: SubprocessDispatchContext<'_>,
+) -> Result<Value, DispatchError> {
     let SubprocessDispatchContext {
         current_ref,
         thread_profile,
@@ -1136,8 +1130,7 @@ pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> 
         hop_runtime,
     } = sctx;
     let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
-        let mut available: Vec<String> =
-            ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
+        let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
         available.sort();
         DispatchError::SchemaMisconfigured {
             kind: current_ref.kind.clone(),
@@ -1147,18 +1140,19 @@ pub(crate) async fn dispatch_subprocess(sctx: SubprocessDispatchContext<'_>) -> 
             ),
         }
     })?;
-    let exec = schema.execution().ok_or_else(|| {
-        DispatchError::NotRootExecutable {
+    let exec = schema
+        .execution()
+        .ok_or_else(|| DispatchError::NotRootExecutable {
             kind: current_ref.kind.clone(),
             detail: "schema has no `execution:` block".into(),
-        }
-    })?;
-    let terminator = exec.terminator.as_ref().ok_or_else(|| {
-        DispatchError::SchemaMisconfigured {
-            kind: current_ref.kind.clone(),
-            detail: "dispatch_subprocess called on a schema with no terminator".into(),
-        }
-    })?;
+        })?;
+    let terminator =
+        exec.terminator
+            .as_ref()
+            .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: "dispatch_subprocess called on a schema with no terminator".into(),
+            })?;
     let protocol_ref = match terminator {
         TerminatorDecl::Subprocess { protocol_ref } => protocol_ref.as_str(),
         TerminatorDecl::InProcess { .. } => {
@@ -1250,14 +1244,10 @@ async fn dispatch_managed_subprocess(
     let runtime_ref = canonical_ref.to_string();
 
     let verified_runtime = match role {
-        SubprocessRole::RuntimeTarget { verified_runtime } => Some(verified_runtime.as_ref().clone()),
-        SubprocessRole::Regular => {
-            ctx
-                .engine
-                .runtimes
-                .lookup_by_ref(canonical_ref)
-                .cloned()
+        SubprocessRole::RuntimeTarget { verified_runtime } => {
+            Some(verified_runtime.as_ref().clone())
         }
+        SubprocessRole::Regular => ctx.engine.runtimes.lookup_by_ref(canonical_ref).cloned(),
     };
 
     let verified_runtime = verified_runtime.ok_or_else(|| {
@@ -1302,16 +1292,12 @@ async fn dispatch_managed_subprocess(
     let resolved_item: ResolvedItem = match subject.verified {
         Some(v) => v.resolved,
         None => {
-            let canonical = CanonicalRef::parse(&subject.item_ref).map_err(|e| {
-                DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string())
-            })?;
+            let canonical = CanonicalRef::parse(&subject.item_ref)
+                .map_err(|e| DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string()))?;
             ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
                 DispatchError::SchemaMisconfigured {
                     kind: canonical.kind.clone(),
-                    detail: format!(
-                        "subject resolution failed for '{}': {e}",
-                        subject.item_ref
-                    ),
+                    detail: format!("subject resolution failed for '{}': {e}", subject.item_ref),
                 }
             })?
         }
@@ -1340,48 +1326,47 @@ async fn dispatch_managed_subprocess(
     )
     .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
 
-    let result = launch::build_and_launch(
-        launch::BuildAndLaunchParams {
-            state,
-            executor_ref: &executor_ref,
-            acting_principal,
-            resolved: &resolved,
-            project_path,
-            provenance: &request.provenance,
-            parameters: &params,
-            vault_bindings: &vault_bindings,
-            pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
-        },
-    ).await.map_err(|e| {
-        match &e {
-            launch::BuildAndLaunchError::Materialization(
-                launch::MaterializationError::ProviderSecretMissing {
-                    provider_id,
-                    env_var,
-                    item_ref,
-                },
-            ) => DispatchError::RequiredSecretMissing {
-                item_ref: item_ref.clone(),
-                env_var: env_var.clone(),
-                source_kind: "provider".to_string(),
-                source_name: provider_id.clone(),
-                remediation: format!(
-                    "ryeos-core-tools vault put --name {env_var} --value-stdin"
-                ),
+    let result = launch::build_and_launch(launch::BuildAndLaunchParams {
+        state,
+        executor_ref: &executor_ref,
+        acting_principal,
+        resolved: &resolved,
+        project_path,
+        provenance: &request.provenance,
+        parameters: &params,
+        vault_bindings: &vault_bindings,
+        pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
+    })
+    .await
+    .map_err(|e| match &e {
+        launch::BuildAndLaunchError::Materialization(
+            launch::MaterializationError::ProviderSecretMissing {
+                provider_id,
+                env_var,
+                item_ref,
             },
-            _ => {
-                let msg = e.to_string();
-                if msg.contains("manifest") || msg.contains("binary") || msg.contains("blob")
-                    || msg.contains("materializ") || msg.contains("native executor")
-                    || msg.contains("arch check")
-                {
-                    DispatchError::RuntimeMaterializationFailed {
-                        executor_ref: executor_ref.clone(),
-                        detail: msg,
-                    }
-                } else {
-                    DispatchError::Internal(e.into())
+        ) => DispatchError::RequiredSecretMissing {
+            item_ref: item_ref.clone(),
+            env_var: env_var.clone(),
+            source_kind: "provider".to_string(),
+            source_name: provider_id.clone(),
+            remediation: format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
+        },
+        _ => {
+            let msg = e.to_string();
+            if msg.contains("manifest")
+                || msg.contains("binary")
+                || msg.contains("blob")
+                || msg.contains("materializ")
+                || msg.contains("native executor")
+                || msg.contains("arch check")
+            {
+                DispatchError::RuntimeMaterializationFailed {
+                    executor_ref: executor_ref.clone(),
+                    detail: msg,
                 }
+            } else {
+                DispatchError::Internal(e.into())
             }
         }
     })?;
@@ -1401,7 +1386,9 @@ async fn dispatch_streaming_subprocess(
     _protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<Value, DispatchError> {
     let item_ref_str = current_ref.to_string();
-    let engine_roots = ctx.engine.resolution_roots(Some(request.project_path.to_path_buf()));
+    let engine_roots = ctx
+        .engine
+        .resolution_roots(Some(request.project_path.to_path_buf()));
 
     let system_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
@@ -1418,10 +1405,9 @@ async fn dispatch_streaming_subprocess(
     let effective_parsers = ctx
         .engine
         .effective_parser_dispatcher(Some(request.project_path))
-        .map_err(|e| DispatchError::InvalidRef(
-            current_ref.to_string(),
-            format!("parser dispatcher: {e}"),
-        ))?;
+        .map_err(|e| {
+            DispatchError::InvalidRef(current_ref.to_string(), format!("parser dispatcher: {e}"))
+        })?;
 
     let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
         current_ref,
@@ -1431,15 +1417,17 @@ async fn dispatch_streaming_subprocess(
         &ctx.engine.trust_store,
         &ctx.engine.composers,
     )
-    .map_err(|e| DispatchError::InvalidRef(
-        current_ref.to_string(),
-        format!("resolution pipeline failed: {e}"),
-    ))?;
+    .map_err(|e| {
+        DispatchError::InvalidRef(
+            current_ref.to_string(),
+            format!("resolution pipeline failed: {e}"),
+        )
+    })?;
 
     let single_root = project_single_root(&resolution_output)?;
 
-    let stdin_data = serde_json::to_string(&single_root)
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+    let stdin_data =
+        serde_json::to_string(&single_root).map_err(|e| DispatchError::Internal(e.into()))?;
 
     // Streaming tools are *items*, not runtime-hosted kinds — each
     // tool ships its own binary in the bundle (e.g.
@@ -1477,7 +1465,11 @@ async fn dispatch_streaming_subprocess(
         })?;
     let executor_ref = format!("native:{executor_id}");
 
-    let cache_root = state.config.system_space_dir.join(ryeos_engine::AI_DIR).join("state");
+    let cache_root = state
+        .config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
         &system_roots,
         &executor_ref,
@@ -1491,11 +1483,8 @@ async fn dispatch_streaming_subprocess(
     })?;
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
-    let envs = ryeos_app::process::build_subprocess_envs(
-        &std::collections::BTreeMap::new(),
-        &[],
-    )
-    .map_err(|e| DispatchError::Internal(e.into()))?;
+    let envs = ryeos_app::process::build_subprocess_envs(&std::collections::BTreeMap::new(), &[])
+        .map_err(|e| DispatchError::Internal(e.into()))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
@@ -1520,18 +1509,15 @@ async fn dispatch_streaming_subprocess(
         });
     }
 
-    let frames = ryeos_engine::protocol_vocabulary::read_all_frames(
-        std::io::Cursor::new(result.stdout.as_bytes()),
-    )
+    let frames = ryeos_engine::protocol_vocabulary::read_all_frames(std::io::Cursor::new(
+        result.stdout.as_bytes(),
+    ))
     .map_err(|e| {
-        DispatchError::Internal(anyhow::anyhow!(
-            "frame read failed for streaming tool: {e}"
-        ))
+        DispatchError::Internal(anyhow::anyhow!("frame read failed for streaming tool: {e}"))
     })?;
 
-    serde_json::to_value(&frames).map_err(|e| {
-        DispatchError::Internal(anyhow::anyhow!("frame serialize: {e}"))
-    })
+    serde_json::to_value(&frames)
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("frame serialize: {e}")))
 }
 
 async fn dispatch_tool_subprocess(
@@ -1598,16 +1584,19 @@ async fn dispatch_tool_subprocess(
 
     let item_ref_for_error = resolved.item_ref.clone();
 
-    let required_caps = ryeos_app::service_registry::extract_required_caps(
-        &resolved.resolved_item.metadata.extra,
-    );
+    let required_caps =
+        ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);
     if !required_caps.is_empty() {
-        enforce_runtime_caps(&state.authorizer, &item_ref_for_error, &required_caps, &ctx.caller_scopes)?;
+        enforce_runtime_caps(
+            &state.authorizer,
+            &item_ref_for_error,
+            &required_caps,
+            &ctx.caller_scopes,
+        )?;
     }
 
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(
-        request.provenance.original_project_path(),
-    ));
+    let dotenv_dirs =
+        ryeos_app::vault::dotenv_search_dirs(Some(request.provenance.original_project_path()));
     let vault_bindings = ryeos_app::vault::read_required_secrets(
         state.vault.as_ref(),
         request.acting_principal,
@@ -1627,7 +1616,8 @@ async fn dispatch_tool_subprocess(
     };
 
     if request.launch_mode == "detached" {
-        let result = crate::execution::runner::run_detached(state.clone(), params).await
+        let result = crate::execution::runner::run_detached(state.clone(), params)
+            .await
             .map_err(|e| DispatchError::SubprocessRunFailed {
                 item_ref: item_ref_for_error.clone(),
                 detail: e.to_string(),
@@ -1637,7 +1627,8 @@ async fn dispatch_tool_subprocess(
             "detached": true,
         }))
     } else {
-        let result = crate::execution::runner::run_inline(state.clone(), params).await
+        let result = crate::execution::runner::run_inline(state.clone(), params)
+            .await
             .map_err(|e| DispatchError::SubprocessRunFailed {
                 item_ref: item_ref_for_error,
                 detail: e.to_string(),
@@ -1739,8 +1730,7 @@ pub async fn dispatch(
 
     loop {
         if !visited.insert(current_ref.clone()) {
-            let mut visited_strs: Vec<String> =
-                visited.iter().map(|r| r.to_string()).collect();
+            let mut visited_strs: Vec<String> = visited.iter().map(|r| r.to_string()).collect();
             visited_strs.sort();
             return Err(DispatchError::AliasCycle {
                 root_ref: item_ref.to_string(),
@@ -1854,44 +1844,31 @@ async fn dispatch_by(
     } = params;
     match terminator {
         TerminatorDecl::Subprocess { .. } => {
-            let tp = thread_profile.ok_or_else(|| {
-                DispatchError::SchemaMisconfigured {
-                    kind: canonical_ref.kind.clone(),
-                    detail: "subprocess terminator has no thread_profile".into(),
-                }
+            let tp = thread_profile.ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: canonical_ref.kind.clone(),
+                detail: "subprocess terminator has no thread_profile".into(),
             })?;
-            dispatch_subprocess(
-                SubprocessDispatchContext {
-                    current_ref: &canonical_ref,
-                    thread_profile: &tp,
-                    verified: verified.as_ref(),
-                    request,
-                    ctx,
-                    state,
-                    role,
-                    root_subject,
-                    hop_runtime: runtime,
-                },
-            )
+            dispatch_subprocess(SubprocessDispatchContext {
+                current_ref: &canonical_ref,
+                thread_profile: &tp,
+                verified: verified.as_ref(),
+                request,
+                ctx,
+                state,
+                role,
+                root_subject,
+                hop_runtime: runtime,
+            })
             .await
         }
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
         } => {
-            let tp = thread_profile.ok_or_else(|| {
-                DispatchError::SchemaMisconfigured {
-                    kind: canonical_ref.kind.clone(),
-                    detail: "service terminator has no thread_profile".into(),
-                }
+            let tp = thread_profile.ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: canonical_ref.kind.clone(),
+                detail: "service terminator has no thread_profile".into(),
             })?;
-            dispatch_service(
-                &canonical_ref.to_string(),
-                &tp,
-                request,
-                ctx,
-                state,
-            )
-            .await
+            dispatch_service(&canonical_ref.to_string(), &tp, request, ctx, state).await
         }
     }
 }
@@ -1905,9 +1882,7 @@ mod tests {
     use lillux::crypto::SigningKey;
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
-    use ryeos_engine::parsers::{
-        ParserDispatcher, ParserRegistry,
-    };
+    use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
     use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
     fn signing_key() -> SigningKey {
@@ -1969,12 +1944,8 @@ metadata:
     fn write_runtime_kind_schema(kinds_dir: &PathBuf) {
         let runtime_dir = kinds_dir.join("runtime");
         fs::create_dir_all(&runtime_dir).unwrap();
-        let signed = lillux::signature::sign_content(
-            RUNTIME_KIND_SCHEMA_BODY,
-            &signing_key(),
-            "#",
-            None,
-        );
+        let signed =
+            lillux::signature::sign_content(RUNTIME_KIND_SCHEMA_BODY, &signing_key(), "#", None);
         fs::write(runtime_dir.join("runtime.kind-schema.yaml"), signed).unwrap();
     }
 
@@ -1982,8 +1953,7 @@ metadata:
         let kinds_dir = tempdir();
         write_runtime_kind_schema(&kinds_dir);
         let ts = trust_store();
-        let kinds = KindRegistry::load_base(&[kinds_dir], &ts)
-            .expect("load runtime kind schema");
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).expect("load runtime kind schema");
         let parser_dispatcher = ParserDispatcher::new(
             ParserRegistry::empty(),
             std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
@@ -2001,8 +1971,7 @@ metadata:
     #[test]
     fn strip_binary_ref_prefix_strips_triple() {
         assert_eq!(
-            strip_binary_ref_prefix("bin/x86_64-unknown-linux-gnu/directive-runtime")
-                .unwrap(),
+            strip_binary_ref_prefix("bin/x86_64-unknown-linux-gnu/directive-runtime").unwrap(),
             "directive-runtime"
         );
     }
@@ -2016,13 +1985,23 @@ metadata:
     }
 
     fn test_authorizer() -> ryeos_runtime::authorizer::Authorizer {
-        ryeos_runtime::authorizer::Authorizer::new(
-            std::sync::Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-                ryeos_runtime::verb_registry::VerbDef { name: "execute".into(), execute: None },
-                ryeos_runtime::verb_registry::VerbDef { name: "fetch".into(), execute: None },
-                ryeos_runtime::verb_registry::VerbDef { name: "sign".into(), execute: Some("tool:ryeos/core/sign".into()) },
-            ]).unwrap()),
-        )
+        ryeos_runtime::authorizer::Authorizer::new(std::sync::Arc::new(
+            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "execute".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "fetch".into(),
+                    execute: None,
+                },
+                ryeos_runtime::verb_registry::VerbDef {
+                    name: "sign".into(),
+                    execute: Some("tool:ryeos/core/sign".into()),
+                },
+            ])
+            .unwrap(),
+        ))
     }
 
     /// **B1 unit test**: `enforce_runtime_caps` itself is unconditional
@@ -2049,7 +2028,12 @@ metadata:
         // SIMULATED indirect path — gate skips the call.
         let original_root_kind = "directive";
         let outcome: Result<(), DispatchError> = if original_root_kind == "runtime" {
-            enforce_runtime_caps(&auth, "runtime:directive-runtime", &required, &caller_scopes)
+            enforce_runtime_caps(
+                &auth,
+                "runtime:directive-runtime",
+                &required,
+                &caller_scopes,
+            )
         } else {
             Ok(())
         };
@@ -2062,7 +2046,12 @@ metadata:
         // SIMULATED direct path — gate fires.
         let original_root_kind = "runtime";
         let outcome: Result<(), DispatchError> = if original_root_kind == "runtime" {
-            enforce_runtime_caps(&auth, "runtime:directive-runtime", &required, &caller_scopes)
+            enforce_runtime_caps(
+                &auth,
+                "runtime:directive-runtime",
+                &required,
+                &caller_scopes,
+            )
         } else {
             Ok(())
         };
@@ -2190,8 +2179,7 @@ metadata:
         // enumerating in DispatchError wording). The runtime: kind
         // path is verified by the dispatch_pin tests.
         let cref = CanonicalRef::parse("unknown:thing").expect("parse");
-        let err = resolve_dispatch_hop(&cref, &ctx)
-            .expect_err("unknown kind must error");
+        let err = resolve_dispatch_hop(&cref, &ctx).expect_err("unknown kind must error");
         let msg = err.to_string();
         // Either "registered kinds: [runtime]" (schema lookup path)
         // OR "resolution failed" (engine.resolve path) — both are
@@ -2205,10 +2193,15 @@ metadata:
     // ── Op dispatch unit tests ───────────────────────────────────────
 
     use axum::http::StatusCode;
-    use std::collections::BTreeMap;
-    use ryeos_engine::kind_registry::{InputDecl, InputType, OperationDecl, OperationDispatch, SideEffectClass};
-    use ryeos_engine::resolution::{ResolutionOutput, ResolvedAncestor, ResolutionEdge, ResolutionStepName, TrustClass as EngineTrustClass};
+    use ryeos_engine::kind_registry::{
+        InputDecl, InputType, OperationDecl, OperationDispatch, SideEffectClass,
+    };
+    use ryeos_engine::resolution::{
+        ResolutionEdge, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
+        TrustClass as EngineTrustClass,
+    };
     use ryeos_runtime::op_wire::{BatchOpError, TrustClass as WireTrustClass};
+    use std::collections::BTreeMap;
 
     fn make_op(name: &str, inputs: BTreeMap<String, InputDecl>) -> OperationDecl {
         OperationDecl {
@@ -2319,7 +2312,10 @@ metadata:
         let err = validate_op_inputs(Some(&json!({"other": "val"})), &op)
             .expect_err("missing required must error");
         let msg = err.to_string();
-        assert!(msg.contains("question"), "must name missing field, got: {msg}");
+        assert!(
+            msg.contains("question"),
+            "must name missing field, got: {msg}"
+        );
         assert!(
             matches!(err, DispatchError::OpInvalidInput { .. }),
             "must be OpInvalidInput variant"
@@ -2344,7 +2340,8 @@ metadata:
         inputs.insert("max_tokens".to_string(), integer_input(false, Some(42)));
         let op = make_op("ask", inputs);
 
-        let r = validate_op_inputs(Some(&json!({"question": "hello", "max_tokens": 100})), &op).unwrap();
+        let r = validate_op_inputs(Some(&json!({"question": "hello", "max_tokens": 100})), &op)
+            .unwrap();
         assert_eq!(r["max_tokens"], 100, "explicit value must override default");
     }
 
@@ -2378,7 +2375,10 @@ metadata:
         let op = make_op("list", inputs);
 
         let r = validate_op_inputs(None, &op).unwrap();
-        assert_eq!(r["count"], 10, "default must be applied when inputs is None");
+        assert_eq!(
+            r["count"], 10,
+            "default must be applied when inputs is None"
+        );
     }
 
     // ── map_batch_error ──────────────────────────────────────────────
@@ -2428,8 +2428,10 @@ metadata:
                 declared: vec!["compose".into(), "query".into()],
             },
         );
-        assert!(matches!(err, DispatchError::UnknownOp { ref requested, ref declared, .. }
-            if requested == "delete" && declared.contains("compose")));
+        assert!(
+            matches!(err, DispatchError::UnknownOp { ref requested, ref declared, .. }
+            if requested == "delete" && declared.contains("compose"))
+        );
         assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
@@ -2505,13 +2507,20 @@ metadata:
         assert_eq!(payload.root_ref, "knowledge:my/doc");
         assert_eq!(payload.items_by_ref.len(), 1);
         assert!(payload.items_by_ref.contains_key("knowledge:my/doc"));
-        assert_eq!(payload.items_by_ref["knowledge:my/doc"].raw_content, "hello");
+        assert_eq!(
+            payload.items_by_ref["knowledge:my/doc"].raw_content,
+            "hello"
+        );
         assert!(payload.edges.is_empty());
     }
 
     #[test]
     fn project_single_root_extends_chain_produces_edges() {
-        let root = make_ancestor("directive:base", "base body", EngineTrustClass::TrustedSystem);
+        let root = make_ancestor(
+            "directive:base",
+            "base body",
+            EngineTrustClass::TrustedSystem,
+        );
         let mid = make_ancestor("directive:mid", "mid body", EngineTrustClass::TrustedUser);
         let leaf = make_ancestor("directive:leaf", "leaf body", EngineTrustClass::TrustedUser);
         let output = ResolutionOutput {
@@ -2531,7 +2540,10 @@ metadata:
         // First edge: root → mid
         assert_eq!(payload.edges[0].from, "directive:base");
         assert_eq!(payload.edges[0].to, "directive:mid");
-        assert_eq!(payload.edges[0].kind, ryeos_runtime::op_wire::EdgeKind::Extends);
+        assert_eq!(
+            payload.edges[0].kind,
+            ryeos_runtime::op_wire::EdgeKind::Extends
+        );
         assert_eq!(payload.edges[0].depth_from_root, Some(1));
 
         // Second edge: mid → leaf
@@ -2542,8 +2554,16 @@ metadata:
 
     #[test]
     fn project_single_root_reference_edges() {
-        let root = make_ancestor("knowledge:main", "main content", EngineTrustClass::TrustedUser);
-        let ref_item = make_ancestor("knowledge:other", "other content", EngineTrustClass::TrustedSystem);
+        let root = make_ancestor(
+            "knowledge:main",
+            "main content",
+            EngineTrustClass::TrustedUser,
+        );
+        let ref_item = make_ancestor(
+            "knowledge:other",
+            "other content",
+            EngineTrustClass::TrustedSystem,
+        );
         let output = ResolutionOutput {
             root: root.clone(),
             ancestors: vec![],
@@ -2566,8 +2586,14 @@ metadata:
         assert_eq!(payload.edges.len(), 1);
         assert_eq!(payload.edges[0].from, "knowledge:main");
         assert_eq!(payload.edges[0].to, "knowledge:other");
-        assert_eq!(payload.edges[0].kind, ryeos_runtime::op_wire::EdgeKind::References);
-        assert_eq!(payload.edges[0].depth_from_root, None, "reference edges have no depth");
+        assert_eq!(
+            payload.edges[0].kind,
+            ryeos_runtime::op_wire::EdgeKind::References
+        );
+        assert_eq!(
+            payload.edges[0].depth_from_root, None,
+            "reference edges have no depth"
+        );
     }
 
     #[test]
@@ -2575,7 +2601,8 @@ metadata:
         // Engine TrustClass → Wire TrustClass mapping is the critical semantic bridge.
         let root_system = make_ancestor("item:sys", "sys", EngineTrustClass::TrustedSystem);
         let root_user = make_ancestor("item:user", "user", EngineTrustClass::TrustedUser);
-        let root_untrusted = make_ancestor("item:untrusted", "un", EngineTrustClass::UntrustedUserSpace);
+        let root_untrusted =
+            make_ancestor("item:untrusted", "un", EngineTrustClass::UntrustedUserSpace);
         let root_unsigned = make_ancestor("item:unsigned", "us", EngineTrustClass::Unsigned);
 
         let cases: Vec<(ResolvedAncestor, WireTrustClass)> = vec![
@@ -2598,8 +2625,7 @@ metadata:
             };
             let payload = project_single_root(&output).unwrap();
             assert_eq!(
-                payload.items_by_ref[&ancestor.resolved_ref].trust_class,
-                expected_trust,
+                payload.items_by_ref[&ancestor.resolved_ref].trust_class, expected_trust,
                 "trust class mismatch for {:?}",
                 ancestor.trust_class
             );
@@ -2628,8 +2654,7 @@ metadata:
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
-        let err = project_single_root(&output)
-            .expect_err("dangling edge endpoint must error");
+        let err = project_single_root(&output).expect_err("dangling edge endpoint must error");
         let msg = err.to_string();
         assert!(
             msg.contains("edge endpoint missing"),
@@ -2647,8 +2672,16 @@ metadata:
         // Verify that referenced_items are included in items_by_ref
         // (not just root + ancestors).
         let root = make_ancestor("knowledge:main", "main", EngineTrustClass::TrustedUser);
-        let ref1 = make_ancestor("knowledge:ref1", "ref1 content", EngineTrustClass::TrustedSystem);
-        let ref2 = make_ancestor("knowledge:ref2", "ref2 content", EngineTrustClass::TrustedUser);
+        let ref1 = make_ancestor(
+            "knowledge:ref1",
+            "ref1 content",
+            EngineTrustClass::TrustedSystem,
+        );
+        let ref2 = make_ancestor(
+            "knowledge:ref2",
+            "ref2 content",
+            EngineTrustClass::TrustedUser,
+        );
         let output = ResolutionOutput {
             root: root.clone(),
             ancestors: vec![],
@@ -2678,8 +2711,14 @@ metadata:
 
         let payload = project_single_root(&output).unwrap();
         assert_eq!(payload.items_by_ref.len(), 3, "root + 2 referenced items");
-        assert_eq!(payload.items_by_ref["knowledge:ref1"].raw_content, "ref1 content");
-        assert_eq!(payload.items_by_ref["knowledge:ref2"].raw_content, "ref2 content");
+        assert_eq!(
+            payload.items_by_ref["knowledge:ref1"].raw_content,
+            "ref1 content"
+        );
+        assert_eq!(
+            payload.items_by_ref["knowledge:ref2"].raw_content,
+            "ref2 content"
+        );
         assert_eq!(payload.edges.len(), 2);
     }
 
@@ -2687,8 +2726,16 @@ metadata:
     fn project_single_root_dedup_by_ref() {
         // If referenced_items contains an item with the same ref as root,
         // the root version wins (or_insert_with keeps first).
-        let root = make_ancestor("knowledge:dup", "root version", EngineTrustClass::TrustedSystem);
-        let ref_dup = make_ancestor("knowledge:dup", "ref version", EngineTrustClass::TrustedUser);
+        let root = make_ancestor(
+            "knowledge:dup",
+            "root version",
+            EngineTrustClass::TrustedSystem,
+        );
+        let ref_dup = make_ancestor(
+            "knowledge:dup",
+            "ref version",
+            EngineTrustClass::TrustedUser,
+        );
         let output = ResolutionOutput {
             root: root.clone(),
             ancestors: vec![],
@@ -2700,11 +2747,14 @@ metadata:
         };
 
         let payload = project_single_root(&output).unwrap();
-        assert_eq!(payload.items_by_ref.len(), 1, "dedup: same ref counted once");
+        assert_eq!(
+            payload.items_by_ref.len(),
+            1,
+            "dedup: same ref counted once"
+        );
         // Root is iterated first, so root version wins.
         assert_eq!(
-            payload.items_by_ref["knowledge:dup"].raw_content,
-            "root version",
+            payload.items_by_ref["knowledge:dup"].raw_content, "root version",
             "root version must win over referenced item (first-write wins)"
         );
     }

@@ -24,8 +24,7 @@ struct RegexKvPattern {
 }
 
 pub fn validate_config(config: &Value) -> Result<(), String> {
-    let cfg: RegexKvConfig =
-        serde_json::from_value(config.clone()).map_err(|e| e.to_string())?;
+    let cfg: RegexKvConfig = serde_json::from_value(config.clone()).map_err(|e| e.to_string())?;
     if cfg.patterns.is_empty() {
         return Err("regex_kv: patterns list is empty".into());
     }

@@ -42,14 +42,8 @@ async fn fast_fixture_boots_daemon_without_real_init() {
         .state_path
         .join(".ai/node/identity/private_key.pem")
         .exists());
-    assert!(h
-        .state_path
-        .join(".ai/node/vault/private_key.pem")
-        .exists());
-    assert!(h
-        .state_path
-        .join(".ai/node/vault/public_key.pem")
-        .exists());
+    assert!(h.state_path.join(".ai/node/vault/private_key.pem").exists());
+    assert!(h.state_path.join(".ai/node/vault/public_key.pem").exists());
     assert!(h
         .user_space
         .path()
@@ -79,36 +73,58 @@ async fn fast_fixture_output_is_byte_stable_across_runs() {
     use sha2::{Digest, Sha256};
 
     fn hash_file(p: &std::path::Path) -> String {
-        let bytes = std::fs::read(p)
-            .unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+        let bytes = std::fs::read(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
         let mut h = Sha256::new();
         h.update(&bytes);
         format!("{:x}", h.finalize())
     }
 
     async fn run_once() -> Vec<(String, String)> {
-        let (h, fixture) = DaemonHarness::start_fast()
-            .await
-            .expect("daemon must boot");
+        let (h, fixture) = DaemonHarness::start_fast().await.expect("daemon must boot");
         let state = h.state_path.clone();
         let user = h.user_space.path().to_path_buf();
         let mut entries: Vec<(String, String)> = vec![
-            ("state/identity/private_key.pem".into(),
-             hash_file(&state.join(".ai/node/identity/private_key.pem"))),
-            ("state/identity/public-identity.json".into(),
-             hash_file(&state.join(".ai/node/identity/public-identity.json"))),
-            ("state/vault/private_key.pem".into(),
-             hash_file(&state.join(".ai/node/vault/private_key.pem"))),
-            ("state/vault/public_key.pem".into(),
-             hash_file(&state.join(".ai/node/vault/public_key.pem"))),
-            ("user/signing/private_key.pem".into(),
-             hash_file(&user.join(".ai/config/keys/signing/private_key.pem"))),
-            ("user/trusted/publisher.toml".into(),
-             hash_file(&user.join(format!(".ai/config/keys/trusted/{}.toml", fixture.publisher_fp())))),
-            ("user/trusted/node.toml".into(),
-             hash_file(&user.join(format!(".ai/config/keys/trusted/{}.toml", fixture.node_fp())))),
-            ("user/trusted/user.toml".into(),
-             hash_file(&user.join(format!(".ai/config/keys/trusted/{}.toml", fixture.user_fp())))),
+            (
+                "state/identity/private_key.pem".into(),
+                hash_file(&state.join(".ai/node/identity/private_key.pem")),
+            ),
+            (
+                "state/identity/public-identity.json".into(),
+                hash_file(&state.join(".ai/node/identity/public-identity.json")),
+            ),
+            (
+                "state/vault/private_key.pem".into(),
+                hash_file(&state.join(".ai/node/vault/private_key.pem")),
+            ),
+            (
+                "state/vault/public_key.pem".into(),
+                hash_file(&state.join(".ai/node/vault/public_key.pem")),
+            ),
+            (
+                "user/signing/private_key.pem".into(),
+                hash_file(&user.join(".ai/config/keys/signing/private_key.pem")),
+            ),
+            (
+                "user/trusted/publisher.toml".into(),
+                hash_file(&user.join(format!(
+                    ".ai/config/keys/trusted/{}.toml",
+                    fixture.publisher_fp()
+                ))),
+            ),
+            (
+                "user/trusted/node.toml".into(),
+                hash_file(&user.join(format!(
+                    ".ai/config/keys/trusted/{}.toml",
+                    fixture.node_fp()
+                ))),
+            ),
+            (
+                "user/trusted/user.toml".into(),
+                hash_file(&user.join(format!(
+                    ".ai/config/keys/trusted/{}.toml",
+                    fixture.user_fp()
+                ))),
+            ),
         ];
         entries.sort();
         drop(h);

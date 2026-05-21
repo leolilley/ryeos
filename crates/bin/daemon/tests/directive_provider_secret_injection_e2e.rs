@@ -177,42 +177,42 @@ async fn run_directive_and_capture_first_request_headers(
     let header_name_owned = header_name.map(|s| s.to_string());
     let prefix_owned = prefix.map(|s| s.to_string());
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider_with_auth(
-            user,
-            &mock_url,
-            &env_var_owned,
-            header_name_owned.as_deref(),
-            prefix_owned.as_deref(),
-            &fixture.publisher,
-        )?;
-        plant_model_routing(user, &fixture.publisher)?;
-        // Declare the env var as a required secret so the dispatcher
-        // reads it out of the vault and injects it into the runtime
-        // subprocess. Without this declaration, dispatch ignores the
-        // vault entirely (post-step-7a scoping).
-        plant_directive_with_secrets(
-            user,
-            "test/secret_injection",
-            "Say hello to {{ name }}.",
-            &[&env_var_owned],
-            &fixture.publisher,
-        )?;
-        // Seal the secret into the daemon's vault store BEFORE boot
-        // so `SealedEnvelopeVault::load` decrypts it at request time.
-        let mut secrets = std::collections::HashMap::new();
-        secrets.insert(env_var_owned.clone(), secret_owned.clone());
-        plant_sealed_vault_secrets(state_path, &secrets)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider_with_auth(
+                user,
+                &mock_url,
+                &env_var_owned,
+                header_name_owned.as_deref(),
+                prefix_owned.as_deref(),
+                &fixture.publisher,
+            )?;
+            plant_model_routing(user, &fixture.publisher)?;
+            // Declare the env var as a required secret so the dispatcher
+            // reads it out of the vault and injects it into the runtime
+            // subprocess. Without this declaration, dispatch ignores the
+            // vault entirely (post-step-7a scoping).
+            plant_directive_with_secrets(
+                user,
+                "test/secret_injection",
+                "Say hello to {{ name }}.",
+                &[&env_var_owned],
+                &fixture.publisher,
+            )?;
+            // Seal the secret into the daemon's vault store BEFORE boot
+            // so `SealedEnvelopeVault::load` decrypts it at request time.
+            let mut secrets = std::collections::HashMap::new();
+            secrets.insert(env_var_owned.clone(), secret_owned.clone());
+            plant_sealed_vault_secrets(state_path, &secrets)?;
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
     })
     .await
@@ -242,7 +242,10 @@ async fn run_directive_and_capture_first_request_headers(
 
     drop(project);
     drop(mock);
-    captured.into_iter().next().expect("at least one captured request")
+    captured
+        .into_iter()
+        .next()
+        .expect("at least one captured request")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -300,9 +303,7 @@ async fn secret_injection_with_default_authorization_bearer() {
         run_directive_and_capture_first_request_headers(env_var, secret, None, None).await;
 
     let actual = headers.get("authorization").unwrap_or_else(|| {
-        panic!(
-            "expected default Authorization header; got headers: {headers:#?}"
-        )
+        panic!("expected default Authorization header; got headers: {headers:#?}")
     });
     let expected = format!("Bearer {secret}");
     assert_eq!(
@@ -377,44 +378,44 @@ async fn run_directive_with_vault_secret(
     let header_name_owned = header_name.map(|s| s.to_string());
     let prefix_owned = prefix.map(|s| s.to_string());
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider_with_auth(
-            user,
-            &mock_url,
-            &env_var_owned,
-            header_name_owned.as_deref(),
-            prefix_owned.as_deref(),
-            &fixture.publisher,
-        )?;
-        plant_model_routing(user, &fixture.publisher)?;
-        // Declare the env var as a required secret so the dispatcher
-        // reads it out of the vault and injects it into the runtime
-        // subprocess. Without this declaration, dispatch ignores the
-        // vault entirely (post-step-7a scoping).
-        plant_directive_with_secrets(
-            user,
-            "test/vault_secret",
-            "Hello {{ name }}.",
-            &[&env_var_owned],
-            &fixture.publisher,
-        )?;
-        // Crucial: secret comes from the sealed vault store, NOT
-        // cmd.env(...). Pre-generate the daemon's vault keypair so we
-        // can seal the store before daemon boot picks the key up.
-        let mut secrets = std::collections::HashMap::new();
-        secrets.insert(env_var_owned.clone(), secret_owned.clone());
-        plant_sealed_vault_secrets(state_path, &secrets)?;
-        let _ = user; // user_space unused for vault now (kept for trust + bundles).
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider_with_auth(
+                user,
+                &mock_url,
+                &env_var_owned,
+                header_name_owned.as_deref(),
+                prefix_owned.as_deref(),
+                &fixture.publisher,
+            )?;
+            plant_model_routing(user, &fixture.publisher)?;
+            // Declare the env var as a required secret so the dispatcher
+            // reads it out of the vault and injects it into the runtime
+            // subprocess. Without this declaration, dispatch ignores the
+            // vault entirely (post-step-7a scoping).
+            plant_directive_with_secrets(
+                user,
+                "test/vault_secret",
+                "Hello {{ name }}.",
+                &[&env_var_owned],
+                &fixture.publisher,
+            )?;
+            // Crucial: secret comes from the sealed vault store, NOT
+            // cmd.env(...). Pre-generate the daemon's vault keypair so we
+            // can seal the store before daemon boot picks the key up.
+            let mut secrets = std::collections::HashMap::new();
+            secrets.insert(env_var_owned.clone(), secret_owned.clone());
+            plant_sealed_vault_secrets(state_path, &secrets)?;
+            let _ = user; // user_space unused for vault now (kept for trust + bundles).
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
     })
     .await
@@ -445,7 +446,10 @@ async fn run_directive_with_vault_secret(
 
     drop(project);
     drop(mock);
-    captured.into_iter().next().expect("at least one captured request")
+    captured
+        .into_iter()
+        .next()
+        .expect("at least one captured request")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -500,38 +504,38 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     // routing + directive (declaring the secret). Then we create
     // the project tempdir, drop the `.env` into it, and dispatch.
     let env_var_owned = env_var.to_string();
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider_with_auth(
-            user,
-            &mock_url,
-            &env_var_owned,
-            None,
-            None,
-            &fixture.publisher,
-        )?;
-        plant_model_routing(user, &fixture.publisher)?;
-        plant_directive_with_secrets(
-            user,
-            "test/dotenv_secret",
-            "Hello {{ name }}.",
-            &[&env_var_owned],
-            &fixture.publisher,
-        )?;
-        // Pre-generate vault keypair so the daemon boots cleanly,
-        // but DO NOT seal any secret — the .env overlay must be the
-        // sole source of the declared secret.
-        let secrets = std::collections::HashMap::new();
-        plant_sealed_vault_secrets(state_path, &secrets)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider_with_auth(
+                user,
+                &mock_url,
+                &env_var_owned,
+                None,
+                None,
+                &fixture.publisher,
+            )?;
+            plant_model_routing(user, &fixture.publisher)?;
+            plant_directive_with_secrets(
+                user,
+                "test/dotenv_secret",
+                "Hello {{ name }}.",
+                &[&env_var_owned],
+                &fixture.publisher,
+            )?;
+            // Pre-generate vault keypair so the daemon boots cleanly,
+            // but DO NOT seal any secret — the .env overlay must be the
+            // sole source of the declared secret.
+            let secrets = std::collections::HashMap::new();
+            plant_sealed_vault_secrets(state_path, &secrets)?;
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
     })
     .await
@@ -541,11 +545,8 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     // will see. The harness sets HOME to user_space and the project
     // path is what we POST in; we use a fresh project tempdir.
     let project = tempfile::tempdir().expect("project tempdir");
-    std::fs::write(
-        project.path().join(".env"),
-        format!("{env_var}={secret}\n"),
-    )
-    .expect("write project .env");
+    std::fs::write(project.path().join(".env"), format!("{env_var}={secret}\n"))
+        .expect("write project .env");
 
     let post_fut = h.post_execute(
         "directive:test/dotenv_secret",
@@ -587,10 +588,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
 /// bypassing `write_sealed_secrets`'s pre-encryption blocklist check.
 /// This simulates a corrupt or malicious sealed store on disk so the
 /// daemon's `validate_decrypted_keys` post-decrypt check fires.
-fn plant_poisoned_sealed_store(
-    state_path: &Path,
-    plaintext_toml: &str,
-) -> anyhow::Result<()> {
+fn plant_poisoned_sealed_store(state_path: &Path, plaintext_toml: &str) -> anyhow::Result<()> {
     let secret_key_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("node")
@@ -626,47 +624,47 @@ async fn vault_blocked_name_fails_request_loud() {
     let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_mock_provider_with_auth(
-            user,
-            &mock_url,
-            "RYEOS_TEST_VAULT_BLOCKED",
-            None,
-            None,
-            &fixture.publisher,
-        )?;
-        plant_model_routing(user, &fixture.publisher)?;
-        // Directive declares a required secret so the vault is
-        // actually read at dispatch time. Without a declared secret
-        // the post-step-7a dispatcher skips the vault read entirely
-        // and a poisoned PATH key in the store never trips.
-        plant_directive_with_secrets(
-            user,
-            "test/vault_blocked",
-            "noop",
-            &["RYEOS_TEST_VAULT_BLOCKED"],
-            &fixture.publisher,
-        )?;
+    let plant =
+        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_mock_provider_with_auth(
+                user,
+                &mock_url,
+                "RYEOS_TEST_VAULT_BLOCKED",
+                None,
+                None,
+                &fixture.publisher,
+            )?;
+            plant_model_routing(user, &fixture.publisher)?;
+            // Directive declares a required secret so the vault is
+            // actually read at dispatch time. Without a declared secret
+            // the post-step-7a dispatcher skips the vault read entirely
+            // and a poisoned PATH key in the store never trips.
+            plant_directive_with_secrets(
+                user,
+                "test/vault_blocked",
+                "noop",
+                &["RYEOS_TEST_VAULT_BLOCKED"],
+                &fixture.publisher,
+            )?;
 
-        // Poisoned sealed store: PATH is on the blocked list, but we
-        // bypass write-time validation by sealing the plaintext
-        // directly. The declared secret is included so the test
-        // isolates the blocked-name failure rather than a "missing
-        // required" error.
-        plant_poisoned_sealed_store(
-            state_path,
-            "RYEOS_TEST_VAULT_BLOCKED = \"ok\"\nPATH = \"/evil:/path\"\n",
-        )?;
-        Ok(())
-    };
+            // Poisoned sealed store: PATH is on the blocked list, but we
+            // bypass write-time validation by sealing the plaintext
+            // directly. The declared secret is included so the test
+            // isolates the blocked-name failure rather than a "missing
+            // required" error.
+            plant_poisoned_sealed_store(
+                state_path,
+                "RYEOS_TEST_VAULT_BLOCKED = \"ok\"\nPATH = \"/evil:/path\"\n",
+            )?;
+            Ok(())
+        };
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, move |cmd| {
         cmd.env(
             "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| {
-                "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
-            }),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
     })
     .await

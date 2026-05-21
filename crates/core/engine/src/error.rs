@@ -7,7 +7,6 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     // ── Ref parsing ──────────────────────────────────────────────────
-
     #[error("malformed ref `{input}`: {reason}")]
     MalformedRef { input: String, reason: String },
 
@@ -21,7 +20,6 @@ pub enum EngineError {
     InvalidSuffix { input: String, reason: String },
 
     // ── Resolution ───────────────────────────────────────────────────
-
     #[error("item not found: `{canonical_ref}` (searched: {searched_spaces:?})")]
     ItemNotFound {
         canonical_ref: String,
@@ -51,7 +49,6 @@ pub enum EngineError {
     BundleDiscoveryFailed { reason: String },
 
     // ── Extension registry ───────────────────────────────────────────
-
     #[error("no extensions registered for kind `{kind}` — extractor YAML missing or empty")]
     NoExtensionsForKind { kind: String },
 
@@ -62,7 +59,6 @@ pub enum EngineError {
     ParserNotRegistered { parser_id: String },
 
     // ── Trust & verification ─────────────────────────────────────────
-
     #[error("signature missing on `{canonical_ref}`")]
     SignatureMissing { canonical_ref: String },
 
@@ -86,7 +82,6 @@ pub enum EngineError {
     },
 
     // ── Planning ─────────────────────────────────────────────────────
-
     #[error("executor not found: `{executor_id}`")]
     ExecutorNotFound { executor_id: String },
 
@@ -127,7 +122,10 @@ pub enum EngineError {
     CycleDetected { cycle: Vec<String> },
 
     #[error("executor chain exceeded max depth {max_depth}; chain: {chain:?}")]
-    ChainTooDeep { max_depth: usize, chain: Vec<String> },
+    ChainTooDeep {
+        max_depth: usize,
+        chain: Vec<String>,
+    },
 
     #[error("invalid runtime config in {path}: {reason}")]
     InvalidRuntimeConfig { path: String, reason: String },
@@ -144,20 +142,26 @@ pub enum EngineError {
     #[error("binary `{bin}` not found in bundle (searched: {searched})")]
     BinNotFound { bin: String, searched: String },
 
-    #[error("bundle manifest missing: no refs/bundles/manifest under bundle root at {bundle_root}")]
+    #[error(
+        "bundle manifest missing: no refs/bundles/manifest under bundle root at {bundle_root}"
+    )]
     BinManifestMissing { bundle_root: String },
 
     #[error("binary `{bin}` not in manifest (triple {triple})")]
     BinNotInManifest { bin: String, triple: String },
 
-    #[error("binary `{bin}` hash mismatch: manifest declares {declared}, on-disk computed {computed}")]
+    #[error(
+        "binary `{bin}` hash mismatch: manifest declares {declared}, on-disk computed {computed}"
+    )]
     BinHashMismatch {
         bin: String,
         declared: String,
         computed: String,
     },
 
-    #[error("binary `{bin}` not trusted: signature from fingerprint `{fingerprint}` not in trust store")]
+    #[error(
+        "binary `{bin}` not trusted: signature from fingerprint `{fingerprint}` not in trust store"
+    )]
     BinUntrusted { bin: String, fingerprint: String },
 
     #[error("unknown template token: {{{token}}}")]
@@ -166,26 +170,24 @@ pub enum EngineError {
     #[error("template requires {{{token}}} but no {token} available")]
     TemplateMissingContext { token: String },
 
-    #[error("unknown runtime block `{key}` on kind `{kind}` at {source_path:?} \
-             (no handler registered and not in the kind schema's `runtime.ignored_keys`)")]
+    #[error(
+        "unknown runtime block `{key}` on kind `{kind}` at {source_path:?} \
+             (no handler registered and not in the kind schema's `runtime.ignored_keys`)"
+    )]
     UnknownRuntimeBlock {
         key: String,
         kind: String,
         source_path: PathBuf,
     },
 
-    #[error("runtime block `{key}` is declared as Singleton but appears on \
-             multiple chain elements: {paths:?}")]
-    DuplicateSingletonBlock {
-        key: String,
-        paths: Vec<PathBuf>,
-    },
+    #[error(
+        "runtime block `{key}` is declared as Singleton but appears on \
+             multiple chain elements: {paths:?}"
+    )]
+    DuplicateSingletonBlock { key: String, paths: Vec<PathBuf> },
 
     #[error("parameter validation failed for `{tool}`:\n  - {}", errors.join("\n  - "))]
-    ParameterValidationFailed {
-        tool: String,
-        errors: Vec<String>,
-    },
+    ParameterValidationFailed { tool: String, errors: Vec<String> },
 
     #[error("runtime binary not found: {binary}")]
     RuntimeBinaryNotFound { binary: String },
@@ -196,10 +198,14 @@ pub enum EngineError {
     #[error("host env passthrough ${{{var}}} not allowed by daemon policy (RYEOS_TOOL_ENV_PASSTHROUGH allowlist)")]
     HostEnvPassthroughNotAllowed { var: String },
 
-    #[error("host env passthrough ${{{var}}} is allowed but {var} is unset in the daemon process env")]
+    #[error(
+        "host env passthrough ${{{var}}} is allowed but {var} is unset in the daemon process env"
+    )]
     HostEnvPassthroughMissing { var: String },
 
-    #[error("reserved host env passthrough ${{{var}}} is not allowed (RYEOS_* prefix is reserved)")]
+    #[error(
+        "reserved host env passthrough ${{{var}}} is not allowed (RYEOS_* prefix is reserved)"
+    )]
     ReservedHostEnvPassthrough { var: String },
 
     #[error("unknown executor alias `{alias}` for kind `{kind}`")]
@@ -212,7 +218,6 @@ pub enum EngineError {
     KindNotExecutable { kind: String },
 
     // ── Execution ────────────────────────────────────────────────────
-
     #[error("execution failed: {reason}")]
     ExecutionFailed { reason: String },
 
@@ -220,7 +225,6 @@ pub enum EngineError {
     BudgetExhausted { thread_id: String },
 
     // ── Scope & budget ─────────────────────────────────────────────
-
     #[error("insufficient scope: required `{required}`, available: {available:?}")]
     InsufficientScope {
         required: String,
@@ -231,17 +235,14 @@ pub enum EngineError {
     InvalidBudget { reason: String },
 
     // ── Lifecycle ────────────────────────────────────────────────────
-
     #[error("invalid state transition from `{from}` on event `{event}`")]
     InvalidStateTransition { from: String, event: String },
 
     // ── Delegation ───────────────────────────────────────────────────
-
     #[error("delegated principal validation failed: {reason}")]
     DelegationValidationFailed { reason: String },
 
     // ── Runtime registry ─────────────────────────────────────────────
-
     #[error("runtime YAML invalid at {path}: {reason}")]
     RuntimeYamlInvalid { path: PathBuf, reason: String },
 
@@ -269,10 +270,7 @@ pub enum EngineError {
         "kind `{kind}` has multiple runtimes marked `default: true`: {}",
         defaults.join(", ")
     )]
-    MultipleRuntimeDefaults {
-        kind: String,
-        defaults: Vec<String>,
-    },
+    MultipleRuntimeDefaults { kind: String, defaults: Vec<String> },
 
     #[error("runtime `{runtime}` serves kind `{kind}` whose terminator declares protocol `{found}`, expected `{expected}`")]
     RuntimeProtocolMismatch {
@@ -283,24 +281,15 @@ pub enum EngineError {
     },
 
     #[error("runtime `{runtime}` serves unknown kind `{kind}`")]
-    RuntimeServesUnknownKind {
-        kind: String,
-        runtime: String,
-    },
+    RuntimeServesUnknownKind { kind: String, runtime: String },
 
     #[error("runtime `{runtime}` serves kind `{kind}` which has no `execution:` block")]
-    RuntimeServesKindNoExecution {
-        kind: String,
-        runtime: String,
-    },
+    RuntimeServesKindNoExecution { kind: String, runtime: String },
 
     #[error("duplicate runtime canonical ref `{canonical_ref}` across bundle roots")]
-    DuplicateRuntimeRef {
-        canonical_ref: String,
-    },
+    DuplicateRuntimeRef { canonical_ref: String },
 
     // ── Inventory ────────────────────────────────────────────────────
-
     /// A per-item failure during inventory construction. The inner
     /// `EngineError` is preserved verbatim so the launcher can map
     /// resolution / parser / verification failures to the appropriate
@@ -328,12 +317,10 @@ pub enum EngineError {
     },
 
     // ── Internal ─────────────────────────────────────────────────────
-
     #[error("internal engine error: {0}")]
     Internal(String),
 
     // ── Handler subprocess dispatch ──────────────────────────────────
-
     #[error("parser `{parser_id}` failed: {kind:?}: {message}")]
     ParserFailed {
         parser_id: String,
@@ -354,7 +341,9 @@ pub enum EngineError {
     #[error("handler `{handler}` returned malformed response: {detail}")]
     HandlerProtocolViolation { handler: String, detail: String },
 
-    #[error("handler binary missing: `{binary_ref}` for handler `{handler}` — {reason}. {remediation}")]
+    #[error(
+        "handler binary missing: `{binary_ref}` for handler `{handler}` — {reason}. {remediation}"
+    )]
     HandlerBinaryMissing {
         handler: String,
         binary_ref: String,
@@ -366,7 +355,6 @@ pub enum EngineError {
     Handler(Box<crate::handlers::HandlerError>),
 
     // ── Protocol references ────────────────────────────────────────
-
     #[error("kind `{kind}` references unknown protocol `{protocol_ref}`: {source}")]
     KindReferencesUnknownProtocol {
         kind: String,

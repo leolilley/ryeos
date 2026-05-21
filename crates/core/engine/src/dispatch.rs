@@ -90,7 +90,9 @@ fn spec_to_request(
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
     // Build env: spec.env + daemon context bindings
-    let mut envs: Vec<(String, String)> = spec.env.iter()
+    let mut envs: Vec<(String, String)> = spec
+        .env
+        .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -318,14 +320,20 @@ mod tests {
         let ctx = test_engine_context();
         let completion = execute_plan(&plan, &ctx).unwrap();
         assert_eq!(completion.status, ThreadTerminalStatus::Completed);
-        assert!(completion.metadata.as_ref().unwrap()["pid"].as_u64().is_some());
+        assert!(completion.metadata.as_ref().unwrap()["pid"]
+            .as_u64()
+            .is_some());
     }
 
     #[test]
     fn dispatch_with_cmd_python() {
         let dir = tempdir();
         let script = dir.join("test.py");
-        fs::write(&script, "import json; print(json.dumps({'status': 'ok'}))\n").unwrap();
+        fs::write(
+            &script,
+            "import json; print(json.dumps({'status': 'ok'}))\n",
+        )
+        .unwrap();
 
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
@@ -448,7 +456,10 @@ mod tests {
         let ctx = test_engine_context();
         let completion = execute_plan(&plan, &ctx).unwrap();
         // Lillux returns a failed result for spawn errors
-        assert!(!matches!(completion.status, ThreadTerminalStatus::Completed));
+        assert!(!matches!(
+            completion.status,
+            ThreadTerminalStatus::Completed
+        ));
     }
 
     #[test]

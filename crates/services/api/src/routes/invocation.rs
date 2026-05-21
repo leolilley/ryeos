@@ -124,11 +124,7 @@ impl RouteInvocationResult {
 pub struct RouteEventStream {
     /// SSE event stream producing `axum::response::sse::Event` items.
     pub events: Pin<
-        Box<
-            dyn Stream<
-                    Item = Result<axum::response::sse::Event, std::convert::Infallible>,
-                > + Send,
-        >,
+        Box<dyn Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>> + Send>,
     >,
     /// Keep-alive interval in seconds.
     pub keep_alive_secs: u64,

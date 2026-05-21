@@ -212,7 +212,12 @@ mod tests {
     fn first_seen_is_fresh() {
         let store = WebhookDedupeStore::new();
         assert_eq!(
-            store.mark_seen(RouteDedupeNamespace::for_route("r1"), "evt_1", 1000, cfg(60, 10)),
+            store.mark_seen(
+                RouteDedupeNamespace::for_route("r1"),
+                "evt_1",
+                1000,
+                cfg(60, 10)
+            ),
             DedupeOutcome::Fresh
         );
     }
@@ -220,9 +225,19 @@ mod tests {
     #[test]
     fn second_within_ttl_is_replay() {
         let store = WebhookDedupeStore::new();
-        store.mark_seen(RouteDedupeNamespace::for_route("r1"), "evt_1", 1000, cfg(60, 10));
+        store.mark_seen(
+            RouteDedupeNamespace::for_route("r1"),
+            "evt_1",
+            1000,
+            cfg(60, 10),
+        );
         assert_eq!(
-            store.mark_seen(RouteDedupeNamespace::for_route("r1"), "evt_1", 1010, cfg(60, 10)),
+            store.mark_seen(
+                RouteDedupeNamespace::for_route("r1"),
+                "evt_1",
+                1010,
+                cfg(60, 10)
+            ),
             DedupeOutcome::Replay
         );
     }
@@ -230,9 +245,19 @@ mod tests {
     #[test]
     fn second_after_ttl_is_fresh() {
         let store = WebhookDedupeStore::new();
-        store.mark_seen(RouteDedupeNamespace::for_route("r1"), "evt_1", 1000, cfg(60, 10));
+        store.mark_seen(
+            RouteDedupeNamespace::for_route("r1"),
+            "evt_1",
+            1000,
+            cfg(60, 10),
+        );
         assert_eq!(
-            store.mark_seen(RouteDedupeNamespace::for_route("r1"), "evt_1", 2000, cfg(60, 10)),
+            store.mark_seen(
+                RouteDedupeNamespace::for_route("r1"),
+                "evt_1",
+                2000,
+                cfg(60, 10)
+            ),
             DedupeOutcome::Fresh
         );
     }
@@ -241,18 +266,37 @@ mod tests {
     fn different_namespaces_do_not_collide() {
         let store = WebhookDedupeStore::new();
         let c = cfg(60, 10);
-        assert_eq!(store.mark_seen(RouteDedupeNamespace::for_route("route_a"), "evt_1", 1000, c), DedupeOutcome::Fresh);
-        assert_eq!(store.mark_seen(RouteDedupeNamespace::for_route("route_b"), "evt_1", 1010, c), DedupeOutcome::Fresh);
+        assert_eq!(
+            store.mark_seen(RouteDedupeNamespace::for_route("route_a"), "evt_1", 1000, c),
+            DedupeOutcome::Fresh
+        );
+        assert_eq!(
+            store.mark_seen(RouteDedupeNamespace::for_route("route_b"), "evt_1", 1010, c),
+            DedupeOutcome::Fresh
+        );
         // Replay only within the same namespace.
-        assert_eq!(store.mark_seen(RouteDedupeNamespace::for_route("route_a"), "evt_1", 1020, c), DedupeOutcome::Replay);
+        assert_eq!(
+            store.mark_seen(RouteDedupeNamespace::for_route("route_a"), "evt_1", 1020, c),
+            DedupeOutcome::Replay
+        );
     }
 
     #[test]
     fn different_delivery_ids_same_namespace() {
         let store = WebhookDedupeStore::new();
-        store.mark_seen(RouteDedupeNamespace::for_route("r1"), "evt_1", 1000, cfg(60, 10));
+        store.mark_seen(
+            RouteDedupeNamespace::for_route("r1"),
+            "evt_1",
+            1000,
+            cfg(60, 10),
+        );
         assert_eq!(
-            store.mark_seen(RouteDedupeNamespace::for_route("r1"), "evt_2", 1010, cfg(60, 10)),
+            store.mark_seen(
+                RouteDedupeNamespace::for_route("r1"),
+                "evt_2",
+                1010,
+                cfg(60, 10)
+            ),
             DedupeOutcome::Fresh
         );
     }

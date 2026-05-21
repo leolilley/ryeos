@@ -32,12 +32,22 @@ pub enum HandlerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HandlerResponse {
-    ParseOk { value: Value },
-    ParseErr { kind: ParseErrKind, message: String },
+    ParseOk {
+        value: Value,
+    },
+    ParseErr {
+        kind: ParseErrKind,
+        message: String,
+    },
     ValidateOk,
-    ValidateErr { message: String },
+    ValidateErr {
+        message: String,
+    },
     ComposeOk(ComposeSuccess),
-    ComposeErr { step: ResolutionStepNameWire, reason: String },
+    ComposeErr {
+        step: ResolutionStepNameWire,
+        reason: String,
+    },
 }
 
 // ── Parser ───────────────────────────────────────────────────────
@@ -172,7 +182,9 @@ mod tests {
 
     #[test]
     fn handler_response_variants_serialize_with_result_tag() {
-        let r = HandlerResponse::ParseOk { value: serde_json::json!(42) };
+        let r = HandlerResponse::ParseOk {
+            value: serde_json::json!(42),
+        };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains(r#""result":"parse_ok""#));
     }

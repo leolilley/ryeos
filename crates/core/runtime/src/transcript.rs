@@ -56,11 +56,7 @@ impl Transcript {
         self
     }
 
-    pub async fn write_event(
-        &self,
-        event_type: &str,
-        payload: Value,
-    ) -> anyhow::Result<()> {
+    pub async fn write_event(&self, event_type: &str, payload: Value) -> anyhow::Result<()> {
         let timestamp = timestamp_millis();
         let event = serde_json::json!({
             "event_type": event_type,
@@ -100,11 +96,9 @@ impl Transcript {
                 .map_err(|e| anyhow::anyhow!("daemon replay failed: {e}"))?;
             return result
                 .get("events")
-                .and_then(|e| e.as_array()).cloned()
-                .map_or_else(
-                    || Err(anyhow::anyhow!("malformed daemon response")),
-                    Ok,
-                );
+                .and_then(|e| e.as_array())
+                .cloned()
+                .map_or_else(|| Err(anyhow::anyhow!("malformed daemon response")), Ok);
         }
 
         let path = paths::thread_transcript_path(&self.project_path, &self.thread_id)?;
@@ -152,13 +146,19 @@ impl Transcript {
         let mut pending_tool_calls: Vec<Value> = Vec::new();
 
         for event in &events {
-            let event_type = event.get("event_type").and_then(|t| t.as_str()).unwrap_or("");
+            let event_type = event
+                .get("event_type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
             let payload = event.get("payload").cloned().unwrap_or(Value::Null);
 
             match event_type {
                 "cognition_in" => {
                     flush_tool_calls(&mut messages, &mut pending_tool_calls);
-                    let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                    let role = payload
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("user");
                     let text = payload.get("text").or_else(|| payload.get("content"));
                     let mut msg = serde_json::json!({"role": role});
                     if let Some(t) = text {
@@ -184,10 +184,7 @@ impl Transcript {
                         .get("call_id")
                         .and_then(|c| c.as_str())
                         .unwrap_or("");
-                    let tool = payload
-                        .get("tool")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
+                    let tool = payload.get("tool").and_then(|t| t.as_str()).unwrap_or("");
                     let input = payload.get("input").cloned().unwrap_or(Value::Null);
                     pending_tool_calls.push(serde_json::json!({
                         "id": call_id,
@@ -291,8 +288,7 @@ impl Transcript {
         }
 
         let signed = self.sign_markdown(&md);
-        let path =
-            paths::thread_knowledge_path(&self.project_path, &self.thread_id)?;
+        let path = paths::thread_knowledge_path(&self.project_path, &self.thread_id)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -302,9 +298,7 @@ impl Transcript {
 
     fn sign_markdown(&self, body: &str) -> String {
         match &self.signing_key {
-            Some(key) => {
-                lillux::signature::sign_content(body, key, "<!--", Some("-->"))
-            }
+            Some(key) => lillux::signature::sign_content(body, key, "<!--", Some("-->")),
             None => body.to_string(),
         }
     }
@@ -375,11 +369,10 @@ fn condense_tool_input(tool: &str, payload: &Value) -> String {
                     );
                 }
             }
-            return serde_json::to_string_pretty(&Value::Object(map))
-                .unwrap_or_else(|e| {
-                    tracing::warn!("failed to serialize truncated tool input for transcript: {e}");
-                    String::new()
-                });
+            return serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_else(|e| {
+                tracing::warn!("failed to serialize truncated tool input for transcript: {e}");
+                String::new()
+            });
         }
     }
     serde_json::to_string_pretty(&input).unwrap_or_else(|e| {
@@ -418,12 +411,9 @@ mod tests {
         )
         .await
         .unwrap();
-        t.write_event(
-            "cognition_out",
-            serde_json::json!({"text": "I'll search."}),
-        )
-        .await
-        .unwrap();
+        t.write_event("cognition_out", serde_json::json!({"text": "I'll search."}))
+            .await
+            .unwrap();
         t.write_event(
             "tool_call_start",
             serde_json::json!({
@@ -458,12 +448,9 @@ mod tests {
         )
         .await
         .unwrap();
-        t.write_event(
-            "cognition_out",
-            serde_json::json!({"text": "Hi"}),
-        )
-        .await
-        .unwrap();
+        t.write_event("cognition_out", serde_json::json!({"text": "Hi"}))
+            .await
+            .unwrap();
         let path = t
             .render_knowledge_transcript(&KnowledgeRenderOptions {
                 directive: "test/directive".into(),

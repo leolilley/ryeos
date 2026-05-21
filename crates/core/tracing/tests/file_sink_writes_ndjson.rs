@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use tracing_subscriber::{Layer, prelude::*};
+use tracing_subscriber::{prelude::*, Layer};
 
 #[test]
 fn file_sink_writes_ndjson() {
@@ -34,7 +34,9 @@ fn file_sink_writes_ndjson() {
         )
         .with_filter(filter);
 
-    let _guard = tracing_subscriber::registry().with(file_layer).set_default();
+    let _guard = tracing_subscriber::registry()
+        .with(file_layer)
+        .set_default();
 
     // Emit some events
     tracing::info!(message = "test_event_1", key = "value1");
@@ -50,7 +52,11 @@ fn file_sink_writes_ndjson() {
     let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
 
     // Should have at least the two events plus span NEW/CLOSE
-    assert!(lines.len() >= 2, "expected at least 2 ndjson lines, got {}", lines.len());
+    assert!(
+        lines.len() >= 2,
+        "expected at least 2 ndjson lines, got {}",
+        lines.len()
+    );
 
     for (i, line) in lines.iter().enumerate() {
         let parsed: serde_json::Value = serde_json::from_str(line)
@@ -72,6 +78,12 @@ fn file_sink_writes_ndjson() {
 
     // Check that our specific events appear
     let all_text = contents;
-    assert!(all_text.contains("test_event_1"), "missing test_event_1 in trace output");
-    assert!(all_text.contains("inside_span"), "missing inside_span in trace output");
+    assert!(
+        all_text.contains("test_event_1"),
+        "missing test_event_1 in trace output"
+    );
+    assert!(
+        all_text.contains("inside_span"),
+        "missing inside_span in trace output"
+    );
 }

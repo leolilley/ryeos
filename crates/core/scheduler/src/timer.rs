@@ -36,7 +36,8 @@ pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receive
         // compute_next_fire(interval, None) always returns now+interval,
         // making is_due always false. Instead we compute each spec's
         // scheduled_at from the DB last fire and check if it's in the past.
-        let due_specs: Vec<ScheduleSpecRecord> = specs.iter()
+        let due_specs: Vec<ScheduleSpecRecord> = specs
+            .iter()
             .filter(|s| spec_is_due(s, &ctx, now))
             .cloned()
             .collect();
@@ -115,9 +116,13 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                             "trigger_reason": fire.trigger_reason,
                             "signer_fingerprint": fire.signer_fingerprint,
                         });
-                        let fires_path = ctx.system_space_dir()
-                            .join(ryeos_engine::AI_DIR).join("state").join("schedules")
-                            .join(&fire.schedule_id).join("fires.jsonl");
+                        let fires_path = ctx
+                            .system_space_dir()
+                            .join(ryeos_engine::AI_DIR)
+                            .join("state")
+                            .join("schedules")
+                            .join(&fire.schedule_id)
+                            .join("fires.jsonl");
                         let db = ctx.scheduler_db();
                         let fire_id_owned = fire.fire_id.clone();
                         let fire_id_log = fire.fire_id.clone();
@@ -130,7 +135,9 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                                 tracing::error!(fire_id = %fire_id_owned, error = %e,
                                     "scheduler: repair sweep failed to finalize fire");
                             }
-                        }).await.unwrap_or_else(|e| {
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
                             tracing::error!(fire_id = %fire_id_log, error = %e,
                                 "repair sweep: spawn_blocking failed");
                         });
@@ -164,9 +171,13 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                         "trigger_reason": fire.trigger_reason,
                         "signer_fingerprint": fire.signer_fingerprint,
                     });
-                    let fires_path = ctx.system_space_dir()
-                        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
-                        .join(&fire.schedule_id).join("fires.jsonl");
+                    let fires_path = ctx
+                        .system_space_dir()
+                        .join(ryeos_engine::AI_DIR)
+                        .join("state")
+                        .join("schedules")
+                        .join(&fire.schedule_id)
+                        .join("fires.jsonl");
                     let db = ctx.scheduler_db();
                     let fire_id_owned = fire.fire_id.clone();
                     let fire_id_log = fire.fire_id.clone();
@@ -179,7 +190,9 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                             tracing::error!(fire_id = %fire_id_owned, error = %e,
                                 "repair sweep: failed to upsert thread_lost fire record");
                         }
-                    }).await.unwrap_or_else(|e| {
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
                         tracing::error!(fire_id = %fire_id_log, error = %e,
                             "repair sweep: spawn_blocking failed for thread_lost");
                     });
@@ -243,7 +256,11 @@ fn spec_is_due<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx, now:
     });
 
     let scheduled_at = match crontab::compute_scheduled_at(
-        &spec.schedule_type, &spec.expression, &spec.timezone, now, effective_last,
+        &spec.schedule_type,
+        &spec.expression,
+        &spec.timezone,
+        now,
+        effective_last,
         Some(spec.registered_at),
     ) {
         Some(at) => at,
@@ -277,8 +294,7 @@ fn spec_is_due<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx, now:
             }
             // For at schedules, parse the expression directly
             if spec.schedule_type == "at" {
-                return crontab::parse_iso_ts(&spec.expression)
-                    .is_some_and(|ts| ts <= now);
+                return crontab::parse_iso_ts(&spec.expression).is_some_and(|ts| ts <= now);
             }
             return false;
         }
@@ -289,36 +305,45 @@ fn spec_is_due<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx, now:
 }
 
 fn compute_soonest_fire(specs: &[ScheduleSpecRecord], now: i64) -> Option<i64> {
-    specs.iter().filter_map(|s| {
-        // For interval schedules with no prior fires, the first fire is at
-        // registered_at + interval. For cron/at, compute_next_fire handles it.
-        if s.schedule_type == "interval" {
-            let interval_secs = match s.expression.parse::<i64>() {
-                Ok(secs) if secs > 0 => secs,
-                _ => return None, // skip invalid interval in sleep calculation
-            };
-            let interval_ms = interval_secs * 1000;
-            let first_fire = s.registered_at + interval_ms;
-            if first_fire > now {
-                return Some(first_fire);
+    specs
+        .iter()
+        .filter_map(|s| {
+            // For interval schedules with no prior fires, the first fire is at
+            // registered_at + interval. For cron/at, compute_next_fire handles it.
+            if s.schedule_type == "interval" {
+                let interval_secs = match s.expression.parse::<i64>() {
+                    Ok(secs) if secs > 0 => secs,
+                    _ => return None, // skip invalid interval in sleep calculation
+                };
+                let interval_ms = interval_secs * 1000;
+                let first_fire = s.registered_at + interval_ms;
+                if first_fire > now {
+                    return Some(first_fire);
+                }
+                // Already due — return now so the timer wakes immediately
+                return Some(now);
             }
-            // Already due — return now so the timer wakes immediately
-            return Some(now);
-        }
-        match crontab::compute_next_fire(&s.schedule_type, &s.expression, &s.timezone, now, None) {
-            Ok(Some(at)) => Some(at),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(
-                    schedule_id = %s.schedule_id,
-                    expression = %s.expression,
-                    error = %e,
-                    "compute_soonest_fire: invalid expression — using 1s fallback"
-                );
-                None
+            match crontab::compute_next_fire(
+                &s.schedule_type,
+                &s.expression,
+                &s.timezone,
+                now,
+                None,
+            ) {
+                Ok(Some(at)) => Some(at),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        schedule_id = %s.schedule_id,
+                        expression = %s.expression,
+                        error = %e,
+                        "compute_soonest_fire: invalid expression — using 1s fallback"
+                    );
+                    None
+                }
             }
-        }
-    }).min()
+        })
+        .min()
 }
 
 async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx) {
@@ -340,7 +365,11 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
     };
 
     let scheduled_at = match crontab::compute_scheduled_at(
-        &spec.schedule_type, &spec.expression, &spec.timezone, now, last_fire_at,
+        &spec.schedule_type,
+        &spec.expression,
+        &spec.timezone,
+        now,
+        last_fire_at,
         Some(spec.registered_at),
     ) {
         Some(at) => at,
@@ -388,10 +417,25 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
         let overlap_ok = overlap::check_overlap(spec, ctx).await;
         if !overlap_ok {
             // Skip this fire and all subsequent fires
-            record_skip(ctx, &pending.fire_id, spec, pending.scheduled_at, "overlap_policy_skip").await;
+            record_skip(
+                ctx,
+                &pending.fire_id,
+                spec,
+                pending.scheduled_at,
+                "overlap_policy_skip",
+            )
+            .await;
             break; // stop processing this batch, later fires reappear next tick
         }
-        dispatch_fire(ctx, &pending.fire_id, spec, pending.scheduled_at, pending.reason, false).await;
+        dispatch_fire(
+            ctx,
+            &pending.fire_id,
+            spec,
+            pending.scheduled_at,
+            pending.reason,
+            false,
+        )
+        .await;
     }
 }
 
@@ -440,9 +484,13 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
             signer_fingerprint: Some(spec.signer_fingerprint.clone()),
         };
         let db = ctx.scheduler_db();
-        let fires_path = ctx.system_space_dir()
-            .join(ryeos_engine::AI_DIR).join("state").join("schedules")
-            .join(&spec.schedule_id).join("fires.jsonl");
+        let fires_path = ctx
+            .system_space_dir()
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
+            .join("schedules")
+            .join(&spec.schedule_id)
+            .join("fires.jsonl");
         let fire_id_owned = fire_id.to_string();
         tokio::task::spawn_blocking(move || {
             if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
@@ -474,9 +522,13 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
         "trigger_reason": trigger_reason,
         "signer_fingerprint": spec.signer_fingerprint,
     });
-    let fires_path = ctx.system_space_dir()
-        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
-        .join(&spec.schedule_id).join("fires.jsonl");
+    let fires_path = ctx
+        .system_space_dir()
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("schedules")
+        .join(&spec.schedule_id)
+        .join("fires.jsonl");
     let rec = FireRecord {
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),
@@ -540,7 +592,10 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
     }
 
     // ── Dispatch via SchedulerContext ────────────────────────
-    match ctx.dispatch_scheduled_item(spec, fire_id, &thread_id, scheduled_at, trigger_reason).await {
+    match ctx
+        .dispatch_scheduled_item(spec, fire_id, &thread_id, scheduled_at, trigger_reason)
+        .await
+    {
         Ok(_) => {
             tracing::info!(
                 fire_id = %fire_id,
@@ -606,14 +661,19 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
 
 /// Dispatch a recovery fire (from reconciler).
 /// Uses reclaim path instead of claim to handle fires already persisted in DB.
-pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(ctx: Arc<Ctx>, intent: super::reconcile::ResumeIntent) {
+pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(
+    ctx: Arc<Ctx>,
+    intent: super::reconcile::ResumeIntent,
+) {
     // Attempt to reclaim the fire for redispatch.
     // This handles the case where fire was persisted but thread was never created.
     let fire_id = intent.fire_id.clone();
     let db = ctx.scheduler_db();
     let can_reclaim = tokio::task::spawn_blocking(move || {
         db.reclaim_fire(&fire_id).unwrap_or(false)
-    }).await.unwrap_or_else(|e| {
+    })
+    .await
+    .unwrap_or_else(|e| {
         tracing::error!(fire_id = %intent.fire_id, error = %e, "reclaim spawn_blocking failed");
         false
     });
@@ -626,7 +686,15 @@ pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(ctx: Arc<Ctx>, intent
         return;
     }
 
-    dispatch_fire(&ctx, &intent.fire_id, &intent.spec, intent.scheduled_at, intent.trigger_reason, true).await;
+    dispatch_fire(
+        &ctx,
+        &intent.fire_id,
+        &intent.spec,
+        intent.scheduled_at,
+        intent.trigger_reason,
+        true,
+    )
+    .await;
 }
 
 async fn record_skip<Ctx: SchedulerContext>(
@@ -649,9 +717,13 @@ async fn record_skip<Ctx: SchedulerContext>(
         "skipped_reason": reason,
         "signer_fingerprint": spec.signer_fingerprint,
     });
-    let fires_path = ctx.system_space_dir()
-        .join(ryeos_engine::AI_DIR).join("state").join("schedules")
-        .join(&spec.schedule_id).join("fires.jsonl");
+    let fires_path = ctx
+        .system_space_dir()
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("schedules")
+        .join(&spec.schedule_id)
+        .join("fires.jsonl");
     let rec = FireRecord {
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),

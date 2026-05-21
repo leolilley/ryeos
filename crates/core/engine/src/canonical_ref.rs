@@ -56,9 +56,11 @@ impl CanonicalRef {
         }
 
         // Split kind from the rest at the first ':'
-        let colon_pos = input.find(':').ok_or_else(|| EngineError::BareRefRejected {
-            input: input.to_owned(),
-        })?;
+        let colon_pos = input
+            .find(':')
+            .ok_or_else(|| EngineError::BareRefRejected {
+                input: input.to_owned(),
+            })?;
 
         let kind_str = &input[..colon_pos];
         let remainder = &input[colon_pos + 1..];
@@ -392,8 +394,7 @@ mod tests {
 
     #[test]
     fn parse_service_ref_with_suffix() {
-        let r =
-            CanonicalRef::parse("service:system/status@t:2026-04-26T00:00:00Z").unwrap();
+        let r = CanonicalRef::parse("service:system/status@t:2026-04-26T00:00:00Z").unwrap();
         assert_eq!(r.kind, "service");
         assert_eq!(r.bare_id, "system/status");
         assert!(r.suffix.is_some());

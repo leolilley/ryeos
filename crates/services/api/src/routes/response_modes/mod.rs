@@ -62,7 +62,10 @@ mod tests {
         assert!(r.get("event_stream").is_some());
         assert!(r.get("launch").is_some());
         assert!(r.get("json").is_some(), "json mode must be registered");
-        assert!(r.get("accepted").is_some(), "accepted alias must be registered");
+        assert!(
+            r.get("accepted").is_some(),
+            "accepted alias must be registered"
+        );
         // Unknown modes never silently resolve.
         assert!(r.get("nonexistent_mode").is_none());
     }

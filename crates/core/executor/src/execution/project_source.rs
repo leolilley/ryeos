@@ -234,7 +234,11 @@ pub fn resolve_project_context(
                 .join("executions")
                 .join(checkout_id);
             let materialization_cache = crate::execution::cache::MaterializationCache::new(
-                state.config.system_space_dir.join("cache").join("snapshots"),
+                state
+                    .config
+                    .system_space_dir
+                    .join("cache")
+                    .join("snapshots"),
             );
             let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
             crate::execution::checkout_project(
@@ -255,53 +259,49 @@ pub fn resolve_project_context(
                 cache_key,
                 || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
                     // Cache miss: materialise user overlay and build engine.
-                    let (user_root, user_guard, trust_overlay) = if let Some(user_mh) =
-                        snapshot.user_manifest_hash.as_ref()
-                    {
-                        let user_exec_dir = state
-                            .config
-                            .system_space_dir
-                            .join("executions")
-                            .join(format!("{}-user", checkout_id));
-                        let user_ai_dir = user_exec_dir.join(ryeos_engine::AI_DIR);
-                        let user_guard = Arc::new(TempDirGuard::new(user_exec_dir.clone()));
-                        crate::execution::checkout_project(
-                            &cas_root,
-                            user_mh,
-                            &user_ai_dir,
-                            Some(&materialization_cache),
-                        )
-                        .map_err(|e| {
-                            ProjectSourceError::CheckoutFailed(format!(
-                                "user-manifest checkout failed: {e}"
-                            ))
-                        })?;
+                    let (user_root, user_guard, trust_overlay) =
+                        if let Some(user_mh) = snapshot.user_manifest_hash.as_ref() {
+                            let user_exec_dir = state
+                                .config
+                                .system_space_dir
+                                .join("executions")
+                                .join(format!("{}-user", checkout_id));
+                            let user_ai_dir = user_exec_dir.join(ryeos_engine::AI_DIR);
+                            let user_guard = Arc::new(TempDirGuard::new(user_exec_dir.clone()));
+                            crate::execution::checkout_project(
+                                &cas_root,
+                                user_mh,
+                                &user_ai_dir,
+                                Some(&materialization_cache),
+                            )
+                            .map_err(|e| {
+                                ProjectSourceError::CheckoutFailed(format!(
+                                    "user-manifest checkout failed: {e}"
+                                ))
+                            })?;
 
-                        let trust_dir = user_ai_dir
-                            .join("config")
-                            .join("keys")
-                            .join("trusted");
-                        let overlay = if trust_dir.is_dir() {
-                            match TrustStore::load_from_dir(&trust_dir) {
-                                Ok(store) if !store.is_empty() => Some(store),
-                                Ok(_) => None,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "pushed user-space trust pins failed to load — \
-                                         proceeding with persistent trust store only"
-                                    );
-                                    None
+                            let trust_dir = user_ai_dir.join("config").join("keys").join("trusted");
+                            let overlay = if trust_dir.is_dir() {
+                                match TrustStore::load_from_dir(&trust_dir) {
+                                    Ok(store) if !store.is_empty() => Some(store),
+                                    Ok(_) => None,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "pushed user-space trust pins failed to load — \
+                                             proceeding with persistent trust store only"
+                                        );
+                                        None
+                                    }
                                 }
-                            }
-                        } else {
-                            None
-                        };
+                            } else {
+                                None
+                            };
 
-                        (Some(user_exec_dir), Some(user_guard), overlay)
-                    } else {
-                        (None, None, None)
-                    };
+                            (Some(user_exec_dir), Some(user_guard), overlay)
+                        } else {
+                            (None, None, None)
+                        };
 
                     // Re-read live bundle roots from the same signed
                     // registry used by daemon startup. Only runs on cache
@@ -499,8 +499,7 @@ mod canonical_project_ref_tests {
 
     #[test]
     fn rejects_nonexistent_absolute() {
-        let err =
-            canonical_project_ref("/this/path/does/not/exist/at/all").unwrap_err();
+        let err = canonical_project_ref("/this/path/does/not/exist/at/all").unwrap_err();
         assert!(format!("{err}").contains("not canonicalizable"));
     }
 
@@ -537,10 +536,8 @@ mod canonical_project_ref_tests {
 
     #[test]
     fn borrowed_constructor_errors_when_dir_missing() {
-        let missing = std::env::temp_dir().join(format!(
-            "ryeos-missing-borrowed-{}",
-            rand::random::<u64>()
-        ));
+        let missing =
+            std::env::temp_dir().join(format!("ryeos-missing-borrowed-{}", rand::random::<u64>()));
         let err = ResolvedProjectContext::borrowed(
             missing.clone(),
             PathBuf::from("/original"),

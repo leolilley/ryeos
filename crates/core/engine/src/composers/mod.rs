@@ -167,10 +167,8 @@ impl ComposerRegistry {
     /// `from_kinds`; this exists so test setups can install or
     /// override a composer for a synthetic kind.
     pub fn register(&mut self, kind: &str, handler: Arc<VerifiedHandler>, config: Value) {
-        self.composers.insert(
-            kind.to_string(),
-            BoundComposer { handler, config },
-        );
+        self.composers
+            .insert(kind.to_string(), BoundComposer { handler, config });
     }
 
     /// True iff a composer is bound for `kind`.
@@ -209,15 +207,16 @@ impl ComposerRegistry {
         ancestors: &[ResolvedAncestor],
         ancestor_parsed: &[Value],
     ) -> Result<KindComposedView, ResolutionError> {
-        let bound = self.composers.get(kind).ok_or_else(|| {
-            ResolutionError::StepFailed {
+        let bound = self
+            .composers
+            .get(kind)
+            .ok_or_else(|| ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
                 reason: format!(
                     "no composer bound for kind `{kind}` — production paths must \
                      bind every kind via ComposerRegistry::from_kinds"
                 ),
-            }
-        })?;
+            })?;
 
         if ancestors.len() != ancestor_parsed.len() {
             return Err(ResolutionError::StepFailed {
@@ -316,9 +315,9 @@ mod tests {
     use crate::kind_registry::KindRegistry;
     use crate::resolution::{ResolutionStepName, ResolvedAncestor, TrustClass};
     use crate::test_support::load_live_handler_registry;
+    use crate::trust::{TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
     use lillux::signature::compute_fingerprint;
-    use crate::trust::{TrustStore, TrustedSigner};
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;

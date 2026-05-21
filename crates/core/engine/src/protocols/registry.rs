@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::protocol_vocabulary::{
-    is_compatible_lifecycle_detached, is_compatible_shape_mode, validate_env_name,
-    CallbackChannel, EnvInjectionSource,
+    is_compatible_lifecycle_detached, is_compatible_shape_mode, validate_env_name, CallbackChannel,
+    EnvInjectionSource,
 };
 use crate::protocols::descriptor::ProtocolDescriptor;
 use crate::protocols::SUPPORTED_PROTOCOL_ABI_VERSION;
@@ -112,14 +112,12 @@ impl ProtocolRegistry {
                     verified.descriptor.abi_version,
                     // Use content hash from the signature verification step.
                     // We'll compute it inline here.
-                    lillux::signature::content_hash(
-                        &lillux::signature::strip_signature_lines(
-                            &std::fs::read_to_string(path).map_err(|e| ProtocolError::Io {
-                                path: path.clone(),
-                                source: e,
-                            })?,
-                        ),
-                    ),
+                    lillux::signature::content_hash(&lillux::signature::strip_signature_lines(
+                        &std::fs::read_to_string(path).map_err(|e| ProtocolError::Io {
+                            path: path.clone(),
+                            source: e,
+                        })?,
+                    ),),
                 ));
                 entries.insert(verified.canonical_ref.clone(), verified);
             }
@@ -158,10 +156,7 @@ impl ProtocolRegistry {
     }
 
     /// Look up a protocol; return NotRegistered if missing.
-    pub fn require(
-        &self,
-        canonical_ref: &str,
-    ) -> Result<&VerifiedProtocol, ProtocolError> {
+    pub fn require(&self, canonical_ref: &str) -> Result<&VerifiedProtocol, ProtocolError> {
         self.entries
             .get(canonical_ref)
             .ok_or_else(|| ProtocolError::NotRegistered {
@@ -212,15 +207,12 @@ fn load_and_verify_protocol(
     })?;
 
     // Verify signature envelope.
-    let sig_header = lillux::signature::parse_signature_line(
-        content.lines().next().unwrap_or(""),
-        "#",
-        None,
-    )
-    .ok_or_else(|| ProtocolError::SignatureInvalid {
-        path: yaml_path.to_owned(),
-        detail: "missing or malformed signature line".to_owned(),
-    })?;
+    let sig_header =
+        lillux::signature::parse_signature_line(content.lines().next().unwrap_or(""), "#", None)
+            .ok_or_else(|| ProtocolError::SignatureInvalid {
+                path: yaml_path.to_owned(),
+                detail: "missing or malformed signature line".to_owned(),
+            })?;
 
     let body = lillux::signature::strip_signature_lines(&content);
     let actual_hash = lillux::signature::content_hash(&body);
@@ -300,10 +292,7 @@ fn validate_protocol_descriptor(
     }
 
     // 3. name matches filename stem
-    let file_stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     if desc.name != file_stem {
         return Err(ProtocolError::NameFilenameMismatch {
             name: desc.name.clone(),
@@ -368,7 +357,8 @@ fn validate_protocol_descriptor(
             if !has_callback_injection {
                 return Err(ProtocolError::Vocabulary {
                     name: desc.name.clone(),
-                    source: crate::protocol_vocabulary::VocabularyError::HttpV1WithoutCallbackInjection,
+                    source:
+                        crate::protocol_vocabulary::VocabularyError::HttpV1WithoutCallbackInjection,
                 });
             }
         }

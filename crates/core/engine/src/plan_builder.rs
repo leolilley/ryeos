@@ -13,20 +13,20 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::canonical_ref::CanonicalRef;
+use crate::contracts::TrustClass as ContractTrustClass;
 use crate::contracts::{
     ExecutionHints, ExecutionPlan, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
     VerifiedItem,
 };
-use crate::contracts::TrustClass as ContractTrustClass;
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
+use crate::resolution::TrustClass;
 use crate::runtime::{
     compile_with_handlers, ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry,
 };
 use crate::trust::TrustStore;
-use crate::resolution::TrustClass;
 
 /// Maximum executor chain depth before we assume a cycle or misconfiguration.
 const MAX_CHAIN_DEPTH: usize = 16;
@@ -91,43 +91,47 @@ fn resolve_executor_chain(
             // Determine which kind schema to look up the alias in.
             // The previous intermediate tells us the kind context.
             // For the first hop, use the root item's kind.
-            let kind_for_alias = intermediates.last()
+            let kind_for_alias = intermediates
+                .last()
                 .map(|i| i.kind.as_str())
                 .unwrap_or(root_kind);
-            let kind_schema = kinds.get(kind_for_alias).ok_or_else(|| {
-                EngineError::UnsupportedKind {
-                    kind: kind_for_alias.to_string(),
-                }
-            })?;
-            let execution = kind_schema.execution().ok_or_else(|| {
-                EngineError::KindNotExecutable {
-                    kind: kind_for_alias.to_string(),
-                }
-            })?;
-            execution.aliases.get(&current_id).ok_or_else(|| {
-                EngineError::UnknownAlias {
+            let kind_schema =
+                kinds
+                    .get(kind_for_alias)
+                    .ok_or_else(|| EngineError::UnsupportedKind {
+                        kind: kind_for_alias.to_string(),
+                    })?;
+            let execution =
+                kind_schema
+                    .execution()
+                    .ok_or_else(|| EngineError::KindNotExecutable {
+                        kind: kind_for_alias.to_string(),
+                    })?;
+            execution
+                .aliases
+                .get(&current_id)
+                .ok_or_else(|| EngineError::UnknownAlias {
                     alias: current_id.clone(),
                     kind: kind_for_alias.to_string(),
-                }
-            })?.clone()
+                })?
+                .clone()
         } else {
             current_id.clone()
         };
 
         // Resolve as canonical ref → tool on disk
-        let ref_ = CanonicalRef::parse(&resolved_id).map_err(|e| {
-            EngineError::ExecutorNotFound {
+        let ref_ =
+            CanonicalRef::parse(&resolved_id).map_err(|e| EngineError::ExecutorNotFound {
                 executor_id: format!(
                     "{current_id} → {resolved_id} (not a valid canonical ref: {e})"
                 ),
-            }
-        })?;
+            })?;
 
-        let kind_schema = kinds.get(&ref_.kind).ok_or_else(|| {
-            EngineError::UnsupportedKind {
+        let kind_schema = kinds
+            .get(&ref_.kind)
+            .ok_or_else(|| EngineError::UnsupportedKind {
                 kind: ref_.kind.clone(),
-            }
-        })?;
+            })?;
 
         let (source_path, _space, matched_ext) =
             crate::item_resolution::resolve_item(roots, kind_schema, &ref_)?;
@@ -148,10 +152,13 @@ fn resolve_executor_chain(
             })?;
 
         // Verify trust/integrity of this chain hop
-        let sig_header = crate::item_resolution::parse_signature_header(&content, &source_format.signature);
+        let sig_header =
+            crate::item_resolution::parse_signature_header(&content, &source_format.signature);
         let trust_class = match &sig_header {
             Some(header) => {
-                if let Some(actual_hash) = crate::trust::content_hash_after_signature(&content, &source_format.signature) {
+                if let Some(actual_hash) =
+                    crate::trust::content_hash_after_signature(&content, &source_format.signature)
+                {
                     if actual_hash != header.content_hash {
                         return Err(EngineError::ContentHashMismatch {
                             canonical_ref: resolved_id.clone(),
@@ -333,13 +340,12 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     // intermediate (Step 2a below). Kept outside the inner scope so
     // `root_parsed` is available after validation.
     let root_parsed = {
-        let content =
-            std::fs::read_to_string(&resolved.source_path).map_err(|e| {
-                EngineError::Internal(format!(
-                    "failed to read tool source for schema validation {}: {e}",
-                    resolved.source_path.display()
-                ))
-            })?;
+        let content = std::fs::read_to_string(&resolved.source_path).map_err(|e| {
+            EngineError::Internal(format!(
+                "failed to read tool source for schema validation {}: {e}",
+                resolved.source_path.display()
+            ))
+        })?;
         let tool_block = parsers.dispatch(
             &resolved.source_format.parser,
             &content,
@@ -393,10 +399,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         resolved.source_path.to_string_lossy().to_string(),
     );
     plan_env.insert("RYEOS_ITEM_KIND".to_owned(), resolved.kind.clone());
-    plan_env.insert(
-        "RYEOS_ITEM_REF".to_owned(),
-        canonical_ref.clone(),
-    );
+    plan_env.insert("RYEOS_ITEM_REF".to_owned(), canonical_ref.clone());
     if let Some(ref root) = resolved.materialized_project_root {
         plan_env.insert(
             "RYEOS_PROJECT_ROOT".to_owned(),
@@ -404,7 +407,10 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         );
     }
     plan_env.insert("RYEOS_SITE_ID".to_owned(), ctx.current_site_id.clone());
-    plan_env.insert("RYEOS_ORIGIN_SITE_ID".to_owned(), ctx.origin_site_id.clone());
+    plan_env.insert(
+        "RYEOS_ORIGIN_SITE_ID".to_owned(),
+        ctx.origin_site_id.clone(),
+    );
 
     // Step 4: Compile intermediates into SubprocessSpec via the
     // runtime-handler registry. The root item's kind schema declares
@@ -414,23 +420,24 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
         _ => None,
     };
-    let root_kind_schema = kinds.get(&resolved.kind).ok_or_else(|| {
-        EngineError::UnsupportedKind {
-            kind: resolved.kind.clone(),
-        }
-    })?;
-    let runtime_spec = root_kind_schema.runtime().ok_or_else(|| {
-        EngineError::SchemaLoaderError {
-            reason: format!(
-                "kind `{}` has no `runtime` block in its kind schema — \
+    let root_kind_schema =
+        kinds
+            .get(&resolved.kind)
+            .ok_or_else(|| EngineError::UnsupportedKind {
+                kind: resolved.kind.clone(),
+            })?;
+    let runtime_spec =
+        root_kind_schema
+            .runtime()
+            .ok_or_else(|| EngineError::SchemaLoaderError {
+                reason: format!(
+                    "kind `{}` has no `runtime` block in its kind schema — \
                  cannot dispatch runtime handlers for executable items",
-                resolved.kind,
-            ),
-        }
-    })?;
+                    resolved.kind,
+                ),
+            })?;
     let registry = build_runtime_registry(runtime_spec)?;
-    let root_trust_class =
-        widen_root_trust_class(item.trust_class, item.resolved.source_space);
+    let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
     let spec = compile_with_handlers(
         &terminal.intermediates,
         &terminal.root_source_path,
@@ -465,9 +472,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
 
     // Complete node
     let complete_id = PlanNodeId(format!("complete:{canonical_ref}"));
-    let complete_node = PlanNode::Complete {
-        id: complete_id,
-    };
+    let complete_node = PlanNode::Complete { id: complete_id };
 
     // Step 6: Compute cache key
     let cache_key = compute_cache_key(
@@ -565,7 +570,7 @@ mod tests {
     use crate::contracts::*;
     use crate::kind_registry::KindRegistry;
     use crate::resolution::TrustClass as ResolutionTrustClass;
-    use crate::trust::{TrustedSigner, TrustStore};
+    use crate::trust::{TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
     use serde_json::json;
     use std::fs;
@@ -625,11 +630,8 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos() as u64;
-        let dir = std::env::temp_dir().join(format!(
-            "rye_plan_test_{}_{}",
-            std::process::id(),
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rye_plan_test_{}_{}", std::process::id(), nanos));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -653,7 +655,16 @@ mod tests {
         let yaml_owned = if yaml.contains("composed_value_contract") {
             yaml.to_string()
         } else {
-            { let with_contract = format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"); if with_contract.contains("composer:") { with_contract } else { format!("{with_contract}composer: handler:ryeos/core/identity\n") } }
+            {
+                let with_contract = format!(
+                    "{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n"
+                );
+                if with_contract.contains("composer:") {
+                    with_contract
+                } else {
+                    format!("{with_contract}composer: handler:ryeos/core/identity\n")
+                }
+            }
         };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }
@@ -699,7 +710,11 @@ metadata:
     fn write_tool_schema(kinds_dir: &Path) {
         let dir = kinds_dir.join("tool");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("tool.kind-schema.yaml"), sign_yaml(TOOL_SCHEMA_YAML)).unwrap();
+        fs::write(
+            dir.join("tool.kind-schema.yaml"),
+            sign_yaml(TOOL_SCHEMA_YAML),
+        )
+        .unwrap();
     }
 
     fn make_verified_item(
@@ -709,7 +724,9 @@ metadata:
         executor_id: Option<&str>,
         project_dir: Option<PathBuf>,
     ) -> VerifiedItem {
-        use crate::contracts::{ItemMetadata, ResolvedItem, ResolvedSourceFormat, SignatureEnvelope};
+        use crate::contracts::{
+            ItemMetadata, ResolvedItem, ResolvedSourceFormat, SignatureEnvelope,
+        };
 
         let metadata = ItemMetadata {
             executor_id: executor_id.map(String::from),
@@ -845,31 +862,28 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(
-            Some(project_dir.join(AI_DIR)),
-            None,
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
-        let plan = build_plan(
-            BuildPlanInput {
-                item: &item,
-                parameters: &json!({"key": "value"}),
-                hints: &ExecutionHints::default(),
-                ctx: &ctx,
-                kinds: &kinds,
-                parsers: &parsers,
-                roots: &roots,
-                registry_fingerprint: "fp:test",
-                trust_store: &ts,
-                host_env: &HostEnvBindings::default(),
-            },
-        )
+        let plan = build_plan(BuildPlanInput {
+            item: &item,
+            parameters: &json!({"key": "value"}),
+            hints: &ExecutionHints::default(),
+            ctx: &ctx,
+            kinds: &kinds,
+            parsers: &parsers,
+            roots: &roots,
+            registry_fingerprint: "fp:test",
+            trust_store: &ts,
+            host_env: &HostEnvBindings::default(),
+        })
         .unwrap();
 
         assert_eq!(plan.root_ref, "tool:my_tool");
         // Chain should include @subprocess and the resolved terminal
-        assert!(plan.executor_chain.iter().any(|id| id.contains("subprocess")));
+        assert!(plan
+            .executor_chain
+            .iter()
+            .any(|id| id.contains("subprocess")));
     }
 
     // ── Test: chain cycle detected ─────────────────────────────────────
@@ -896,26 +910,20 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(
-            Some(project_dir.join(AI_DIR)),
-            None,
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
-        let err = build_plan(
-            BuildPlanInput {
-                item: &item,
-                parameters: &json!(null),
-                hints: &ExecutionHints::default(),
-                ctx: &ctx,
-                kinds: &kinds,
-                parsers: &parsers,
-                roots: &roots,
-                registry_fingerprint: "fp:test",
-                trust_store: &ts,
-                host_env: &HostEnvBindings::default(),
-            },
-        )
+        let err = build_plan(BuildPlanInput {
+            item: &item,
+            parameters: &json!(null),
+            hints: &ExecutionHints::default(),
+            ctx: &ctx,
+            kinds: &kinds,
+            parsers: &parsers,
+            roots: &roots,
+            registry_fingerprint: "fp:test",
+            trust_store: &ts,
+            host_env: &HostEnvBindings::default(),
+        })
         .unwrap_err();
 
         assert!(matches!(err, EngineError::CycleDetected { .. }));
@@ -935,7 +943,11 @@ config:
         // Verify the alias is loaded
         let tool_schema = kinds.get("tool").unwrap();
         assert_eq!(
-            tool_schema.execution.as_ref().and_then(|e| e.aliases.get("@subprocess")).map(|s| s.as_str()),
+            tool_schema
+                .execution
+                .as_ref()
+                .and_then(|e| e.aliases.get("@subprocess"))
+                .map(|s| s.as_str()),
             Some("tool:ryeos/core/subprocess/execute")
         );
         assert!(tool_schema.is_executable());
@@ -965,26 +977,20 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(
-            Some(project_dir.join(AI_DIR)),
-            None,
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
-        let err = build_plan(
-            BuildPlanInput {
-                item: &item,
-                parameters: &json!(null),
-                hints: &ExecutionHints::default(),
-                ctx: &ctx,
-                kinds: &kinds,
-                parsers: &parsers,
-                roots: &roots,
-                registry_fingerprint: "fp:test",
-                trust_store: &ts,
-                host_env: &HostEnvBindings::default(),
-            },
-        )
+        let err = build_plan(BuildPlanInput {
+            item: &item,
+            parameters: &json!(null),
+            hints: &ExecutionHints::default(),
+            ctx: &ctx,
+            kinds: &kinds,
+            parsers: &parsers,
+            roots: &roots,
+            registry_fingerprint: "fp:test",
+            trust_store: &ts,
+            host_env: &HostEnvBindings::default(),
+        })
         .unwrap_err();
 
         assert!(
@@ -1015,20 +1021,18 @@ config:
         let ctx = test_plan_context(None);
         let roots = ResolutionRoots::from_flat(None, None, vec![]);
 
-        let err = build_plan(
-            BuildPlanInput {
-                item: &item,
-                parameters: &json!(null),
-                hints: &ExecutionHints::default(),
-                ctx: &ctx,
-                kinds: &kinds,
-                parsers: &parsers,
-                roots: &roots,
-                registry_fingerprint: "fp:test",
-                trust_store: &TrustStore::empty(),
-                host_env: &HostEnvBindings::default(),
-            },
-        )
+        let err = build_plan(BuildPlanInput {
+            item: &item,
+            parameters: &json!(null),
+            hints: &ExecutionHints::default(),
+            ctx: &ctx,
+            kinds: &kinds,
+            parsers: &parsers,
+            roots: &roots,
+            registry_fingerprint: "fp:test",
+            trust_store: &TrustStore::empty(),
+            host_env: &HostEnvBindings::default(),
+        })
         .unwrap_err();
 
         assert!(matches!(err, EngineError::MissingExecutorId { .. }));
@@ -1039,7 +1043,10 @@ config:
     // The plan_builder tests below cover the integrated path through
     // `compile_with_handlers`.
 
-    use crate::runtime::{compile_with_handlers, ChainIntermediate as RChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry};
+    use crate::runtime::{
+        compile_with_handlers, ChainIntermediate as RChainIntermediate, HostEnvBindings,
+        RuntimeHandlerRegistry,
+    };
 
     fn empty_roots() -> ResolutionRoots {
         ResolutionRoots::from_flat(None, None, vec![])
@@ -1238,7 +1245,10 @@ config:
         .unwrap();
 
         assert_eq!(spec.cmd, "python3");
-        assert_eq!(spec.args, vec!["/project/.ai/tools/echo.py", "--project-path", "/project"]);
+        assert_eq!(
+            spec.args,
+            vec!["/project/.ai/tools/echo.py", "--project-path", "/project"]
+        );
         assert_eq!(spec.stdin_data, Some(r#"{"message":"hello"}"#.to_string()));
         assert_eq!(spec.timeout_secs, 60);
         assert_eq!(spec.env.get("PYTHONUNBUFFERED").unwrap(), "1");
@@ -1309,7 +1319,11 @@ config:
 
         // Write a chain hop tool with a valid signature, then tamper it.
         // The root tool points to tool:runtimes/python/script as executor.
-        let runtime_dir = project_dir.join(AI_DIR).join("tools").join("runtimes").join("python");
+        let runtime_dir = project_dir
+            .join(AI_DIR)
+            .join("tools")
+            .join("runtimes")
+            .join("python");
         fs::create_dir_all(&runtime_dir).unwrap();
 
         // Sign the runtime YAML
@@ -1327,9 +1341,8 @@ config:
         use lillux::crypto::Signer;
         let sig: lillux::crypto::Signature = signing_key.sign(hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
-        let signed_content = format!(
-            "# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}\n{body}"
-        );
+        let signed_content =
+            format!("# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}\n{body}");
         // Tamper after signing
         let tampered = signed_content.replace("@subprocess", "@tampered");
         fs::write(runtime_dir.join("script.yaml"), &tampered).unwrap();
@@ -1338,7 +1351,8 @@ config:
         let _term = write_terminal(&project_dir, "ryeos/core/subprocess/execute");
 
         // Root tool
-        let tool_path = write_chain_tool(&project_dir, "my_tool", Some("tool:runtimes/python/script"));
+        let tool_path =
+            write_chain_tool(&project_dir, "my_tool", Some("tool:runtimes/python/script"));
 
         let item = make_verified_item(
             "tool:my_tool",
@@ -1349,26 +1363,20 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(
-            Some(project_dir.join(AI_DIR)),
-            None,
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
-        let err = build_plan(
-            BuildPlanInput {
-                item: &item,
-                parameters: &json!(null),
-                hints: &ExecutionHints::default(),
-                ctx: &ctx,
-                kinds: &kinds,
-                parsers: &parsers,
-                roots: &roots,
-                registry_fingerprint: "fp:test",
-                trust_store: &ts,
-                host_env: &HostEnvBindings::default(),
-            },
-        )
+        let err = build_plan(BuildPlanInput {
+            item: &item,
+            parameters: &json!(null),
+            hints: &ExecutionHints::default(),
+            ctx: &ctx,
+            kinds: &kinds,
+            parsers: &parsers,
+            roots: &roots,
+            registry_fingerprint: "fp:test",
+            trust_store: &ts,
+            host_env: &HostEnvBindings::default(),
+        })
         .unwrap_err();
 
         assert!(
@@ -1381,11 +1389,32 @@ config:
 
     #[test]
     fn cache_key_deterministic() {
-        let k1 = compute_cache_key("tool:a", "hash1", &[], "fp1", &json!(1), &ExecutionHints::default());
-        let k2 = compute_cache_key("tool:a", "hash1", &[], "fp1", &json!(1), &ExecutionHints::default());
+        let k1 = compute_cache_key(
+            "tool:a",
+            "hash1",
+            &[],
+            "fp1",
+            &json!(1),
+            &ExecutionHints::default(),
+        );
+        let k2 = compute_cache_key(
+            "tool:a",
+            "hash1",
+            &[],
+            "fp1",
+            &json!(1),
+            &ExecutionHints::default(),
+        );
         assert_eq!(k1, k2);
 
-        let k3 = compute_cache_key("tool:b", "hash1", &[], "fp1", &json!(1), &ExecutionHints::default());
+        let k3 = compute_cache_key(
+            "tool:b",
+            "hash1",
+            &[],
+            "fp1",
+            &json!(1),
+            &ExecutionHints::default(),
+        );
         assert_ne!(k1, k3);
     }
 
@@ -1446,7 +1475,8 @@ config:
     - "{project_path}"
   input_data: "{params_json}"
   timeout_secs: 120
-"#.to_string();
+"#
+        .to_string();
         let runtime_path = runtime_dir.join("script.yaml");
         fs::write(&runtime_path, &runtime_content).unwrap();
 
@@ -1464,11 +1494,8 @@ category: ryeos/core/subprocess\n";
         fs::write(terminal_dir.join("execute.yaml"), terminal_content).unwrap();
 
         // 4. Write root tool: my_tool.py
-        let tool_path = write_chain_tool(
-            &project_dir,
-            "my_tool",
-            Some("tool:runtimes/python/script"),
-        );
+        let tool_path =
+            write_chain_tool(&project_dir, "my_tool", Some("tool:runtimes/python/script"));
 
         let item = make_verified_item(
             "tool:my_tool",
@@ -1479,27 +1506,21 @@ category: ryeos/core/subprocess\n";
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(
-            Some(project_dir.join(AI_DIR)),
-            None,
-            vec![],
-        );
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
         // 5. Build plan — this walks the full 3-hop chain
-        let plan = build_plan(
-            BuildPlanInput {
-                item: &item,
-                parameters: &json!({"message": "hello"}),
-                hints: &ExecutionHints::default(),
-                ctx: &ctx,
-                kinds: &kinds,
-                parsers: &parsers,
-                roots: &roots,
-                registry_fingerprint: "fp:test",
-                trust_store: &ts,
-                host_env: &HostEnvBindings::default(),
-            },
-        )
+        let plan = build_plan(BuildPlanInput {
+            item: &item,
+            parameters: &json!({"message": "hello"}),
+            hints: &ExecutionHints::default(),
+            ctx: &ctx,
+            kinds: &kinds,
+            parsers: &parsers,
+            roots: &roots,
+            registry_fingerprint: "fp:test",
+            trust_store: &ts,
+            host_env: &HostEnvBindings::default(),
+        })
         .expect("build_plan should succeed for valid 3-hop chain");
 
         // 6. Verify the plan structure
@@ -1508,21 +1529,29 @@ category: ryeos/core/subprocess\n";
 
         // Chain should include the runtime hop and the resolved terminal
         assert!(
-            plan.executor_chain.iter().any(|id| id.contains("python/script")),
+            plan.executor_chain
+                .iter()
+                .any(|id| id.contains("python/script")),
             "executor_chain should include the runtime: {:?}",
             plan.executor_chain,
         );
         assert!(
-            plan.executor_chain.iter().any(|id| id.contains("subprocess")),
+            plan.executor_chain
+                .iter()
+                .any(|id| id.contains("subprocess")),
             "executor_chain should include the terminal alias resolution: {:?}",
             plan.executor_chain,
         );
 
         // 7. Verify the DispatchSubprocess node
-        let dispatch = plan.nodes.iter().find_map(|n| match n {
-            PlanNode::DispatchSubprocess { spec, .. } => Some(spec.clone()),
-            _ => None,
-        }).expect("plan should have a DispatchSubprocess node");
+        let dispatch = plan
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                PlanNode::DispatchSubprocess { spec, .. } => Some(spec.clone()),
+                _ => None,
+            })
+            .expect("plan should have a DispatchSubprocess node");
 
         // Command should be the resolved interpreter path (fake python in .venv)
         assert!(
@@ -1553,7 +1582,10 @@ category: ryeos/core/subprocess\n";
         );
 
         // stdin_data should have the params JSON
-        assert_eq!(dispatch.stdin_data.as_deref(), Some(r#"{"message":"hello"}"#));
+        assert_eq!(
+            dispatch.stdin_data.as_deref(),
+            Some(r#"{"message":"hello"}"#)
+        );
 
         // timeout_secs from the runtime config
         assert_eq!(dispatch.timeout_secs, 120);

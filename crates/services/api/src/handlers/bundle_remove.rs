@@ -11,9 +11,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,10 +74,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let removed_dir = if bundle_dir.exists() {
         fs::remove_dir_all(&bundle_dir).with_context(|| {
-            format!(
-                "failed to remove bundle directory {}",
-                bundle_dir.display()
-            )
+            format!("failed to remove bundle directory {}", bundle_dir.display())
         })?;
         true
     } else {
@@ -107,8 +104,8 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.bundle.remove"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)
-                .context("bundle.remove requires { name }")?;
+            let req: Request =
+                serde_json::from_value(params).context("bundle.remove requires { name }")?;
             handle(req, state).await
         })
     },

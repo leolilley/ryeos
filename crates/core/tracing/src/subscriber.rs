@@ -15,8 +15,8 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, Layer};
 
 /// Configuration for the tracing subscriber.
 #[derive(Debug)]
@@ -68,10 +68,16 @@ impl SubscriberConfig {
         if let Err(e) = std::fs::create_dir_all(&state_dir_path) {
             // Log but continue — the file open below will produce a clearer
             // error if the directory truly can't be created.
-            eprintln!("warn: failed to create trace dir {}: {e}", state_dir_path.display());
+            eprintln!(
+                "warn: failed to create trace dir {}: {e}",
+                state_dir_path.display()
+            );
         }
 
-        let trace_path = state_dir.join(".ai").join("state").join("trace-events.ndjson");
+        let trace_path = state_dir
+            .join(".ai")
+            .join("state")
+            .join("trace-events.ndjson");
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -80,9 +86,7 @@ impl SubscriberConfig {
 
         // Build the registry: stderr (human) + file (ndjson).
         let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| {
-                EnvFilter::new("ryeosd=info,ryeos_engine=info,ryeos_state=info")
-            });
+            .unwrap_or_else(|_| EnvFilter::new("ryeosd=info,ryeos_engine=info,ryeos_state=info"));
 
         let writer = Arc::new(Mutex::new(file));
 
@@ -91,7 +95,10 @@ impl SubscriberConfig {
             .json()
             .with_writer(SharedFileWriter(writer.clone()))
             .with_ansi(false)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW | tracing_subscriber::fmt::format::FmtSpan::CLOSE);
+            .with_span_events(
+                tracing_subscriber::fmt::format::FmtSpan::NEW
+                    | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+            );
 
         // Stderr layer: human-readable for operator convenience.
         let stderr_layer = tracing_subscriber::fmt::layer()
@@ -150,16 +157,18 @@ impl SharedFileWriter {
 
 impl std::io::Write for &SharedFileWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut file = self.0.lock().map_err(|e| {
-            std::io::Error::other(format!("lock poisoned: {e}"))
-        })?;
+        let mut file = self
+            .0
+            .lock()
+            .map_err(|e| std::io::Error::other(format!("lock poisoned: {e}")))?;
         file.write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut file = self.0.lock().map_err(|e| {
-            std::io::Error::other(format!("lock poisoned: {e}"))
-        })?;
+        let mut file = self
+            .0
+            .lock()
+            .map_err(|e| std::io::Error::other(format!("lock poisoned: {e}")))?;
         file.flush()
     }
 }

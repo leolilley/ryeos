@@ -4,8 +4,8 @@ use std::sync::Arc;
 use axum::http::Method;
 
 use super::invocation::{CompiledRouteInvocation, RoutePrincipal};
-use ryeos_app::route_raw::RawRouteSpec;
 use crate::route_error::RouteConfigError;
+use ryeos_app::route_raw::RawRouteSpec;
 
 pub struct CompiledRoute {
     pub id: String,

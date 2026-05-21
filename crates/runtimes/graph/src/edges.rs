@@ -41,18 +41,16 @@ fn evaluate_conditional_edges(edges: &[ConditionalEdge], context: &Value) -> Opt
     let mut default = None;
     for edge in edges {
         match &edge.when {
-            Some(condition) => {
-                match ryeos_runtime::condition::matches(context, condition) {
-                    Ok(true) => return Some(edge.to.clone()),
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            edge_to = %edge.to,
-                            "edge condition evaluation failed, skipping branch: {e:#}"
-                        );
-                    }
+            Some(condition) => match ryeos_runtime::condition::matches(context, condition) {
+                Ok(true) => return Some(edge.to.clone()),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        edge_to = %edge.to,
+                        "edge condition evaluation failed, skipping branch: {e:#}"
+                    );
                 }
-            }
+            },
             None => {
                 default = Some(edge.to.clone());
             }

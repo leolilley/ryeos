@@ -9,10 +9,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
 use crate::handler_error::HandlerError;
+use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,15 +42,23 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         )));
     }
 
-    let cas_root = state.state_store.cas_root()
+    let cas_root = state
+        .state_store
+        .cas_root()
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
     let cas = lillux::cas::CasStore::new(cas_root);
 
     // Walk the bundle tree, ingest each file into CAS.
     let mut entries: Vec<Value> = Vec::new();
     let mut total_bytes: u64 = 0;
-    walk_and_ingest(&bundle_path, &bundle_path, &cas, &mut entries, &mut total_bytes)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    walk_and_ingest(
+        &bundle_path,
+        &bundle_path,
+        &cas,
+        &mut entries,
+        &mut total_bytes,
+    )
+    .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     Ok(serde_json::json!({
         "bundle_name": req.bundle_name,
@@ -69,12 +77,13 @@ fn walk_and_ingest(
     entries: &mut Vec<Value>,
     total_bytes: &mut u64,
 ) -> Result<()> {
-    for entry in std::fs::read_dir(current)
-        .with_context(|| format!("read dir {}", current.display()))?
+    for entry in
+        std::fs::read_dir(current).with_context(|| format!("read dir {}", current.display()))?
     {
         let entry = entry?;
         let path = entry.path();
-        let rel = path.strip_prefix(base)
+        let rel = path
+            .strip_prefix(base)
             .context("strip_prefix")?
             .to_string_lossy()
             .to_string();
@@ -82,8 +91,8 @@ fn walk_and_ingest(
         if path.is_dir() {
             walk_and_ingest(base, &path, cas, entries, total_bytes)?;
         } else if path.is_file() {
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("read file {}", path.display()))?;
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("read file {}", path.display()))?;
             *total_bytes += bytes.len() as u64;
             let hash = cas.store_blob(&bytes)?;
             entries.push(serde_json::json!({

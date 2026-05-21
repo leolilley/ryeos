@@ -67,7 +67,10 @@ fn resolve_policy_from_config(
     let mut grace = default_grace;
 
     let Some(resolved) = ctx.params.get("resolved_config") else {
-        return ResolvedPolicy { mode, grace_secs: grace };
+        return ResolvedPolicy {
+            mode,
+            grace_secs: grace,
+        };
     };
 
     // Layer 1: system / user / project defaults (already merged by
@@ -76,18 +79,25 @@ fn resolve_policy_from_config(
         if let Some(s) = defaults.get("cancellation_mode").and_then(Value::as_str) {
             mode = s.to_owned();
         }
-        if let Some(n) = defaults.get("cancellation_grace_secs").and_then(Value::as_u64) {
+        if let Some(n) = defaults
+            .get("cancellation_grace_secs")
+            .and_then(Value::as_u64)
+        {
             grace = n;
         }
     }
 
     // Layer 2: per-tool overrides keyed by chain[0]'s executor_id.
-    let root_tool_id = ctx.chain.first().map(|c| c.executor_id.as_str()).unwrap_or("");
-    if let Some(tool_overrides) = resolved
-        .get("tools")
-        .and_then(|t| t.get(root_tool_id))
-    {
-        if let Some(s) = tool_overrides.get("cancellation_mode").and_then(Value::as_str) {
+    let root_tool_id = ctx
+        .chain
+        .first()
+        .map(|c| c.executor_id.as_str())
+        .unwrap_or("");
+    if let Some(tool_overrides) = resolved.get("tools").and_then(|t| t.get(root_tool_id)) {
+        if let Some(s) = tool_overrides
+            .get("cancellation_mode")
+            .and_then(Value::as_str)
+        {
             mode = s.to_owned();
         }
         if let Some(n) = tool_overrides
@@ -98,7 +108,10 @@ fn resolve_policy_from_config(
         }
     }
 
-    ResolvedPolicy { mode, grace_secs: grace }
+    ResolvedPolicy {
+        mode,
+        grace_secs: grace,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,8 +169,7 @@ impl RuntimeHandler for NativeAsyncHandler {
         // `native_async: false` is rejected loudly.
         let cancellation_mode = match block {
             Value::Bool(true) => {
-                let policy =
-                    resolve_policy_from_config(ctx, "graceful", DEFAULT_GRACEFUL_SECS);
+                let policy = resolve_policy_from_config(ctx, "graceful", DEFAULT_GRACEFUL_SECS);
                 match policy.mode.as_str() {
                     "hard" => CancellationMode::Hard,
                     "graceful" => CancellationMode::Graceful {
@@ -177,19 +189,17 @@ impl RuntimeHandler for NativeAsyncHandler {
             Value::Bool(false) => {
                 return Err(EngineError::InvalidRuntimeConfig {
                     path: intermediate.source_path.display().to_string(),
-                    reason:
-                        "`native_async: false` is not supported — omit the block to disable"
-                            .to_string(),
+                    reason: "`native_async: false` is not supported — omit the block to disable"
+                        .to_string(),
                 });
             }
             other => {
-                let rich: RichForm =
-                    serde_json::from_value(other.clone()).map_err(|e| {
-                        EngineError::InvalidRuntimeConfig {
-                            path: intermediate.source_path.display().to_string(),
-                            reason: format!("invalid native_async block: {e}"),
-                        }
-                    })?;
+                let rich: RichForm = serde_json::from_value(other.clone()).map_err(|e| {
+                    EngineError::InvalidRuntimeConfig {
+                        path: intermediate.source_path.display().to_string(),
+                        reason: format!("invalid native_async block: {e}"),
+                    }
+                })?;
                 match rich.cancel_mode {
                     CancelModeChoice::Hard => CancellationMode::Hard,
                     CancelModeChoice::Graceful => CancellationMode::Graceful {

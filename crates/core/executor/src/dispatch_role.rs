@@ -35,7 +35,10 @@ pub fn enforce_runtime_target_caps(
     if !matches!(role, SubprocessRole::RuntimeTarget { .. }) {
         return Ok(());
     }
-    if !acting_caps.iter().any(|c| c == RUNTIME_EXECUTE_CAP || c == "*") {
+    if !acting_caps
+        .iter()
+        .any(|c| c == RUNTIME_EXECUTE_CAP || c == "*")
+    {
         return Err(crate::dispatch_error::DispatchError::MissingCap {
             required: RUNTIME_EXECUTE_CAP.to_string(),
         });

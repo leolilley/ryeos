@@ -230,10 +230,7 @@ impl RuntimeRegistry {
                     1 => Ok(defaults[0]),
                     0 => Err(EngineError::RuntimeDefaultRequired {
                         kind: kind.to_owned(),
-                        candidates: list
-                            .iter()
-                            .map(|r| r.canonical_ref.to_string())
-                            .collect(),
+                        candidates: list.iter().map(|r| r.canonical_ref.to_string()).collect(),
                     }),
                     _ => Err(EngineError::MultipleRuntimeDefaults {
                         kind: kind.to_owned(),
@@ -267,22 +264,18 @@ fn load_and_verify_runtime_yaml(
     root_trust: TrustClass,
     trust: &TrustStore,
 ) -> Result<VerifiedRuntime, EngineError> {
-    let content = std::fs::read_to_string(yaml_path).map_err(|e| {
-        EngineError::RuntimeYamlInvalid {
+    let content =
+        std::fs::read_to_string(yaml_path).map_err(|e| EngineError::RuntimeYamlInvalid {
             path: yaml_path.to_owned(),
             reason: format!("cannot read file: {e}"),
-        }
-    })?;
+        })?;
 
-    let sig_header = lillux::signature::parse_signature_line(
-        content.lines().next().unwrap_or(""),
-        "#",
-        None,
-    )
-    .ok_or_else(|| EngineError::RuntimeYamlInvalid {
-        path: yaml_path.to_owned(),
-        reason: "missing or malformed signature line".to_owned(),
-    })?;
+    let sig_header =
+        lillux::signature::parse_signature_line(content.lines().next().unwrap_or(""), "#", None)
+            .ok_or_else(|| EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: "missing or malformed signature line".to_owned(),
+            })?;
 
     let body = lillux::signature::strip_signature_lines(&content);
     let actual_hash = lillux::signature::content_hash(&body);
@@ -347,10 +340,7 @@ fn load_and_verify_runtime_yaml(
 ///
 /// Pub(crate) so the integration tests can exercise the parser
 /// directly without standing up a trust store / bundle directory.
-pub(crate) fn parse_runtime_yaml(
-    yaml_path: &Path,
-    body: &str,
-) -> Result<RuntimeYaml, EngineError> {
+pub(crate) fn parse_runtime_yaml(yaml_path: &Path, body: &str) -> Result<RuntimeYaml, EngineError> {
     serde_yaml::from_str::<RuntimeYaml>(body).map_err(|e| EngineError::RuntimeYamlInvalid {
         path: yaml_path.to_owned(),
         reason: format!("YAML parse error: {e}"),

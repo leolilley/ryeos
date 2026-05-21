@@ -12,8 +12,8 @@ pub mod launch_envelope;
 pub mod lillux_bridge;
 pub mod limits;
 pub mod project_source;
-pub mod runtime_dispatch;
 pub mod runner;
+pub mod runtime_dispatch;
 pub mod thread_meta;
 
 use std::collections::HashMap;
@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use lillux::cas::{CasStore, sha256_hex};
-use ryeos_state::signer::Signer;
+use lillux::cas::{sha256_hex, CasStore};
 use ryeos_state::objects::SourceManifest;
+use ryeos_state::signer::Signer;
 
 use self::cache::MaterializationCache;
 
@@ -156,7 +156,15 @@ pub fn fold_back_outputs(
     let mut new_items: HashMap<String, String> = pre_manifest.item_source_hashes.clone();
     let mut changed = false;
 
-    walk_and_diff(cas_root, working_dir, working_dir, &pre_integrity, &mut new_items, &mut changed, ignore)?;
+    walk_and_diff(
+        cas_root,
+        working_dir,
+        working_dir,
+        &pre_integrity,
+        &mut new_items,
+        &mut changed,
+        ignore,
+    )?;
 
     // Detect deletions: entries in pre-manifest but missing from working dir
     for rel_path in pre_manifest.item_source_hashes.keys() {
@@ -172,7 +180,9 @@ pub fn fold_back_outputs(
     }
 
     // Create new manifest
-    let new_manifest = SourceManifest { item_source_hashes: new_items };
+    let new_manifest = SourceManifest {
+        item_source_hashes: new_items,
+    };
     let new_hash = cas.store_object(&new_manifest.to_value())?;
 
     tracing::debug!(
@@ -207,9 +217,14 @@ pub fn advance_after_foldback(
     // Preserve user_manifest_hash and sync scope from the current
     // snapshot. When user-space sync is active, the fold-back result
     // must carry the same user manifest hash so pull-back sees changes.
-    let current_snapshot_obj = cas.get_object(current_snapshot_hash)?
-        .ok_or_else(|| anyhow::anyhow!("current snapshot {} not found in CAS", current_snapshot_hash))?;
-    let current_snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&current_snapshot_obj)?;
+    let current_snapshot_obj = cas.get_object(current_snapshot_hash)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "current snapshot {} not found in CAS",
+            current_snapshot_hash
+        )
+    })?;
+    let current_snapshot =
+        ryeos_state::objects::ProjectSnapshot::from_value(&current_snapshot_obj)?;
 
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: new_manifest_hash.to_string(),
@@ -276,7 +291,8 @@ fn walk_and_diff(
                 }
                 _ => {
                     // New or changed — ingest into items (canonical format).
-                    let result: self::ingest::IngestResult = self::ingest::ingest_item(cas_root, &rel, &path)?;
+                    let result: self::ingest::IngestResult =
+                        self::ingest::ingest_item(cas_root, &rel, &path)?;
                     tracing::trace!(
                         rel_path = %rel,
                         blob_hash = %result.blob_hash,

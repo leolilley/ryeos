@@ -44,9 +44,7 @@ where
     // are small JSON objects, so this is not a hot path.
     let v = Value::deserialize(deserializer)?;
     match v {
-        Value::Array(_) => {
-            serde_json::from_value(v).map_err(serde::de::Error::custom)
-        }
+        Value::Array(_) => serde_json::from_value(v).map_err(serde::de::Error::custom),
         _ => {
             let one: T = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
             Ok(vec![one])

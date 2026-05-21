@@ -33,7 +33,11 @@ pub enum ResolvedProjectSpec {
 /// don't touch their tail.
 pub fn verb_needs_project_resolution(tokens: &[String]) -> bool {
     matches!(
-        tokens.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+        tokens
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
         ["remote", "execute", ..]
             | ["remote", "push", ..]
             | ["remote", "bind-project", ..]
@@ -111,9 +115,8 @@ fn resolve_spec(
         )),
         (true, None) => Ok(ResolvedProjectSpec::NoProject),
         (false, Some(p)) => {
-            let cwd = std::env::current_dir().map_err(|e| {
-                CliError::ProjectResolution(format!("cwd: {e}"))
-            })?;
+            let cwd = std::env::current_dir()
+                .map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
             let abs = if p.is_absolute() { p } else { cwd.join(p) };
             let canonical = abs.canonicalize().map_err(|e| {
                 CliError::ProjectResolution(format!(
@@ -126,13 +129,10 @@ fn resolve_spec(
         }
         (false, None) => {
             // Auto-discover from cwd.
-            let cwd = std::env::current_dir().map_err(|e| {
-                CliError::ProjectResolution(format!("cwd: {e}"))
-            })?;
+            let cwd = std::env::current_dir()
+                .map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
             let discovered = ryeos_state::project_discovery::discover_project_root(&cwd)
-                .map_err(|e| {
-                    CliError::ProjectResolution(format!("project discovery: {e}"))
-                })?;
+                .map_err(|e| CliError::ProjectResolution(format!("project discovery: {e}")))?;
             match discovered {
                 Some(root) => {
                     let canonical = root.canonicalize().map_err(|e| {
@@ -191,21 +191,14 @@ mod tests {
 
     #[test]
     fn rewrite_passes_no_project_through() {
-        let tail = vec![
-            "--no-project".into(),
-            "tool:foo/bar".into(),
-        ];
+        let tail = vec!["--no-project".into(), "tool:foo/bar".into()];
         let out = rewrite_project_tail(&tail).unwrap();
         assert_eq!(out, vec!["tool:foo/bar".to_string(), "--no-project".into()]);
     }
 
     #[test]
     fn rewrite_rejects_both_flags() {
-        let tail = vec![
-            "--no-project".into(),
-            "--project".into(),
-            "/tmp".into(),
-        ];
+        let tail = vec!["--no-project".into(), "--project".into(), "/tmp".into()];
         let err = rewrite_project_tail(&tail).unwrap_err();
         assert!(format!("{err}").contains("cannot pass both"));
     }

@@ -56,11 +56,12 @@ impl ParserDispatcher {
             "parser dispatch"
         );
 
-        let descriptor = self.parser_tools.get(parser_ref).ok_or_else(|| {
-            EngineError::ParserNotRegistered {
-                parser_id: parser_ref.to_string(),
-            }
-        })?;
+        let descriptor =
+            self.parser_tools
+                .get(parser_ref)
+                .ok_or_else(|| EngineError::ParserNotRegistered {
+                    parser_id: parser_ref.to_string(),
+                })?;
 
         let handler = self
             .handlers
@@ -83,13 +84,11 @@ impl ParserDispatcher {
 
         match resp {
             HandlerResponse::ParseOk { value } => Ok(value),
-            HandlerResponse::ParseErr { kind, message } => {
-                Err(EngineError::ParserFailed {
-                    parser_id: parser_ref.into(),
-                    kind: crate::error::ParseErrKind::from_wire(kind),
-                    message,
-                })
-            }
+            HandlerResponse::ParseErr { kind, message } => Err(EngineError::ParserFailed {
+                parser_id: parser_ref.into(),
+                kind: crate::error::ParseErrKind::from_wire(kind),
+                message,
+            }),
             other => Err(EngineError::Internal(format!(
                 "parser handler returned unexpected response: {other:?}"
             ))),
@@ -97,21 +96,21 @@ impl ParserDispatcher {
     }
 
     pub fn validate_config(&self, parser_ref: &str) -> Result<(), EngineError> {
-        let descriptor = self.parser_tools.get(parser_ref).ok_or_else(|| {
-            EngineError::ParserNotRegistered {
-                parser_id: parser_ref.to_string(),
-            }
-        })?;
+        let descriptor =
+            self.parser_tools
+                .get(parser_ref)
+                .ok_or_else(|| EngineError::ParserNotRegistered {
+                    parser_id: parser_ref.to_string(),
+                })?;
 
         let handler = self
             .handlers
             .ensure_serves(&descriptor.handler, HandlerServes::Parser)
             .map_err(|e| EngineError::Handler(Box::new(e)))?;
 
-        let request =
-            HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
-                parser_config: descriptor.parser_config.clone(),
-            });
+        let request = HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
+            parser_config: descriptor.parser_config.clone(),
+        });
 
         let resp = run_handler_subprocess(handler, &request, PARSE_TIMEOUT)?;
 
@@ -128,5 +127,3 @@ impl ParserDispatcher {
         }
     }
 }
-
-

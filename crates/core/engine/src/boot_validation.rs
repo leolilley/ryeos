@@ -54,16 +54,10 @@ pub enum BootIssue {
         parser_ref: String,
     },
     /// A parser descriptor's `handler` references an unknown handler.
-    UnknownHandler {
-        parser_ref: String,
-        handler: String,
-    },
+    UnknownHandler { parser_ref: String, handler: String },
     /// A parser descriptor's `parser_config` failed handler validation
     /// via subprocess.
-    InvalidParserConfig {
-        parser_ref: String,
-        reason: String,
-    },
+    InvalidParserConfig { parser_ref: String, reason: String },
     /// Handler binary spawn failed during config validation.
     HandlerUnusable {
         parser_ref: String,
@@ -73,17 +67,12 @@ pub enum BootIssue {
     /// A composer is registered for a kind that doesn't exist in the
     /// `KindRegistry`. Composer registration is explicit, so this is
     /// always a programmer error.
-    ComposerForUnknownKind {
-        kind: String,
-    },
+    ComposerForUnknownKind { kind: String },
     /// A kind schema's `composer` field names a handler ref that is
     /// not registered in the `HandlerRegistry`. The kind→handler
     /// mapping is data-driven; an unknown handler ref is the
     /// composer-side equivalent of `DanglingParserRef`.
-    UnknownComposerHandler {
-        kind: String,
-        handler_id: String,
-    },
+    UnknownComposerHandler { kind: String, handler_id: String },
     /// A kind schema's `composer_config` failed subprocess
     /// validation by the composer handler binary.
     /// Composer-side equivalent of `InvalidParserConfig`.
@@ -190,8 +179,8 @@ pub fn validate_boot(
                 }
             };
 
-            let handler_result = handler_registry
-                .ensure_serves(&descriptor.handler, HandlerServes::Parser);
+            let handler_result =
+                handler_registry.ensure_serves(&descriptor.handler, HandlerServes::Parser);
 
             let handler = match &handler_result {
                 Ok(h) => Some(*h),
@@ -248,7 +237,9 @@ pub fn validate_boot(
                                 detail: format!("malformed response: {detail}"),
                             });
                         }
-                        Err(EngineError::HandlerBinaryMissing { handler, reason, .. }) => {
+                        Err(EngineError::HandlerBinaryMissing {
+                            handler, reason, ..
+                        }) => {
                             tracing::warn!(
                                 handler = %handler,
                                 reason = %reason,
@@ -287,18 +278,17 @@ pub fn validate_boot(
             Some(s) => s,
             None => continue,
         };
-        let handler = match handler_registry
-            .ensure_serves(&schema.composer, HandlerServes::Composer)
-        {
-            Ok(h) => h,
-            Err(_) => {
-                issues.push(BootIssue::UnknownComposerHandler {
-                    kind: kind.to_string(),
-                    handler_id: schema.composer.clone(),
-                });
-                continue;
-            }
-        };
+        let handler =
+            match handler_registry.ensure_serves(&schema.composer, HandlerServes::Composer) {
+                Ok(h) => h,
+                Err(_) => {
+                    issues.push(BootIssue::UnknownComposerHandler {
+                        kind: kind.to_string(),
+                        handler_id: schema.composer.clone(),
+                    });
+                    continue;
+                }
+            };
 
         // Cache key: (handler_ref, JSON config) so two kinds that
         // bind the same handler with identical configs only spawn
@@ -314,10 +304,9 @@ pub fn validate_boot(
         }
         composer_config_checked.insert(cache_key, ());
 
-        let request =
-            HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
-                composer_config: schema.composer_config.clone(),
-            });
+        let request = HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
+            composer_config: schema.composer_config.clone(),
+        });
         match run_handler_subprocess(handler, &request, VALIDATION_SUBPROCESS_TIMEOUT) {
             Ok(HandlerResponse::ValidateOk) => {}
             Ok(HandlerResponse::ValidateErr { message }) => {
@@ -357,7 +346,9 @@ pub fn validate_boot(
                     detail: format!("malformed response: {detail}"),
                 });
             }
-            Err(EngineError::HandlerBinaryMissing { handler, reason, .. }) => {
+            Err(EngineError::HandlerBinaryMissing {
+                handler, reason, ..
+            }) => {
                 tracing::warn!(
                     handler = %handler,
                     reason = %reason,
@@ -476,22 +467,20 @@ pub fn validate_protocol_builder(
 
         if let crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref } = terminator {
             match kind_name {
-                "runtime"
-                    if protocol_ref != "protocol:ryeos/core/runtime_v1" => {
-                        issues.push(BootIssue::RuntimeProtocolMismatch {
-                            kind: kind_name.to_string(),
-                            protocol_ref: protocol_ref.clone(),
-                            expected: "protocol:ryeos/core/runtime_v1".to_string(),
-                        });
-                    }
-                "streaming_tool"
-                    if protocol_ref != "protocol:ryeos/core/tool_streaming_v1" => {
-                        issues.push(BootIssue::StreamingToolProtocolMismatch {
-                            kind: kind_name.to_string(),
-                            protocol_ref: protocol_ref.clone(),
-                            expected: "protocol:ryeos/core/tool_streaming_v1".to_string(),
-                        });
-                    }
+                "runtime" if protocol_ref != "protocol:ryeos/core/runtime_v1" => {
+                    issues.push(BootIssue::RuntimeProtocolMismatch {
+                        kind: kind_name.to_string(),
+                        protocol_ref: protocol_ref.clone(),
+                        expected: "protocol:ryeos/core/runtime_v1".to_string(),
+                    });
+                }
+                "streaming_tool" if protocol_ref != "protocol:ryeos/core/tool_streaming_v1" => {
+                    issues.push(BootIssue::StreamingToolProtocolMismatch {
+                        kind: kind_name.to_string(),
+                        protocol_ref: protocol_ref.clone(),
+                        expected: "protocol:ryeos/core/tool_streaming_v1".to_string(),
+                    });
+                }
                 _ => {}
             }
         }
@@ -528,8 +517,8 @@ fn schedule_contract_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::canonical_ref::CanonicalRef;
-use crate::composers::ComposerRegistry;
+    use crate::canonical_ref::CanonicalRef;
+    use crate::composers::ComposerRegistry;
     use crate::kind_registry::KindRegistry;
     use crate::parsers::descriptor::ParserDescriptor;
     use crate::parsers::ParserRegistry;
@@ -724,14 +713,12 @@ composed_value_contract:
         let composers = composers_from(&kinds);
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
-        assert!(issues.iter().any(|i| matches!(
-            i,
-            BootIssue::UnknownHandler { .. }
-        )));
-        assert!(!issues.iter().any(|i| matches!(
-            i,
-            BootIssue::DanglingParserRef { .. }
-        )));
+        assert!(issues
+            .iter()
+            .any(|i| matches!(i, BootIssue::UnknownHandler { .. })));
+        assert!(!issues
+            .iter()
+            .any(|i| matches!(i, BootIssue::DanglingParserRef { .. })));
     }
 
     #[test]
@@ -852,10 +839,12 @@ composed_value_contract:
         let has_unknown = issues
             .iter()
             .any(|i| matches!(i, BootIssue::UnknownHandler { .. }));
-        let has_ghost = issues.iter().any(|i| matches!(
-            i,
-            BootIssue::ComposerForUnknownKind { kind } if kind == "ghost_kind"
-        ));
+        let has_ghost = issues.iter().any(|i| {
+            matches!(
+                i,
+                BootIssue::ComposerForUnknownKind { kind } if kind == "ghost_kind"
+            )
+        });
         assert!(
             has_unknown && has_ghost,
             "expected both faults reported, got: {issues:?}"
@@ -892,11 +881,14 @@ composed_value_contract:
         }];
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &dup_refs).unwrap_err();
-        assert!(issues.iter().any(|i| matches!(
-            i,
-            BootIssue::DuplicateParserRef { parser_ref: pr, paths }
-                if pr == "parser:ryeos/core/yaml/yaml" && paths.len() == 2
-        )), "expected DuplicateParserRef in {issues:?}");
+        assert!(
+            issues.iter().any(|i| matches!(
+                i,
+                BootIssue::DuplicateParserRef { parser_ref: pr, paths }
+                    if pr == "parser:ryeos/core/yaml/yaml" && paths.len() == 2
+            )),
+            "expected DuplicateParserRef in {issues:?}"
+        );
     }
 
     fn write_parser_kind(root: &std::path::Path, parser_ref: &str, sk: &SigningKey) {
@@ -934,11 +926,14 @@ composed_value_contract:
         let composers = composers_from(&kinds);
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
-        assert!(issues.iter().any(|i| matches!(
-            i,
-            BootIssue::DanglingParserRef { kind, parser_ref, .. }
-                if kind == "parser" && parser_ref == "parser:ryeos/core/yaml/yaml"
-        )), "expected DanglingParserRef for parser kind in {issues:?}");
+        assert!(
+            issues.iter().any(|i| matches!(
+                i,
+                BootIssue::DanglingParserRef { kind, parser_ref, .. }
+                    if kind == "parser" && parser_ref == "parser:ryeos/core/yaml/yaml"
+            )),
+            "expected DanglingParserRef for parser kind in {issues:?}"
+        );
     }
 
     #[test]
@@ -961,14 +956,12 @@ composed_value_contract:
         let composers = ComposerRegistry::new();
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
-        assert!(!issues.iter().any(|i| matches!(
-            i,
-            BootIssue::DanglingParserRef { .. }
-        )));
-        assert!(issues.iter().any(|i| matches!(
-            i,
-            BootIssue::UnknownHandler { .. }
-        )));
+        assert!(!issues
+            .iter()
+            .any(|i| matches!(i, BootIssue::DanglingParserRef { .. })));
+        assert!(issues
+            .iter()
+            .any(|i| matches!(i, BootIssue::UnknownHandler { .. })));
     }
 
     // ── Parser → composer wiring contract tests ──────────────────────
@@ -978,7 +971,12 @@ composed_value_contract:
 
     fn shape_with_required_body() -> ValueShape {
         let mut required = BTreeMap::new();
-        required.insert("body".to_string(), FieldType::Single { prim: PrimType::String });
+        required.insert(
+            "body".to_string(),
+            FieldType::Single {
+                prim: PrimType::String,
+            },
+        );
         ValueShape {
             root_type: ShapeType::Mapping,
             required,
@@ -1009,10 +1007,9 @@ composed_value_contract:
         let composers = composers_from(&kinds);
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(
-            !issues.iter().any(|i| matches!(
-                i,
-                BootIssue::ParserComposerContractViolation { .. }
-            )),
+            !issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::ParserComposerContractViolation { .. })),
             "expected no contract violations, got: {issues:?}"
         );
     }
@@ -1114,9 +1111,7 @@ composed_value_contract:
         )]);
         let hr = handler_registry();
         let composers = ComposerRegistry::new();
-        let issues =
-            validate_boot(&kinds, &parsers, &hr, &composers, &[])
-                .unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
         assert!(
             issues.iter().any(|i| matches!(
                 i,
@@ -1131,8 +1126,18 @@ composed_value_contract:
     fn aggregates_all_contract_violations() {
         let parser_ref = "parser:ryeos/core/markdown/directive";
         let mut required = BTreeMap::new();
-        required.insert("body".to_string(), FieldType::Single { prim: PrimType::String });
-        required.insert("name".to_string(), FieldType::Single { prim: PrimType::String });
+        required.insert(
+            "body".to_string(),
+            FieldType::Single {
+                prim: PrimType::String,
+            },
+        );
+        required.insert(
+            "name".to_string(),
+            FieldType::Single {
+                prim: PrimType::String,
+            },
+        );
         let _kind_shape = ValueShape {
             root_type: ShapeType::Mapping,
             required,
@@ -1143,7 +1148,12 @@ composed_value_contract:
             "  root_type: mapping\n  required:\n    body:\n      type: single\n      prim: string\n    name:\n      type: single\n      prim: string\n",
         );
         let mut p_required = BTreeMap::new();
-        p_required.insert("body".to_string(), FieldType::Single { prim: PrimType::Integer });
+        p_required.insert(
+            "body".to_string(),
+            FieldType::Single {
+                prim: PrimType::Integer,
+            },
+        );
         let bad_producer = ValueShape {
             root_type: ShapeType::Sequence,
             required: p_required,
@@ -1176,14 +1186,18 @@ composed_value_contract:
         let has_root = viols
             .iter()
             .any(|v| matches!(v, ContractViolation::RootTypeMismatch { .. }));
-        let has_missing = viols.iter().any(|v| matches!(
-            v,
-            ContractViolation::MissingRequiredField { name, .. } if name == "name"
-        ));
-        let has_type_mismatch = viols.iter().any(|v| matches!(
-            v,
-            ContractViolation::FieldTypeMismatch { name, .. } if name == "body"
-        ));
+        let has_missing = viols.iter().any(|v| {
+            matches!(
+                v,
+                ContractViolation::MissingRequiredField { name, .. } if name == "name"
+            )
+        });
+        let has_type_mismatch = viols.iter().any(|v| {
+            matches!(
+                v,
+                ContractViolation::FieldTypeMismatch { name, .. } if name == "body"
+            )
+        });
         assert!(
             has_root && has_missing && has_type_mismatch,
             "expected root + missing + type-mismatch all aggregated, got: {issues:?}"
@@ -1240,9 +1254,7 @@ composed_value_contract:
         // non-empty mapping).
         let hr = live_handler_registry();
         let composers = ComposerRegistry::new();
-        let issues =
-            validate_boot(&kinds, &parsers, &hr, &composers, &[])
-                .unwrap_err();
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
 
         let bad: Vec<&str> = issues
             .iter()
@@ -1336,15 +1348,18 @@ composed_value_contract:
         };
 
         let result = build_subprocess_spec(&desc, &request);
-        assert!(result.is_err(), "expected builder to reject callback_token without binding");
+        assert!(
+            result.is_err(),
+            "expected builder to reject callback_token without binding"
+        );
     }
 
     /// EnvelopeRequired is the only acceptable error under synthetic
     /// inputs — it should NOT produce ProtocolBuilderRejected.
     #[test]
     fn envelope_required_is_accepted_by_boot_validator() {
-        use crate::protocols::builder::BuildError;
         use crate::protocol_vocabulary::{CallbackChannel, LifecycleMode, StdoutMode, StdoutShape};
+        use crate::protocols::builder::BuildError;
 
         // A descriptor that requires an envelope but we pass None
         // should produce EnvelopeRequired, which is accepted.
@@ -1394,9 +1409,7 @@ composed_value_contract:
 
         match build_subprocess_spec(&desc, &request) {
             Err(BuildError::EnvelopeRequired(_)) => {} // accepted
-            other => panic!(
-                "expected EnvelopeRequired, got: {other:?}"
-            ),
+            other => panic!("expected EnvelopeRequired, got: {other:?}"),
         }
     }
 

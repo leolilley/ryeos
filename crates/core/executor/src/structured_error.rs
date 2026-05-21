@@ -111,9 +111,7 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 source_name,
                 remediation,
             ),
-            DispatchError::MissingCap { required } => {
-                Self::missing_cap(e.to_string(), required)
-            }
+            DispatchError::MissingCap { required } => Self::missing_cap(e.to_string(), required),
             _ => Self::generic(e.code(), e.to_string()),
         }
     }

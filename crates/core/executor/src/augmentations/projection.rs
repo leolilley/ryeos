@@ -36,9 +36,7 @@ pub fn build_compose_context_payload(
 
     for (_root_ref, resolution) in per_root {
         // Root + ancestors.
-        for resolved in
-            std::iter::once(&resolution.root).chain(resolution.ancestors.iter())
-        {
+        for resolved in std::iter::once(&resolution.root).chain(resolution.ancestors.iter()) {
             items_by_ref
                 .entry(resolved.resolved_ref.clone())
                 .or_insert_with(|| ancestor_to_verified(resolved));
@@ -75,9 +73,7 @@ pub fn build_compose_context_payload(
 
     // Validate: every edge endpoint is in items_by_ref.
     for edge in &edges {
-        if !items_by_ref.contains_key(&edge.from)
-            || !items_by_ref.contains_key(&edge.to)
-        {
+        if !items_by_ref.contains_key(&edge.from) || !items_by_ref.contains_key(&edge.to) {
             return Err(LaunchAugmentationError::ProjectionInvariant {
                 reason: format!(
                     "edge endpoint missing from items_by_ref: {} -> {}",
@@ -92,9 +88,7 @@ pub fn build_compose_context_payload(
         for r in refs {
             if !items_by_ref.contains_key(r) {
                 return Err(LaunchAugmentationError::ProjectionInvariant {
-                    reason: format!(
-                        "position '{position}' root '{r}' missing from items_by_ref"
-                    ),
+                    reason: format!("position '{position}' root '{r}' missing from items_by_ref"),
                 });
             }
         }
@@ -113,9 +107,7 @@ pub fn build_compose_context_payload(
 }
 
 /// Helper: convert engine `ResolvedAncestor` → wire `VerifiedItem`.
-fn ancestor_to_verified(
-    a: &ryeos_engine::resolution::ResolvedAncestor,
-) -> VerifiedItem {
+fn ancestor_to_verified(a: &ryeos_engine::resolution::ResolvedAncestor) -> VerifiedItem {
     VerifiedItem {
         raw_content: a.raw_content.clone(),
         raw_content_digest: a.raw_content_digest.clone(),
@@ -127,9 +119,7 @@ fn ancestor_to_verified(
         trust_class: match a.trust_class {
             ryeos_engine::resolution::TrustClass::TrustedSystem => TrustClass::TrustedSystem,
             ryeos_engine::resolution::TrustClass::TrustedUser => TrustClass::TrustedUser,
-            ryeos_engine::resolution::TrustClass::UntrustedUserSpace => {
-                TrustClass::TrustedProject
-            }
+            ryeos_engine::resolution::TrustClass::UntrustedUserSpace => TrustClass::TrustedProject,
             ryeos_engine::resolution::TrustClass::Unsigned => TrustClass::Untrusted,
         },
     }
@@ -138,11 +128,11 @@ fn ancestor_to_verified(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::resolution::KindComposedView;
     use ryeos_engine::resolution::{
-        ResolvedAncestor, ResolutionEdge, ResolutionOutput, ResolutionStepName,
+        ResolutionEdge, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
         TrustClass as EngineTrustClass,
     };
-    use ryeos_engine::resolution::KindComposedView;
 
     fn make_ancestor(ref_str: &str, content: &str, trust: EngineTrustClass) -> ResolvedAncestor {
         use std::collections::hash_map::DefaultHasher;
@@ -162,7 +152,11 @@ mod tests {
         }
     }
 
-    fn make_resolution(root: ResolvedAncestor, ancestors: Vec<ResolvedAncestor>, ref_edges: Vec<ResolutionEdge>) -> ResolutionOutput {
+    fn make_resolution(
+        root: ResolvedAncestor,
+        ancestors: Vec<ResolvedAncestor>,
+        ref_edges: Vec<ResolutionEdge>,
+    ) -> ResolutionOutput {
         ResolutionOutput {
             root,
             ancestors,
@@ -178,12 +172,16 @@ mod tests {
     fn projection_single_position_single_root() {
         let root = make_ancestor("knowledge:doc", "content", EngineTrustClass::TrustedUser);
         let mut per_root = BTreeMap::new();
-        per_root.insert("knowledge:doc".to_string(), make_resolution(root, vec![], vec![]));
+        per_root.insert(
+            "knowledge:doc".to_string(),
+            make_resolution(root, vec![], vec![]),
+        );
 
         let mut positions = BTreeMap::new();
         positions.insert("system".to_string(), vec!["knowledge:doc".to_string()]);
 
-        let payload = build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
+        let payload =
+            build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
         let obj = payload.as_object().unwrap();
 
         assert_eq!(obj["items_by_ref"].as_object().unwrap().len(), 1);
@@ -200,14 +198,21 @@ mod tests {
         let root1 = make_ancestor("knowledge:a", "a", EngineTrustClass::TrustedUser);
         let root2 = make_ancestor("knowledge:b", "b", EngineTrustClass::TrustedSystem);
         let mut per_root = BTreeMap::new();
-        per_root.insert("knowledge:a".to_string(), make_resolution(root1, vec![], vec![]));
-        per_root.insert("knowledge:b".to_string(), make_resolution(root2, vec![], vec![]));
+        per_root.insert(
+            "knowledge:a".to_string(),
+            make_resolution(root1, vec![], vec![]),
+        );
+        per_root.insert(
+            "knowledge:b".to_string(),
+            make_resolution(root2, vec![], vec![]),
+        );
 
         let mut positions = BTreeMap::new();
         positions.insert("system".to_string(), vec!["knowledge:a".to_string()]);
         positions.insert("before".to_string(), vec!["knowledge:b".to_string()]);
 
-        let payload = build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
+        let payload =
+            build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
         assert_eq!(payload["items_by_ref"].as_object().unwrap().len(), 2);
     }
 
@@ -231,7 +236,8 @@ mod tests {
         positions.insert("pos1".to_string(), vec!["knowledge:c1".to_string()]);
         positions.insert("pos2".to_string(), vec!["knowledge:c2".to_string()]);
 
-        let payload = build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
+        let payload =
+            build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
         // c1, c2, base — base appears once despite being in both resolutions.
         assert_eq!(payload["items_by_ref"].as_object().unwrap().len(), 3);
     }
@@ -257,7 +263,8 @@ mod tests {
         let mut positions = BTreeMap::new();
         positions.insert("system".to_string(), vec!["knowledge:main".to_string()]);
 
-        let payload = build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
+        let payload =
+            build_compose_context_payload(&per_root, &positions, &BTreeMap::new()).unwrap();
         let edges = payload["edges"].as_array().unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["from"], "knowledge:main");
@@ -297,10 +304,16 @@ mod tests {
     fn projection_missing_position_root_errors() {
         let root = make_ancestor("knowledge:a", "a", EngineTrustClass::TrustedUser);
         let mut per_root = BTreeMap::new();
-        per_root.insert("knowledge:a".to_string(), make_resolution(root, vec![], vec![]));
+        per_root.insert(
+            "knowledge:a".to_string(),
+            make_resolution(root, vec![], vec![]),
+        );
 
         let mut positions = BTreeMap::new();
-        positions.insert("system".to_string(), vec!["knowledge:nonexistent".to_string()]);
+        positions.insert(
+            "system".to_string(),
+            vec!["knowledge:nonexistent".to_string()],
+        );
 
         let err = build_compose_context_payload(&per_root, &positions, &BTreeMap::new())
             .expect_err("missing position root must error");
@@ -314,7 +327,10 @@ mod tests {
     fn projection_budgets_included() {
         let root = make_ancestor("knowledge:doc", "c", EngineTrustClass::TrustedUser);
         let mut per_root = BTreeMap::new();
-        per_root.insert("knowledge:doc".to_string(), make_resolution(root, vec![], vec![]));
+        per_root.insert(
+            "knowledge:doc".to_string(),
+            make_resolution(root, vec![], vec![]),
+        );
 
         let mut positions = BTreeMap::new();
         positions.insert("system".to_string(), vec!["knowledge:doc".to_string()]);

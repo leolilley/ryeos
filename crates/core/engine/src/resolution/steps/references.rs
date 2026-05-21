@@ -34,7 +34,11 @@ pub(crate) fn run(
 ) -> Result<(), ResolutionError> {
     let root_ref = ctx.current_ref.clone();
     let root_path = ctx.root_loaded.source_path().clone();
-    let direct = field_as_list(&ctx.root_loaded.parsed, field, ResolutionStepName::ResolveReferences)?;
+    let direct = field_as_list(
+        &ctx.root_loaded.parsed,
+        field,
+        ResolutionStepName::ResolveReferences,
+    )?;
 
     // Best (smallest) depth at which we've recursed *into* a given node.
     // Root is treated as visited at depth 0.
@@ -149,7 +153,11 @@ fn walk(
 
     let next_kind = ref_.kind.clone();
     let next_path = to_path.clone();
-    let next_ids = field_as_list(&parsed_for_recursion, field, ResolutionStepName::ResolveReferences)?;
+    let next_ids = field_as_list(
+        &parsed_for_recursion,
+        field,
+        ResolutionStepName::ResolveReferences,
+    )?;
     for next_id in next_ids {
         added += walk(
             ctx,

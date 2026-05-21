@@ -35,25 +35,19 @@ pub struct ReachableSet {
 ///     → source_manifest (item_source_hashes values)
 ///       → item_source (content_blob_hash) → blob
 ///   project_snapshot.parent_hashes → walk history
-pub fn collect_reachable(
-    cas_root: &Path,
-    refs_root: &Path,
-) -> Result<ReachableSet> {
+pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableSet> {
     let mut set = ReachableSet::default();
     let mut queue: VecDeque<String> = VecDeque::new();
 
     // Seed from chain heads
     let chains_dir = refs_root.join("generic/chains");
     if chains_dir.is_dir() {
-        for entry in std::fs::read_dir(&chains_dir)
-            .context("failed to read chains refs directory")?
+        for entry in
+            std::fs::read_dir(&chains_dir).context("failed to read chains refs directory")?
         {
             let entry = entry.context("failed to read chain ref entry")?;
             if entry.file_type()?.is_dir() {
-                let chain_root_id = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string();
+                let chain_root_id = entry.file_name().to_string_lossy().to_string();
                 let head_path = entry.path().join("head");
                 if head_path.exists() {
                     if let Some(target) = read_ref_target(&head_path)? {
@@ -69,20 +63,19 @@ pub fn collect_reachable(
     // refs/projects/<principal_key>/<project_hash>/head
     let projects_dir = refs_root.join("projects");
     if projects_dir.is_dir() {
-        for principal_entry in std::fs::read_dir(&projects_dir)
-            .context("failed to read projects refs directory")?
+        for principal_entry in
+            std::fs::read_dir(&projects_dir).context("failed to read projects refs directory")?
         {
-            let principal_entry = principal_entry.context("failed to read project principal entry")?;
+            let principal_entry =
+                principal_entry.context("failed to read project principal entry")?;
             if principal_entry.file_type()?.is_dir() {
                 for project_entry in std::fs::read_dir(principal_entry.path())
                     .context("failed to read principal project refs directory")?
                 {
-                    let project_entry = project_entry.context("failed to read project ref entry")?;
+                    let project_entry =
+                        project_entry.context("failed to read project ref entry")?;
                     if project_entry.file_type()?.is_dir() {
-                        let project_hash = project_entry
-                            .file_name()
-                            .to_string_lossy()
-                            .to_string();
+                        let project_hash = project_entry.file_name().to_string_lossy().to_string();
                         let head_path = project_entry.path().join("head");
                         if head_path.exists() {
                             if let Some(target) = read_ref_target(&head_path)? {
@@ -103,7 +96,8 @@ pub fn collect_reachable(
         for project_entry in std::fs::read_dir(&deployed_projects_dir)
             .context("failed to read deployed project refs directory")?
         {
-            let project_entry = project_entry.context("failed to read deployed project ref entry")?;
+            let project_entry =
+                project_entry.context("failed to read deployed project ref entry")?;
             if project_entry.file_type()?.is_dir() {
                 let project_hash = project_entry.file_name().to_string_lossy().to_string();
                 let head_path = project_entry.path().join("head");
@@ -135,10 +129,7 @@ pub fn collect_reachable(
             Err(_) => continue,
         };
 
-        let kind = value
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
         let children = extract_child_hashes(kind, &value);
         for child in children {
@@ -230,19 +221,13 @@ fn extract_child_hashes(kind: &str, value: &Value) -> Vec<String> {
 
         "thread_event" => {
             // prev_chain_event_hash
-            if let Some(hash) = value
-                .get("prev_chain_event_hash")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(hash) = value.get("prev_chain_event_hash").and_then(|v| v.as_str()) {
                 if !hash.is_empty() {
                     children.push(hash.to_string());
                 }
             }
             // prev_thread_event_hash
-            if let Some(hash) = value
-                .get("prev_thread_event_hash")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(hash) = value.get("prev_thread_event_hash").and_then(|v| v.as_str()) {
                 if !hash.is_empty() {
                     children.push(hash.to_string());
                 }
@@ -251,19 +236,13 @@ fn extract_child_hashes(kind: &str, value: &Value) -> Vec<String> {
 
         "project_snapshot" => {
             // project_manifest_hash
-            if let Some(hash) = value
-                .get("project_manifest_hash")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(hash) = value.get("project_manifest_hash").and_then(|v| v.as_str()) {
                 if !hash.is_empty() {
                     children.push(hash.to_string());
                 }
             }
             // user_manifest_hash
-            if let Some(hash) = value
-                .get("user_manifest_hash")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(hash) = value.get("user_manifest_hash").and_then(|v| v.as_str()) {
                 if !hash.is_empty() {
                     children.push(hash.to_string());
                 }
@@ -282,10 +261,7 @@ fn extract_child_hashes(kind: &str, value: &Value) -> Vec<String> {
 
         "source_manifest" => {
             // item_source_hashes values
-            if let Some(hashes) = value
-                .get("item_source_hashes")
-                .and_then(|v| v.as_object())
-            {
+            if let Some(hashes) = value.get("item_source_hashes").and_then(|v| v.as_object()) {
                 for (_path, hash_value) in hashes {
                     if let Some(hash) = hash_value.as_str() {
                         if !hash.is_empty() {
@@ -384,7 +360,13 @@ mod tests {
     }
 
     fn make_hash(suffix: &str) -> String {
-        format!("{:064}", suffix.as_bytes().iter().fold(0u64, |a, &b| a.wrapping_add(b as u64)))
+        format!(
+            "{:064}",
+            suffix
+                .as_bytes()
+                .iter()
+                .fold(0u64, |a, &b| a.wrapping_add(b as u64))
+        )
     }
 
     #[test]
@@ -457,8 +439,7 @@ mod tests {
         write_object(&cas_root, &snap_hash, &snap);
 
         // Write signed head ref
-        let head_path = refs_root
-            .join("generic/chains/T-root/head");
+        let head_path = refs_root.join("generic/chains/T-root/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
         let ref_value = serde_json::json!({
             "schema": 1,
@@ -665,20 +646,24 @@ mod tests {
 
         // Write an orphan object not linked from any head
         let orphan_hash = make_hash("orphan");
-        write_object(&cas_root, &orphan_hash, &serde_json::json!({
-            "kind": "thread_event",
-            "schema": 1,
-            "chain_root_id": "T-root",
-            "chain_seq": 1,
-            "thread_id": "T-root",
-            "thread_seq": 1,
-            "event_type": "orphan",
-            "durability": "durable",
-            "ts": "2026-04-22T00:00:00Z",
-            "prev_chain_event_hash": null,
-            "prev_thread_event_hash": null,
-            "payload": {}
-        }));
+        write_object(
+            &cas_root,
+            &orphan_hash,
+            &serde_json::json!({
+                "kind": "thread_event",
+                "schema": 1,
+                "chain_root_id": "T-root",
+                "chain_seq": 1,
+                "thread_id": "T-root",
+                "thread_seq": 1,
+                "event_type": "orphan",
+                "durability": "durable",
+                "ts": "2026-04-22T00:00:00Z",
+                "prev_chain_event_hash": null,
+                "prev_thread_event_hash": null,
+                "payload": {}
+            }),
+        );
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         assert!(set.object_hashes.is_empty());

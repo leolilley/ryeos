@@ -115,7 +115,8 @@ impl SchedulerContext for AppSchedulerContext {
             requested_inputs: None,
         };
 
-        ryeos_executor::dispatch::dispatch(&spec.item_ref, &dispatch_req, &exec_ctx, &self.0).await?;
+        ryeos_executor::dispatch::dispatch(&spec.item_ref, &dispatch_req, &exec_ctx, &self.0)
+            .await?;
         Ok(())
     }
 }

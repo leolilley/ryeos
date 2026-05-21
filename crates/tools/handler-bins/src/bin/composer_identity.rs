@@ -5,10 +5,7 @@ fn main() {
     std::process::exit(run_handler(|req| match req {
         HandlerRequest::Compose(c) => match identity::compose(&c.composer_config, &c) {
             Ok(success) => HandlerResponse::ComposeOk(success),
-            Err((step, reason)) => HandlerResponse::ComposeErr {
-                step,
-                reason,
-            },
+            Err((step, reason)) => HandlerResponse::ComposeErr { step, reason },
         },
         HandlerRequest::ValidateComposerConfig(v) => {
             match identity::validate_config(&v.composer_config) {

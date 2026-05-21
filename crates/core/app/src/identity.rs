@@ -247,8 +247,12 @@ created_at = "{ca}"
     // Atomic write: .tmp → rename
     let entry_path = auth_dir.join(format!("{fingerprint}.toml"));
     let tmp = entry_path.with_extension("tmp");
-    fs::write(&tmp, signed.as_bytes())
-        .with_context(|| format!("failed to write authorized-key entry {}", entry_path.display()))?;
+    fs::write(&tmp, signed.as_bytes()).with_context(|| {
+        format!(
+            "failed to write authorized-key entry {}",
+            entry_path.display()
+        )
+    })?;
     fs::rename(&tmp, &entry_path)
         .with_context(|| format!("failed to rename to {}", entry_path.display()))?;
 
@@ -307,7 +311,10 @@ mod tests {
             &key,
             WildcardPolicy::AllowBootstrap,
         );
-        assert!(result.is_ok(), "wildcard should be allowed under AllowBootstrap");
+        assert!(
+            result.is_ok(),
+            "wildcard should be allowed under AllowBootstrap"
+        );
     }
 
     #[test]

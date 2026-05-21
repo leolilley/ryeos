@@ -13,8 +13,8 @@ pub mod head_cache;
 pub mod ignore;
 pub mod locators;
 pub mod objects;
-pub mod project_sync;
 pub mod project_discovery;
+pub mod project_sync;
 pub mod projection;
 pub mod queries;
 pub mod reachability;
@@ -30,7 +30,10 @@ pub mod verify;
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;
-pub use objects::{thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage, ChainState};
+pub use objects::{
+    thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
+    ChainState,
+};
 pub use projection::ProjectionDb;
 pub use refs::{SignedRef, TrustStore};
 pub use signer::Signer;

@@ -6,22 +6,20 @@ use axum::serve;
 use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
 
-use ryeosd::config::{self, Cli, Config};
-use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+use ryeos_api::{registry as service_registry, routes};
 use ryeos_app::callback_token::CallbackCapabilityStore;
-use ryeos_app::identity::NodeIdentity;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
-use ryeos_app::thread_lifecycle::ThreadLifecycleService;
+use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
-use ryeosd::scheduler::db::SchedulerDb;
-use ryeosd::{
-    bootstrap, reconcile, scheduler, uds,
-};
-use ryeos_api::{registry as service_registry, routes};
-use ryeos_executor::executor as service_executor;
-use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
+use ryeos_app::thread_lifecycle::ThreadLifecycleService;
 use ryeos_app::{command_service, event_store_service, thread_lifecycle};
+use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
+use ryeos_executor::executor as service_executor;
+use ryeosd::config::{self, Cli, Config};
+use ryeosd::scheduler::db::SchedulerDb;
+use ryeosd::{bootstrap, reconcile, scheduler, uds};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,7 +30,9 @@ async fn main() -> Result<()> {
     // Must come after config load so system_space_dir is known.
     // The init_only path below may create .ai/state/ if it doesn't exist yet,
     // but for_daemon_with_file_sink already creates .ai/state/ on its own.
-    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(&config.system_space_dir));
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(
+        &config.system_space_dir,
+    ));
 
     // --init-only: bootstrap node-local state (identity, trust, dirs) and exit.
     //
@@ -79,7 +79,10 @@ async fn main() -> Result<()> {
     // Handle subcommands before daemon startup
     if let Some(ref cmd) = cli.command {
         match cmd {
-            config::DaemonCommand::RunService { service_ref, params } => {
+            config::DaemonCommand::RunService {
+                service_ref,
+                params,
+            } => {
                 return run_service_standalone(&config, service_ref, params.as_deref()).await;
             }
         }
@@ -124,7 +127,8 @@ async fn main() -> Result<()> {
         let mut missing: Vec<&str> = Vec::new();
 
         for desc in operational_services {
-            let canonical = match ryeos_engine::canonical_ref::CanonicalRef::parse(desc.service_ref) {
+            let canonical = match ryeos_engine::canonical_ref::CanonicalRef::parse(desc.service_ref)
+            {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(service = desc.service_ref, error = %e, "operational service ref parse failed");
@@ -133,43 +137,46 @@ async fn main() -> Result<()> {
             };
 
             match engine.resolve(&plan_ctx, &canonical) {
-                Ok(resolved) => {
-                    match engine.verify(&plan_ctx, resolved) {
-                        Ok(verified) => {
-                            match ryeos_api::registry::extract_endpoint(&verified.resolved.metadata.extra) {
-                                Ok(endpoint) => {
-                                    if !services.has(&endpoint) {
-                                        let msg = format!(
+                Ok(resolved) => match engine.verify(&plan_ctx, resolved) {
+                    Ok(verified) => {
+                        match ryeos_api::registry::extract_endpoint(
+                            &verified.resolved.metadata.extra,
+                        ) {
+                            Ok(endpoint) => {
+                                if !services.has(&endpoint) {
+                                    let msg = format!(
                                             "service resolves to endpoint '{}' but no handler registered",
                                             endpoint
                                         );
-                                        tracing::error!(service = desc.service_ref, %endpoint, "{}", msg);
-                                        failed.push((desc.service_ref, msg));
-                                    } else {
-                                        tracing::debug!(
-                                            service = desc.service_ref,
-                                            trust_class = ?verified.trust_class,
-                                            %endpoint,
-                                            "operational service verified"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    let msg = format!("endpoint extraction failed: {e}");
-                                    tracing::error!(service = desc.service_ref, error = %e, "{}", msg);
+                                    tracing::error!(service = desc.service_ref, %endpoint, "{}", msg);
                                     failed.push((desc.service_ref, msg));
+                                } else {
+                                    tracing::debug!(
+                                        service = desc.service_ref,
+                                        trust_class = ?verified.trust_class,
+                                        %endpoint,
+                                        "operational service verified"
+                                    );
                                 }
                             }
-                        }
-                        Err(e) => {
-                            let msg = format!("{e}");
-                            tracing::error!(service = desc.service_ref, error = %msg, "operational service verification FAILED");
-                            failed.push((desc.service_ref, msg));
+                            Err(e) => {
+                                let msg = format!("endpoint extraction failed: {e}");
+                                tracing::error!(service = desc.service_ref, error = %e, "{}", msg);
+                                failed.push((desc.service_ref, msg));
+                            }
                         }
                     }
-                }
+                    Err(e) => {
+                        let msg = format!("{e}");
+                        tracing::error!(service = desc.service_ref, error = %msg, "operational service verification FAILED");
+                        failed.push((desc.service_ref, msg));
+                    }
+                },
                 Err(_) => {
-                    tracing::warn!(service = desc.service_ref, "operational service not found in bundle");
+                    tracing::warn!(
+                        service = desc.service_ref,
+                        "operational service not found in bundle"
+                    );
                     missing.push(desc.service_ref);
                 }
             }
@@ -177,7 +184,11 @@ async fn main() -> Result<()> {
 
         if !failed.is_empty() {
             for (svc, error) in &failed {
-                tracing::error!(svc, error, "refusing to start: operational service failed verification");
+                tracing::error!(
+                    svc,
+                    error,
+                    "refusing to start: operational service failed verification"
+                );
             }
             anyhow::bail!(
                 "operational service catalog self-check failed: {} service(s) failed verification",
@@ -187,7 +198,10 @@ async fn main() -> Result<()> {
 
         if !missing.is_empty() {
             for svc in &missing {
-                tracing::error!(svc, "refusing to start: operational service not found in bundle");
+                tracing::error!(
+                    svc,
+                    "refusing to start: operational service not found in bundle"
+                );
             }
             anyhow::bail!(
                 "operational service catalog self-check failed: {} service(s) missing",
@@ -210,21 +224,29 @@ async fn main() -> Result<()> {
     tracing::info!(routes = route_table.load().all.len(), "route table built");
 
     // These must be initialized after the self-check (which only needs engine + services).
-    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(&config));
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(
+        &config,
+    ));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-    
+
     let state_root = config.system_space_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
-    
+
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-    
-    let state_store = Arc::new(state_store::StateStore::new(state_root, runtime_db_path, signer, write_barrier.clone())
-        .context("StateStore initialization failed")?);
+
+    let state_store = Arc::new(
+        state_store::StateStore::new(state_root, runtime_db_path, signer, write_barrier.clone())
+            .context("StateStore initialization failed")?,
+    );
     tracing::info!("StateStore initialized successfully");
 
     // Open scheduler DB
-    let scheduler_db_path = config.system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("scheduler.sqlite3");
+    let scheduler_db_path = config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("scheduler.sqlite3");
     let scheduler_db = Arc::new(
         scheduler::db::SchedulerDb::open(&scheduler_db_path)
             .context("SchedulerDb initialization failed")?,
@@ -233,21 +255,26 @@ async fn main() -> Result<()> {
 
     // Acquire operator state lock — prevents standalone services from
     // running while the daemon is up. Released on process exit (Drop).
-    let _state_lock = state_lock::StateLock::acquire(
-        &state_lock::default_lock_path(&config.system_space_dir),
-    ).context("failed to acquire state lock — is another ryeosd instance or standalone service running?")?;
+    let _state_lock = state_lock::StateLock::acquire(&state_lock::default_lock_path(
+        &config.system_space_dir,
+    ))
+    .context(
+        "failed to acquire state lock — is another ryeosd instance or standalone service running?",
+    )?;
     tracing::info!("State lock acquired");
-    
-    let events = Arc::new(EventStoreService::new(
-        state_store.clone(),
-    ));
+
+    let events = Arc::new(EventStoreService::new(state_store.clone()));
     let threads = Arc::new(ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
     )?);
     threads.set_scheduler_db(scheduler_db.clone(), config.system_space_dir.clone());
-    let commands = Arc::new(CommandService::new(state_store.clone(), kind_profiles.clone(), events.clone()));
+    let commands = Arc::new(CommandService::new(
+        state_store.clone(),
+        kind_profiles.clone(),
+        events.clone(),
+    ));
     let callback_tokens = Arc::new(CallbackCapabilityStore::new());
     let thread_auth = Arc::new(ryeos_app::callback_token::ThreadAuthStore::new());
     // `services` already built above for self-check
@@ -264,31 +291,37 @@ async fn main() -> Result<()> {
             .context("load sealed-envelope vault — did `ryeos init` (or daemon bootstrap) run?")?,
     );
 
-    let verb_registry = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(
-        &node_config_snapshot
-            .verbs
-            .iter()
-            .map(|r| ryeos_runtime::verb_registry::VerbDef {
-                name: r.name.clone(),
-                execute: r.execute.clone(),
-            })
-            .collect::<Vec<_>>(),
-    ).context("failed to build verb registry from node-config records")?);
+    let verb_registry = Arc::new(
+        ryeos_runtime::verb_registry::VerbRegistry::from_records(
+            &node_config_snapshot
+                .verbs
+                .iter()
+                .map(|r| ryeos_runtime::verb_registry::VerbDef {
+                    name: r.name.clone(),
+                    execute: r.execute.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .context("failed to build verb registry from node-config records")?,
+    );
 
-    let alias_registry = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(
-        &node_config_snapshot
-            .aliases
-            .iter()
-            .map(|r| ryeos_runtime::alias_registry::AliasDef {
-                tokens: r.tokens.clone(),
-                verb: r.verb.clone(),
-                deprecated: r.deprecated.unwrap_or(false),
-                replacement_tokens: r.replacement_tokens.clone(),
-                removed_in: r.removed_in.clone(),
-                positional_field: r.positional_field.clone(),
-            })
-            .collect::<Vec<_>>(),
-    ).context("failed to build alias registry from node-config records")?);
+    let alias_registry = Arc::new(
+        ryeos_runtime::alias_registry::AliasRegistry::from_records(
+            &node_config_snapshot
+                .aliases
+                .iter()
+                .map(|r| ryeos_runtime::alias_registry::AliasDef {
+                    tokens: r.tokens.clone(),
+                    verb: r.verb.clone(),
+                    deprecated: r.deprecated.unwrap_or(false),
+                    replacement_tokens: r.replacement_tokens.clone(),
+                    removed_in: r.removed_in.clone(),
+                    positional_field: r.positional_field.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .context("failed to build alias registry from node-config records")?,
+    );
 
     // Validate: all aliases reference known verbs
     alias_registry
@@ -310,7 +343,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(verb_registry.clone()));
+    let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(
+        verb_registry.clone(),
+    ));
 
     // Bind the TCP listener BEFORE constructing AppState so the
     // status endpoint reports the actual bound address (when the
@@ -354,10 +389,11 @@ async fn main() -> Result<()> {
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(
             ryeos_app::ignore::load_from_system_space(&config.system_space_dir)
-                .context("load ingest ignore config — did `ryeos init` run?")?
+                .context("load ingest ignore config — did `ryeos init` run?")?,
         ),
         vault_fingerprint: {
-            let vault_pk_path = config.system_space_dir
+            let vault_pk_path = config
+                .system_space_dir
                 .join(ryeos_engine::AI_DIR)
                 .join("node/vault/public_key.pem");
             if vault_pk_path.exists() {
@@ -380,7 +416,8 @@ async fn main() -> Result<()> {
 
     // Scheduler reload channel — must be created BEFORE the router is built
     // so that HTTP handler clones of AppState carry the sender.
-    let (scheduler_reload_tx, scheduler_reload_rx) = tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
+    let (scheduler_reload_tx, scheduler_reload_rx) =
+        tokio::sync::mpsc::channel::<scheduler::ReloadSignal>(16);
     app_state.scheduler_reload_tx = Some(scheduler_reload_tx);
 
     // Auth is per-route via the dispatcher's auth_invoker chain.
@@ -415,16 +452,23 @@ async fn main() -> Result<()> {
         &daemon_json_path,
         serde_json::to_string_pretty(&daemon_info)?,
     )
-    .with_context(|| format!(
-        "failed to write daemon.json at {} — tools cannot discover the daemon without it",
-        daemon_json_path.display()
-    ))?;
+    .with_context(|| {
+        format!(
+            "failed to write daemon.json at {} — tools cannot discover the daemon without it",
+            daemon_json_path.display()
+        )
+    })?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&config.uds_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to set socket permissions on {}", config.uds_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "failed to set socket permissions on {}",
+                    config.uds_path.display()
+                )
+            })?;
     }
 
     let uds_state = Arc::new(app_state.clone());
@@ -454,42 +498,43 @@ async fn main() -> Result<()> {
         let st = app_state.clone();
         let threads = app_state.threads.clone();
         tokio::spawn(async move {
-            let params = match ryeos_executor::execution::runner::execution_params_from_resume_context(
-                &st,
-                &intent.resume_context,
-            ) {
-                Ok(p) => p,
-                Err(err) => {
-                    tracing::error!(
-                        thread_id = %intent.thread_id,
-                        error = %err,
-                        "resume: failed to build ExecutionParams from ResumeContext — finalizing"
-                    );
-                    if let Err(fin_err) = threads.finalize_thread(
-                        &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                            thread_id: intent.thread_id.clone(),
-                            status: "failed".to_string(),
-                            outcome_code: Some("resume_rebuild_failed".to_string()),
-                            result: None,
-                            error: Some(serde_json::json!({
-                                "code": "resume_rebuild_failed",
-                                "message": err.to_string(),
-                            })),
-                            metadata: None,
-                            artifacts: Vec::new(),
-                            final_cost: None,
-                            summary_json: None,
-                        },
-                    ) {
-                        tracing::warn!(
+            let params =
+                match ryeos_executor::execution::runner::execution_params_from_resume_context(
+                    &st,
+                    &intent.resume_context,
+                ) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        tracing::error!(
                             thread_id = %intent.thread_id,
-                            error = %fin_err,
-                            "resume: finalize after rebuild failure also failed"
+                            error = %err,
+                            "resume: failed to build ExecutionParams from ResumeContext — finalizing"
                         );
+                        if let Err(fin_err) = threads.finalize_thread(
+                            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                                thread_id: intent.thread_id.clone(),
+                                status: "failed".to_string(),
+                                outcome_code: Some("resume_rebuild_failed".to_string()),
+                                result: None,
+                                error: Some(serde_json::json!({
+                                    "code": "resume_rebuild_failed",
+                                    "message": err.to_string(),
+                                })),
+                                metadata: None,
+                                artifacts: Vec::new(),
+                                final_cost: None,
+                                summary_json: None,
+                            },
+                        ) {
+                            tracing::warn!(
+                                thread_id = %intent.thread_id,
+                                error = %fin_err,
+                                "resume: finalize after rebuild failure also failed"
+                            );
+                        }
+                        return;
                     }
-                    return;
-                }
-            };
+                };
             if let Err(err) = ryeos_executor::execution::runner::run_existing_detached(
                 st,
                 intent.thread_id.clone(),
@@ -509,9 +554,9 @@ async fn main() -> Result<()> {
     }
 
     // ── Scheduler reconciliation + timer start ──
-    let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(
-        Arc::new(app_state.clone()),
-    ));
+    let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(Arc::new(
+        app_state.clone(),
+    )));
     let scheduler_intents = scheduler::reconcile::reconcile(&scheduler_ctx).await?;
     for intent in scheduler_intents {
         let st = scheduler_ctx.clone();
@@ -565,9 +610,11 @@ fn drain_running_threads(state: &AppState) {
     for thread in &threads {
         if let Some(pgid) = thread.runtime.pgid {
             let action = process::resolve_shutdown_action(
-                thread.runtime.launch_metadata.as_ref().and_then(
-                    |lm| lm.cancellation_mode,
-                ),
+                thread
+                    .runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|lm| lm.cancellation_mode),
             );
             tracing::info!(
                 pgid,
@@ -596,7 +643,9 @@ async fn shutdown_signal() {
     let terminate = async {
         use tokio::signal::unix::{signal, SignalKind};
         match signal(SignalKind::terminate()) {
-            Ok(mut sigterm) => { sigterm.recv().await; }
+            Ok(mut sigterm) => {
+                sigterm.recv().await;
+            }
             Err(_) => std::future::pending::<()>().await,
         }
     };
@@ -634,19 +683,24 @@ async fn run_service_standalone(
     let services = Arc::new(service_registry::build_service_registry());
 
     // Acquire state lock (prevents concurrent daemon)
-    let _state_lock = state_lock::StateLock::acquire(
-        &state_lock::default_lock_path(&config.system_space_dir),
-    ).context("failed to acquire state lock — is the daemon running?")?;
+    let _state_lock =
+        state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.system_space_dir))
+            .context("failed to acquire state lock — is the daemon running?")?;
 
     let state_root = config.system_space_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(state_store::StateStore::new(
-        state_root, runtime_db_path, signer, write_barrier.clone(),
+        state_root,
+        runtime_db_path,
+        signer,
+        write_barrier.clone(),
     )?);
 
-    let events = Arc::new(event_store_service::EventStoreService::new(state_store.clone()));
+    let events = Arc::new(event_store_service::EventStoreService::new(
+        state_store.clone(),
+    ));
     let threads = Arc::new(thread_lifecycle::ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
@@ -658,31 +712,37 @@ async fn run_service_standalone(
         events.clone(),
     ));
 
-    let standalone_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(
-        &node_config_snapshot
-            .verbs
-            .iter()
-            .map(|r| ryeos_runtime::verb_registry::VerbDef {
-                name: r.name.clone(),
-                execute: r.execute.clone(),
-            })
-            .collect::<Vec<_>>(),
-    ).context("failed to build verb registry from node-config records")?);
+    let standalone_vr = Arc::new(
+        ryeos_runtime::verb_registry::VerbRegistry::from_records(
+            &node_config_snapshot
+                .verbs
+                .iter()
+                .map(|r| ryeos_runtime::verb_registry::VerbDef {
+                    name: r.name.clone(),
+                    execute: r.execute.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .context("failed to build verb registry from node-config records")?,
+    );
 
-    let standalone_ar = Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(
-        &node_config_snapshot
-            .aliases
-            .iter()
-            .map(|r| ryeos_runtime::alias_registry::AliasDef {
-                tokens: r.tokens.clone(),
-                verb: r.verb.clone(),
-                deprecated: r.deprecated.unwrap_or(false),
-                replacement_tokens: r.replacement_tokens.clone(),
-                removed_in: r.removed_in.clone(),
-                positional_field: r.positional_field.clone(),
-            })
-            .collect::<Vec<_>>(),
-    ).context("failed to build alias registry from node-config records")?);
+    let standalone_ar = Arc::new(
+        ryeos_runtime::alias_registry::AliasRegistry::from_records(
+            &node_config_snapshot
+                .aliases
+                .iter()
+                .map(|r| ryeos_runtime::alias_registry::AliasDef {
+                    tokens: r.tokens.clone(),
+                    verb: r.verb.clone(),
+                    deprecated: r.deprecated.unwrap_or(false),
+                    replacement_tokens: r.replacement_tokens.clone(),
+                    removed_in: r.removed_in.clone(),
+                    positional_field: r.positional_field.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .context("failed to build alias registry from node-config records")?,
+    );
 
     // Validate: all aliases reference known verbs
     standalone_ar
@@ -703,7 +763,9 @@ async fn run_service_standalone(
         }
     }
 
-    let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(standalone_vr.clone()));
+    let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(
+        standalone_vr.clone(),
+    ));
 
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
@@ -743,8 +805,9 @@ async fn run_service_standalone(
     };
 
     let params: serde_json::Value = match params_json {
-        Some(json_str) => serde_json::from_str(json_str)
-            .with_context(|| "parse --params as JSON")?,
+        Some(json_str) => {
+            serde_json::from_str(json_str).with_context(|| "parse --params as JSON")?
+        }
         None => serde_json::json!({}),
     };
 

@@ -28,9 +28,8 @@ use ryeos_tools::actions::init::{run_init, InitOptions};
 use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 use ryeos_tools::actions::trust::{run_pin, run_pin_from, PinFromOptions, PinOptions};
 use ryeos_tools::actions::vault::{
-    run_list as run_vault_list, run_put as run_vault_put,
-    run_remove as run_vault_remove, run_rewrap as run_vault_rewrap, ListOptions,
-    PutOptions, RemoveOptions, RewrapOptions,
+    run_list as run_vault_list, run_put as run_vault_put, run_remove as run_vault_remove,
+    run_rewrap as run_vault_rewrap, ListOptions, PutOptions, RemoveOptions, RewrapOptions,
 };
 
 use crate::error::CliError;
@@ -126,7 +125,9 @@ struct InitArgs {
 
 fn run_init_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<InitArgs>(argv)?;
-    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
+    let system_space_dir = args
+        .system_space_dir
+        .unwrap_or_else(default_system_space_dir);
     let user_root = args.user_root.unwrap_or_else(default_user_root);
 
     let opts = InitOptions {
@@ -177,7 +178,9 @@ struct AuthorizeKeyArgs {
 
 fn run_authorize_key_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<AuthorizeKeyArgs>(argv)?;
-    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
+    let system_space_dir = args
+        .system_space_dir
+        .unwrap_or_else(default_system_space_dir);
 
     let pk_b64 = args
         .public_key
@@ -338,12 +341,18 @@ fn run_vault_put_verb(argv: &[String]) -> Result<()> {
         std::io::stdin()
             .read_to_string(&mut buf)
             .map_err(|e| anyhow::anyhow!("failed to read secret from stdin: {e}"))?;
-        if buf.ends_with('\n') { buf.pop(); }
-        if buf.ends_with('\r') { buf.pop(); }
+        if buf.ends_with('\n') {
+            buf.pop();
+        }
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
         buf
     };
 
-    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
+    let system_space_dir = args
+        .system_space_dir
+        .unwrap_or_else(default_system_space_dir);
     let report = run_vault_put(&PutOptions {
         system_space_dir,
         entries: vec![(args.name, value)],
@@ -367,9 +376,13 @@ struct VaultListArgs {
 
 fn run_vault_list_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultListArgs>(argv)?;
-    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
-    let report = run_vault_list(&ListOptions { system_space_dir: system_space_dir })
-        .context("ryeos vault list failed")?;
+    let system_space_dir = args
+        .system_space_dir
+        .unwrap_or_else(default_system_space_dir);
+    let report = run_vault_list(&ListOptions {
+        system_space_dir: system_space_dir,
+    })
+    .context("ryeos vault list failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -392,7 +405,9 @@ struct VaultRemoveArgs {
 
 fn run_vault_remove_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultRemoveArgs>(argv)?;
-    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
+    let system_space_dir = args
+        .system_space_dir
+        .unwrap_or_else(default_system_space_dir);
     let report = run_vault_remove(&RemoveOptions {
         system_space_dir: system_space_dir,
         keys: args.keys,
@@ -416,9 +431,13 @@ struct VaultRewrapArgs {
 
 fn run_vault_rewrap_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<VaultRewrapArgs>(argv)?;
-    let system_space_dir = args.system_space_dir.unwrap_or_else(default_system_space_dir);
-    let report = run_vault_rewrap(&RewrapOptions { system_space_dir: system_space_dir })
-        .context("ryeos vault rewrap failed")?;
+    let system_space_dir = args
+        .system_space_dir
+        .unwrap_or_else(default_system_space_dir);
+    let report = run_vault_rewrap(&RewrapOptions {
+        system_space_dir: system_space_dir,
+    })
+    .context("ryeos vault rewrap failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -456,7 +475,9 @@ struct PublishArgs {
 fn run_publish_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<PublishArgs>(argv)?;
     let signing_key = load_signing_key(&args.key)?;
-    let registry_root = args.registry_root.unwrap_or_else(|| args.bundle_source.clone());
+    let registry_root = args
+        .registry_root
+        .unwrap_or_else(|| args.bundle_source.clone());
     let report = run_publish(&PublishOptions {
         bundle_source: args.bundle_source,
         registry_root,
@@ -490,10 +511,8 @@ fn parse_or_handle_help<P: Parser>(argv: &[String]) -> Result<P> {
 }
 
 fn load_signing_key(path: &std::path::Path) -> Result<SigningKey> {
-    let pem = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    SigningKey::from_pkcs8_pem(&pem)
-        .with_context(|| format!("decode {}", path.display()))
+    let pem = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    SigningKey::from_pkcs8_pem(&pem).with_context(|| format!("decode {}", path.display()))
 }
 
 // ── Defaults ────────────────────────────────────────────────────────
@@ -508,5 +527,7 @@ fn default_system_space_dir() -> PathBuf {
 }
 
 fn default_user_root() -> PathBuf {
-    roots::user_root().ok().unwrap_or_else(|| PathBuf::from("."))
+    roots::user_root()
+        .ok()
+        .unwrap_or_else(|| PathBuf::from("."))
 }

@@ -21,8 +21,8 @@ pub fn write_sealed_secrets(
 
     let envelope = lillux::vault::seal(vault_pk, plaintext_toml.as_bytes())
         .map_err(|e| anyhow!("vault: seal failed: {e:#}"))?;
-    let envelope_toml = toml::to_string(&envelope)
-        .map_err(|e| anyhow!("vault: serialize envelope: {e}"))?;
+    let envelope_toml =
+        toml::to_string(&envelope).map_err(|e| anyhow!("vault: serialize envelope: {e}"))?;
 
     if let Some(parent) = store_path.parent() {
         std::fs::create_dir_all(parent)
@@ -53,8 +53,8 @@ pub fn read_sealed_secrets(
         .with_context(|| format!("read {}", store_path.display()))?;
     let envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw)
         .with_context(|| format!("parse envelope TOML at {}", store_path.display()))?;
-    let plaintext = lillux::vault::open(sk, &envelope)
-        .map_err(|e| anyhow!("open envelope: {e:#}"))?;
+    let plaintext =
+        lillux::vault::open(sk, &envelope).map_err(|e| anyhow!("open envelope: {e:#}"))?;
     let plaintext_str =
         std::str::from_utf8(&plaintext).context("decrypted plaintext is not UTF-8")?;
     let map: HashMap<String, String> =
@@ -64,9 +64,9 @@ pub fn read_sealed_secrets(
 }
 
 fn toml_quote(s: &str) -> String {
-    if s.bytes().all(|b| {
-        b.is_ascii() && b != b'"' && b != b'\\' && !b.is_ascii_control()
-    }) {
+    if s.bytes()
+        .all(|b| b.is_ascii() && b != b'"' && b != b'\\' && !b.is_ascii_control())
+    {
         format!("\"{s}\"")
     } else {
         let mut tmp = std::collections::BTreeMap::new();

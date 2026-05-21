@@ -55,11 +55,12 @@ pub fn resolve_command(
     verb_registry: &crate::verb_registry::VerbRegistry,
 ) -> Result<ResolvedCommand, ResolveError> {
     // 1. Match alias
-    let (verb_name, consumed) = alias_registry
-        .match_argv(tokens)
-        .ok_or_else(|| ResolveError::NoMatch {
-            tokens: tokens.to_vec(),
-        })?;
+    let (verb_name, consumed) =
+        alias_registry
+            .match_argv(tokens)
+            .ok_or_else(|| ResolveError::NoMatch {
+                tokens: tokens.to_vec(),
+            })?;
 
     // 2. Look up verb
     let verb = verb_registry
@@ -85,8 +86,7 @@ pub fn resolve_command(
     //    named field instead of `_args`.
     let tail: Vec<String> = tokens[consumed..].to_vec();
     let positional_field = alias_def.and_then(|d| d.positional_field.as_deref());
-    let parameters =
-        crate::arg_binder::bind_argv_with_positional_field(&tail, positional_field);
+    let parameters = crate::arg_binder::bind_argv_with_positional_field(&tail, positional_field);
 
     // 5. Check deprecation
     let deprecated = alias_def.map(|d| d.deprecated).unwrap_or(false);
@@ -227,7 +227,11 @@ mod tests {
 
     #[test]
     fn bind_key_value_pairs() {
-        let tail = vec!["--name".to_string(), "foo".to_string(), "--verbose".to_string()];
+        let tail = vec![
+            "--name".to_string(),
+            "foo".to_string(),
+            "--verbose".to_string(),
+        ];
         let result = crate::arg_binder::bind_argv(&tail);
         assert_eq!(result.get("name").unwrap(), "foo");
         assert_eq!(result.get("verbose").unwrap(), true);
@@ -285,13 +289,12 @@ mod tests {
             },
         ])
         .unwrap();
-        let verbs = crate::verb_registry::VerbRegistry::from_records(&[
-            crate::verb_registry::VerbDef {
+        let verbs =
+            crate::verb_registry::VerbRegistry::from_records(&[crate::verb_registry::VerbDef {
                 name: "remote-execute".into(),
                 execute: Some("service:remote/execute".into()),
-            },
-        ])
-        .unwrap();
+            }])
+            .unwrap();
 
         let tokens = vec![
             "remote".to_string(),

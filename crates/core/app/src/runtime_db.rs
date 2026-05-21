@@ -86,34 +86,129 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "thread_runtime",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "chain_root_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "pid", col_type: "INTEGER", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "pgid", col_type: "INTEGER", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "metadata", col_type: "BLOB", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "launch_metadata", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "resume_attempts", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "pid",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "pgid",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "metadata",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_metadata",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "resume_attempts",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
                 name: "thread_commands",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "command_id", col_type: "INTEGER", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "command_type", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "status", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "requested_by", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "params", col_type: "BLOB", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "result", col_type: "BLOB", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "created_at", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "claimed_at", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "completed_at", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec {
+                        name: "command_id",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "command_type",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "status",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "requested_by",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "params",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "result",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "claimed_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completed_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
         ],
         indexes: &[
-            sqlite_schema::IndexSpec { name: "idx_thread_runtime_chain_root", table: "thread_runtime", columns: &["chain_root_id"], unique: false },
-            sqlite_schema::IndexSpec { name: "idx_thread_commands_thread_status", table: "thread_commands", columns: &["thread_id", "status"], unique: false },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_runtime_chain_root",
+                table: "thread_runtime",
+                columns: &["chain_root_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_commands_thread_status",
+                table: "thread_commands",
+                columns: &["thread_id", "status"],
+                unique: false,
+            },
         ],
     }
 }
@@ -161,8 +256,8 @@ impl RuntimeDb {
         pgid: i64,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
-        let lm_json = serde_json::to_string(launch_metadata)
-            .context("failed to encode launch_metadata")?;
+        let lm_json =
+            serde_json::to_string(launch_metadata).context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime
                 SET pid = ?2, pgid = ?3, launch_metadata = ?4
@@ -239,23 +334,19 @@ impl RuntimeDb {
     /// Missing row (legitimate fresh thread) ⇒ 0.
     /// Row present but `resume_attempts` NULL (corruption) ⇒ bail.
     pub fn get_resume_attempts(&self, thread_id: &str) -> Result<u32> {
-        let row_exists: bool = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM thread_runtime WHERE thread_id = ?1",
-                params![thread_id],
-                |row| row.get(0),
-            )?;
+        let row_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM thread_runtime WHERE thread_id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
         if !row_exists {
             return Ok(0);
         }
-        let n: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT resume_attempts FROM thread_runtime WHERE thread_id = ?1",
-                params![thread_id],
-                |row| row.get(0),
-            )?;
+        let n: Option<i64> = self.conn.query_row(
+            "SELECT resume_attempts FROM thread_runtime WHERE thread_id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
         match n {
             Some(v) => {
                 if v < 0 {
@@ -417,11 +508,7 @@ fn parse_json_blob(blob: Option<Vec<u8>>) -> rusqlite::Result<Option<Value>> {
     blob.map(|bytes| serde_json::from_slice(&bytes))
         .transpose()
         .map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Blob,
-                Box::new(err),
-            )
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(err))
         })
 }
 

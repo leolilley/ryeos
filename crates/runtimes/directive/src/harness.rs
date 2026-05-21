@@ -398,7 +398,10 @@ mod tests {
         };
         // The specific pattern should win over the wildcard.
         let assessment = policy.assess("directive:auth/login");
-        assert!(!assessment.blocked, "specific low-risk pattern should override wildcard high");
+        assert!(
+            !assessment.blocked,
+            "specific low-risk pattern should override wildcard high"
+        );
         assert_eq!(assessment.level, "low");
     }
 

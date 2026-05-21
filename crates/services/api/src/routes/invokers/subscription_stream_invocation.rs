@@ -6,8 +6,8 @@
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContract,
-    RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
+    CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContext,
+    RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_app::event_store_service::EventReplayParams;
 
@@ -37,9 +37,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
             .input
             .get("thread_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                RouteDispatchError::BadRequest("missing thread_id in request".into())
-            })?
+            .ok_or_else(|| RouteDispatchError::BadRequest("missing thread_id in request".into()))?
             .to_string();
 
         // Last-Event-ID for resumption.
@@ -258,7 +256,9 @@ pub(crate) fn parse_last_event_id(
         None => return Ok(None),
     };
 
-    let s = raw.to_str().map_err(|_| RouteDispatchError::BadLastEventId)?;
+    let s = raw
+        .to_str()
+        .map_err(|_| RouteDispatchError::BadLastEventId)?;
     let n = s
         .parse::<i64>()
         .map_err(|_| RouteDispatchError::BadLastEventId)?;

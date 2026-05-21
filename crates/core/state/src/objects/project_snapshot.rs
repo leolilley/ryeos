@@ -109,7 +109,10 @@ mod tests {
         };
         let value = original.to_value();
         let restored = ProjectSnapshot::from_value(&value).unwrap();
-        assert_eq!(restored.project_manifest_hash, original.project_manifest_hash);
+        assert_eq!(
+            restored.project_manifest_hash,
+            original.project_manifest_hash
+        );
         assert_eq!(restored.source, "fold_back");
     }
 

@@ -40,12 +40,11 @@ pub fn validate_caller_params(
         return Ok(());
     };
 
-    let validator = jsonschema::validator_for(schema).map_err(|e| {
-        EngineError::InvalidRuntimeConfig {
+    let validator =
+        jsonschema::validator_for(schema).map_err(|e| EngineError::InvalidRuntimeConfig {
             path: tool_id.to_owned(),
             reason: format!("invalid JSON schema in config_schema: {e}"),
-        }
-    })?;
+        })?;
 
     let mut errors: Vec<String> = Vec::new();
     for err in validator.iter_errors(params) {

@@ -27,8 +27,8 @@ use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
-use crate::trust::TrustStore;
 use crate::resolution::TrustClass;
+use crate::trust::TrustStore;
 
 /// Reserved env key prefix — runtime configs may not override
 /// daemon-injected bindings.
@@ -61,9 +61,7 @@ impl HostEnvBindings {
     /// Build from an explicit allowlist (e.g. parsed from
     /// `RYEOS_TOOL_ENV_PASSTHROUGH`), snapshotting current host env
     /// values for each allowed key. Rejects reserved names.
-    pub fn from_allowlist(
-        allowed: impl IntoIterator<Item = String>,
-    ) -> Result<Self, EngineError> {
+    pub fn from_allowlist(allowed: impl IntoIterator<Item = String>) -> Result<Self, EngineError> {
         let mut out = Self::default();
         for name in allowed {
             if name.starts_with(RESERVED_ENV_PREFIX) {
@@ -142,12 +140,13 @@ pub fn expand_template(template: &str, ctx: &TemplateContext) -> Result<String, 
                     token: "project_path".into(),
                 })?,
             "params_json" => ctx.params_json.clone(),
-            "interpreter" => ctx
-                .interpreter
-                .clone()
-                .ok_or_else(|| EngineError::TemplateMissingContext {
-                    token: "interpreter".into(),
-                })?,
+            "interpreter" => {
+                ctx.interpreter
+                    .clone()
+                    .ok_or_else(|| EngineError::TemplateMissingContext {
+                        token: "interpreter".into(),
+                    })?
+            }
             other => match ctx.extra.get(other) {
                 Some(v) => v.clone(),
                 None => {
@@ -454,9 +453,10 @@ pub fn compile_with_handlers(
     // them never need a handler to have run first.
     if let Some(first) = chain.first() {
         if let Some(tool_dir) = first.source_path.parent() {
-            ctx.template_ctx
-                .extra
-                .insert("tool_dir".to_owned(), tool_dir.to_string_lossy().into_owned());
+            ctx.template_ctx.extra.insert(
+                "tool_dir".to_owned(),
+                tool_dir.to_string_lossy().into_owned(),
+            );
             let tool_parent = tool_dir.parent().unwrap_or(tool_dir);
             ctx.template_ctx.extra.insert(
                 "tool_parent".to_owned(),
@@ -575,23 +575,24 @@ pub fn compile_with_handlers(
         ..
     } = ctx;
 
-    let command = spec_overrides.command.ok_or_else(|| EngineError::NoRuntimeConfig {
-        chain: chain_str.to_vec(),
-    })?;
+    let command = spec_overrides
+        .command
+        .ok_or_else(|| EngineError::NoRuntimeConfig {
+            chain: chain_str.to_vec(),
+        })?;
     let cmd_expanded = expand_template(&command, &template_ctx)?;
 
     // Resolve `bin:` prefix — look up the binary from the bundle's
     // `.ai/bin/<triple>/` directory instead of PATH.
     let cmd = if cmd_expanded.starts_with("bin:") {
-        let bundle_root = find_bundle_root(root_source_path).ok_or_else(|| {
-            EngineError::InvalidBinPrefix {
+        let bundle_root =
+            find_bundle_root(root_source_path).ok_or_else(|| EngineError::InvalidBinPrefix {
                 raw: cmd_expanded.clone(),
                 detail: format!(
                     "cannot find bundle root (no .ai/ ancestor of {})",
                     root_source_path.display()
                 ),
-            }
-        })?;
+            })?;
         let resolved = crate::binary_resolver::resolve_bundle_binary_ref(
             &cmd_expanded,
             &bundle_root,
@@ -628,7 +629,9 @@ pub fn compile_with_handlers(
     Ok(PlanSubprocessSpec {
         cmd,
         args,
-        cwd: spec_overrides.cwd.or_else(|| project_root.map(|p| p.to_path_buf())),
+        cwd: spec_overrides
+            .cwd
+            .or_else(|| project_root.map(|p| p.to_path_buf())),
         env: expanded_env,
         stdin_data,
         timeout_secs,
@@ -654,9 +657,7 @@ mod tests {
     #[test]
     fn env_value_expands_allowed_host_env_passthrough() {
         let mut host_env = HostEnvBindings::default();
-        host_env
-            .allowed
-            .insert("BACKEND_API_URL".into());
+        host_env.allowed.insert("BACKEND_API_URL".into());
         host_env.values.insert(
             "BACKEND_API_URL".into(),
             "http://host.docker.internal:4000".into(),
@@ -697,9 +698,7 @@ mod tests {
     #[test]
     fn env_value_reports_allowed_but_missing() {
         let mut host_env = HostEnvBindings::default();
-        host_env
-            .allowed
-            .insert("BACKEND_API_URL".into());
+        host_env.allowed.insert("BACKEND_API_URL".into());
         // No value populated.
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
         let err = expand_env_value("${BACKEND_API_URL}", &ctx, &host_env).unwrap_err();
@@ -742,4 +741,3 @@ mod tests {
         assert_eq!(got, "hello-/tool.yaml");
     }
 }
-

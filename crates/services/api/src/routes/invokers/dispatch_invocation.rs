@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContract, RouteInvocationContext,
+    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
     RouteInvocationOutput, RouteInvocationResult,
 };
 
@@ -62,8 +62,8 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
     ) -> Result<RouteInvocationResult, RouteDispatchError> {
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 
-        let item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&self.item_ref)
-            .map_err(|e| {
+        let item_ref =
+            crate::routes::parsed_ref::ParsedItemRef::parse(&self.item_ref).map_err(|e| {
                 RouteDispatchError::Internal(format!(
                     "dispatch invoker: invalid item_ref '{}': {}",
                     self.item_ref, e

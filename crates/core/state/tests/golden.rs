@@ -113,7 +113,11 @@ fn golden_thread_snapshot_canonical_json() {
         let canonical = lillux::canonical_json(object);
         let hash = lillux::sha256_hex(canonical.as_bytes());
 
-        assert_eq!(object["kind"], "thread_snapshot", "case {}: invalid kind", i);
+        assert_eq!(
+            object["kind"], "thread_snapshot",
+            "case {}: invalid kind",
+            i
+        );
         assert_eq!(object["schema"], 1, "case {}: invalid schema", i);
 
         let hash2 = lillux::sha256_hex(lillux::canonical_json(object).as_bytes());
@@ -188,17 +192,19 @@ fn generate_vectors() {
     let dir = test_vectors_dir();
     fs::create_dir_all(&dir).expect("create test-vectors dir");
 
-    for file in ["thread_event_vectors.json", "thread_snapshot_vectors.json", "chain_state_vectors.json"] {
+    for file in [
+        "thread_event_vectors.json",
+        "thread_snapshot_vectors.json",
+        "chain_state_vectors.json",
+    ] {
         let vectors_path = dir.join(file);
         if !vectors_path.exists() {
             eprintln!("Skipping: {} not found", file);
             continue;
         }
 
-        let data = fs::read_to_string(&vectors_path)
-            .expect("failed to read vectors file");
-        let mut vectors: Value = serde_json::from_str(&data)
-            .expect("failed to parse vectors file");
+        let data = fs::read_to_string(&vectors_path).expect("failed to read vectors file");
+        let mut vectors: Value = serde_json::from_str(&data).expect("failed to parse vectors file");
 
         let cases = vectors["cases"]
             .as_array_mut()
@@ -212,10 +218,8 @@ fn generate_vectors() {
             case["expected_hash"] = json!(hash);
         }
 
-        let updated = serde_json::to_string_pretty(&vectors)
-            .expect("failed to serialize vectors");
-        fs::write(&vectors_path, updated)
-            .expect("failed to write updated vectors");
+        let updated = serde_json::to_string_pretty(&vectors).expect("failed to serialize vectors");
+        fs::write(&vectors_path, updated).expect("failed to write updated vectors");
 
         println!("Updated: {}", vectors_path.display());
     }
@@ -268,5 +272,8 @@ fn verify_canonical_json_determinism() {
     let canonical1 = lillux::canonical_json(&obj1);
     let canonical2 = lillux::canonical_json(&obj2);
 
-    assert_eq!(canonical1, canonical2, "Canonical JSON must be deterministic");
+    assert_eq!(
+        canonical1, canonical2,
+        "Canonical JSON must be deterministic"
+    );
 }

@@ -23,14 +23,16 @@ impl UdsRuntimeClient {
 
     pub fn from_env() -> Result<Self, CallbackError> {
         let path = crate::daemon_rpc::resolve_daemon_socket_path(None);
-        let token = std::env::var("RYEOSD_CALLBACK_TOKEN")
-            .map_err(|_| CallbackError::Transport(
-                anyhow::anyhow!("RYEOSD_CALLBACK_TOKEN must be set by daemon")
-            ))?;
-        let tat = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
-            .map_err(|_| CallbackError::Transport(
-                anyhow::anyhow!("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon")
-            ))?;
+        let token = std::env::var("RYEOSD_CALLBACK_TOKEN").map_err(|_| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "RYEOSD_CALLBACK_TOKEN must be set by daemon"
+            ))
+        })?;
+        let tat = std::env::var("RYEOSD_THREAD_AUTH_TOKEN").map_err(|_| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "RYEOSD_THREAD_AUTH_TOKEN must be set by daemon"
+            ))
+        })?;
         Ok(Self::new(path, token, tat))
     }
 
@@ -53,10 +55,7 @@ impl UdsRuntimeClient {
     fn inject_callback_token(&self, params: &mut Value) {
         if let Some(map) = params.as_object_mut() {
             if !map.contains_key("callback_token") && !self.callback_token.is_empty() {
-                map.insert(
-                    "callback_token".to_string(),
-                    json!(self.callback_token),
-                );
+                map.insert("callback_token".to_string(), json!(self.callback_token));
             }
             if !map.contains_key("thread_auth_token") && !self.thread_auth_token.is_empty() {
                 map.insert(
@@ -90,11 +89,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn attach_process(
-        &self,
-        thread_id: &str,
-        pid: u32,
-    ) -> Result<Value, CallbackError> {
+    async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id, "pid": pid});
         self.inject_callback_token(&mut params);
         self.rpc
@@ -112,11 +107,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn finalize_thread(
-        &self,
-        thread_id: &str,
-        status: &str,
-    ) -> Result<Value, CallbackError> {
+    async fn finalize_thread(&self, thread_id: &str, status: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id, "status": status});
         self.inject_callback_token(&mut params);
         self.rpc
@@ -254,7 +245,10 @@ mod tests {
     fn from_env_returns_error_without_token() {
         std::env::remove_var("RYEOSD_CALLBACK_TOKEN");
         let result = UdsRuntimeClient::from_env();
-        assert!(result.is_err(), "from_env() should fail when RYEOSD_CALLBACK_TOKEN is not set");
+        assert!(
+            result.is_err(),
+            "from_env() should fail when RYEOSD_CALLBACK_TOKEN is not set"
+        );
     }
 
     #[test]

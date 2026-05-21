@@ -85,11 +85,7 @@ metadata:
   rules: {}
 "##;
     let signed = lillux::signature::sign_content(schema_body, &signing_key(), "#", None);
-    fs::write(
-        kinds_dir.join("directive.kind-schema.yaml"),
-        signed,
-    )
-    .unwrap();
+    fs::write(kinds_dir.join("directive.kind-schema.yaml"), signed).unwrap();
     let kinds_search = bundle_root.join(".ai/node/engine/kinds");
     KindRegistry::load_base(&[kinds_search], &trust_store()).unwrap()
 }
@@ -131,7 +127,11 @@ fn parse_via_registry(body: &str) -> Result<RuntimeYaml, EngineError> {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "rt", body);
     let kinds = directive_kind_registry(&bundle);
-    let registry = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &kinds)?;
+    let registry = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &kinds,
+    )?;
     let rt = registry
         .all()
         .next()
@@ -147,8 +147,14 @@ fn parse_runtime_yaml_success() {
     assert_eq!(yaml.default, Some(true));
     assert_eq!(yaml.binary_ref, "bin/{host_triple}/directive_runner");
     assert_eq!(yaml.abi_version, "v1");
-    assert_eq!(yaml.required_caps, vec!["ryeos.read.directive.*".to_string()]);
-    assert_eq!(yaml.description.as_deref(), Some("Default directive runtime"));
+    assert_eq!(
+        yaml.required_caps,
+        vec!["ryeos.read.directive.*".to_string()]
+    );
+    assert_eq!(
+        yaml.description.as_deref(),
+        Some("Default directive runtime")
+    );
     let schema = yaml.schema.expect("schema present");
     assert_eq!(schema.envelope, "LaunchEnvelope");
     assert_eq!(schema.result, "RuntimeResult");
@@ -221,7 +227,12 @@ abi_version: v1
 #[test]
 fn registry_empty_when_no_bundles_have_runtimes() {
     let bundle = tempdir(); // no .ai/runtimes/ subdir
-    let registry = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
+    let registry = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &directive_kind_registry(&bundle),
+    )
+    .unwrap();
     assert_eq!(registry.all().count(), 0);
     let err = registry.lookup_for("directive").unwrap_err();
     assert!(matches!(err, EngineError::NoRuntimeFor { .. }));
@@ -231,8 +242,12 @@ fn registry_empty_when_no_bundles_have_runtimes() {
 fn registry_one_runtime_serving_kind_returned() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
-    let registry =
-        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
+    let registry = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &directive_kind_registry(&bundle),
+    )
+    .unwrap();
 
     let rt = registry.lookup_for("directive").unwrap();
     assert_eq!(rt.canonical_ref.to_string(), "runtime:default");
@@ -264,8 +279,12 @@ abi_version: v1
 ",
     );
 
-    let registry =
-        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
+    let registry = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &directive_kind_registry(&bundle),
+    )
+    .unwrap();
     let rt = registry.lookup_for("directive").unwrap();
     assert_eq!(rt.canonical_ref.to_string(), "runtime:fast");
     assert_eq!(rt.yaml.default, Some(true));
@@ -297,7 +316,12 @@ abi_version: v1
 ",
     );
 
-    let err = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap_err();
+    let err = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &directive_kind_registry(&bundle),
+    )
+    .unwrap_err();
     match err {
         EngineError::MultipleRuntimeDefaults { kind, defaults } => {
             assert_eq!(kind, "directive");
@@ -331,8 +355,12 @@ abi_version: v1
 ",
     );
 
-    let registry =
-        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
+    let registry = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &directive_kind_registry(&bundle),
+    )
+    .unwrap();
     let err = registry.lookup_for("directive").unwrap_err();
     match err {
         EngineError::RuntimeDefaultRequired { kind, candidates } => {
@@ -347,8 +375,12 @@ abi_version: v1
 fn registry_lookup_by_ref_returns_runtime() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
-    let registry =
-        RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap();
+    let registry = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &directive_kind_registry(&bundle),
+    )
+    .unwrap();
 
     let canonical = CanonicalRef::parse("runtime:default").unwrap();
     let rt = registry.lookup_by_ref(&canonical).expect("lookup hit");
@@ -370,7 +402,12 @@ fn registry_tampered_yaml_aborts_build() {
     let tampered = format!("{content}# tampered\n");
     fs::write(&path, tampered).unwrap();
 
-    let err = RuntimeRegistry::build_from_bundles(&[(bundle.clone(), TrustClass::TrustedSystem)], &trust_store(), &directive_kind_registry(&bundle)).unwrap_err();
+    let err = RuntimeRegistry::build_from_bundles(
+        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &trust_store(),
+        &directive_kind_registry(&bundle),
+    )
+    .unwrap_err();
     match err {
         EngineError::RuntimeYamlInvalid { reason, .. } => {
             assert!(
