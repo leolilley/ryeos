@@ -1,6 +1,6 @@
 # Maintainer: Leo Lilley <leo.lml.lilley@gmail.com>
 pkgname=ryeos
-pkgver=0.4.6
+pkgver=0.4.7
 pkgrel=1
 pkgdesc="Portable operating system for AI — persistent, signed workspace for LLMs"
 arch=('x86_64')
