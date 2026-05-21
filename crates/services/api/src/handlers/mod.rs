@@ -28,16 +28,21 @@ pub mod node_sign;
 pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
+pub mod project_apply_snapshot;
+pub mod project_status;
 pub mod push_head;
 pub mod rebuild;
 pub mod remote_authorize;
+pub mod remote_bind_project;
 pub mod remote_bundle_install;
 pub mod remote_configure;
 pub mod remote_execute;
 pub mod remote_list;
+pub mod remote_project_status;
 pub mod remote_pull;
 pub mod remote_push;
 pub mod remote_status;
+pub mod remote_sync_project_ai;
 pub mod remote_thread_status;
 pub mod remote_threads;
 pub mod remote_vault_delete;
@@ -71,6 +76,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     objects_put::DESCRIPTOR,
     objects_get::DESCRIPTOR,
     push_head::DESCRIPTOR,
+    project_apply_snapshot::DESCRIPTOR,
+    project_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
     threads_cancel::DESCRIPTOR,
@@ -94,9 +101,12 @@ pub const ALL: &[ServiceDescriptor] = &[
     scheduler_pause::DESCRIPTOR,
     scheduler_resume::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
+    remote_bind_project::DESCRIPTOR,
     remote_list::DESCRIPTOR,
     remote_status::DESCRIPTOR,
     remote_push::DESCRIPTOR,
+    remote_sync_project_ai::DESCRIPTOR,
+    remote_project_status::DESCRIPTOR,
     remote_pull::DESCRIPTOR,
     remote_execute::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,

@@ -189,6 +189,33 @@ impl RemoteClient {
         self.signed_post("/push-head", &body).await
     }
 
+    /// POST /project/apply-snapshot (authenticated).
+    pub async fn apply_project_snapshot(
+        &self,
+        project_path: &str,
+        snapshot_hash: &str,
+        expected_deployed_hash: Option<&str>,
+        force: bool,
+    ) -> Result<Value> {
+        let mut body = serde_json::json!({
+            "project_path": project_path,
+            "snapshot_hash": snapshot_hash,
+            "force": force,
+        });
+        if let Some(expected) = expected_deployed_hash {
+            body.as_object_mut()
+                .unwrap()
+                .insert("expected_deployed_hash".into(), serde_json::json!(expected));
+        }
+        self.signed_post("/project/apply-snapshot", &body).await
+    }
+
+    /// POST /project/status (authenticated).
+    pub async fn project_status(&self, project_path: &str) -> Result<Value> {
+        let body = serde_json::json!({ "project_path": project_path });
+        self.signed_post("/project/status", &body).await
+    }
+
     /// POST /execute (authenticated).
     pub async fn execute(
         &self,

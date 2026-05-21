@@ -1,5 +1,6 @@
 //! `remote/push` — push project content to a remote node.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,13 +50,30 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             e
         )
     })?;
-    let project_path_for_ref = canonical_abs.to_string_lossy().to_string();
+    let mut project_path_for_ref = canonical_abs.to_string_lossy().to_string();
     let abs_project_path = canonical_abs;
 
     // Load remote's cached ignore rules (required — remote configure always
     // populates them). Inline fetch on cache miss, persisting for future use.
     let remotes = config::load_remotes(&state.config.system_space_dir)?;
     let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
+    if let Some(cfg) = remote_cfg.as_ref() {
+        if let Some(binding) = cfg.project_bindings.get(&project_path_for_ref) {
+            match binding.sync_scope {
+                ryeos_state::project_sync::ProjectSyncScope::AiOnly => {
+                    anyhow::bail!(
+                        "remote push is a full-project staging command and refuses ai_only binding '{}' -> '{}'; use `ryeos remote sync-project-ai`",
+                        project_path_for_ref,
+                        binding.remote_project_path
+                    );
+                }
+                ryeos_state::project_sync::ProjectSyncScope::FullProject => {
+                    config::validate_remote_project_path(&binding.remote_project_path)?;
+                    project_path_for_ref = binding.remote_project_path.clone();
+                }
+            }
+        }
+    }
     let remote_ignore = match remote_cfg {
         Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
         None => {
@@ -74,6 +92,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     principal_id: String::new(), // partial — user should reconfigure
                     vault_fingerprint: String::new(),
                     ingest_ignore: fetched.clone(),
+                    project_bindings: HashMap::new(),
                 });
                 config::save_remotes(&state.config.system_space_dir, &remotes)
             })();

@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::project_sync::ProjectSyncScope;
+
 /// A snapshot of a project's source files at a point in time.
 ///
 /// Stored in CAS as an immutable object. Linked from thread snapshots
@@ -15,6 +17,10 @@ pub struct ProjectSnapshot {
     /// Hash of the user-level manifest (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_manifest_hash: Option<String>,
+    /// Declared scope of the project manifest. Missing in older CAS
+    /// objects defaults to `full_project` during manual deserialization.
+    #[serde(default)]
+    pub project_sync_scope: ProjectSyncScope,
     /// Parent snapshot hashes (DAG structure for versioning).
     pub parent_hashes: Vec<String>,
     /// ISO-8601 timestamp of creation.
@@ -25,7 +31,7 @@ pub struct ProjectSnapshot {
 
 impl ProjectSnapshot {
     /// Schema version for project snapshots.
-    pub const SCHEMA: u32 = 2;
+    pub const SCHEMA: u32 = 3;
 
     /// Serialize to a CAS JSON object.
     pub fn to_value(&self) -> Value {
@@ -33,6 +39,7 @@ impl ProjectSnapshot {
             "kind": "project_snapshot",
             "schema": Self::SCHEMA,
             "project_manifest_hash": self.project_manifest_hash,
+            "project_sync_scope": self.project_sync_scope,
             "parent_hashes": self.parent_hashes,
             "created_at": self.created_at,
             "source": self.source,
@@ -57,6 +64,12 @@ impl ProjectSnapshot {
                 .get("user_manifest_hash")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            project_sync_scope: value
+                .get("project_sync_scope")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default(),
             parent_hashes: value
                 .get("parent_hashes")
                 .and_then(|v| v.as_array())
@@ -89,6 +102,7 @@ mod tests {
         let original = ProjectSnapshot {
             project_manifest_hash: "ab".repeat(32),
             user_manifest_hash: None,
+            project_sync_scope: ProjectSyncScope::FullProject,
             parent_hashes: vec![],
             created_at: "2026-04-23T00:00:00Z".to_string(),
             source: "fold_back".to_string(),
@@ -104,6 +118,7 @@ mod tests {
         let original = ProjectSnapshot {
             project_manifest_hash: "ab".repeat(32),
             user_manifest_hash: Some("cd".repeat(32)),
+            project_sync_scope: ProjectSyncScope::FullProject,
             parent_hashes: vec!["ef".repeat(32)],
             created_at: "2026-04-23T00:00:00Z".to_string(),
             source: "manual_push".to_string(),
@@ -112,5 +127,34 @@ mod tests {
         let restored = ProjectSnapshot::from_value(&value).unwrap();
         assert_eq!(restored.user_manifest_hash, Some("cd".repeat(32)));
         assert_eq!(restored.parent_hashes.len(), 1);
+    }
+
+    #[test]
+    fn missing_project_sync_scope_defaults_to_full_project() {
+        let value = json!({
+            "kind": "project_snapshot",
+            "schema": 2,
+            "project_manifest_hash": "ab".repeat(32),
+            "parent_hashes": [],
+            "created_at": "2026-04-23T00:00:00Z",
+            "source": "legacy_push",
+        });
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(restored.project_sync_scope, ProjectSyncScope::FullProject);
+    }
+
+    #[test]
+    fn ai_only_scope_roundtrips() {
+        let original = ProjectSnapshot {
+            project_manifest_hash: "ab".repeat(32),
+            user_manifest_hash: None,
+            project_sync_scope: ProjectSyncScope::AiOnly,
+            parent_hashes: vec![],
+            created_at: "2026-04-23T00:00:00Z".to_string(),
+            source: "remote_ai_sync".to_string(),
+        };
+        let value = original.to_value();
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(restored.project_sync_scope, ProjectSyncScope::AiOnly);
     }
 }

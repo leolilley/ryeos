@@ -65,19 +65,48 @@ pub fn collect_reachable(
         }
     }
 
-    // Seed from project heads
+    // Seed from principal-scoped project heads:
+    // refs/projects/<principal_key>/<project_hash>/head
     let projects_dir = refs_root.join("projects");
     if projects_dir.is_dir() {
-        for entry in std::fs::read_dir(&projects_dir)
+        for principal_entry in std::fs::read_dir(&projects_dir)
             .context("failed to read projects refs directory")?
         {
-            let entry = entry.context("failed to read project ref entry")?;
-            if entry.file_type()?.is_dir() {
-                let project_hash = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string();
-                let head_path = entry.path().join("head");
+            let principal_entry = principal_entry.context("failed to read project principal entry")?;
+            if principal_entry.file_type()?.is_dir() {
+                for project_entry in std::fs::read_dir(principal_entry.path())
+                    .context("failed to read principal project refs directory")?
+                {
+                    let project_entry = project_entry.context("failed to read project ref entry")?;
+                    if project_entry.file_type()?.is_dir() {
+                        let project_hash = project_entry
+                            .file_name()
+                            .to_string_lossy()
+                            .to_string();
+                        let head_path = project_entry.path().join("head");
+                        if head_path.exists() {
+                            if let Some(target) = read_ref_target(&head_path)? {
+                                queue.push_back(target);
+                                set.project_hashes.push(project_hash);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Seed from node-level deployed project heads:
+    // refs/deployed/projects/<project_hash>/head
+    let deployed_projects_dir = refs_root.join("deployed/projects");
+    if deployed_projects_dir.is_dir() {
+        for project_entry in std::fs::read_dir(&deployed_projects_dir)
+            .context("failed to read deployed project refs directory")?
+        {
+            let project_entry = project_entry.context("failed to read deployed project ref entry")?;
+            if project_entry.file_type()?.is_dir() {
+                let project_hash = project_entry.file_name().to_string_lossy().to_string();
+                let head_path = project_entry.path().join("head");
                 if head_path.exists() {
                     if let Some(target) = read_ref_target(&head_path)? {
                         queue.push_back(target);

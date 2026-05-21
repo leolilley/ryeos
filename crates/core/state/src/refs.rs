@@ -298,6 +298,68 @@ pub fn advance_project_head_ref(
     write_project_head_ref(refs_root, principal_key, project_hash, new_snapshot_hash, signer)
 }
 
+/// Canonical deployed-project storage key derived from the remote live
+/// project path after remote-side canonicalization.
+pub fn deployed_project_key(canonical_project_path: &str) -> String {
+    lillux::cas::sha256_hex(canonical_project_path.as_bytes())
+}
+
+/// Write the node-level deployed ref for a live project path.
+pub fn write_deployed_project_ref(
+    refs_root: &Path,
+    project_hash: &str,
+    project_snapshot_hash: &str,
+    signer: &dyn Signer,
+) -> anyhow::Result<()> {
+    let ref_path = format!("deployed/projects/{}", project_hash);
+    let signed_ref = SignedRef::new(
+        ref_path.clone(),
+        project_snapshot_hash.to_string(),
+        lillux::time::iso8601_now(),
+        signer.fingerprint().to_string(),
+    );
+    let path = refs_root.join(&ref_path).join("head");
+    write_signed_ref(&path, signed_ref, signer)
+}
+
+/// Read the node-level deployed ref for a live project path.
+pub fn read_deployed_project_ref(
+    refs_root: &Path,
+    project_hash: &str,
+) -> anyhow::Result<Option<SignedRef>> {
+    let head_path = refs_root
+        .join("deployed/projects")
+        .join(project_hash)
+        .join("head");
+    if !head_path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(read_signed_ref(&head_path)?))
+}
+
+/// Advance the node-level deployed ref with compare-and-swap.
+pub fn advance_deployed_project_ref(
+    refs_root: &Path,
+    project_hash: &str,
+    new_snapshot_hash: &str,
+    expected_current_hash: &str,
+    signer: &dyn Signer,
+) -> anyhow::Result<()> {
+    let current = read_deployed_project_ref(refs_root, project_hash)?
+        .ok_or_else(|| anyhow!("no deployed project ref for project {}", project_hash))?;
+
+    if current.target_hash != expected_current_hash {
+        anyhow::bail!(
+            "deployed project conflict for project {}: expected {}, got {}",
+            project_hash,
+            expected_current_hash,
+            current.target_hash
+        );
+    }
+
+    write_deployed_project_ref(refs_root, project_hash, new_snapshot_hash, signer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,10 +9,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
-use ryeos_executor::executor::ServiceAvailability;
-use crate::registry::ServiceDescriptor;
 use crate::handler_context::HandlerContext;
+use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +45,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             snapshot.project_manifest_hash, req.snapshot_hash
         ))?;
     let manifest = ryeos_state::objects::SourceManifest::from_value(&manifest_obj)?;
+
+    ryeos_state::project_sync::validate_project_manifest_paths(
+        &manifest,
+        snapshot.project_sync_scope,
+    )?;
 
     // 3. Validate manifest entries don't contain ignored paths
     let ignore = &state.ignore_matcher;
@@ -87,6 +92,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     // 5. Write the HEAD ref (with CAS compare-and-swap if HEAD already exists)
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    let project_lock = crate::handlers::project_apply_snapshot::project_apply_lock(&project_hash);
+    let _project_guard = project_lock
+        .lock()
+        .map_err(|_| anyhow!("project lock poisoned for '{}'", canonical_project_path))?;
     let _permit = state.write_barrier.try_acquire()
         .map_err(|e| anyhow!("cannot acquire CAS write permit: {e}"))?;
 

@@ -1,7 +1,7 @@
 //! Client-side project-path resolution.
 //!
-//! `remote execute` and `remote push` both need a project root, and the
-//! daemon CANNOT do auto-discovery — its cwd is irrelevant to the caller.
+//! Remote project-bearing verbs need a project root, and the daemon
+//! CANNOT do auto-discovery — its cwd is irrelevant to the caller.
 //! So the CLI is responsible for:
 //!
 //! 1. Detecting an explicit `--project <path>` (or `-p <path>`) in the
@@ -34,7 +34,11 @@ pub enum ResolvedProjectSpec {
 pub fn verb_needs_project_resolution(tokens: &[String]) -> bool {
     matches!(
         tokens.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
-        ["remote", "execute", ..] | ["remote", "push", ..]
+        ["remote", "execute", ..]
+            | ["remote", "push", ..]
+            | ["remote", "bind-project", ..]
+            | ["remote", "sync-project-ai", ..]
+            | ["remote", "project-status", ..]
     )
 }
 
@@ -165,6 +169,18 @@ mod tests {
             "push".into(),
             "--remote".into(),
             "default".into(),
+        ]));
+        assert!(verb_needs_project_resolution(&[
+            "remote".into(),
+            "bind-project".into(),
+        ]));
+        assert!(verb_needs_project_resolution(&[
+            "remote".into(),
+            "sync-project-ai".into(),
+        ]));
+        assert!(verb_needs_project_resolution(&[
+            "remote".into(),
+            "project-status".into(),
         ]));
         assert!(!verb_needs_project_resolution(&["status".into()]));
         assert!(!verb_needs_project_resolution(&[

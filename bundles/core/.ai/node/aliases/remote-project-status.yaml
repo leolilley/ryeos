@@ -1,0 +1,6 @@
+# ryeos:signed:2026-05-21T04:50:27Z:7baff30d5b75e74b7715e3f60d51663c7e96ace8a4b24259510aba969b5cd375:9bp2L9x3ngNFAQQ2kDbDCfXL1P2orBJiXh2f/RUwz2RyW6bm/906gq/58exXlEVFn1VC9KcUnFXs/79O7ywuAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "aliases"
+section: aliases
+tokens: ["remote", "project-status"]
+verb: remote-project-status
+description: "Report deployed status for a bound remote project"

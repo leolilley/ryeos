@@ -54,6 +54,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 # User space lives on the persistent /data volume so operator trust,
 # signing keys, and secrets survive container redeploys.
 ENV HOME=/data/user
+ENV USER_SPACE=/data/user
 ENV RYEOS_SYSTEM_SPACE_DIR=/data/core
 EXPOSE 8000
 

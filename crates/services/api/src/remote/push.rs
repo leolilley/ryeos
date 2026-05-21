@@ -13,6 +13,7 @@ use base64::Engine as _;
 use lillux::cas::{sha256_hex, CasStore};
 use ryeos_state::ignore::IgnoreMatcher;
 use ryeos_state::objects::SourceManifest;
+use ryeos_state::project_sync::{ProjectSyncScope, PROJECT_AI_SYNC_DIRS};
 
 use crate::remote::client::{BlobUpload, RemoteClient};
 use ryeos_app::state::AppState;
@@ -35,6 +36,57 @@ pub struct PushResult {
     /// The exact pushed user manifest. None when the operator's user
     /// space is empty / absent.
     pub user_manifest: Option<SourceManifest>,
+}
+
+/// Build, upload, and stage an AI-only project snapshot.
+///
+/// Unlike [`push_project`], this is allow-list based and project-only:
+/// it does not ingest app files and never includes a user manifest.
+pub async fn push_project_ai_only(
+    client: &RemoteClient,
+    state: &Arc<AppState>,
+    local_project_path: &Path,
+    remote_project_path_for_ref: &str,
+) -> Result<PushResult> {
+    let system_space_dir = &state.config.system_space_dir;
+    refuse_walking_root(local_project_path, system_space_dir)?;
+
+    let local_cas_root = system_space_dir.join(ryeos_engine::AI_DIR).join("state").join("objects");
+    let local_cas = CasStore::new(local_cas_root);
+
+    let mut items: HashMap<String, String> = HashMap::new();
+    ingest_project_ai_for_push(&local_cas, local_project_path, &mut items)?;
+
+    let manifest = SourceManifest { item_source_hashes: items };
+    ryeos_state::project_sync::validate_project_manifest_paths(&manifest, ProjectSyncScope::AiOnly)?;
+    let manifest_hash = local_cas.store_object(&manifest.to_value())?;
+
+    let snapshot = ryeos_state::objects::ProjectSnapshot {
+        project_manifest_hash: manifest_hash.clone(),
+        user_manifest_hash: None,
+        project_sync_scope: ProjectSyncScope::AiOnly,
+        parent_hashes: Vec::new(),
+        created_at: lillux::time::iso8601_now(),
+        source: "remote_ai_sync".to_string(),
+    };
+    let snapshot_hash = local_cas.store_object(&snapshot.to_value())?;
+
+    let all_hashes = collect_snapshot_hashes(&local_cas, &manifest, None, None, &manifest_hash, &snapshot_hash);
+    let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes).await?;
+
+    client.push_head(remote_project_path_for_ref, &snapshot_hash).await?;
+
+    let manifest_entries = manifest.item_source_hashes.len();
+    Ok(PushResult {
+        snapshot_hash,
+        manifest_hash,
+        manifest,
+        manifest_entries,
+        blobs_uploaded,
+        blobs_skipped,
+        user_manifest_hash: None,
+        user_manifest: None,
+    })
 }
 
 /// Push a project directory to a remote node.
@@ -90,6 +142,7 @@ pub async fn push_project(
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
         user_manifest_hash: user_manifest_hash.clone(),
+        project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
         parent_hashes: Vec::new(),
         created_at: lillux::time::iso8601_now(),
         source: "push".to_string(),
@@ -97,49 +150,80 @@ pub async fn push_project(
     let snapshot_hash = local_cas.store_object(&snapshot.to_value())?;
 
     // 4. Collect all object hashes we need the remote to have
+    let all_hashes = collect_snapshot_hashes(
+        &local_cas,
+        &manifest,
+        user_manifest.as_ref(),
+        user_manifest_hash.as_deref(),
+        &manifest_hash,
+        &snapshot_hash,
+    );
+
+    let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes).await?;
+
+    // 7. Call push-head
+    client.push_head(project_path_for_ref, &snapshot_hash).await?;
+
+    let manifest_entries = manifest.item_source_hashes.len();
+    Ok(PushResult {
+        snapshot_hash,
+        manifest_hash,
+        manifest,
+        manifest_entries,
+        blobs_uploaded,
+        blobs_skipped,
+        user_manifest_hash,
+        user_manifest,
+    })
+}
+
+fn collect_snapshot_hashes(
+    cas: &CasStore,
+    manifest: &SourceManifest,
+    user_manifest: Option<&SourceManifest>,
+    user_manifest_hash: Option<&str>,
+    manifest_hash: &str,
+    snapshot_hash: &str,
+) -> Vec<String> {
     let mut all_hashes: Vec<String> = Vec::new();
-    for (_rel_path, obj_hash) in &manifest.item_source_hashes {
+    collect_manifest_hashes(cas, manifest, &mut all_hashes);
+    if let Some(um) = user_manifest {
+        collect_manifest_hashes(cas, um, &mut all_hashes);
+    }
+    if let Some(umh) = user_manifest_hash {
+        all_hashes.push(umh.to_string());
+    }
+    all_hashes.push(manifest_hash.to_string());
+    all_hashes.push(snapshot_hash.to_string());
+    all_hashes.sort();
+    all_hashes.dedup();
+    all_hashes
+}
+
+fn collect_manifest_hashes(cas: &CasStore, manifest: &SourceManifest, all_hashes: &mut Vec<String>) {
+    for obj_hash in manifest.item_source_hashes.values() {
         all_hashes.push(obj_hash.clone());
-        // The item source object also contains a blob reference
-        if let Ok(Some(item_obj)) = local_cas.get_object(obj_hash) {
+        if let Ok(Some(item_obj)) = cas.get_object(obj_hash) {
             if let Some(blob_hash) = item_obj.get("content_blob_hash").and_then(|v| v.as_str()) {
                 all_hashes.push(blob_hash.to_string());
             }
         }
     }
-    // Include user manifest objects + their backing blobs so the
-    // remote can materialise the per-request user root.
-    if let Some(ref um) = user_manifest {
-        for (_rel_path, obj_hash) in &um.item_source_hashes {
-            all_hashes.push(obj_hash.clone());
-            if let Ok(Some(item_obj)) = local_cas.get_object(obj_hash) {
-                if let Some(blob_hash) =
-                    item_obj.get("content_blob_hash").and_then(|v| v.as_str())
-                {
-                    all_hashes.push(blob_hash.to_string());
-                }
-            }
-        }
-        if let Some(ref umh) = user_manifest_hash {
-            all_hashes.push(umh.clone());
-        }
-    }
-    all_hashes.push(manifest_hash.clone());
-    all_hashes.push(snapshot_hash.clone());
-    all_hashes.sort();
-    all_hashes.dedup();
+}
 
-    // 5. Check which hashes the remote already has
-    let has_resp = client.objects_has(&all_hashes).await?;
+async fn upload_missing(
+    client: &RemoteClient,
+    local_cas: &CasStore,
+    all_hashes: &[String],
+) -> Result<(usize, usize)> {
+    let has_resp = client.objects_has(all_hashes).await?;
     let missing: Vec<String> = has_resp.missing;
 
-    // 6. Upload missing blobs and objects
-    let blobs_uploaded = if !missing.is_empty() {
+    let uploaded = if !missing.is_empty() {
         let mut blobs = Vec::new();
         let mut objects = Vec::new();
 
         for hash in &missing {
-            // Try blob first
             if let Ok(Some(data)) = local_cas.get_blob(hash) {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
                 blobs.push(BlobUpload { data: encoded });
@@ -156,22 +240,7 @@ pub async fn push_project(
         0
     };
 
-    let blobs_skipped = all_hashes.len() - missing.len();
-
-    // 7. Call push-head
-    client.push_head(project_path_for_ref, &snapshot_hash).await?;
-
-    let manifest_entries = manifest.item_source_hashes.len();
-    Ok(PushResult {
-        snapshot_hash,
-        manifest_hash,
-        manifest,
-        manifest_entries,
-        blobs_uploaded,
-        blobs_skipped,
-        user_manifest_hash,
-        user_manifest,
-    })
+    Ok((uploaded, all_hashes.len() - missing.len()))
 }
 
 /// Reject project paths that would walk the entire home directory
@@ -319,6 +388,86 @@ pub(crate) fn ingest_user_space_for_push(
     let manifest = SourceManifest { item_source_hashes: items };
     let manifest_hash = cas.store_object(&manifest.to_value())?;
     Ok((Some(manifest_hash), Some(manifest)))
+}
+
+/// Walk only managed project AI roots and ingest regular files.
+/// Symlinked allow-list roots and symlinks inside those roots are skipped.
+fn ingest_project_ai_for_push(
+    cas: &CasStore,
+    project_root: &Path,
+    items: &mut HashMap<String, String>,
+) -> Result<()> {
+    for dir in PROJECT_AI_SYNC_DIRS {
+        let abs = project_root.join(dir);
+        match std::fs::symlink_metadata(&abs) {
+            Ok(md) if md.file_type().is_symlink() => {
+                tracing::warn!(path = %abs.display(), "skipping symlinked project AI sync root");
+                continue;
+            }
+            Ok(md) if md.is_dir() => ingest_project_ai_dir_for_push(cas, project_root, &abs, items)?,
+            _ => continue,
+        }
+    }
+    Ok(())
+}
+
+fn ingest_project_ai_dir_for_push(
+    cas: &CasStore,
+    project_root: &Path,
+    dir: &Path,
+    items: &mut HashMap<String, String>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            tracing::warn!(path = %entry.path().display(), "skipping symlink in project AI ingest");
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            ingest_project_ai_dir_for_push(cas, project_root, &path, items)?;
+        } else if ft.is_file() {
+            let rel = path
+                .strip_prefix(project_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let bytes = std::fs::read(&path)?;
+            let blob_hash = cas.store_blob(&bytes)?;
+            let integrity = sha256_hex(&bytes);
+            let item_source = ryeos_state::objects::ItemSource {
+                item_ref: rel.clone(),
+                content_blob_hash: blob_hash,
+                integrity,
+                signature_info: None,
+                mode: executable_mode(&path),
+            };
+            let obj_hash = cas.store_object(&item_source.to_value())?;
+            items.insert(rel, obj_hash);
+        }
+    }
+    Ok(())
+}
+
+fn executable_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode())
+            .filter(|m| m & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Recursive helper for [`ingest_user_space_for_push`]. Walks `dir`,
@@ -752,5 +901,59 @@ mod ingest_symlink_tests {
             "real allowlist root must be walked, got keys: {:?}",
             items.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn ingest_project_ai_walks_only_managed_roots() {
+        let cas_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path().to_path_buf());
+        let project = TempDir::new().unwrap();
+
+        std::fs::create_dir_all(project.path().join(".ai/directives")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/state")).unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join(".ai/directives/ok.md"), "ok").unwrap();
+        std::fs::write(project.path().join(".ai/state/runtime.sqlite3"), "state").unwrap();
+        std::fs::write(project.path().join("src/index.ts"), "app").unwrap();
+
+        let mut items = HashMap::new();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items).unwrap();
+
+        assert!(items.contains_key(".ai/directives/ok.md"));
+        assert!(!items.keys().any(|k| k.contains("runtime.sqlite3")), "state must not be ingested: {items:?}");
+        assert!(!items.keys().any(|k| k.starts_with("src/")), "app code must not be ingested: {items:?}");
+    }
+
+    #[test]
+    fn ingest_project_ai_skips_symlinks_and_preserves_exec_mode() {
+        #[cfg(not(unix))]
+        {
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let cas_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path().to_path_buf());
+        let project = TempDir::new().unwrap();
+        let tools = project.path().join(".ai/tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let tool = tools.join("run.sh");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), tools.join("leak.sh")).unwrap();
+
+        let mut items = HashMap::new();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items).unwrap();
+        assert!(items.contains_key(".ai/tools/run.sh"));
+        assert!(!items.contains_key(".ai/tools/leak.sh"));
+
+        let obj_hash = items.get(".ai/tools/run.sh").unwrap();
+        let obj = cas.get_object(obj_hash).unwrap().unwrap();
+        let item = ryeos_state::objects::ItemSource::from_value(&obj).unwrap();
+        assert_eq!(item.mode.map(|m| m & 0o777), Some(0o755));
     }
 }

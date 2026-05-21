@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use serde_json::Value;
 
@@ -81,7 +82,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         }
     };
 
-    let (abs_project_path, project_path_for_ref) = match &project_spec {
+    let (abs_project_path, mut project_path_for_ref) = match &project_spec {
         ProjectPathSpec::NoProject => (None, NO_PROJECT_SENTINEL.to_string()),
         ProjectPathSpec::Explicit { path } => {
             if !path.is_absolute() {
@@ -109,6 +110,25 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     let remotes = config::load_remotes(&state.config.system_space_dir)
         .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
+    if let (Some(proj_path), Some(cfg)) = (abs_project_path.as_ref(), remote_cfg.as_ref()) {
+        let canonical_key = proj_path.to_string_lossy().to_string();
+        if let Some(binding) = cfg.project_bindings.get(&canonical_key) {
+            match binding.sync_scope {
+                ryeos_state::project_sync::ProjectSyncScope::AiOnly => {
+                    return Err(HandlerError::BadRequest(format!(
+                        "remote execute is not supported for ai_only binding '{}' -> '{}' yet; use remote sync-project-ai for deployment or bind as full_project",
+                        canonical_key, binding.remote_project_path
+                    )));
+                }
+                ryeos_state::project_sync::ProjectSyncScope::FullProject => {
+                    config::validate_remote_project_path(&binding.remote_project_path)
+                        .map_err(|e| HandlerError::BadRequest(format!("invalid remote project binding: {e:#}")))?;
+                    project_path_for_ref = binding.remote_project_path.clone();
+                }
+            }
+        }
+    }
+
     let remote_ignore = match remote_cfg {
         Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)
             .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?,
@@ -129,6 +149,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                     principal_id: String::new(),
                     vault_fingerprint: String::new(),
                     ingest_ignore: fetched.clone(),
+                    project_bindings: HashMap::new(),
                 });
                 config::save_remotes(&state.config.system_space_dir, &remotes)
                     .map_err(|e| HandlerError::Internal(format!("save remotes: {e:#}")))?;
@@ -176,6 +197,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             let snapshot = ryeos_state::objects::ProjectSnapshot {
                 project_manifest_hash: manifest_hash.clone(),
                 user_manifest_hash: user_manifest_hash.clone(),
+                project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
                 parent_hashes: Vec::new(),
                 created_at: lillux::time::iso8601_now(),
                 source: "push-no-project".to_string(),

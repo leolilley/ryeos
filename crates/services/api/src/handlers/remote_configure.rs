@@ -39,6 +39,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         principal_id: pubkey.principal_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
         ingest_ignore,
+        project_bindings: remotes
+            .get(&req.remote)
+            .map(|r| r.project_bindings.clone())
+            .unwrap_or_default(),
     });
     config::save_remotes(&state.config.system_space_dir, &remotes)?;
 
