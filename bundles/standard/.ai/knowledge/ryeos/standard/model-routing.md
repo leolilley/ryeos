@@ -1,4 +1,5 @@
-<!-- ryeos:signed:2026-05-20T05:57:10Z:8519e564d7be5a9ec1260a136fd8bc4fec4630ed9c1fd11b0f6e5f15b4f4ad1c:aNseglauZvjYtj4reVMj7qU8LBtwCh0MGoc5R5O/07xJXB3o9QMQ03zfvE/DwHw54/8nqPWMlyHh1M4l4sLOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+# ryeos:signed:2026-05-20T11:41:17Z:75812c24f163bf5301fdcb5f032641afd12c37c110cb43df4cf79305846739df:Yd1l5aQ3LO7IpG7sUAbiu6TjwqU97m8K2uezimTi29Vi6aH11TAIVzy6dMm/c57GZS+3Ktm4OKVIgCzACLlWBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 tags: [models, providers, routing, tiers, llm]
 version: "1.1.0"
@@ -34,7 +35,7 @@ concrete model and provider.
 
 ## The Routing Table
 
-Defined in `config:crates/core/runtime/model_routing`. All tiers currently
+Defined in `config:ryeos-runtime/model_routing`. All tiers currently
 route through the **Zen** provider (`opencode.ai/zen`). The routing
 table specifies:
 
@@ -47,7 +48,7 @@ tier_name:
 
 ## Provider configs
 
-### Zen (`config:crates/core/runtime/model-providers/zen`)
+### Zen (`config:ryeos-runtime/model-providers/zen`)
 The primary gateway. Routes to multiple model families through
 `opencode.ai/zen`:
 - **Anthropic Claude** (via Zen's Anthropic proxy)
@@ -62,17 +63,17 @@ formats:
 - `openai_compat` profile for `gpt-*`, `minimax-*`, `glm-*`, etc.
 - `gemini` profile for `gemini-*` models
 
-### Anthropic (`config:crates/core/runtime/model-providers/anthropic`)
+### Anthropic (`config:ryeos-runtime/model-providers/anthropic`)
 Direct Anthropic Messages API access. Uses `x-api-key` auth,
 `anthropic-version: 2023-06-01`, blocks-array message format.
 
-### OpenAI (`config:crates/core/runtime/model-providers/openai`)
+### OpenAI (`config:ryeos-runtime/model-providers/openai`)
 Direct OpenAI Chat Completions access. Uses `Bearer` token auth,
 standard `chat/completions` endpoint.
 
 Legacy provider tool descriptors were removed: the directive runtime now
 uses the runtime-level provider configs directly. Adding a provider means
-adding a signed config under `config/crates/core/runtime/model-providers/` and,
+adding a signed config under `config/ryeos-runtime/model-providers/` and,
 if it should be selected by tier, pointing `model_routing.yaml` at that
 provider.
 

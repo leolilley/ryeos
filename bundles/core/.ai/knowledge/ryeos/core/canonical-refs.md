@@ -20,23 +20,23 @@ kind:path/to/item
 
 - **kind** — one of `directive`, `tool`, `knowledge`, `config`, `graph`,
   `handler`, `parser`, `protocol`, `runtime`, `service`, `node`
-- **path** — slash-separated path *without* file extension
+- **path** — slash-separated path _without_ file extension
 
 The kind determines which subdirectory of `.ai/` to look in:
 
-| Kind        | Directory       | Example                                  |
-|-------------|-----------------|------------------------------------------|
-| `directive` | `directives/`   | `directive:my/deploy` → `directives/my/deploy.md` |
-| `tool`      | `tools/`        | `tool:ryeos/core/sign` → `tools/ryeos/core/sign.yaml` |
-| `knowledge` | `knowledge/`    | `knowledge:ryeos/core/signing` → `knowledge/ryeos/core/signing.md` |
-| `config`    | `config/`       | `config:execution/execution` → `config/execution/execution.yaml` |
-| `graph`     | `graphs/`       | `graph:my/pipeline` → `graphs/my/pipeline.yaml` |
-| `handler`   | `handlers/`     | `handler:ryeos/core/identity` → `handlers/ryeos/core/identity.yaml` |
-| `parser`    | `parsers/`      | `parser:ryeos/core/yaml/yaml` → `parsers/ryeos/core/yaml/yaml.yaml` |
-| `protocol`  | `protocols/`    | `protocol:ryeos/core/opaque` → `protocols/ryeos/core/opaque.yaml` |
-| `runtime`   | `runtimes/`     | `runtime:directive-runtime` → `runtimes/directive-runtime.yaml` |
-| `service`   | `services/`     | `service:fetch` → `services/fetch.yaml` |
-| `node`      | `node/`         | Various sub-paths (verbs, aliases, routes, engine) |
+| Kind        | Directory     | Example                                                             |
+| ----------- | ------------- | ------------------------------------------------------------------- |
+| `directive` | `directives/` | `directive:my/deploy` → `directives/my/deploy.md`                   |
+| `tool`      | `tools/`      | `tool:ryeos/core/sign` → `tools/ryeos/core/sign.yaml`               |
+| `knowledge` | `knowledge/`  | `knowledge:ryeos/core/signing` → `knowledge/ryeos/core/signing.md`  |
+| `config`    | `config/`     | `config:execution/execution` → `config/execution/execution.yaml`    |
+| `graph`     | `graphs/`     | `graph:my/pipeline` → `graphs/my/pipeline.yaml`                     |
+| `handler`   | `handlers/`   | `handler:ryeos/core/identity` → `handlers/ryeos/core/identity.yaml` |
+| `parser`    | `parsers/`    | `parser:ryeos/core/yaml/yaml` → `parsers/ryeos/core/yaml/yaml.yaml` |
+| `protocol`  | `protocols/`  | `protocol:ryeos/core/opaque` → `protocols/ryeos/core/opaque.yaml`   |
+| `runtime`   | `runtimes/`   | `runtime:directive-runtime` → `runtimes/directive-runtime.yaml`     |
+| `service`   | `services/`   | `service:fetch` → `services/fetch.yaml`                             |
+| `node`      | `node/`       | Various sub-paths (verbs, aliases, routes, engine)                  |
 
 ## Bare IDs
 

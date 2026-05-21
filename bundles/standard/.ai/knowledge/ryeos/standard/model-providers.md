@@ -1,4 +1,5 @@
-<!-- ryeos:signed:2026-05-20T05:57:10Z:65cc9d0d9e4ec00588af174a4a6f9dd1c2adbed4536230cf2048dfa8b6d89e92:cT9cWB3DwZrjPVqDuLkra+mQbDAwjIqxiG6oJ4F+k0a4MqZv8UwLT0f2p+T48GFVQiKXpmz2heA/82sIHA6cCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+# ryeos:signed:2026-05-20T11:41:17Z:48c5e0a62da815faeaa1dce8074071da9d9e8aabd1a031ae18cdd87bed9d1c5a:ntuL4bmFM5iWYBPp4N28Jio8fZ9L7EKmmjcOGzsmjWRLktQisgD3dCRZoorEIU5jcfINZm7U5/qC/Enjzhl+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 category: ryeos/standard
 tags: [models, providers, routing, runtime, security]
@@ -17,15 +18,15 @@ freezes the provider config before runtime execution begins.
 ## Resolution order
 
 Provider selection is implemented in
-`crates/core/runtime/src/model_resolution.rs:658-729`:
+`ryeos-runtime/src/model_resolution.rs:658-729`:
 
 1. If a directive names `model.name`, it must also name
    `model.provider` and `model.context_window`. This keeps provider and
    model coherent.
 2. Otherwise the directive's tier selects a row from
-   `config:crates/core/runtime/model_routing`.
+   `config:ryeos-runtime/model_routing`.
 3. The selected provider id loads
-   `config:crates/core/runtime/model-providers/<provider>`.
+   `config:ryeos-runtime/model-providers/<provider>`.
 4. Provider defaults and model-profile overrides are merged into the
    concrete HTTP schema, auth header, streaming mode, and pricing.
 
@@ -61,7 +62,7 @@ test selects that provider.
 To add a provider:
 
 1. Add a signed YAML under
-   `config/crates/core/runtime/model-providers/<provider>.yaml`.
+   `config/ryeos-runtime/model-providers/<provider>.yaml`.
 2. Declare the family, auth header, request/response schemas,
    streaming mode, and pricing defaults.
 3. Add model-profile overrides when one endpoint serves multiple wire

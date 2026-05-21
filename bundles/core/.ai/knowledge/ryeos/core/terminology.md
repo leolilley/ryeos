@@ -1,3 +1,5 @@
+# ryeos:signed:2026-05-20T11:41:17Z:9c2b44c120c7b2cfcb6021e6273a0a72195983953f84af7a4c988b15f4102def:vTrLOlqahRdxjYbXirqULLwKU9+ouHXnqB1OBXdRQVsoJut9PsuSEy2uyrpvlE2ixM8iu7VLvZz/dCYr8OpqAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 category: ryeos/core
 tags: [reference, terminology, naming, conventions]
@@ -11,7 +13,7 @@ description: >
 
 ## Binary Names
 
-The Rust workspace produces 13 executables across 7 crates:
+The Rust workspace produces 14 executables across 8 crates:
 
 | Binary                        | Crate                    | Purpose                          |
 |-------------------------------|--------------------------|----------------------------------|
@@ -27,10 +29,12 @@ The Rust workspace produces 13 executables across 7 crates:
 | `rye-parser-yaml-document`    | `ryeos-handler-bins`     | Parser handler subprocess        |
 | `rye-parser-yaml-header-document` | `ryeos-handler-bins` | Parser handler subprocess        |
 | `rye-parser-regex-kv`         | `ryeos-handler-bins`     | Parser handler subprocess        |
+| `lillux`                      | `lillux`                  | Kernel primitives (CAS, crypto, exec, identity, time) |
 
 Two naming prefixes coexist:
 - **`ryeos`** — main system binaries (CLI, daemon, runtimes, tools)
 - **`rye-`** — handler subprocess binaries (parsers and composers)
+- **`lillux`** — kernel primitives (CAS, crypto, exec, identity, time)
 
 ## Namespace Convention
 
@@ -78,8 +82,7 @@ The MCP server (`ryeosd-mcp`, package `ryeosd-mcp`) exposes a
 
 The server discovers the CLI binary in order:
 1. `RYE_BIN` environment variable
-2. `which ryeos`
-3. `which rye`
+2. `shutil.which("ryeos")`
 
 ## CLI Verbs
 

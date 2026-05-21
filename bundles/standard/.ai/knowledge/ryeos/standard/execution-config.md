@@ -1,4 +1,5 @@
-<!-- ryeos:signed:2026-05-20T05:57:10Z:fa78bead1dc9f09acd3cab9f9869b9be7a16f945ad66ba2157514ee9c1dd4444:jSEJDQujmRbAxTqmeKKtHThFR7/MYSCf3hoK6HxnAINAXIFJrd0XQWllTmz2j4j7gm2DmrsjiWoBdHvkzhCcDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+# ryeos:signed:2026-05-20T11:41:17Z:59ab31eecf12c6c0eb706b7308be6624253a44b41473f21880c3f98a61c84af8:KCm25Q3HtKhuzZpKP4HcH74S4gJMbr3FsJZZ2b/QemBK8bim86extZyzlQOc7PvXNv7TY5duXKBKCUSCmz8QAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 tags: [reference, execution, retry, timeout, config]
 version: "1.0.0"
@@ -14,7 +15,7 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 
 ## Config File
 
-`config:crates/core/runtime/execution` defines:
+`config:ryeos-runtime/execution` defines:
 
 | Setting              | Default  | Description                           |
 |----------------------|----------|---------------------------------------|
@@ -41,15 +42,15 @@ Timeouts are retried by default (`retry_on_timeout: true`).
 
 Execution config is resolved via `config_resolve: deep_merge`:
 
-1. **Base:** `config:crates/core/runtime/execution` (from standard bundle)
-2. **User override:** `~/.ryeos/.ai/config/crates/core/runtime/execution.yaml`
-3. **Project override:** `.ai/config/crates/core/runtime/execution.yaml`
+1. **Base:** `config:ryeos-runtime/execution` (from standard bundle)
+2. **User override:** `~/.ryeos/.ai/config/ryeos-runtime/execution.yaml`
+3. **Project override:** `.ai/config/ryeos-runtime/execution.yaml`
 
 Deep merge means you can override individual settings without
 repeating the entire config:
 
 ```yaml
-# ~/.ryeos/.ai/config/crates/core/runtime/execution.yaml
+# ~/.ryeos/.ai/config/ryeos-runtime/execution.yaml
 retries: 5
 timeout_seconds: 600
 ```

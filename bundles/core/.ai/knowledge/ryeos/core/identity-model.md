@@ -10,18 +10,18 @@ description: >
 
 # Identity Model
 
-ryEOS has four distinct identity/trust layers. They are **never
+ryeOS has four distinct identity/trust layers. They are **never
 interchangeable** — each layer has a specific purpose, storage location,
 and lifecycle.
 
 ## The Four Layers
 
-| Layer | Purpose | Storage | Created by |
-|-------|---------|---------|------------|
-| **Publisher trust** | Verify signed bundle items | `~/.ryeos/.ai/config/keys/trusted/<fp>.toml` | `ryeos trust pin` |
-| **User (CLI) key** | Sign local HTTP requests from CLI to your own daemon | `~/.ryeos/.ai/config/keys/signing/private_key.pem` | `ryeos init` |
-| **Node (daemon) key** | Sign outbound HTTP requests to remote daemons; sign authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem` | `ryeos init` or daemon auto-init |
-| **Vault X25519** | Seal/unseal vault secrets (XChaCha20-Poly1305 envelopes) | `<system>/.ai/node/vault/private_key.pem` | `ryeos init` or daemon auto-init |
+| Layer                 | Purpose                                                                  | Storage                                            | Created by                       |
+| --------------------- | ------------------------------------------------------------------------ | -------------------------------------------------- | -------------------------------- |
+| **Publisher trust**   | Verify signed bundle items                                               | `~/.ryeos/.ai/config/keys/trusted/<fp>.toml`       | `ryeos trust pin`                |
+| **User (CLI) key**    | Sign local HTTP requests from CLI to your own daemon                     | `~/.ryeos/.ai/config/keys/signing/private_key.pem` | `ryeos init`                     |
+| **Node (daemon) key** | Sign outbound HTTP requests to remote daemons; sign authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem`       | `ryeos init` or daemon auto-init |
+| **Vault X25519**      | Seal/unseal vault secrets (XChaCha20-Poly1305 envelopes)                 | `<system>/.ai/node/vault/private_key.pem`          | `ryeos init` or daemon auto-init |
 
 ### Publisher trust
 
@@ -89,6 +89,7 @@ ryeos init --source <bundles>
 ```
 
 Creates all four layers:
+
 1. User key (load-or-create)
 2. Node key (load-or-create)
 3. Vault X25519 (load-or-create)
@@ -129,12 +130,12 @@ ryeos identity public-key
 
 ## Key Rotation
 
-| Key | How to rotate | Side effects |
-|-----|--------------|--------------|
-| User key | Manual replacement + re-pin trust | CLI auth breaks until new key authorized |
-| Node key | Regenerate node key + re-sign node-config items + re-trust + re-authorize | All remote authorizations invalidated; must re-authorize on every remote |
-| Vault key | `ryeos vault rewrap` | None — re-seals all entries under new key |
-| Publisher trust | `ryeos trust pin` | Items signed by untrusted keys fail verification |
+| Key             | How to rotate                                                             | Side effects                                                             |
+| --------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| User key        | Manual replacement + re-pin trust                                         | CLI auth breaks until new key authorized                                 |
+| Node key        | Regenerate node key + re-sign node-config items + re-trust + re-authorize | All remote authorizations invalidated; must re-authorize on every remote |
+| Vault key       | `ryeos vault rewrap`                                                      | None — re-seals all entries under new key                                |
+| Publisher trust | `ryeos trust pin`                                                         | Items signed by untrusted keys fail verification                         |
 
 ## Request Authentication Flow
 

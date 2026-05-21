@@ -1,3 +1,5 @@
+# ryeos:signed:2026-05-20T11:41:17Z:313cdd049f7d5f5897b53a6fa7f5e82f11dc35bec31da81f45cfb1a9be43bee6:5Df44kQFK5++1H8R5WdNBopzZbEImd7JpB+sRYADlrrS1LyiplLAG7HsiYgfMy6GXCH6sue9tp2agYo6xaRIBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 category: ryeos/core
 tags: [operations, daemon, lifecycle, init, state]
@@ -40,7 +42,7 @@ The node ID is derived from the public key fingerprint.
 │   │   ├── standard/       ← Standard bundle (always present)
 │   │   └── <custom>/       ← User-installed bundles
 │   └── node/
-│       ├── identity.yaml   ← Node key and metadata
+│       ├── identity/       ← Node signing keys (private_key.pem, public-identity.json)
 │       └── config.yaml     ← Node-level config
 ├── cas/
 │   └── <content-hash>...   ← Content-addressed objects

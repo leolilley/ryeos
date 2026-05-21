@@ -1,33 +1,34 @@
-<!-- ryeos:signed:2026-05-20T05:57:10Z:5e6e7ba8557311536fe46edcdc5fd55f41852f57f95ebdcdc29c89f9465f2c6a:C2ySUxK2r7auDikLegwzm1Y3/tqyghjywooTwSLu2FdxXt10SNkVBvLadwK5WXxdhHeEgRBb6ofaRyzlGr7kCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+# ryeos:signed:2026-05-20T11:41:17Z:226bb46508da29192f41c7afbf6013a4fc59684c1aea5ef706cb3819d20ca7be:HnNyaKqA+Eh+/wo98Csl5nbBod4CyW6CwcaGuuQY8evyqBVgAyTOuOVP6FCj8LG7/Dv/xif4ExI8P/PitlGHAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 tags: [reference, providers, zen, anthropic, openai, adapter]
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  The agent adapter tools — full HTTP client specifications for
-  calling LLM providers with request building, response parsing,
-  and streaming support.
+  How LLM providers work — the directive runtime reads provider configs
+  at launch time to build HTTP requests, parse responses, and handle
+  streaming for each model family.
 ---
 
-# Agent Adapter Tools
+# LLM Provider Adapters
 
-The standard bundle includes three agent adapter tools that serve as
-complete HTTP client specifications for LLM providers. These adapters
-are used by the directive runtime during the prompt + tool loop.
+The directive runtime interacts with LLM providers directly using
+runtime-level provider configs. Each provider config specifies:
 
-## Adapter Architecture
+- How to build requests (URL, headers, body template)
+- How to parse responses (content extraction, tool call detection)
+- How to handle streaming (SSE event types, delta merging)
+- How to format tool results (wrapping for re-submission)
+- Pricing (per-model cost per million tokens)
 
-Each adapter is a YAML tool definition that specifies:
-- **How to build requests** (URL, headers, body template)
-- **How to parse responses** (content extraction, tool call detection)
-- **How to handle streaming** (SSE event types, delta merging)
-- **How to format tool results** (wrapping for re-submission)
-- **Pricing** (per-model cost per million tokens)
+## Provider Configs
 
-## Anthropic Adapter (`tool:ryeos/agent/providers/anthropic`)
+Provider configs are signed YAML files resolved at runtime launch and
+frozen into a `ResolvedProviderSnapshot`. This avoids a time-of-check /
+time-of-use split between daemon preflight and runtime HTTP calls.
 
-**Version:** 1.3.0
-**Type:** `http` (makes outbound HTTP calls)
-**Requires:** `net.call`
+## Anthropic Provider
+
+**Config:** `config:ryeos-runtime/model-providers/anthropic`
 
 ### Tier Mapping
 | Tier     | Model                       |
@@ -48,11 +49,9 @@ Each adapter is a YAML tool definition that specifies:
   `content_block_start`, `content_block_delta`, `message_delta`)
 - Content-block detection for text vs tool_use
 
-## OpenAI Adapter (`tool:ryeos/agent/providers/openai`)
+## OpenAI Provider
 
-**Version:** 1.0.0
-**Type:** `http`
-**Requires:** `net.call`
+**Config:** `config:ryeos-runtime/model-providers/openai`
 
 ### Tier Mapping
 | Tier     | Model          |
@@ -71,12 +70,10 @@ Each adapter is a YAML tool definition that specifies:
 - Mode: `delta_merge` (merge delta chunks)
 - Sentinel: `[DONE]`
 
-## Zen Adapter (`tool:ryeos/agent/providers/zen`)
+## Zen Provider (Primary Gateway)
 
-**Version:** 1.0.0
-**Type:** `http`
-**Requires:** `net.call`
-**The primary adapter** — all routing table tiers use Zen.
+**Config:** `config:ryeos-runtime/model-providers/zen`
+**The primary provider** — all routing table tiers use Zen.
 
 ### Profiles
 Zen uses a profile system that deep-merges provider-specific config
@@ -102,16 +99,24 @@ The Zen adapter includes pricing for 30+ models across all families.
 Free models (minimax-m2.5-free, big-pickle, trinity-large-preview-free,
 nemotron-3-super-free, hy3-preview-free) have zero cost.
 
-## How Adapters Are Used
+## How Providers Are Used
 
 During directive execution:
 1. The directive runtime reads the routing table to find the model
    and provider for the directive's tier
-2. It selects the appropriate agent adapter
-3. The adapter builds the HTTP request (messages + tools)
-4. The adapter handles streaming response parsing
+2. It loads the provider config and resolves profile overrides
+3. The runtime builds the HTTP request (messages + tools) using the
+   provider's wire format (Anthropic blocks, OpenAI chat, Gemini
+   generate)
+4. The runtime handles streaming response parsing via the provider's
+   streaming mode (event_typed, delta_merge, complete_chunks)
 5. Tool calls are detected and dispatched through the daemon
 6. Tool results are formatted and re-submitted
 
 This happens automatically — directive authors only need to specify
 `model.tier` (or accept the default).
+
+Provider configs are signed YAML files under
+`config/ryeos-runtime/model-providers/`. Adding a provider means
+adding a new signed config and pointing a routing tier at it. See
+[model-providers](model-providers.md) for details.

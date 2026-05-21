@@ -1,4 +1,5 @@
-<!-- ryeos:signed:2026-05-20T05:57:10Z:6487caec56ecbba2031a51daaf79160a23c0eb5a27682d0f2b1af8733d3a83dc:7UIBN3/FNm2wU+YUp7T8dWkJmjODa4HL7kV1rN+lqtHUs4bDGzM9KJPCpsMiuk8bd7WAbkbRqrDDeLQEyjZ7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+# ryeos:signed:2026-05-20T11:41:17Z:0a32d46af6817aa2cc0c6d613eb8c45aeb0e988d3cf22af427b01e4999cd8936:lM1kXGdiQa+vvdJOSbyf9AYUY9IKpEGd23K/7SuOtFI4RfmAaJVkLHYzo5xz3Qra6oogZ9/f+z0L+XHtIYAXCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 category: ryeos/standard/config
 tags: [config, models, routing, tiers]
@@ -6,7 +7,7 @@ version: "1.0.0"
 description: Model routing config reference.
 ---
 
-# Config: crates/core/runtime/model_routing
+# Config: ryeos-runtime/model_routing
 
 Invariant: model routing maps abstract directive tiers to concrete provider/model/context-window choices when a directive does not pin an explicit model.
 

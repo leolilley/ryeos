@@ -1,131 +1,113 @@
+# ryeos:signed:2026-05-20T11:41:17Z:fad54ff41aec43f1073f32a5b90e4093e4a1663928891b96c97192c9cc245e58:uimnd29X4ghxEDI8KwexjeJ3lVYsYf8UTcy3Apvbz2GiNEwIriC8QNaSHCKMwqE39LlqfEjR2/owzmh9Erk0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 category: ryeos/core
 tags: [fundamentals, mcp, agent-interface, tools]
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  How AI agents interact with Rye OS via MCP — the three tools
-  (execute, fetch, sign), command dispatch, and routing patterns.
+  How AI agents interact with Rye OS via MCP — the single `cli`
+  tool, argument passing, and routing patterns.
 ---
 
 # MCP Agent Interface
 
-AI agents (opencode, amp, Claude, etc.) interact with Rye OS through
-**MCP (Model Context Protocol)** tools. The MCP server (`ryeosd-mcp`)
-exposes three tools that map directly to the core CLI verbs.
+AI agents (Claude Code, Cursor, amp, etc.) interact with Rye OS through
+**MCP (Model Context Protocol)**. The MCP server is a thin wrapper
+that exposes a single tool, `cli`, which shells out to the `ryeos`
+CLI binary.
 
-## The Three MCP Tools
+## Threat Model
 
-### `execute` — Run Items
-Execute a directive, tool, service, graph, or knowledge operation.
+The MCP server is intended for **local single-user use**:
 
-**Parameters:**
-| Field          | Type   | Required | Description                    |
-|----------------|--------|----------|--------------------------------|
-| `item_id`      | string | yes      | Canonical ref or bare ID       |
-| `parameters`   | object | no       | Input values for the item      |
-| `project_path` | string | yes      | Absolute path to project root  |
-| `thread`       | string | no       | `"inline"` (default) or `"fork"` |
-| `async`        | bool   | no       | Fire-and-forget (fork mode only) |
-| `dry_run`      | bool   | no       | Validate without executing     |
-| `target`       | string | no       | `"local"` or `"remote"`        |
-| `resume_thread_id` | string | no   | Resume a paused thread         |
+- Transport: stdio over a process owned by the operator's OS user
+- Caller authentication: assumed (the OS user IS the operator)
+- Capability gating: none at the MCP layer — every CLI verb the
+  `ryeos` binary exposes is available
 
-**Returns:** Execution result, or thread_id if async.
+Do NOT expose the MCP server over the network without a separate
+auth-terminating proxy.
 
-For directives, the response contains `your_directions` (instructions
-for the calling agent to follow) and `body` (the directive's prompt).
+## The `cli` Tool
 
-### `fetch` — Read Items
-Resolve and read an item without executing it.
+The server exposes one tool:
 
-**Parameters:**
-| Field          | Type   | Required | Description                    |
-|----------------|--------|----------|--------------------------------|
-| `item_id`      | string | yes*     | Canonical ref or bare ID       |
-| `query`        | string | no*      | Search query (discovery mode)  |
-| `scope`        | string | no       | Filter by type/namespace       |
-| `project_path` | string | yes      | Absolute path to project root  |
-| `source`       | string | no       | `project`, `user`, `system`, `all` |
-| `destination`  | string | no       | Copy to `project` or `user`    |
-| `with_content` | bool   | no       | Include file body              |
-| `verify`       | bool   | no       | Also check signature           |
-
-*One of `item_id` or `query` is required.
-
-**Two modes:**
-1. **ID mode** (`item_id` given) — resolve and return the item
-2. **Query mode** (`query` given) — search and return matching items
-
-### `sign` — Sign Items
-Cryptographically sign an item after creation or edit.
-
-**Parameters:**
-| Field          | Type   | Required | Description                    |
-|----------------|--------|----------|--------------------------------|
-| `item_id`      | string | yes      | Canonical ref or glob pattern  |
-| `project_path` | string | yes      | Absolute path to project root  |
-| `source`       | string | no       | `project` (default) or `user`  |
-
-Supports glob patterns for batch signing: `directive:*`, `tool:my/*`.
-
-## Command Dispatch Table
-
-Agents should map natural language to MCP tool calls:
-
-| User Says                 | Tool     | Parameters                           |
-|---------------------------|----------|--------------------------------------|
-| "execute directive X"     | execute  | `item_id="directive:X"`              |
-| "execute tool X"          | execute  | `item_id="tool:X"`                   |
-| "fetch directive X"       | fetch    | `item_id="directive:X"`              |
-| "search directives for X" | fetch    | `scope="directive", query="X"`       |
-| "sign directive X"        | sign     | `item_id="directive:X"`              |
-| "sign all tools"          | sign     | `item_id="tool:*"`                   |
-
-## Fork Mode
-
-For long-running directives, use `thread="fork"` to spawn a managed
-background thread with its own LLM loop:
-
-```
-execute(item_id="directive:my/pipeline", thread="fork", async=true)
-→ returns thread_id immediately
-→ directive runs in background
+```json
+{
+  "tool": "cli",
+  "args": ["execute", "tool:ryeos/core/sign"],
+  "project_path": "/path/to/project"
+}
 ```
 
-Use `execute` with `resume_thread_id` to resume a paused thread.
+### Parameters
 
-## Modifier Reference
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `args` | string[] | Yes | argv passed to `ryeos`. Do NOT include `ryeos` as the first element. |
+| `project_path` | string | No | Sets the subprocess working directory. Defaults to the MCP server's cwd. |
+| `timeout_s` | number | No | Seconds before the subprocess is killed. Default 60. Minimum 1. |
 
-| Modifier         | Meaning                                              |
-|------------------|------------------------------------------------------|
-| `from system`    | `source="system"`                                    |
-| `from user`      | `source="user"`                                      |
-| `from project`   | `source="project"`                                   |
-| `to user`        | `destination="user"` (copies item)                   |
-| `to project`     | `destination="project"` (copies item)                |
-| `dry run`        | `dry_run=true`                                       |
-| `with {...}`     | `parameters={...}`                                   |
+### Returns
+
+A JSON object with `exit_code`, `stdout`, `stderr`, and (if stdout is
+valid JSON) a parsed `json` field. On validation errors or timeouts, a
+typed error is returned with `error` and `type` fields.
+
+### Discovery
+
+```json
+{"tool": "cli", "args": ["help"]}
+```
+
+Lists all available verbs in the current project. Verbs are loaded
+data-driven from `.ai/config/cli/*.yaml` — installing a new bundle
+makes new verbs immediately callable with no MCP redeploy.
+
+### Binary Discovery
+
+The server finds the `ryeos` binary via:
+
+1. `RYE_BIN` environment variable
+2. `shutil.which("ryeos")` on PATH
+
+## Example Invocations
+
+```json
+// Execute a directive
+{"tool": "cli", "args": ["execute", "directive:my/workflow"], "project_path": "/path"}
+
+// Fetch an item
+{"tool": "cli", "args": ["fetch", "tool:ryeos/core/sign", "--with-content"], "project_path": "/path"}
+
+// Sign items
+{"tool": "cli", "args": ["sign", "directive:*"], "project_path": "/path"}
+
+// Push to a remote
+{"tool": "cli", "args": ["remote", "push", "--remote", "prod", "--project", "/abs/path"]}
+
+// Thread operations
+{"tool": "cli", "args": ["thread", "list"], "project_path": "/path"}
+{"tool": "cli", "args": ["thread", "tail", "T-abc123"], "project_path": "/path"}
+```
 
 ## Workflow Patterns
 
 ### Pattern 1: Execute and Follow
+```json
+{"tool": "cli", "args": ["execute", "directive:deploy"], "project_path": "/path"}
 ```
-agent: execute(item_id="directive:deploy")
-→ response: your_directions + body
-→ agent follows the instructions in your_directions
-```
+The response contains the execution result. For directives, follow the
+returned directions.
 
 ### Pattern 2: Discover First
+```json
+{"tool": "cli", "args": ["help"], "project_path": "/path"}
 ```
-agent: fetch(query="testing", scope="directive")
-→ response: list of matching directives
-→ user picks one
-→ agent: execute(item_id="directive:chosen-one")
-```
+List all available verbs, then execute the appropriate one.
 
 ### Pattern 3: Read-Only Inspection
+```json
+{"tool": "cli", "args": ["fetch", "tool:my/helper", "--with-content"], "project_path": "/path"}
 ```
-agent: fetch(item_id="tool:my/helper", with_content=true)
-→ response: tool metadata + source code
-→ agent shows to user, does not execute
-```
+Inspect an item without executing it.

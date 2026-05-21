@@ -1,3 +1,5 @@
+# ryeos:signed:2026-05-20T11:41:17Z:16758660ad7e239c575e89bea99f34a9d71245934d9dac66e7b5823c1f9545cc:3+2u7f+u76CVppSWixFlk3wPU/HaP5d3jEweOsAykUPdLFWy9sRsm+Xnnyse3iXKC87tzbFuZ1syd8AimY1hDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 category: ryeos/core
 tags: [reference, templating, interpolation, substitution]
@@ -22,7 +24,7 @@ distinct to prevent collisions.
 │  System 1: {token}         — tool config.command/args       │
 │  System 2: ${VAR} + {token} — env_config values             │
 │  System 3: ${path.X}       — HTTP route source_config       │
-├─────────────────────────────────┬───────────────────────────┤
+├─────────────────────────────────────────────────────────────┤
 │                                 │ fork + exec               │
 │                                 ▼                           │
 │  RUST RUNTIME SUBPROCESS                                    │
@@ -30,11 +32,6 @@ distinct to prevent collisions.
 │                                                             │
 │  System 4: ${path} + {input:name} — graph/directive bodies │
 │  System 5: {key} exact-match      — provider API templates │
-├─────────────────────────────────┬───────────────────────────┤
-│                                 │ descriptor-local          │
-│                                 ▼                           │
-│  PYTHON SUBPROCESS                                           │
-│  System 6: ${path} + {input:name} — Python descriptors     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -217,24 +214,13 @@ Missing placeholders become `null` with a warning log (not an error).
 
 ---
 
-## System 6: Python Graph Interpolation (Legacy)
-
-**Runs in:** Python subprocess (state-graph walker).
-**Syntax:** Identical to System 4 (same `${...}` and `{input:...}` forms).
-
-### Difference from Rust (System 4)
-System 6 preserves descriptor-local Python templating semantics. System
-4 is the stricter Rust runtime path and hard-errors on missing inputs.
-
----
-
 ## Execution Order
 
 When all systems could apply to the same data, they run in this order:
 
 1. **Daemon compile time:** System 2 (env `${VAR}`) → System 1 (`{token}`)
 2. **Route dispatch time:** System 3 (`${path.X}`)
-3. **Runtime subprocess:** System 4/6 (`${dotted.path}`, `{input:name}`)
+3. **Runtime subprocess:** System 4 (`${dotted.path}`, `{input:name}`)
 4. **Provider formatting:** System 5 (`{key}` exact-match)
 
 Each system operates on different data at different stages, so there
@@ -249,6 +235,6 @@ The syntaxes are designed to be distinguishable:
 | `{token}`      | System 1, 2     | Daemon config only |
 | `${VAR}`       | System 2        | Env values only    |
 | `${path.X}`    | System 3        | Route configs only |
-| `${dotted.path}` | System 4, 5, 6 | Runtime bodies    |
-| `{input:name}` | System 4, 6     | Runtime bodies    |
+| `${dotted.path}` | System 4, 5  | Runtime bodies    |
+| `{input:name}` | System 4        | Runtime bodies    |
 | `{key}`        | System 5        | Provider templates |

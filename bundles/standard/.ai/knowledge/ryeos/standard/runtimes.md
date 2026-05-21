@@ -1,4 +1,5 @@
-<!-- ryeos:signed:2026-05-20T05:57:10Z:ebb45fe87187b75fa9b35b82d6605aed0f91884917ae9982d292ddc5bb487d4d:5YjeoF8jPW+Tf/Vm26OMW9ca21Y5/SFAafU6MaD9O1zyk0eA/4WW5l0wnyeP3LuSdXvMZJ2wxYz2S2BvGL2dDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+# ryeos:signed:2026-05-20T11:41:17Z:fbd68e329d8f41cf00ef946da7ea882d8c47285bd91e1b438458f2bf9cd1d5b0:BYjoZJzb4nbDfuQFkIW6LObsNF3o1WpB6mV2pBgWb80EY7od0pw5sdURZY9qCDwg5+AtQDYeKkEyh3km1dc3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
 version: "1.0.0"
@@ -54,8 +55,7 @@ through the daemon's HTTP callback channel, which enforces permissions.
 **Required caps:** `runtime.execute`
 
 The graph runtime handles DAG-based workflows defined in YAML.
-It delegates to the state-graph walker (in the core bundle) for
-the actual graph traversal.
+It performs graph traversal natively in Rust.
 
 ### How it works
 1. Receives a `LaunchEnvelope` containing the graph YAML definition

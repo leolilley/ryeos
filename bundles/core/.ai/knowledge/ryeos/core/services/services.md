@@ -1,3 +1,5 @@
+# ryeos:signed:2026-05-20T11:41:17Z:ab6159c33e9c7601eb6ee84d818ea28bd322449ca984e8a8d9e8e0a3a972b7a3:oWKQkZU0gZeNhc4CpBlI+H1aVAYoPiUTgKEQArmCTTRXd1TlVuKKTTxG3ItMpQMRvr4/ISMWFS19GVwdqAP1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+
 ---
 category: ryeos/core
 tags: [reference, services, daemon, in-process]
@@ -115,7 +117,7 @@ These are contributed by the standard bundle.
 | `events/chain_replay` | `events.chain_replay` | none |
 | `commands/submit` | `commands.submit` | `ryeos.execute.service.commands.submit` |
 | `scheduler/register` | `scheduler.register` | `ryeos.execute.service.scheduler.register` |
-| `scheduler/list` | `scheduler.list` | `ryeos.execute.service.scheduler/list` |
+| `scheduler/list` | `scheduler.list` | `ryeos.execute.service.scheduler.list` |
 | `scheduler/deregister` | `scheduler.deregister` | `ryeos.execute.service.scheduler.deregister` |
 | `scheduler/pause` | `scheduler.pause` | `ryeos.execute.service.scheduler.pause` |
 | `scheduler/resume` | `scheduler.resume` | `ryeos.execute.service.scheduler.resume` |
