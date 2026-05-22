@@ -124,6 +124,26 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    For remote verbs that take a project root, CLI-side rewrite injects a canonical
     //    `--project <abs>` or `--no-project` into the tail. The daemon
     //    cannot do this — its cwd is irrelevant to the caller.
+
+    // Guard: `--project` / `-p` in the tail is almost certainly a mistake —
+    // the user meant the global flag (`ryeos -p <path> <verb>`) not a verb
+    // parameter. Catch it early with a clear message instead of silently
+    // passing it to the daemon where the tool ignores it.
+    if let Some(idx) = cli.rest.iter().position(|t| t == "--project" || t == "-p") {
+        let verb = cli.rest.first().map(|s| s.as_str()).unwrap_or("<verb>");
+        let project_val = cli.rest.get(idx + 1).map(|s| s.as_str()).unwrap_or("<path>");
+        return Err(CliError::Usage {
+            message: format!(
+                "`--project` after the verb is not a valid flag.\n\
+                 \n\
+                 You wrote:  ryeos {verb} ... --project {project_val}\n\
+                 Did you mean: ryeos -p {project_val} {verb} ...\n\
+                 \n\
+                 `-p` / `--project` is a global flag that goes BEFORE the verb."
+            ),
+        });
+    }
+
     let normalized_kv = normalize_bare_key_value_args(&cli.rest);
     let tokens = canonicalize_tokens_from_alias_metadata(&normalized_kv, &system_space_dir)?;
 
