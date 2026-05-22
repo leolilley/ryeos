@@ -6,6 +6,7 @@ pkgdesc="Portable operating system for AI — persistent, signed workspace for L
 arch=('x86_64')
 url="https://github.com/leolilley/ryeos"
 license=('MIT')
+install=ryeos.install
 
 # SQLite is bundled (libsqlite3-sys), TLS via rustls — no runtime system deps
 depends=('gcc-libs' 'glibc')
@@ -54,8 +55,9 @@ package() {
     install -Dm755 target/release/rye-composer-identity             "$pkgdir/usr/bin/rye-composer-identity"
 
     # ── Bundle YAML data ────────────────────────────────────
-    # Ship each bundle under /usr/share/ryeos/<name>/.ai/
-    # `ryeos init --source /usr/share/ryeos` discovers immediate children
+    # Ship each bundle under /usr/share/ryeos/<name>/.ai/.
+    # Plain `ryeos init` uses /usr/share/ryeos as its default source and
+    # discovers immediate children
     # containing .ai/ — so the layout must be:
     #   /usr/share/ryeos/core/.ai/...
     #   /usr/share/ryeos/standard/.ai/...
@@ -68,17 +70,4 @@ package() {
 
     # ── License ─────────────────────────────────────────────
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-}
-
-post_install() {
-    # Verify bundles have correct structure
-    for bundle_path in /usr/share/ryeos/*/; do
-        if [[ ! -d "$bundle_path/.ai" ]]; then
-            echo "ERROR: $bundle_path/.ai missing — bundle structure incorrect" >&2
-            return 1
-        fi
-    done
-
-    echo "ryeos bundles installed to /usr/share/ryeos"
-    echo "Initialize with: ryeos init --source /usr/share/ryeos"
 }
