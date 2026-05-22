@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T04:30:09Z:7d9d48188e57bd1ca9d96d535f7d9e627de5bb616e4f7947b1d2d66c2ec0c306:rhYkrYbBmIwiqqdVRoFGMQ22sfYOddbRe9qY3qKtJU5IUUv25cvhDZNWTZQ0cUzurtz5HOK0k+zclb9KEgAZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T07:21:26Z:7d9d48188e57bd1ca9d96d535f7d9e627de5bb616e4f7947b1d2d66c2ec0c306:rhYkrYbBmIwiqqdVRoFGMQ22sfYOddbRe9qY3qKtJU5IUUv25cvhDZNWTZQ0cUzurtz5HOK0k+zclb9KEgAZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.export
 required_caps: ["ryeos.execute.service.bundle.export"]

@@ -1,75 +1,60 @@
-<!-- ryeos:signed:2026-05-22T04:30:07Z:c5362c6b9031458ccf2dc3b5e7654dcf82c00dfb34543a252bd25da895957131:PMe5KnsdcS5lvbFs1gp2EEviOMutt+4IpzAWWTRtX0N+KqUll8KurKO3jByltdruIeGroJcH8FhzulFKk8tYDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
-
+<!-- ryeos:signed:2026-05-22T07:21:24Z:1d6ee4cb8950769038f167cf05485ecbe30fcacb32ddadc2b6761df221dae194:9Z82php2jSSfHPlWz2gKKa6r4RKeEFysXruvCrR2u4QW5ibyrGL8P8MUmuaazWRb+WUnTNpOOFAdUVDH1OWXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
-tags: [reference, env, daemon, cli, runtimes]
-version: "1.0.0"
+tags: [reference, env, daemon, cli, runtimes, lifecycle]
+version: "2.0.0"
 description: >
-  Environment variables for daemon, CLI, runtimes, tools, and provider auth.
+  Environment variables for local lifecycle, daemon dispatch, CLI
+  signing, runtimes, tools, and provider auth.
 ---
 
 # Environment Variables
 
-## Required
+## Required by runtime execution
 
-| Variable   | Description                                            |
-| ---------- | ------------------------------------------------------ |
+| Variable | Description |
+|---|---|
 | `HOSTNAME` | Node identity for thread isolation. Must be non-empty. |
 
-## Daemon configuration
+## Local lifecycle and daemon configuration
 
-| Variable                   | Default               | Description                                                    |
-| -------------------------- | --------------------- | -------------------------------------------------------------- |
-| `RYEOS_SYSTEM_SPACE_DIR`   | `$XDG_DATA_DIR/ryeos` | System data directory. Overrides `--system-data-dir` CLI flag. |
-| `XDG_RUNTIME_DIR`          | `/tmp/ryeosd-<uid>`   | UDS socket parent directory.                                   |
-| `RUST_LOG`                 | —                     | Tracing filter. Propagated to subprocesses.                    |
-| `RUST_BACKTRACE`           | —                     | Backtrace control. Propagated to subprocesses.                 |
+| Variable | Default | Description |
+|---|---|---|
+| `RYEOS_SYSTEM_SPACE_DIR` | `$XDG_DATA_DIR/ryeos` | System space root. Equivalent to `--system-space-dir`. |
+| `USER_SPACE` | `~/.ryeos` via root resolver | User-space root override. |
+| `XDG_RUNTIME_DIR` | `/tmp/ryeosd-<uid>` | Parent for default daemon UDS socket. |
+| `RYEOS_SIGNING_KEY_PATH` | derived from user root | Daemon config override for `user_signing_key_path`. |
 
-## CLI configuration
+`ryeos init`, `start`, `stop`, and `status` ignore `RYEOSD_URL`.
 
-| Variable              | Default                                            | Description                             |
-| --------------------- | -------------------------------------------------- | --------------------------------------- |
-| `RYEOS_CLI_KEY_PATH`  | Node identity key                                  | CLI signing key path.                   |
-| `RYEOSD_SOCKET_PATH`  | `$XDG_RUNTIME_DIR/ryeosd.sock`                     | Daemon UDS socket path.                 |
-| `HOME`                | —                                                  | Fallback for user root discovery.       |
+## CLI daemon-backed dispatch
 
-## Runtime subprocess (injected by daemon)
+| Variable | Default | Description |
+|---|---|---|
+| `RYEOSD_URL` | discovered from `<system>/daemon.json` | Explicit daemon HTTP URL for normal dispatch; bypasses local lifecycle preflight. |
+| `RYEOS_CLI_KEY_PATH` | `<user>/.ai/config/keys/signing/private_key.pem` | Explicit CLI/user signing key path. |
 
-These are set automatically by the protocol builder. Do not set manually.
+When `RYEOSD_URL` is unset, normal daemon-backed dispatch first requires
+local lifecycle status `Running`, then reads `daemon.json` for bind.
 
-| Variable                   | Description                      |
-| -------------------------- | -------------------------------- |
-| `RYEOSD_CALLBACK_TOKEN`    | Auth token for daemon callbacks. |
-| `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token.           |
-| `RYEOSD_SOCKET_PATH`       | Daemon UDS path for callbacks.   |
-| `RYEOSD_THREAD_ID`         | Thread identifier.               |
-| `RYEOSD_PROJECT_PATH`      | Project root path.               |
-| `RYEOS_THREAD_ID`          | Thread ID for tool primitives.   |
-| `RYEOS_CHAIN_ROOT_ID`      | Chain root identifier.           |
-| `RYEOS_ITEM_PATH`          | Resolved item source path.       |
-| `RYEOS_ITEM_KIND`          | Resolved item kind.              |
-| `RYEOS_ITEM_REF`           | Canonical item reference.        |
-| `RYEOS_PROJECT_ROOT`       | Materialized project root.       |
-| `RYEOS_SITE_ID`            | Current site identifier.         |
-| `RYEOS_ORIGIN_SITE_ID`     | Origin site identifier.          |
-| `USER_SPACE`               | User-space root path.            |
-| `RYEOS_SYSTEM_SPACE_DIR`   | System-space root path.          |
-| `RYEOS_CHECKPOINT_DIR`     | Per-thread checkpoint directory. |
-| `RYEOS_RESUME`             | Set to `1` on resume re-spawns.  |
+## Daemon/runtime variables
 
-## Provider auth (dynamic)
+The daemon sets `RYEOSD_URL` and `RYEOSD_SOCKET_PATH` after listener
+startup and injects callback/runtime variables into subprocesses:
+`RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_AUTH_TOKEN`, `RYEOSD_THREAD_ID`,
+`RYEOSD_PROJECT_PATH`, `RYEOS_THREAD_ID`, `RYEOS_CHAIN_ROOT_ID`,
+`RYEOS_ITEM_PATH`, `RYEOS_ITEM_KIND`, `RYEOS_ITEM_REF`,
+`RYEOS_PROJECT_ROOT`, `RYEOS_SITE_ID`, `RYEOS_ORIGIN_SITE_ID`,
+`USER_SPACE`, `RYEOS_SYSTEM_SPACE_DIR`, `RYEOS_CHECKPOINT_DIR`, and
+`RYEOS_RESUME`.
 
-LLM provider auth uses dynamic env var names from the provider's `auth.env_var` field:
+## Provider auth
 
-| Common Variable     | Provider  |
-| ------------------- | --------- |
-| `OPENAI_API_KEY`    | OpenAI    |
-| `ANTHROPIC_API_KEY` | Anthropic |
-
-The runtime reads `std::env::var(<env_var>)` and fails if unset.
+LLM provider auth uses dynamic env var names from provider config, such
+as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
 
 ## Subprocess env allowlist
 
-The daemon propagates these OS-level vars to every subprocess:
-
-`PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `USER_SPACE`, `RYEOS_SYSTEM_SPACE_DIR`, `RUST_LOG`, `RUST_BACKTRACE`, `RYEOSD_TEST_STDERR_DIR`
+The daemon propagates: `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`,
+`TZ`, `TMPDIR`, `USER_SPACE`, `RYEOS_SYSTEM_SPACE_DIR`, `RUST_LOG`,
+`RUST_BACKTRACE`, and `RYEOSD_TEST_STDERR_DIR`.

@@ -1,152 +1,68 @@
-<!-- ryeos:signed:2026-05-22T04:30:07Z:f400f808a090e7894e0b1b4bddeecb16809f4805009aa73f88461165a00a32d5:9FsXvgY/zsIBLoxYd//cqE3c9bwZMsUH8hI/63L0daoO6kIeUhTYgT9UX3dVU04emNFy3R26gffYyUhLk/KABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T07:21:24Z:49af727f7b38b647d5b68da0aa854dbd0ec4f81cf1c7ec27f417eccebfa49aeb:G6IwE8TsCU7aT4nxG8+ESD4FnxZvjawbgJuY8hDtzVz2STkP9TEi07M73SvLwarj5k4Ck1ZpTqx3j6TLt/tgAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  The four identity layers in ryEOS — what each key is for, where it
-  lives, and which key signs which kind of request. This is the
-  authoritative reference for all trust and auth decisions.
+  The four identity layers in ryEOS: publisher trust, user key, node key,
+  and vault key; what each signs and who owns each artifact.
 ---
 
 # Identity Model
 
-ryeOS has four distinct identity/trust layers. They are **never
-interchangeable** — each layer has a specific purpose, storage location,
-and lifecycle.
+ryeOS has four distinct identity/trust layers:
 
-## The Four Layers
+| Layer | Purpose | Storage | Created by |
+|---|---|---|---|
+| Publisher trust | Verify signed bundle items | `<user>/.ai/config/keys/trusted/<fp>.toml` | `ryeos init` / `ryeos trust pin` |
+| User (CLI) key | Sign local CLI HTTP requests | `<user>/.ai/config/keys/signing/private_key.pem` | `ryeos init` |
+| Node (daemon) key | Sign outbound daemon requests and authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem` | `ryeos init` |
+| Vault X25519 | Seal/unseal vault secrets | `<system>/.ai/node/vault/private_key.pem` | `ryeos init`, repaired if missing after init |
 
-| Layer                 | Purpose                                                                  | Storage                                            | Created by                       |
-| --------------------- | ------------------------------------------------------------------------ | -------------------------------------------------- | -------------------------------- |
-| **Publisher trust**   | Verify signed bundle items                                               | `~/.ryeos/.ai/config/keys/trusted/<fp>.toml`       | `ryeos trust pin`                |
-| **User (CLI) key**    | Sign local HTTP requests from CLI to your own daemon                     | `~/.ryeos/.ai/config/keys/signing/private_key.pem` | `ryeos init`                     |
-| **Node (daemon) key** | Sign outbound HTTP requests to remote daemons; sign authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem`       | `ryeos init`                     |
-| **Vault X25519**      | Seal/unseal vault secrets (XChaCha20-Poly1305 envelopes)                 | `<system>/.ai/node/vault/private_key.pem`          | `ryeos init`                     |
+## Publisher trust
 
-### Publisher trust
+`ryeos init` pins the compiled official publisher key and any
+`--trust-file` entries. Additional publishers are pinned with
+`ryeos trust pin`. Official publisher rotation requires a coordinated
+binary release because the public key bytes are compiled into
+`ryeos-node` and must hash to the compiled fingerprint.
 
-The operator trust store at `~/.ryeos/.ai/config/keys/trusted/` holds the public
-keys of publishers whose signed bundle items will be accepted. Each
-entry is a TOML file named by fingerprint, signed by the key it
-declares (self-signature).
+## User (CLI) key
 
-Managed by `ryeos trust pin`. The `ryeos init` command auto-pins the
-official publisher key and any `--trust-file` entries.
+The user key is the operator identity for signing local daemon requests.
+The CLI resolves it from `RYEOS_CLI_KEY_PATH` when set, otherwise from
+`<user>/.ai/config/keys/signing/private_key.pem`. It must not fall back
+to the node key.
 
-### User (CLI) key
+## Node (daemon) key
 
-The operator's persistent Ed25519 identity. The CLI uses this key to
-sign every request to the **local** daemon (`POST /execute`, etc.).
+The node key signs outbound remote requests, signs authorized-key TOMLs,
+produces the node public identity document, and anchors the node
+self-trust doc. Daemon startup never auto-regenerates it, because doing
+so would invalidate user-space trust and remote authorizations.
 
-- **Never force-regenerated** — `ryeos init --force` rotates the node
-  key but preserves the user key.
-- Rotation requires explicit operator action (manual key replacement).
+Remote operations authorize the caller's node key, not the user's CLI key:
 
-The daemon authorizes this key at bootstrap by writing a node-signed
-authorized-key TOML to
-`<system>/.ai/node/auth/authorized_keys/<user-fp>.toml`
-with scopes `["*"]`.
-
-### Node (daemon) key
-
-The daemon's Ed25519 identity. Used for:
-
-1. **Signing outbound remote requests** — when your daemon calls a
-   remote daemon, it signs with the **node key**, not the user key.
-2. **Signing authorized-key TOMLs** — the daemon signs new
-   authorized-key entries with its node key so they can be verified
-   on next boot.
-3. **Self-trust** — the node key's public half is pinned in
-   `~/.ryeos/.ai/config/keys/trusted/` so daemon-written node-config items
-   verify on subsequent boots.
-
-**Critical for remote operations**: when a remote daemon receives an
-authenticated request, it verifies the signature against its own
-authorized-keys store. The key that must be authorized on the remote is
-the **caller's node key**, NOT the caller's user key.
-
-```
-CLI ──[user key signs]──> local daemon ──[node key signs]──> remote daemon
-                                                      ↑
-                                    remote authorizes this fingerprint
+```text
+CLI --[user key]--> local daemon --[node key]--> remote daemon
 ```
 
-### Vault X25519
+## Authorized keys
 
-A separate X25519 keypair used exclusively for sealing/unsealing
-secret values in the vault. Separate from the Ed25519 node identity so
-that node-key rotation does NOT brick the vault.
+Authorized-key TOMLs are node-signed local node config. Bootstrap/admin
+may grant wildcard `*`; normal remote delegation should enumerate scopes.
+Daemon startup may repair the local user's authorized-key entry after
+`ryeos init` has created the required keys and trust docs, but the daemon
+never writes user trust.
 
-Rotation is via `ryeos vault rewrap` (generates new keypair, re-seals
-all entries).
+## Vault X25519
 
-## Lifecycle
+Vault X25519 is separate from the Ed25519 node identity, so node-key
+rotation does not brick sealed vault data. Vault rotation is handled by
+vault rewrap flows.
 
-### Fresh install
+## Request authentication
 
-```
-ryeos init
-```
-
-Creates all four layers:
-
-1. User key (load-or-create)
-2. Node key (load-or-create)
-3. Vault X25519 (load-or-create)
-4. Publisher trust (pin official key + `--trust-file` entries)
-5. Self-trust entries for both user and node keys
-6. User authorized-key TOML (node-signed, scopes `["*"]`)
-
-### Runtime startup
-
-After `ryeos init`, the runtime verifies initialization (keys, bundles,
-registrations exist) and loads the two-phase node config. Runtime
-bootstrap may repair a few missing daemon-local artifacts, but it does
-not install or register bundles and is not a substitute for `ryeos init`.
-
-### Remote bootstrap
-
-To authorize a caller on a remote node, the **remote operator** must
-authorize the caller's **node key**:
-
-```bash
-# On the remote node:
-ryeos authorize-key \
-  --public-key "ed25519:<CALLER_NODE_PUBKEY_B64>" \
-  --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
-```
-
-The fingerprint to authorize is the SHA-256 of the caller's **node**
-public key (not the user key). To display the node public key:
-
-```bash
-# On the caller node:
-ryeos identity public-key
-```
-
-## Key Rotation
-
-| Key             | How to rotate                                                             | Side effects                                                             |
-| --------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| User key        | Manual replacement + re-pin trust                                         | CLI auth breaks until new key authorized                                 |
-| Node key        | Regenerate node key + re-sign node-config items + re-trust + re-authorize | All remote authorizations invalidated; must re-authorize on every remote |
-| Vault key       | `ryeos vault rewrap`                                                      | None — re-seals all entries under new key                                |
-| Publisher trust | `ryeos trust pin`                                                         | Items signed by untrusted keys fail verification                         |
-
-## Request Authentication Flow
-
-### Local (CLI → daemon)
-
-1. CLI resolves user signing key from `~/.ryeos/.ai/config/keys/signing/`
-2. CLI signs `POST /execute` with Ed25519(user_key, sha256(canonical_request))
-3. Daemon verifies against `authorized_keys/<fp>.toml`
-4. Scopes from the TOML are the caller's effective capabilities
-
-### Remote (daemon → daemon)
-
-1. Local daemon resolves node identity from `<system>/.ai/node/identity/`
-2. Local daemon signs outbound request with Ed25519(node_key, sha256(canonical_request))
-3. Remote daemon verifies against its own `authorized_keys/<fp>.toml`
-4. The authorized fingerprint must be the **caller's node key fingerprint**
+Local CLI requests are signed with the user key and verified against the
+local authorized-keys store. Remote daemon-to-daemon requests are signed
+with the caller node key and verified by the remote authorized-keys store.

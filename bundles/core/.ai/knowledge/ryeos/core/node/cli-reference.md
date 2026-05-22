@@ -1,212 +1,106 @@
-<!-- ryeos:signed:2026-05-22T04:30:07Z:885e57bce38826402f3e480761ee47446705723712c5c0ee059cbc7b3485911a:sGKuhVsWPqFHyc+FiagykzhZooS2NrpTkpeprkv8pQr+VAI1bZK9ZcClZkAZntnEYLFGcs4rS/z8ARlj3hDRBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T07:21:24Z:5fb96383ac865d83594a66efeb3229b2992e50d2d14789c8372646b7ca56ac35:kWnNc1LSm922Hw7UN/iDKVvJV/4kQi5XSvROWQL9DGHdIFmIX4dv+e18KU4iDroYJ5TmOF9zDmFr0NZkUsDTAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
-category: ryeos/core
-tags: [reference, cli, verbs, aliases]
-version: "2.0.0"
+category: ryeos/core/node
+tags: [reference, cli, verbs, aliases, lifecycle]
+version: "3.0.0"
 description: >
-  Complete reference for the ryeos CLI — all verbs, aliases,
-  and their arguments.
+  Complete reference for the ryeos CLI: local lifecycle verbs, local
+  operator verbs, daemon-backed verbs, aliases, and arguments.
 ---
 
 # CLI Reference
 
-The `ryeos` CLI communicates with the daemon via HTTP. Commands are
-dispatched through **verbs** (full names) and **aliases** (shortcuts).
-Core contributes engine/control-plane verbs; standard contributes workflow
-verbs such as threads, events, scheduler, commands, and compose.
+The `ryeos` CLI has two execution paths:
 
-## Setup
+1. Local verbs that run without daemon dispatch: `init`, `start`, `stop`,
+   `status`, `trust pin`, `authorize-key`, `publish`, and local vault
+   maintenance verbs.
+2. Daemon-backed verbs declared by signed bundle YAML and dispatched over
+   HTTP to a running daemon.
+
+Daemon-backed dispatch is preflighted with local lifecycle status unless
+`RYEOSD_URL` is set. Lifecycle verbs ignore `RYEOSD_URL`.
+
+## Minimal lifecycle surface
 
 ### `ryeos init`
-Bootstrap user + node keys, discover and install packaged bundles, and
-pin publisher keys. For packaged installs, run it with no flags:
-
-```
-ryeos init
-```
-
-Advanced/development overrides are available when using a non-packaged
-bundle source or custom state locations:
 
 ```bash
 ryeos init [--source <dir>] [--system-space-dir <dir>] [--user-root <dir>]
            [--trust-file <file>...]
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--source` | `/usr/share/ryeos` | Directory containing bundle subdirectories |
-| `--system-space-dir` | XDG data dir / ryeos | Daemon state and installed bundles |
-| `--user-root` | `~/.ryeos` | User space root (parent of `.ai/`) |
-| `--trust-file` | (none) | Additional publisher trust docs to pin (repeatable) |
+Packaged installs use `/usr/share/ryeos` by default, so plain
+`ryeos init` is sufficient. Development usage:
 
-Init is **idempotent** — running it again preserves keys, atomically
-updates bundles, and re-validates registrations.
-
-Development usage:
 ```bash
 ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
-### `ryeos trust pin`
-Pin a publisher's Ed25519 public key into the operator trust store.
+### `ryeos start`
 
+```bash
+ryeos start [--system-space-dir <dir>]
 ```
-ryeos trust pin --from <PUBLISHER_TRUST.toml>
+
+Starts the local daemon. Fails if not initialized, succeeds immediately
+if already running, and uses the lifecycle start flock. Default readiness
+timeout is 15 seconds.
+
+### `ryeos stop`
+
+```bash
+ryeos stop [--force] [--system-space-dir <dir>]
 ```
 
-Required before installing bundles from a third-party publisher.
-
-## Core Verbs
-
-### `ryeos execute <ref> [params...]`
-Execute an item by canonical ref. Dispatches through the kind system
-to the appropriate runtime.
-
-### `ryeos fetch <ref>`
-Resolve and read an item. Returns parsed metadata and optional content.
-Does not execute.
-
-- `--with-content` — include file body
-- `--verify` — also verify the signature
-
-Aliases: `f`
-
-### `ryeos sign <ref>`
-Cryptographically sign an item. Updates the signature header in-place.
-
-- Supports glob patterns: `directive:*`, `tool:my/project/*`
-- `--source project|user` — which space to sign in
-
-Aliases: `s`
-
-### `ryeos verify <ref>`
-Verify an item's signature and integrity. Checks content hash,
-key trust, and path anchoring.
+Gracefully stops the local daemon via the UDS that just proved live.
+Default graceful timeout is 10 seconds. `--force` re-confirms live
+`status: "running"` and PID before signalling and verifies the PID is
+`ryeosd` on Unix.
 
 ### `ryeos status`
-Show daemon status: version, uptime, bind address, active threads.
+
+```bash
+ryeos status [--json] [--system-space-dir <dir>]
+```
+
+Read-only lifecycle status. Treats `daemon.json` as a hint and trusts
+only a `lifecycle.status` response reporting `status: "running"`.
+
+## Other local operator verbs
+
+- `ryeos trust pin --from <PUBLISHER_TRUST.toml>` — pin publisher trust.
+- `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
+- `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
+
+## Core daemon-backed verbs
+
+- `ryeos execute <ref> [params...]` — execute an item by canonical ref.
+- `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
+- `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
+- `ryeos verify <ref>` — verify signature, trust, and path anchoring.
 
 ## Bundle Management
 
-### `ryeos bundle install <path>`
-Install a bundle into the daemon's state directory. Offline-only
-(daemon must be stopped). Verifies signatures during install.
+- `ryeos bundle install <path>` — install bundle offline.
+- `ryeos bundle list` — list installed bundles.
+- `ryeos bundle remove <name>` — remove installed bundle offline.
 
-### `ryeos bundle list`
-List all installed bundles with their names and source paths.
+## Standard workflow verbs
 
-### `ryeos bundle remove <name>`
-Remove an installed bundle. Offline-only.
-
-## Thread Operations
-
-Thread verbs are contributed by the standard bundle.
-
-### `ryeos thread list`
-List all threads. Optional `--limit` flag.
-
-### `ryeos thread get <id>`
-Get a single thread's detail: status, result, artifacts, facets.
-
-### `ryeos thread tail <id>`
-Tail a thread's events in real-time (SSE stream).
-
-### `ryeos thread children <id>`
-List direct child threads of a parent.
-
-### `ryeos thread chain <id>`
-Get the full parent chain (thread tree + edges).
-
-## Event Operations
-
-Event verbs are contributed by the standard bundle.
-
-### `ryeos events replay <thread_id>`
-Replay persisted events for a single thread.
-
-- `--after-chain-seq <n>` — start after sequence number
-- `--limit <n>` — max events to return
-
-### `ryeos events chain-replay <chain-root-id>`
-Replay events across an entire chain (root + all descendants).
-
-## Scheduler Operations
-
-Scheduler verbs are contributed by the standard bundle.
-
-### `ryeos scheduler register`
-Create or update a schedule spec.
-
-### `ryeos scheduler list`
-List all registered schedules.
-
-### `ryeos scheduler deregister`
-Remove a schedule spec.
-
-### `ryeos scheduler pause` / `ryeos scheduler resume`
-Pause or resume a schedule.
-
-### `ryeos scheduler show-fires`
-Show fire history for a schedule.
-
-## Maintenance
-
-### `ryeos rebuild`
-Rebuild the daemon's projection database from CAS state. Offline-only.
-`--verify` to also check signatures during rebuild.
-
-### `ryeos maintenance gc`
-Run garbage collection on CAS objects. Supports `--dry-run` and
-`--compact` flags.
-
-### `ryeos identity public-key`
-Print the daemon's node identity public key.
+Standard contributes thread, event, scheduler, command, and compose
+verbs such as `thread list`, `thread get`, `events replay`,
+`scheduler register`, and `compose`.
 
 ## Remote Operations
 
-Remote verbs are core daemon-control verbs for cross-node transfer,
-execution, authorization, thread inspection, live bundle install, and
-vault proxy operations.
-
-See [Remote Command Reference](../remote/remote-command-reference.md)
-for syntax, examples, required local capabilities, remote authorized-key
-scopes, HTTP routes, outputs, and failure modes.
-
-Quick list:
-
-- `ryeos remote configure --remote <name> --url <url>`
-- `ryeos remote list`
-- `ryeos remote status --remote <name>`
-- `ryeos remote authorize --remote <name> --public-key <key> --label <label> --scopes <cap>`
-- `ryeos remote push --remote <name> --project <abs-path>`
-- `ryeos remote pull --remote <name> --hashes <hash>... [--output-dir <dir>]`
-- `ryeos remote execute --remote <name> --item-ref <ref> (--project <abs-path> | --no-project)`
-- `ryeos remote threads --remote <name> [--limit <n>]`
-- `ryeos remote thread-status --remote <name> --thread-id <id>`
-- `ryeos remote bundle-install --remote <name> --bundle-name <bundle>`
-- `ryeos remote vault-set --remote <name> --name <key> --value <value>`
-- `ryeos remote vault-list --remote <name>`
-- `ryeos remote vault-delete --remote <name> --name <key>`
-
-## Vault Operations
-
-Core vault verbs are `ryeos vault set`, `ryeos vault list`, and
-`ryeos vault delete`. They operate on sealed daemon vault state and are
-separate from runtime vault bindings resolved during execution preflight.
-
-## Workflow Utilities
-
-### `ryeos commands submit <thread_id> <command_type>`
-Submit a runtime command (cancel, kill, interrupt, continue) to an
-active thread.
-
-### `ryeos compose`
-Compose a knowledge graph context block within a token budget.
+Remote verbs cover cross-node configure/status, push/pull, execute,
+threads, remote authorization, live bundle install, and vault proxying.
+See [Remote Command Reference](../remote/remote-command-reference.md).
 
 ## Aliases Quick Reference
 
-| Alias | Verb             |
-|-------|------------------|
-| `f`   | `fetch`          |
-| `s`   | `sign`           |
+| Alias | Verb |
+|---|---|
+| `f` | `fetch` |
+| `s` | `sign` |

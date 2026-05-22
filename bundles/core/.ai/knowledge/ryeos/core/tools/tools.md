@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T04:30:07Z:2e9d58561c9dc08ccf1a50bf94c08ded9d949e093b036f30e86ea9bc0c4a7a28:NwTPFxOUNAgCnEeqHLP8h/SU1Hp6cYT4HDoi0ImI52NHw/M6/yegteT89lyznY480PbrUKAgRkTD+XqWuRa5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T07:21:24Z:2e9d58561c9dc08ccf1a50bf94c08ded9d949e093b036f30e86ea9bc0c4a7a28:NwTPFxOUNAgCnEeqHLP8h/SU1Hp6cYT4HDoi0ImI52NHw/M6/yegteT89lyznY480PbrUKAgRkTD+XqWuRa5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]

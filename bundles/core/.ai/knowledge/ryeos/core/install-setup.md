@@ -1,12 +1,12 @@
-<!-- ryeos:signed:2026-05-22T04:30:07Z:71b0943aef491729263c4ccb2df135fe7658d46759b9a3ddc072a3a16eda410e:XJyzdtm7Ldn2HocAT5oGa10gdfXBjONGlM7bo74KhCCaktCUWMU5W/LvSbGWa2Kq82fl8h5XoaWdfbDbXQY5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T07:21:24Z:eb4c31132735c34e8692b07cd7422ef8367060c4b1a7c59588c75a6da628e367:fAj+VTswPnuDhWBmfqRD0y6xwI9x3IeW8YS6qws1sY1J373C9eDJiHpyPxZ4gOJKoHCdDROF9Xfv7y9OHmmYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
-version: "2.0.0"
+version: "3.0.0"
 description: >
-  How to install and set up ryEOS — from package to initialized CLI environment.
-  Covers init, bundle discovery, trust pinning, identity model,
-  and the full directory layout after setup.
+  How to install and set up ryEOS from package to initialized local node.
+  Covers ryeos-node init, bundle discovery, trust pinning, identity, and
+  runtime startup.
 ---
 
 # Installation and Setup
@@ -14,219 +14,82 @@ description: >
 ## Quick Start
 
 ```bash
-# 1. Install the package (Arch Linux / AUR example)
+# Install package, then initialize packaged bundles from /usr/share/ryeos
 yay -S ryeos
-
-# 2. Initialize (discovers bundles from /usr/share/ryeos by default)
 ryeos init
+ryeos start
+ryeos status
 ```
 
-For packaged installs, `ryeos init` is the one required setup command.
-It uses `/usr/share/ryeos` as the default bundle source and the default
-system/user spaces unless you pass explicit override flags.
+For packaged installs, `ryeos init` is the required setup command. It
+uses `/usr/share/ryeos` as the default bundle source. Package install
+hooks validate `/usr/share/ryeos/*/.ai` and print `Initialize with:
+ryeos init`.
 
-## First-Boot Authentication
+## Lifecycle surface
 
-`ryeos init` creates a node-signed authorized-key TOML for the local
-operator's user key with scopes `["*"]`. This is what lets the CLI
-authenticate to the daemon over HTTP.
+The user lifecycle surface is exactly `ryeos init`, `ryeos start`,
+`ryeos stop`, and `ryeos status`. There is no restart, enable/disable,
+init-system integration, or separate probe command. Lifecycle commands
+are local-node operations and ignore `RYEOSD_URL`.
 
-`ryeos init` must run before normal CLI-dispatched commands. Daemon
-bootstrap can repair a few daemon-local artifacts, but it does not
-install or register bundles and is not a substitute for `ryeos init`.
+## What `ryeos init` does
 
-To authorize additional callers (e.g. for remote nodes), see
-[`ryeos authorize-key`](#authorizing-callers).
+`ryeos init` is implemented by `ryeos-node` and is authoritative for
+operator-owned setup. It creates layout, user key, node key, self-trust,
+official/additional publisher trust, discovers and plans bundles,
+installs and registers bundles, creates vault key material, writes
+default ingest-ignore config, and verifies post-init trust.
 
-## What `ryeos init` Does
+Daemon bootstrap can repair daemon-local artifacts after init, but it
+cannot install bundles or create user-space trust artifacts and is not a
+substitute for `ryeos init`.
 
-Init is a one-time setup that creates the full runtime environment. It's
-**idempotent** — running it again is safe and preserves existing keys.
+## Bundle discovery
 
-### Step by step
+Source layout:
 
-1. **Create directory layout** — system space, user space, CAS state,
-   bundle dirs, vault, identity
-2. **User signing key** — load-or-create at
-   `~/.ryeos/.ai/config/keys/signing/private_key.pem`
-3. **Node signing key** — load-or-create at
-   `<system>/.ai/node/identity/private_key.pem`
-4. **Self-trust** — both keys pinned into `~/.ryeos/.ai/config/keys/trusted/`
-5. **Pin publisher key** — hardcoded official publisher Ed25519 key
-   written to trust store (no on-disk trust needed)
-6. **Pin additional trust files** — any `--trust-file` args processed
-7. **Discover bundles** — scan source for child dirs with `.ai/`
-8. **Plan bundle graph** — resolve `(requires_kinds ∪ uses_kinds) - provides_kinds`, detect duplicate providers and cycles
-9. **Install each bundle** — preflight verification + copy + signed registration
-10. **Vault keypair** — X25519 for sealed secrets (separate from identity)
-11. **Post-init verification** — reload trust store, confirm all keys present
-
-### Bundle discovery
-
-Source layout (`/usr/share/ryeos` or custom `--source`):
-
-```
+```text
 source/
-├── core/
-│   └── .ai/          ← recognized as bundle "core"
-├── standard/
-│   └── .ai/          ← recognized as bundle "standard"
-└── not-a-bundle/     ← no .ai/ → skipped
+├── core/.ai/
+├── standard/.ai/
+└── not-a-bundle/
 ```
 
-Bundle names are directory names. Rules: lowercase alphanumeric,
-hyphens, underscores, 1–64 chars. Hidden directories (starting with `.`)
-are skipped. There are no hardcoded bundle names — anything with `.ai/`
-is installed.
+Immediate children containing `.ai/` are bundles. Hidden directories and
+invalid names are skipped; bundle names are not hardcoded.
 
-### Preflight verification
-
-Before copying a bundle, every signable item is checked:
-
-- **Signed** — unsigned items are rejected
-- **Signature valid** — Ed25519 verification against content hash
-- **Signer trusted** — fingerprint must be in the operator trust store
-- **Manifest valid** — if present, signature + identity + provides_kinds
-  are verified
-
-If any check fails, the entire bundle install is refused.
-
-### Manifest dependency check
-
-Bundles declare `requires_kinds` in their manifest. Init validates that
-every required kind across all discovered bundles is provided by at
-least one bundle's `provides_kinds`. If not, init fails with a clear
-error listing which bundles need which missing kinds.
-
-## Source Locations
-
-| Scenario | `--source` | Notes |
-|----------|-----------|-------|
-| Packaged install | `/usr/share/ryeos` (default) | Zero flags needed |
-| Development | `bundles` | Add `--trust-file` for dev key |
-| Docker | `/opt/ryeos` | |
-| Custom | Any directory | Must contain bundle subdirs with `.ai/` |
-
-## Development Setup
+## Development setup
 
 ```bash
-# Build
 cargo build
-
-# Populate bundles with signed items + staged binaries
-./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
-
-# Init with dev keys
-ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
-
-# Run tests
-cargo test
-```
-
-## Authorizing Callers
-
-Use `ryeos authorize-key` to grant an Ed25519 public key access to the
-daemon's authenticated endpoints. This is a **local verb** — it writes
-directly to disk and does not require the daemon to be running.
-
-```bash
-# Grant full access
-ryeos authorize-key \
-  --public-key "ed25519:<base64_pubkey>" \
-  --label "ci-pipeline" \
-  --scopes "*"
-
-# Grant scoped access for remote execution
-ryeos authorize-key \
-  --public-key "ed25519:<base64_pubkey>" \
-  --label "remote-caller" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
-```
-
-Scopes are comma-separated. Use `"*"` for full access (local operator).
-Remote callers must enumerate specific capabilities — wildcard delegation
-is forbidden for non-local keys.
-
-## Environment Variables
-
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `RYEOS_SYSTEM_SPACE_DIR` | Override the system space directory (parent of `.ai/`) | XDG data dir `/ryeos` |
-| `RYEOSD_SOCKET_PATH` | Set by daemon at startup for UDS discovery | (daemon writes) |
-| `RYEOSD_URL` | Set by daemon at startup for HTTP discovery | (daemon writes) |
-
-## Directory Layout After Init
-
-```
-~/.ryeos/.ai/
-├── config/keys/
-│   ├── signing/private_key.pem          ← your Ed25519 identity
-│   └── trusted/
-│       ├── <publisher-fp>.toml          ← official publisher trust
-│       ├── <user-fp>.toml               ← self-trust
-│       └── <node-fp>.toml               ← daemon trust
-
-<system-space>/.ai/
-├── node/
-│   ├── identity/private_key.pem         ← daemon's Ed25519 key
-│   ├── identity/public-identity.json    ← public identity doc
-│   ├── vault/
-│   │   ├── private_key.pem              ← X25519 sealed secrets key
-│   │   └── public_key.pem
-│   ├── auth/authorized_keys/
-│   │   └── <user-fp>.toml               ← CLI auth (node-signed)
-│   ├── config.yaml                      ← daemon config
-│   ├── bundles/
-│   │   ├── core.yaml                    ← signed registration records
-│   │   └── standard.yaml
-│   └── engine/kinds/                    ← merged kind schemas cache
-├── bundles/
-│   ├── core/.ai/                        ← installed core bundle
-│   │   ├── manifest.source.yaml         ← hand-authored manifest
-│   │   ├── manifest.yaml                ← generated + signed manifest
-│   │   ├── handlers/ parsers/ services/ tools/
-│   │   ├── node/engine/kinds/           ← kind schemas (9 kinds)
-│   │   └── node/verbs/ node/aliases/
-│   └── standard/.ai/                    ← installed standard bundle
-│       ├── manifest.source.yaml
-│       ├── manifest.yaml
-│       ├── knowledge/                   ← directives, graphs, threads docs
-│       └── node/engine/kinds/           ← kind schemas (3 kinds)
-└── state/
-    ├── objects/                         ← CAS object store
-    └── refs/                            ← CAS refs
-```
-
-## Updating Bundles
-
-Re-run `ryeos init` with the updated source. Bundles are atomically
-replaced using stage → swap with one-generation backup. Keys, trust,
-and registrations are preserved.
-
-```bash
-# After updating the package
-ryeos init
-
-# Or for development
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
 ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos start
 ```
 
-## Runtime Startup
+## Directory layout after init/start
 
-After `ryeos init`, the runtime process starts from the initialized
-system space and uses the signed registrations that init wrote:
+```text
+~/.ryeos/.ai/config/keys/signing/private_key.pem
+~/.ryeos/.ai/config/keys/trusted/<fp>.toml
 
-1. **Verify initialized** — checks system space exists, at least one
-   bundle registration present, keys exist
-2. **Phase 1** — reads bundle registrations, discovers effective roots
-3. **Build engine** — loads kind schemas, parsers, handlers from all
-   registered bundles
-4. **Phase 2** — full node-config scan across all sections
-5. **Bind** — starts the local control-plane listener
+<system-space>/.ai/bundles/<name>/.ai/
+<system-space>/.ai/node/identity/private_key.pem
+<system-space>/.ai/node/identity/public-identity.json
+<system-space>/.ai/node/vault/{private_key.pem,public_key.pem}
+<system-space>/.ai/node/auth/authorized_keys/<user>.toml
+<system-space>/.ai/node/config.yaml
+<system-space>/.ai/node/bundles/<name>.yaml
+<system-space>/.ai/node/ingest/ignore.yaml
+<system-space>/.ai/state/{operator.lock,lifecycle-start.lock,runtime.sqlite3,scheduler.sqlite3,objects,refs}
+<system-space>/daemon.json       # hint only while running
+```
 
-Runtime startup does NOT install or modify bundles — it only reads what
-`ryeos init` wrote.
+After `ryeos init`, `ryeos start` spawns `ryeosd`. The daemon verifies
+initialization before writing runtime state, acquires the state lock
+before unlinking sockets, repairs only daemon-local artifacts, then loads
+registered bundles and starts listeners.
 
-For the identity model and trust layers, see
-[Identity Model](../identity-model.md).
+For details, see [Local Node Lifecycle](node/lifecycle.md), [Operator
+Init](node/operator-init.md), and [Identity Model](identity-model.md).

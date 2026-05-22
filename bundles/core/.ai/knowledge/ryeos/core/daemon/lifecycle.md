@@ -1,100 +1,76 @@
-<!-- ryeos:signed:2026-05-22T04:30:06Z:f10af9474c040c35202a50bf4bd8ade2f17bb9fbd1b287b18047ba5cfeb7eefd:w9DDPLPUkpGc4aZHbpVapwMBG9xUFAP+7A1tK8JIlqzJVoH22ZOF7NYEn5RTfIqXMJf5W/Tq8gSSeYGz/iy6CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
-
+<!-- ryeos:signed:2026-05-22T07:21:24Z:1311da3860593050b2afb30919e367c62fa2ed479d042324c0a37d408343cb9f:cpbuCIQ6xcdFUWX3Zv0hpUK3C6hwX+vnWYQDXK25uVodRWZEAYbN/KB1WjH6r5Aa2YJ2XN2bkby59BUqMGE0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
-category: ryeos/core
-tags: [operations, daemon, lifecycle, init, state]
-version: "1.0.0"
+category: ryeos/core/daemon
+tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
+version: "2.0.0"
 description: >
-  The daemon lifecycle — initialization, state directory structure,
-  startup, shutdown, and bootstrap sequence.
+  Daemon process lifecycle: strict startup ordering, local lifecycle RPC,
+  daemon.json metadata, and shutdown cleanup.
 ---
 
-# Daemon Lifecycle
+# Daemon Process Lifecycle
 
-The daemon (`ryeosd`) is the long-running process at the heart of
-Rye OS. It holds the CAS, manages threads, serves HTTP, and
-dispatches execution.
+`ryeosd` is the long-running runtime process. It owns the HTTP API, UDS
+runtime callbacks, execution state, scheduler, CAS projection, and
+service registry. The local user lifecycle verbs are owned by
+`ryeos-node`; see [Local Node Lifecycle](../node/lifecycle.md).
 
-## Initialization (`ryeos init`)
+## Strict startup order
 
-Before first use, a node must be initialized:
+Daemon startup is fail-closed and side-effect-minimal until operator
+initialization has been verified:
 
-```
-ryeos init
-```
+1. `Cli::parse` and `Config::load` — side-effect-free config.
+2. `bootstrap::verify_initialized` — requires signed bundle
+   registrations and bails with `Run: ryeos init` guidance if absent.
+3. Subcommand dispatch — `run-service` standalone takes its own state
+   lock immediately after init verification.
+4. Acquire daemon state lock before removing any socket.
+5. Initialize tracing/file sink only after init verification and state
+   lock acquisition.
+6. `bootstrap::repair_daemon_local` — repair only daemon-local artifacts
+   and fail when user-space init artifacts are missing.
+7. Remove stale configured socket and ensure runtime paths.
+8. Two-phase node-config bootstrap, engine construction, service
+   self-check, route table build, listeners, scheduler, and metadata
+   write.
 
-This creates:
-1. **User identity** — Ed25519 key pair used by the CLI
-2. **Node identity** — Ed25519 key pair used by the runtime
-3. **System space** — default `<XDG_DATA_HOME>/ryeos/`
-4. **CAS state** — content-addressed storage for items and events
-5. **Bundle registrations** — signed records for installed bundles
+The state-lock-before-socket-unlink ordering prevents a second daemon
+from unlinking the first daemon's live socket.
 
-The node ID is derived from the public key fingerprint.
+## State lock
 
-## State Directory Structure
+The daemon holds `<system>/.ai/state/operator.lock` for its lifetime.
+`StateLock` opens with `truncate(false)`, acquires `flock` first, and
+writes its PID only after winning, so a losing process can read the
+holder PID.
 
-```
-<system-space>/
-├── .ai/
-│   ├── bundles/
-│   │   ├── core/           ← Core bundle
-│   │   ├── standard/       ← Standard bundle
-│   │   └── <custom>/       ← User-installed bundles
-│   └── node/
-│       ├── identity/       ← Node signing keys (private_key.pem, public-identity.json)
-│       └── bundles/        ← Signed bundle registration records
-└── state/
-    ├── objects/            ← Content-addressed objects
-    ├── refs/               ← CAS refs
-    └── runtime.sqlite3     ← Runtime projection database
-```
+## Daemon-local repair
 
-## Startup Sequence
+`repair_daemon_local` is not init. It verifies operator-owned artifacts
+created by `ryeos init` and repairs only daemon-local files. See
+[Daemon Bootstrap](bootstrap.md).
 
-When the runtime process starts:
+## Local lifecycle UDS RPC
 
-1. **Load bundles** — scan registered bundle directories
-2. **Bootstrap engine** — load kind schemas, parsers, handlers
-   (Layer 1: raw signed-YAML for handlers/protocols, breaks chicken-and-egg)
-3. **Build projection** — index all items into SQLite
-4. **Register services** — wire up in-process service endpoints
-5. **Start HTTP server** — bind to configured address
-6. **Restore threads** — recover any interrupted threads
-7. **Start scheduler** — evaluate registered schedules
+The daemon UDS server exposes local lifecycle methods:
 
-## Shutdown
+- `lifecycle.status` — returns `status: "running"`, PID, version,
+  started timestamp, bind address, and UDS path.
+- `lifecycle.shutdown` — accepts graceful shutdown.
 
-Graceful shutdown:
-1. Stop accepting new requests
-2. Wait for in-flight executions to complete (or timeout)
-3. Persist thread state
-4. Close projection database
-5. Exit
+These are local UDS control messages, not public HTTP routes.
 
-## Bootstrap Chicken-and-Egg
+## `daemon.json`
 
-The engine has a bootstrap ordering problem: parsers and handlers
-are defined as items, but items need parsers to be read. Solution:
-- **Layer 1:** Load handlers, protocols, and kind schemas as raw
-  signed YAML (no composition, no extends chains)
-- **Layer 2:** Use the Layer-1 handlers to parse everything else
-  (directives, tools, knowledge, etc.)
+After listeners bind, the daemon writes `<system>/daemon.json` with PID,
+UDS path, HTTP bind address, start time, version, and system space. It is
+a discovery hint only; lifecycle code confirms liveness through
+`lifecycle.status`. On normal shutdown the daemon removes `daemon.json`
+and the configured UDS socket best-effort.
 
-This is why `handler` and `protocol` kinds use the `identity`
-composer and the raw YAML parser.
+## Runtime shutdown
 
-## Health Monitoring
-
-- `GET /health` — unauthenticated health check
-- `ryeos status` — detailed status (version, uptime, threads, bundles)
-
-## Offline Operations
-
-Some operations require the daemon to be stopped:
-- `bundle install` / `bundle remove`
-- `rebuild`
-- Direct CAS manipulation
-
-Online operations (execute, fetch, sign, thread queries) require
-the daemon to be running.
+Shutdown can be triggered by Ctrl-C/SIGTERM or `lifecycle.shutdown`. The
+daemon stops serving, drains running threads, applies configured process
+shutdown actions, removes metadata/socket files best-effort, and exits.

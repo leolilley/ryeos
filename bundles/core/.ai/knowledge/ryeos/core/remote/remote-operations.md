@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T04:30:06Z:17bf9a6f6d91b866efa3345f6bfc373733d133df126b7463237def8f1e3ebe82:aYxdaihSaPqF520hhRDqDzNSak3xK5fhtkLdTZmwdC+wLj3cqbtuoUi+62p8bEu1qxvXtpy3Tlxsn+Qg1ZBYAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T07:21:23Z:7a2fbacadfb6f5f278ee32de43ca1ed74391d12b12c063e171825976a847d24d:j9J+mH7hHm5UpUU9G+8qryCoaUa2AMGkO+HRY34S0/VF7dUtxZQgUynBU7i5Y22cJEmU99J6H95GmPnNOAACDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -161,15 +161,22 @@ their capabilities explicitly.
 
 ## Node-Key Rotation
 
-When a node's signing key is compromised or needs rotation:
+When a node's signing key is compromised or needs rotation, treat it as a
+break-glass operation. The daemon no longer has an `--init-only` path and
+will not auto-regenerate the node key, because doing so would invalidate
+the node trust doc pinned in user space.
 
-1. Rotate the node signing key (`ryeosd --init-only --force`).
-2. Reissue the bootstrap local operator key.
-3. Reissue every remotely granted authorized key.
-4. All existing authorized-key TOMLs become invalid immediately.
+Safe rotation requires explicit operator action:
 
-This is an intentional break-glass: node-key rotation invalidates all
-delegated authority.
+1. Stop the daemon.
+2. Replace/regenerate the node signing key under
+   `<system>/.ai/node/identity/private_key.pem`.
+3. Recreate and pin the matching node trust doc in user space.
+4. Re-sign or recreate node-signed local config items as needed.
+5. Reissue every remotely granted authorized key.
+
+This intentionally invalidates delegated authority until remotes
+authorize the new node key.
 
 ### Key rotation on the caller side
 
