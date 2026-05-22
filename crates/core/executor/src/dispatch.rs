@@ -792,7 +792,31 @@ pub(crate) async fn dispatch_op(
     let stdin_data =
         serde_json::to_string(&envelope).map_err(|e| DispatchError::Internal(e.into()))?;
 
-    // 7. Resolve the native executor path and spawn via lillux.
+    // 7. Mint thread auth token and build env injections. The op-dispatch
+    //    subprocess needs the same daemon env vars as the normal subprocess
+    //    path: socket path, callback token, thread ID, system space dir,
+    //    thread auth token, and optionally project path.
+    let thread_auth =
+        state
+            .thread_auth
+            .mint(&thread_id, request.acting_principal.to_string(), ctx.caller_scopes.clone(), ttl);
+    let callback_token_str = cap.token.clone();
+    let thread_auth_token_str = thread_auth.token.clone();
+    let socket_path_str = state.config.uds_path.to_string_lossy().to_string();
+    let system_space_str = state.config.system_space_dir.to_string_lossy().to_string();
+
+    let mut per_spawn: Vec<(String, String)> = vec![
+        ("RYEOSD_SOCKET_PATH".to_string(), socket_path_str),
+        ("RYEOSD_CALLBACK_TOKEN".to_string(), callback_token_str),
+        ("RYEOSD_THREAD_ID".to_string(), thread_id.clone()),
+        ("RYEOS_SYSTEM_SPACE_DIR".to_string(), system_space_str),
+        ("RYEOSD_THREAD_AUTH_TOKEN".to_string(), thread_auth_token_str),
+    ];
+    if !request.project_path.as_os_str().is_empty() {
+        per_spawn.push(("RYEOSD_PROJECT_PATH".to_string(), request.project_path.to_string_lossy().to_string()));
+    }
+
+    // 8. Resolve the native executor path and spawn via lillux.
     let system_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
         .iter()
@@ -822,8 +846,11 @@ pub(crate) async fn dispatch_op(
     })?;
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
-    let envs = ryeos_app::process::build_subprocess_envs(&std::collections::BTreeMap::new(), &[])
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+    let envs = ryeos_app::process::build_subprocess_envs(
+        &std::collections::BTreeMap::new(),
+        &per_spawn,
+    )
+    .map_err(|e| DispatchError::Internal(e.into()))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
