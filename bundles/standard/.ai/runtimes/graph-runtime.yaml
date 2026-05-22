@@ -1,4 +1,4 @@
-# rye:unsigned
+# ryeos:signed:2026-05-23T06:00:00Z:0263436069711f1ab799dd786a940bd62c1b90ff532bc435702e6c6f353b57e1:6SinFYTw4H4ftdfdM2ihtOXxGpCPAvUCWlgmMXGrMFTwLvmC0cFuYliQAvDHVC9PjdK6FSiLCrzLmDTg7oTEDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: runtime
 serves: graph
 default: true

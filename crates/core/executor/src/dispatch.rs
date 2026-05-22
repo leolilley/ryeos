@@ -325,7 +325,7 @@ pub(crate) fn resolve_dispatch_hop(
                 detail: "schema has no `execution:` block".into(),
             })?;
 
-    thread_profile = exec.thread_profile.clone();
+    thread_profile = exec.thread_profile.as_ref().map(|tp| tp.name.clone());
 
     // **P1.4**: for runtime-kind refs, also look up the runtime
     // registry. This provides binary_ref, required_caps, and the

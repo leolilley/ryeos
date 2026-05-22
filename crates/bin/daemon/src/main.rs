@@ -202,9 +202,9 @@ async fn main() -> Result<()> {
     };
     tracing::info!(routes = route_table.load().all.len(), "route table built");
 
-    // These must be initialized after the self-check (which only needs engine + services).
-    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(
-        &config,
+    // Build thread-kind profiles from the loaded kind schemas.
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(
+        Some(&engine.kinds),
     ));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
@@ -709,12 +709,13 @@ async fn run_service_standalone(
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.system_space_dir))
             .context("failed to acquire state lock — is the daemon running?")?;
 
-    // Minimal bootstrap (subset of daemon startup)
-    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(config));
-    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
     // Two-phase node-config bootstrap (same as daemon-start path)
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
+
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(
+        Some(&engine.kinds),
+    ));
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
     let services = Arc::new(service_registry::build_service_registry());
 

@@ -1,4 +1,4 @@
-# rye:unsigned
+# ryeos:signed:2026-05-23T06:00:00Z:ad0846e9261fec87d8671aac74b5f5ccb54c8b3e05d66188bdf561087198344d:5/dR6TzqjuyGhKB5BXwxAgderpFbS4usD6njx86L9hRQVsvXPE7h2yKR9/NdJbKbHjRZOFqtzJO97846nPssBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: runtime
 serves: knowledge
 default: true

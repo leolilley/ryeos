@@ -75,7 +75,7 @@ mod tests {
             .unwrap(),
         );
         let kind_profiles =
-            Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::load_defaults());
+            Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
         let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
             state_store.clone(),
         ));

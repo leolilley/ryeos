@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T16:15:04Z:e59c1359c878facc4677e05d0b02de4019219f23a6393400105016892a9cd496:zieHkpa5qEGUcE+BrMWe+T8uE4YiMuTIYMwZ1phQ//AaE4xe0fnfvffQg9XywmebTiZ58h2KKiBiI0Exor2xBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T06:00:00Z:2967c6a3ddd77ed03de2af4ad8437af9c760f59e85a5194ec5b6e4559514bb9d:G/Opt5dhGynhfy9sO3g+JQv150uRVh2w2CdyNyRwMOZJK7IrDb0ly7BHLD8GvERuPNuOhIa6fj2zhjFO1VYxDw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -11,7 +11,11 @@ execution:
   # the registry — there is no implicit fallback.
   delegate:
     via: runtime_registry
-  thread_profile: graph_run
+  thread_profile:
+    name: graph_run
+    root_executable: true
+    supports_interrupt: true
+    supports_continuation: true
   resolution:
     - step: resolve_extends_chain
 formats:

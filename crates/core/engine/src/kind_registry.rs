@@ -612,6 +612,33 @@ fn default_meta_output_derived() -> String {
     "rendered_contexts_meta".to_string()
 }
 
+/// Thread-profile declaration inside a kind schema's `execution` block.
+///
+/// Defines the thread kind name used in thread records AND the lifecycle
+/// flags that govern interrupt/continuation behaviour. One source of truth
+/// — the thread-kind profile map is built from these declarations at boot,
+/// eliminating the need for hardcoded Rust profile entries.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadProfileDecl {
+    /// Thread kind name (e.g. `"directive_run"`, `"tool_run"`).
+    /// Used as the `kind` field on thread records.
+    pub name: String,
+    /// Whether this thread kind can be the root of an `/execute` request.
+    #[serde(default = "default_true")]
+    pub root_executable: bool,
+    /// Whether the thread can be interrupted mid-execution.
+    #[serde(default)]
+    pub supports_interrupt: bool,
+    /// Whether the thread supports continuation (successor threads).
+    #[serde(default)]
+    pub supports_continuation: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -650,13 +677,12 @@ pub struct ExecutionSchema {
     /// implicit fallback was removed in favor of this explicit field.
     #[serde(default)]
     pub delegate: Option<DelegationSpec>,
-    /// Schema-declared thread-profile name (looked up in the daemon's
-    /// `KindProfileRegistry`). The terminator dispatchers
-    /// (`dispatch_subprocess`, `dispatch_managed_subprocess`) read this
-    /// instead of hardcoding profile names — V5.4 SSE adds a streaming
-    /// runtime profile by changing the schema, not the dispatch code.
+    /// Schema-declared thread profile (name + lifecycle flags). The
+    /// dispatch layer reads `profile.name` as the thread kind.
+    /// The daemon builds the thread-kind profile map from these declarations
+    /// at boot — no hardcoded Rust profile map needed.
     #[serde(default)]
-    pub thread_profile: Option<String>,
+    pub thread_profile: Option<ThreadProfileDecl>,
     /// Default operation for this kind. When a client sends
     /// `/execute` without `operation`, the daemon resolves to this.
     #[serde(default)]
@@ -1596,10 +1622,7 @@ fn parse_execution_schema(
 
     let delegate = parse_delegation_spec(execution_value, display)?;
 
-    let thread_profile = execution_value
-        .get("thread_profile")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
+    let thread_profile = parse_thread_profile(execution_value, display);
 
     // Parse default_operation
     let default_operation = execution_value
@@ -1729,6 +1752,36 @@ fn parse_execution_schema(
         operations,
         launch_augmentations,
     }))
+}
+
+/// Parse the `execution.thread_profile` block from a kind schema.
+///
+/// Accepts two formats for backward compatibility during migration:
+/// - **String**: `"directive_run"` (legacy — defaults all flags)
+/// - **Mapping**: `{ name: knowledge_run, root_executable: true, ... }`
+///
+/// New schemas should use the mapping form. String form is accepted so
+/// existing schemas don't break during rollout.
+fn parse_thread_profile(
+    execution_value: &serde_yaml::Value,
+    _display: &str,
+) -> Option<ThreadProfileDecl> {
+    let tp_value = execution_value.get("thread_profile")?;
+
+    match tp_value {
+        // Legacy string form: `"directive_run"`
+        serde_yaml::Value::String(s) => Some(ThreadProfileDecl {
+            name: s.clone(),
+            root_executable: true,
+            supports_interrupt: false,
+            supports_continuation: false,
+        }),
+        // New mapping form: `{ name: ..., root_executable: ..., ... }`
+        serde_yaml::Value::Mapping(_) => {
+            serde_yaml::from_value::<ThreadProfileDecl>(tp_value.clone()).ok()
+        }
+        _ => None,
+    }
 }
 
 /// Parse the `execution.delegate` block from a kind schema. Returns
@@ -2433,7 +2486,10 @@ execution:
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert_eq!(exec.terminator, None);
-        assert_eq!(exec.thread_profile.as_deref(), Some("directive_run"));
+        assert_eq!(
+            exec.thread_profile.as_ref().map(|tp| tp.name.as_str()),
+            Some("directive_run")
+        );
         assert!(exec.delegate.is_some(), "delegate must parse");
     }
 
