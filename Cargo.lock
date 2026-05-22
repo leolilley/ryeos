@@ -2077,6 +2077,7 @@ dependencies = [
  "lillux",
  "rand 0.8.5",
  "ryeos-engine",
+ "ryeos-node",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tools",
@@ -2222,6 +2223,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "dirs",
+ "libc",
+ "lillux",
+ "rand 0.8.5",
+ "rmp-serde",
+ "ryeos-app",
+ "ryeos-bundle",
+ "ryeos-engine",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ryeos-runtime"
 version = "0.2.1"
 dependencies = [
@@ -2316,6 +2339,7 @@ dependencies = [
 name = "ryeos-tracing"
 version = "0.1.0"
 dependencies = [
+ "ryeos-node",
  "ryeos-tracing",
  "serde_json",
  "tempfile",
@@ -2368,6 +2392,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-node",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",

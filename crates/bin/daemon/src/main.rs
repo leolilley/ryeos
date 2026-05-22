@@ -25,58 +25,16 @@ use ryeosd::{bootstrap, reconcile, scheduler, uds};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut config = Config::load(&cli.to_sources())?;
+    ryeosd::init_shutdown_channel();
 
-    // Initialize tracing with file sink (writes ndjson to <system_space_dir>/.ai/state/trace-events.ndjson).
-    // Must come after config load so system_space_dir is known.
-    // The init_only path below may create .ai/state/ if it doesn't exist yet,
-    // but for_daemon_with_file_sink already creates .ai/state/ on its own.
-    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(
-        &config.system_space_dir,
-    ));
+    // Verify operator-owned node initialization before any local repairs
+    // or runtime-state writes. `ryeos init` is authoritative for bundle
+    // registrations and user-space identity/trust artifacts.
+    bootstrap::verify_initialized(&config)?;
 
-    // --init-only: bootstrap node-local state (identity, trust, dirs) and exit.
-    //
-    // This intentionally does NOT walk or sign items in `system_space_dir`.
-    // System-tier bundle items are operator/publisher-managed and out of
-    // scope for daemon init. To re-sign bundle items, use:
-    //   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
-    // See docs/operations/signing-bundles.md.
-    if cli.init_only {
-        let force = cli.force;
-        bootstrap::init(&config, &bootstrap::InitOptions { force })?;
-        tracing::info!("init-only complete, exiting");
-        return Ok(());
-    }
-
-    // Auto-init: always run bootstrap when any key artefact is missing.
-    // `bootstrap::init` is idempotent — when files exist it's a verify
-    // pass; when they don't it creates them.
-    //
-    // We check for node identity, vault key, and public-identity.json
-    // rather than `system_space_dir.exists()` because the tracing
-    // subscriber pre-creates `<system_space_dir>/.ai/state/` before
-    // this code runs, which would otherwise defeat the predicate.
-    let vault_secret_path = config
-        .system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("vault")
-        .join("private_key.pem");
-    let public_identity_path = config
-        .system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("identity")
-        .join("public-identity.json");
-    if !config.node_signing_key_path.exists()
-        || !vault_secret_path.exists()
-        || !public_identity_path.exists()
-    {
-        tracing::info!("one or more key artefacts missing — running bootstrap init");
-        bootstrap::init(&config, &bootstrap::InitOptions { force: false })?;
-    }
-
-    // Handle subcommands before daemon startup
+    // Handle subcommands BEFORE acquiring the daemon state lock or
+    // initializing tracing. Subcommands (e.g. `run-service`) manage
+    // their own state lock and must not conflict with the daemon's.
     if let Some(ref cmd) = cli.command {
         match cmd {
             config::DaemonCommand::RunService {
@@ -88,14 +46,35 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Verify initialization
-    bootstrap::verify_initialized(&config)?;
+    // Acquire the daemon state lock BEFORE unlinking any sockets or
+    // writing runtime state. This prevents a second `ryeosd` (or
+    // standalone service) from racing in and removing the first
+    // daemon's live socket. The lock is automatically released when
+    // the process exits (Drop on the file descriptor).
+    let _state_lock = state_lock::StateLock::acquire(&state_lock::default_lock_path(
+        &config.system_space_dir,
+    ))
+    .context(
+        "failed to acquire state lock — is another ryeosd instance or standalone service running?",
+    )?;
+
+    // Initialize tracing with file sink only after init-state passes so direct
+    // `ryeosd` startup on a fresh system cannot create runtime state.
+    ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(
+        &config.system_space_dir,
+    ));
+
+    // Repair only daemon-local artifacts. Missing user-space artifacts
+    // (user signing key, trust docs) fail with guidance to run
+    // `ryeos init` — daemon never substitutes for operator init.
+    bootstrap::repair_daemon_local(&config)?;
 
     // Startup auto-signing is intentionally NOT called here.
     // The daemon start path is fail-closed on unsigned trust-sensitive items.
-    // Use `ryeosd --init-only` (or `--init-only --force`) to sign items.
+    // Use `ryeos init` to install bundle registrations before daemon startup.
 
     process::remove_stale_socket(&config.uds_path)?;
+    ensure_runtime_paths(&config)?;
 
     // ── Two-phase node-config bootstrap ──
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(&config)?;
@@ -253,14 +232,8 @@ async fn main() -> Result<()> {
     );
     tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
 
-    // Acquire operator state lock — prevents standalone services from
-    // running while the daemon is up. Released on process exit (Drop).
-    let _state_lock = state_lock::StateLock::acquire(&state_lock::default_lock_path(
-        &config.system_space_dir,
-    ))
-    .context(
-        "failed to acquire state lock — is another ryeosd instance or standalone service running?",
-    )?;
+    // State lock already held since the start of main (acquired before
+    // socket unlink); see the early `_state_lock` binding.
     tracing::info!("State lock acquired");
 
     let events = Arc::new(EventStoreService::new(state_store.clone()));
@@ -463,23 +436,23 @@ async fn main() -> Result<()> {
 
     // Write daemon.json so tools can discover the daemon.
     // This is the discovery contract — fail if we can't write it.
-    let daemon_info = serde_json::json!({
-        "pid": std::process::id(),
-        "socket": config.uds_path.display().to_string(),
-        "bind": actual_bind.to_string(),
-        "started_at": lillux::time::iso8601_now(),
-    });
+    let daemon_info = ryeos_node::DaemonMetadata {
+        pid: Some(std::process::id()),
+        uds_path: Some(config.uds_path.clone()),
+        bind: Some(actual_bind.to_string()),
+        started_at: Some(lillux::time::iso8601_now()),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        system_space_dir: config.system_space_dir.clone(),
+    };
     let daemon_json_path = config.system_space_dir.join("daemon.json");
-    std::fs::write(
-        &daemon_json_path,
-        serde_json::to_string_pretty(&daemon_info)?,
-    )
-    .with_context(|| {
-        format!(
-            "failed to write daemon.json at {} — tools cannot discover the daemon without it",
-            daemon_json_path.display()
-        )
-    })?;
+    daemon_info
+        .write(&config.system_space_dir)
+        .with_context(|| {
+            format!(
+                "failed to write daemon.json at {} — tools cannot discover the daemon without it",
+                daemon_json_path.display()
+            )
+        })?;
 
     #[cfg(unix)]
     {
@@ -675,10 +648,43 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
+    let lifecycle_shutdown = async {
+        if let Some(mut rx) = ryeosd::subscribe_shutdown() {
+            let _ = rx.recv().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+        _ = lifecycle_shutdown => {}
     }
+}
+
+fn ensure_runtime_paths(config: &Config) -> Result<()> {
+    if let Some(parent) = config.db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create db parent {}", parent.display()))?;
+    }
+    if let Some(parent) = config.uds_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create uds parent {}", parent.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
+                || {
+                    format!(
+                        "failed to set runtime dir permissions on {}",
+                        parent.display()
+                    )
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Run a service in standalone mode (daemon is not running).
@@ -695,6 +701,14 @@ async fn run_service_standalone(
     // Verify initialization
     bootstrap::verify_initialized(config)?;
 
+    // Acquire the state lock immediately after init verification, BEFORE
+    // any expensive bootstrap work. Otherwise standalone mode would
+    // perform identity/engine/node-config loads while a competing
+    // daemon held the lock, only to fail late.
+    let _state_lock =
+        state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.system_space_dir))
+            .context("failed to acquire state lock — is the daemon running?")?;
+
     // Minimal bootstrap (subset of daemon startup)
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(config));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
@@ -703,11 +717,6 @@ async fn run_service_standalone(
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
 
     let services = Arc::new(service_registry::build_service_registry());
-
-    // Acquire state lock (prevents concurrent daemon)
-    let _state_lock =
-        state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.system_space_dir))
-            .context("failed to acquire state lock — is the daemon running?")?;
 
     let state_root = config.system_space_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();

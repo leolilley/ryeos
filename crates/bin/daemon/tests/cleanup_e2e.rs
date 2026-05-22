@@ -83,42 +83,37 @@ async fn cli_daemon_up_uses_execute() {
     );
 }
 
-// ── Test 4: CLI fails fast when daemon is down (no silent fallback) ────
-//   Asserts the post-cli-impl contract: `ryeos execute` always tries the
-//   daemon. If `daemon.json` is absent (daemon down), it exits 75
-//   (EX_TEMPFAIL) with a typed error, NOT a silent fallback to spawning
-//   `ryeosd run-service`. The offline path is now an explicit, separate
-//   verb (`ryeosd run-service ...`); the CLI must not paper over it.
+// ── Test 4: CLI fails fast when initialized but daemon is down ────────
+//   Lifecycle preflight should explain the stopped local node state rather
+//   than surfacing daemon.json/signing/transport noise or silently spawning
+//   `ryeosd run-service`.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cli_daemon_down_fails_fast_with_exit_75() {
+async fn cli_initialized_but_stopped_suggests_start() {
+    let state = tempfile::tempdir().expect("state tempdir");
     let user_space = tempfile::tempdir().expect("user tempdir");
-    common::populate_user_space(user_space.path());
+    let fixture = common::fast_fixture::populate_initialized_state(state.path(), user_space.path())
+        .expect("populate initialized state");
+    common::fast_fixture::register_core_bundle_at_state(state.path(), &fixture)
+        .expect("register core");
+    common::fast_fixture::register_standard_bundle(state.path(), &fixture)
+        .expect("register standard");
 
     let ryeos = ryeos_binary();
     let out = tokio::process::Command::new(&ryeos)
         .arg("execute")
         .arg("service:system/status")
-        // RYEOSD_BIN intentionally NOT set — the new contract has no
-        // fallback that would consult it; presence or absence is moot.
-        .env("RYEOS_SYSTEM_SPACE_DIR", common::workspace_core_dir())
+        .env("RYEOS_SYSTEM_SPACE_DIR", state.path())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .output()
         .await
         .expect("spawn ryeos");
-    assert_eq!(
-        out.status.code(),
-        Some(75),
-        "expected EX_TEMPFAIL (75) for daemon-down, got exit={:?}\nstdout={}\nstderr={}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert!(!out.status.success(), "daemon-down CLI should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("daemon.json not found"),
-        "expected stderr to mention 'daemon.json not found' (typed fail-loud), got: {stderr}"
+        stderr.contains("RyeOS is initialized but not running. Run: ryeos start"),
+        "expected lifecycle stopped guidance, got: {stderr}"
     );
     drop(user_space);
 }
@@ -212,11 +207,11 @@ async fn cli_execute_defaults_project_path_to_dot() {
     );
 }
 
-// ── Test 8: --init-only must NEVER mutate RYEOS_SYSTEM_SPACE_DIR ─────────────
-//   (Catches the V5.2-CLOSEOUT bug that polluted bundles/core.)
+// ── Test 8: daemon init surface must not exist or mutate system space ────────
+//   (Catches regressions that reintroduce daemon-side init and pollute bundles/core.)
 
 #[tokio::test(flavor = "multi_thread")]
-async fn init_only_does_not_mutate_system_space() {
+async fn daemon_init_only_is_rejected_and_does_not_mutate_system_space() {
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -267,7 +262,7 @@ async fn init_only_does_not_mutate_system_space() {
     let user_space = tempfile::tempdir().expect("user tempdir");
     common::populate_user_space(user_space.path());
 
-    // Run --init-only against the COPIED system bundle.
+    // Try the removed daemon init surface against the COPIED system bundle.
     let init = std::process::Command::new(ryeosd_binary())
         .arg("--init-only")
         .arg("--system-space-dir")
@@ -278,22 +273,55 @@ async fn init_only_does_not_mutate_system_space() {
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .output()
-        .expect("ryeosd --init-only");
+        .expect("ryeosd --init-only rejection");
     assert!(
-        init.status.success(),
-        "init-only failed:\nstderr={}",
+        !init.status.success(),
+        "removed --init-only should fail, stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
 
     let after = snapshot(&sys_root);
     assert_eq!(
         before, after,
-        "RYEOS_SYSTEM_SPACE_DIR was mutated by --init-only — daemon bootstrap must NEVER touch operator-managed bundle content"
+        "RYEOS_SYSTEM_SPACE_DIR was mutated by removed --init-only — daemon bootstrap must NEVER touch operator-managed bundle content"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_daemon_start_on_fresh_state_creates_no_runtime_state() {
+    let outer = tempfile::tempdir().expect("state tempdir");
+    let state_path = outer.path().join("state");
+    let runtime_path = outer.path().join("runtime");
+
+    let out = std::process::Command::new(ryeosd_binary())
+        .arg("--system-space-dir")
+        .arg(&state_path)
+        .arg("--uds-path")
+        .arg(runtime_path.join("ryeosd.sock"))
+        .output()
+        .expect("ryeosd fresh start rejection");
+
+    assert!(
+        !out.status.success(),
+        "fresh daemon start must fail before init, stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Run: ryeos init"), "stderr={stderr}");
+    assert!(
+        !state_path.exists(),
+        "fresh daemon start must not create system state before init verification"
+    );
+    assert!(
+        !runtime_path.exists(),
+        "fresh daemon start must not create runtime socket dirs before init verification"
     );
 }
 
 // ── Test 9: UDS namespace rejects service methods (Gate 3 daemon-spawn) ──
-//   The bare UDS server must only expose `system.health` and `runtime.*`
+//   The bare UDS server must only expose health/lifecycle control and `runtime.*`
 //   methods. A service method like `system/status` must get "unknown_method".
 //   This closes the TODO at cleanup_invariants.rs:171.
 
@@ -409,8 +437,8 @@ async fn state_lock_prevents_concurrent_daemons() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn symlinked_node_config_rejected_at_startup() {
-    let result = DaemonHarness::start_with_pre_init(
-        |state_path, _user_space| {
+    let result = DaemonHarness::start_fast_with(
+        |state_path, _user_space, _fixture| {
             let bundles_dir = state_path.join(".ai").join("node").join("bundles");
             std::fs::create_dir_all(&bundles_dir)?;
             let link_target = bundles_dir.join("adversarial.yaml");

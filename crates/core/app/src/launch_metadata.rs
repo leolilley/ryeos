@@ -342,10 +342,7 @@ mod tests {
     #[test]
     fn daemon_thread_state_dir_is_under_system_space_dir() {
         let dir = daemon_thread_state_dir(std::path::Path::new("/var/lib/ryeosd"), "T-abc");
-        assert_eq!(
-            dir,
-            PathBuf::from("/var/lib/crates/bin/daemon/threads/T-abc")
-        );
+        assert_eq!(dir, PathBuf::from("/var/lib/ryeosd/threads/T-abc"));
     }
 
     #[test]

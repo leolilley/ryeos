@@ -380,10 +380,12 @@ impl DaemonHarness {
     /// (e.g. signed bundle registrations, audit records) so that the
     /// daemon's Phase 1 bootstrap and engine init pick them up.
     ///
-    /// Note: this path relies on auto-init (the daemon runs bootstrap
-    /// idempotently when key artefacts are missing). For tests that need
-    /// deterministic keys and pre-registered bundles, prefer
-    /// [`start_fast`] or [`start_fast_with`].
+    /// Populates the user-space identity/trust artifacts via the fast
+    /// fixture before invoking `pre_init`. The daemon refuses to start
+    /// when those artifacts are missing — `ryeos init` is the
+    /// operator-side path that owns them — so the harness pre-creates
+    /// them here so individual tests can focus on whatever they want to
+    /// exercise.
     pub async fn start_with_pre_init<S, F>(pre_init: S, tweak: F) -> anyhow::Result<Self>
     where
         S: FnOnce(&Path, &Path) -> anyhow::Result<()>,
@@ -397,6 +399,13 @@ impl DaemonHarness {
         // state (identity, vault, DB, daemon.json) into the copy, not
         // the workspace tree.
         let (core_bundle_tmp, system_space_dir) = copy_core_to_temp();
+
+        // Plant user-space identity + trust docs and daemon-local node
+        // key / vault / public identity so the daemon's startup
+        // `repair_daemon_local` invariants pass. The fixture is
+        // intentionally pre-applied rather than relying on (now-gone)
+        // daemon auto-init for user-space artifacts.
+        let _ = fast_fixture::populate_initialized_state(&system_space_dir, user_space.path())?;
 
         pre_init(&system_space_dir, user_space.path())?;
 

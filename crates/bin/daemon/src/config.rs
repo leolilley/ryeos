@@ -38,12 +38,7 @@ pub struct Cli {
     #[arg(long)]
     pub authorized_keys_dir: Option<PathBuf>,
 
-    /// Run bootstrap init only, then exit (no server)
-    #[arg(long)]
-    pub init_only: bool,
-
-    /// Force regenerate the node signing key during init.
-    /// Does NOT affect the user signing key.
+    /// Resolve stored config conflicts in favor of explicit CLI values.
     #[arg(long)]
     pub force: bool,
 }

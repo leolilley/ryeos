@@ -45,7 +45,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //      ryeos trust pin --from <trust>   — pin a publisher key
     //      ryeos publish <src>              — bundle author publish dance
     //      ryeos vault {put,list,remove,rewrap} — sealed secret management
-    if local_verbs::try_dispatch(&cli.rest)? {
+    if local_verbs::try_dispatch(&cli.rest).await? {
         return Ok(());
     }
 
@@ -319,6 +319,7 @@ async fn post_to_daemon(
     system_space_dir: &std::path::Path,
     body: &Value,
 ) -> Result<Value, CliError> {
+    lifecycle_preflight(system_space_dir).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(system_space_dir).await?;
     let signer = crate::transport::signing::Signer::resolve(system_space_dir)?;
 
@@ -331,6 +332,44 @@ async fn post_to_daemon(
     let url = format!("{}/execute", daemon_url);
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
+}
+
+async fn lifecycle_preflight(system_space_dir: &std::path::Path) -> Result<(), CliError> {
+    // A deliberate remote override is still valid for normal daemon-backed
+    // dispatch. Lifecycle reads/mutations themselves ignore this env var.
+    if std::env::var_os("RYEOSD_URL").is_some() {
+        return Ok(());
+    }
+
+    let env =
+        ryeos_node::LocalLifecycleEnv::load(Some(system_space_dir.to_path_buf())).map_err(|e| {
+            CliError::Local {
+                detail: format!("resolve local node lifecycle env: {e:#}"),
+            }
+        })?;
+    match ryeos_node::LifecycleController::from_env(env)
+        .status()
+        .await
+        .map_err(|e| CliError::Local {
+            detail: format!("read lifecycle status: {e:#}"),
+        })? {
+        ryeos_node::LifecycleStatus::Running { .. } => Ok(()),
+        ryeos_node::LifecycleStatus::NotInitialized { diagnostics } => Err(CliError::Local {
+            detail: format!(
+                "RyeOS is not initialized. Run: ryeos init\nDetail: {}",
+                diagnostics.message
+            ),
+        }),
+        ryeos_node::LifecycleStatus::Stopped { .. } => Err(CliError::Local {
+            detail: "RyeOS is initialized but not running. Run: ryeos start".into(),
+        }),
+        ryeos_node::LifecycleStatus::Stale { diagnostics, .. } => Err(CliError::Local {
+            detail: format!(
+                "RyeOS daemon metadata is stale: {}\nRun: ryeos start",
+                diagnostics.message
+            ),
+        }),
+    }
 }
 
 fn print_result(payload: serde_json::Value) {

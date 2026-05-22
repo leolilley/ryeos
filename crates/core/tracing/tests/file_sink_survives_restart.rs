@@ -7,37 +7,37 @@
 use std::fs;
 use std::process::Command;
 
-/// Build the ryeosd binary if needed, then spawn it with a temp state dir.
-/// Returns (state_dir, trace_path).
-fn spawn_daemon_once(
+/// Build the ryeosd binary if needed, then initialize a temp state dir.
+/// Returns (state_dir, user_root, trace_path).
+fn init_node_once(
     tmp: &tempfile::TempDir,
-    exe: &str,
-) -> (std::path::PathBuf, std::path::PathBuf) {
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let state_dir = tmp.path().to_path_buf();
     let trace_path = state_dir
         .join(".ai")
         .join("state")
         .join("trace-events.ndjson");
 
-    // Bootstrap a minimal state
-    let output = Command::new(exe)
-        .args([
-            "--init-only",
-            "--system-space-dir",
-            state_dir.to_str().unwrap(),
-        ])
-        .env("RUST_LOG", "ryeosd=info")
-        .output()
-        .expect("failed to run ryeosd --init-only");
+    let root = workspace_root();
+    let user_root = tmp.path().join("user");
+    ryeos_node::run_init(&ryeos_node::InitOptions {
+        system_space_dir: state_dir.clone(),
+        user_root: user_root.clone(),
+        source_dir: root.join("bundles"),
+        trust_files: vec![root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
+        skip_preflight: true,
+    })
+    .expect("ryeos init state for tracing test");
 
-    if !output.status.success() {
-        panic!(
-            "ryeosd --init-only failed: stderr={}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    (state_dir, user_root, trace_path)
+}
 
-    (state_dir, trace_path)
+fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|p| p.join("bundles").is_dir())
+        .expect("workspace root with bundles/")
+        .to_path_buf()
 }
 
 fn cargo_exe() -> Option<String> {
@@ -64,13 +64,15 @@ fn file_sink_survives_daemon_restart() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Run #1: init and quickly start/stop
-    let (state_dir, trace_path) = spawn_daemon_once(&tmp, &exe);
+    let (state_dir, user_root, trace_path) = init_node_once(&tmp);
     let state_str = state_dir.to_str().unwrap();
 
     // Start daemon #1, let it write some startup spans, then kill it
     let mut child1 = Command::new(&exe)
         .args(["--system-space-dir", state_str])
         .env("RUST_LOG", "ryeosd=info")
+        .env("USER_SPACE", &user_root)
+        .env("HOME", &user_root)
         .spawn()
         .expect("failed to spawn ryeosd #1");
 
@@ -91,6 +93,8 @@ fn file_sink_survives_daemon_restart() {
     let mut child2 = Command::new(&exe)
         .args(["--system-space-dir", state_str])
         .env("RUST_LOG", "ryeosd=info")
+        .env("USER_SPACE", &user_root)
+        .env("HOME", &user_root)
         .spawn()
         .expect("failed to spawn ryeosd #2");
 

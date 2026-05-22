@@ -110,6 +110,7 @@ pub struct InitReport {
     pub vault_pubkey_fingerprint: String,
     /// Names of bundles discovered and installed from `source_dir`.
     pub bundles_installed: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
 }
 
@@ -388,13 +389,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         );
     }
 
-    let next_steps = vec![
-        format!(
-            "Start the daemon: ryeosd --system-space-dir {}",
-            opts.system_space_dir.display()
-        ),
-        "Try a verb: ryeos status".to_string(),
-    ];
+    let next_steps = Vec::new();
 
     Ok(InitReport {
         system_space_dir: opts.system_space_dir.clone(),
@@ -694,9 +689,9 @@ fn install_bundle(
         }
 
         // Verify every signable item in the source bundle against the trust store.
-        crate::actions::install::preflight_verify_bundle(
+        ryeos_bundle::preflight::preflight_verify_bundle_in_context(
             source,
-            system_space_dir_for_kinds,
+            &[system_space_dir_for_kinds.to_path_buf()],
             Some(user_root),
         )
         .with_context(|| format!("preflight verification of {} bundle", name))?;

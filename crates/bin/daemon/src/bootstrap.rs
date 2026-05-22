@@ -452,52 +452,11 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
 /// Verifies:
 /// - system_space_dir exists
 /// - at least one bundle registration exists at `.ai/node/bundles/*.yaml`
-/// - node signing key exists
-/// - user signing key exists
 ///
 /// No bundle names are checked — the engine is agnostic about what's
 /// installed. Any registered bundle contributes its kinds and items.
 pub fn verify_initialized(config: &Config) -> Result<()> {
-    let system_space_dir = &config.system_space_dir;
-    if !system_space_dir.exists() {
-        anyhow::bail!(
-            "ryeosd not initialized: system space dir missing at {}\n\
-             Run: ryeos init --source <path>",
-            system_space_dir.display()
-        );
-    }
-
-    let bundles_dir = system_space_dir.join(".ai").join("node").join("bundles");
-
-    if !bundles_dir.is_dir() {
-        anyhow::bail!(
-            "bundle registration directory missing at {}\n\
-             Run: ryeos init --source <path>",
-            bundles_dir.display()
-        );
-    }
-
-    // At least one registered bundle is required for the engine to load kinds.
-    let has_any_registration = fs::read_dir(&bundles_dir)
-        .with_context(|| format!("read {}", bundles_dir.display()))?
-        .any(|entry| {
-            entry
-                .ok()
-                .and_then(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str().map(|s| s == "yaml"))
-                })
-                .unwrap_or(false)
-        });
-
-    if !has_any_registration {
-        anyhow::bail!(
-            "no bundles registered at {}\n\
-             Run: ryeos init --source <path>",
-            bundles_dir.display()
-        );
-    }
+    ryeos_node::require_initialized(&config.system_space_dir)?;
 
     if !config.node_signing_key_path.exists() {
         tracing::warn!("no node signing key found — signed items will fail to verify");
@@ -505,6 +464,155 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
     if !config.user_signing_key_path.exists() {
         tracing::warn!("no user signing key found — operator-signed items will fail to verify");
     }
+    Ok(())
+}
+
+/// Repair daemon-local artifacts after init-state verification.
+///
+/// `ryeos init` is the single authoritative path for user-space artifacts
+/// (user signing key, user/node trust docs, official-publisher pinning,
+/// bundle install + registration). Daemon startup must NOT recreate or
+/// partially substitute for any of those.
+///
+/// This function:
+///   1. Verifies the user-space artifacts that `ryeos init` is
+///      responsible for. Missing → fail with guidance.
+///   2. Verifies the node signing key exists. Missing → fail (we cannot
+///      safely regenerate the node key here because doing so would
+///      invalidate the existing node trust doc in user space).
+///   3. Repairs daemon-local artifacts only: daemon-local directory
+///      layout, default config, vault X25519 keypair, public identity
+///      document, node-signed authorized-key entry for the user key.
+///
+/// Trust docs in user space are NEVER written here.
+pub fn repair_daemon_local(config: &Config) -> Result<()> {
+    // Derive the trust dir from the resolved user signing key path
+    // rather than re-reading `roots::user_root()`. The user signing
+    // key path was already resolved at config-load time and is the
+    // authoritative anchor; deriving from the live env again here
+    // could give a different answer if `USER_SPACE`/`HOME` changed
+    // between operator init and daemon start.
+    //
+    // Layout:
+    //   <user_root>/.ai/config/keys/signing/private_key.pem
+    //   <user_root>/.ai/config/keys/trusted/
+    let trust_dir = config
+        .user_signing_key_path
+        .parent() // .../keys/signing
+        .and_then(|p| p.parent()) // .../keys
+        .map(|p| p.join("trusted"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "user_signing_key_path {} has no parent",
+                config.user_signing_key_path.display()
+            )
+        })?;
+
+    // ── 1. Required user-space artifacts ──
+    if !config.user_signing_key_path.exists() {
+        bail!(
+            "user signing key missing at {} — run: ryeos init",
+            config.user_signing_key_path.display()
+        );
+    }
+
+    if !config.node_signing_key_path.exists() {
+        bail!(
+            "node signing key missing at {} — run: ryeos init\n\
+             (daemon refuses to regenerate the node key automatically because doing so \
+             would invalidate the node trust doc already pinned in user space)",
+            config.node_signing_key_path.display()
+        );
+    }
+
+    let user_identity = NodeIdentity::load(&config.user_signing_key_path)?;
+    let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
+
+    let user_trust_entry = trust_dir.join(format!("{}.toml", user_identity.fingerprint()));
+    if !user_trust_entry.exists() {
+        bail!(
+            "user trust doc missing at {} — run: ryeos init",
+            user_trust_entry.display()
+        );
+    }
+    let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
+    if !node_trust_entry.exists() {
+        bail!(
+            "node trust doc missing at {} — run: ryeos init",
+            node_trust_entry.display()
+        );
+    }
+
+    // ── 2. Daemon-local layout (idempotent) ──
+    create_directory_layout(config)?;
+
+    // ── 3. Default daemon config file (daemon-local) ──
+    let config_path = config
+        .system_space_dir
+        .join(AI_DIR)
+        .join("node")
+        .join("config.yaml");
+    if !config_path.exists() {
+        write_default_config(&config_path, config)?;
+        tracing::info!(path = %config_path.display(), "wrote default daemon config");
+    }
+
+    // ── 4. Public identity (daemon-local; derives from node key) ──
+    let identity_path = config
+        .system_space_dir
+        .join(AI_DIR)
+        .join("node")
+        .join("identity")
+        .join("public-identity.json");
+    if !identity_path.exists() {
+        node_identity.write_public_identity(&identity_path)?;
+        tracing::info!(path = %identity_path.display(), "wrote node public identity");
+    }
+
+    // ── 5. Vault X25519 keypair (daemon-local). Decoupled from node
+    //    identity so node-key rotation does not brick the vault. ──
+    let vault_dir = config
+        .system_space_dir
+        .join(AI_DIR)
+        .join("node")
+        .join("vault");
+    fs::create_dir_all(&vault_dir)
+        .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
+    let vault_secret_path = vault_dir.join("private_key.pem");
+    let vault_public_path = vault_dir.join("public_key.pem");
+    let vault_sk = if vault_secret_path.exists() {
+        lillux::vault::read_secret_key(&vault_secret_path)
+            .with_context(|| format!("load vault key {}", vault_secret_path.display()))?
+    } else {
+        let sk = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&vault_secret_path, &sk)
+            .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
+        tracing::info!(path = %vault_secret_path.display(), "generated vault X25519 keypair");
+        sk
+    };
+    lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
+        .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
+
+    // ── 6. Node-signed authorized-key entry for the user key
+    //    (daemon-local — the file lives under
+    //    `<system_space>/.ai/node/auth/authorized_keys/`). ──
+    fs::create_dir_all(&config.authorized_keys_dir).with_context(|| {
+        format!(
+            "create authorized_keys dir {}",
+            config.authorized_keys_dir.display()
+        )
+    })?;
+    let user_auth_entry = config
+        .authorized_keys_dir
+        .join(format!("{}.toml", user_identity.fingerprint()));
+    if !user_auth_entry.exists() {
+        write_user_authorized(
+            &user_auth_entry,
+            &user_identity,
+            node_identity.signing_key(),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -867,5 +975,96 @@ mod tests {
         let items = find_signed_node_config_items(tmp.path()).unwrap();
         assert_eq!(items.len(), 1);
         assert!(items[0].ends_with("nested.yaml"));
+    }
+
+    /// `repair_daemon_local` must derive the user trust dir from the
+    /// resolved `user_signing_key_path` (not by re-reading the env), and
+    /// the derivation must match the canonical layout
+    /// `<user_root>/.ai/config/keys/{signing,trusted}/`.
+    #[test]
+    fn repair_daemon_local_trust_dir_derives_from_user_signing_key_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_root = tmp.path().join("home");
+        let signing_path = user_root
+            .join(".ai")
+            .join("config")
+            .join("keys")
+            .join("signing")
+            .join("private_key.pem");
+        let expected_trust_dir = user_root
+            .join(".ai")
+            .join("config")
+            .join("keys")
+            .join("trusted");
+
+        // Mirror the derivation in `repair_daemon_local`.
+        let derived = signing_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("trusted"))
+            .expect("derive trust dir");
+        assert_eq!(
+            derived, expected_trust_dir,
+            "trust dir derivation must follow canonical layout"
+        );
+    }
+
+    /// `repair_daemon_local` must refuse to start when user-space
+    /// init artifacts are missing — daemon never substitutes for
+    /// `ryeos init`.
+    #[test]
+    fn repair_daemon_local_fails_when_user_signing_key_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_root = tmp.path().join("home");
+        let signing_dir = user_root
+            .join(".ai")
+            .join("config")
+            .join("keys")
+            .join("signing");
+        fs::create_dir_all(&signing_dir).unwrap();
+        let system_space_dir = tmp.path().join("state");
+        fs::create_dir_all(system_space_dir.join(".ai").join("node").join("bundles")).unwrap();
+        // Plant a signed bundle registration so verify_initialized would
+        // pass; we want repair_daemon_local itself to be the one that
+        // surfaces the missing user-space artifact.
+        fs::write(
+            system_space_dir
+                .join(".ai")
+                .join("node")
+                .join("bundles")
+                .join("core.yaml"),
+            "# ryeos:signed:test\nkind: node\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            db_path: system_space_dir
+                .join(".ai")
+                .join("state")
+                .join("runtime.sqlite3"),
+            uds_path: system_space_dir.join("ryeosd.sock"),
+            system_space_dir: system_space_dir.clone(),
+            node_signing_key_path: system_space_dir
+                .join(".ai")
+                .join("node")
+                .join("identity")
+                .join("private_key.pem"),
+            user_signing_key_path: signing_dir.join("private_key.pem"),
+            authorized_keys_dir: system_space_dir
+                .join(".ai")
+                .join("node")
+                .join("auth")
+                .join("authorized_keys"),
+            require_auth: false,
+        };
+
+        let err = repair_daemon_local(&config).expect_err("should refuse without user key");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("user signing key missing"), "got: {msg}");
+        assert!(
+            msg.contains("ryeos init"),
+            "must guide to ryeos init, got: {msg}"
+        );
     }
 }

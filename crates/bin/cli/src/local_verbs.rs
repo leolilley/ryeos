@@ -7,8 +7,8 @@
 //! dispatcher BEFORE the verb table lookup so they always work even on
 //! a fresh checkout with no `core` bundle present.
 //!
-//! Each verb here parses its own argv slice with clap, runs an action in
-//! `ryeos-tools`, and prints a JSON report on success.
+//! Each verb here parses its own argv slice with clap, runs shared local
+//! lifecycle/tool actions, and prints a report on success.
 //!
 //! No daemon round-trip. No verb-table dependency. No trust-store load
 //! before keys exist.
@@ -21,10 +21,10 @@ use clap::Parser;
 use lillux::crypto::{DecodePrivateKey, SigningKey};
 
 use ryeos_engine::roots;
+use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv, StopOptions};
 use ryeos_tools::actions::authorize::{
     run_authorize_client as run_authorize_key, AuthorizeClientParams,
 };
-use ryeos_tools::actions::init::{run_init, InitOptions};
 use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 use ryeos_tools::actions::trust::{run_pin, run_pin_from, PinFromOptions, PinOptions};
 use ryeos_tools::actions::vault::{
@@ -38,13 +38,25 @@ use crate::error::CliError;
 /// if no match (caller should fall through to verb-table dispatch).
 ///
 /// Errors from a matched local verb propagate as `CliError::Local`.
-pub fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
+pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
     if argv.is_empty() {
         return Ok(false);
     }
     match argv[0].as_str() {
         "init" => {
             run_init_verb(&argv[1..]).map_err(map_local_err)?;
+            Ok(true)
+        }
+        "status" => {
+            run_status_verb(&argv[1..]).await.map_err(map_local_err)?;
+            Ok(true)
+        }
+        "start" => {
+            run_start_verb(&argv[1..]).await.map_err(map_local_err)?;
+            Ok(true)
+        }
+        "stop" => {
+            run_stop_verb(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
         }
         "authorize-key" => {
@@ -130,16 +142,138 @@ fn run_init_verb(argv: &[String]) -> Result<()> {
         .unwrap_or_else(default_system_space_dir);
     let user_root = args.user_root.unwrap_or_else(default_user_root);
 
-    let opts = InitOptions {
+    let opts = ryeos_node::InitOptions {
         system_space_dir,
         user_root,
         source_dir: args.source,
         trust_files: args.trust_files,
         skip_preflight: false,
     };
-    let report = run_init(&opts).context("ryeos init failed")?;
+    let report = ryeos_node::run_init(&opts).context("ryeos init failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+// ── ryeos {status,start,stop} ───────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos status",
+    about = "Show local node lifecycle status",
+    no_binary_name = true
+)]
+struct StatusArgs {
+    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    system_space_dir: Option<PathBuf>,
+
+    /// Emit structured JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+async fn run_status_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<StatusArgs>(argv)?;
+    let controller = LifecycleController::from_env(local_env(args.system_space_dir)?);
+    let status = controller.status().await.context("ryeos status failed")?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        print_lifecycle_status(&status);
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos start",
+    about = "Bring the local node runtime online",
+    no_binary_name = true
+)]
+struct StartArgs {
+    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    system_space_dir: Option<PathBuf>,
+}
+
+async fn run_start_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<StartArgs>(argv)?;
+    let controller = LifecycleController::from_env(local_env(args.system_space_dir)?);
+    let report = controller.start().await.context("ryeos start failed")?;
+    if report.already_running {
+        println!("running");
+    } else {
+        println!("started");
+    }
+    print_lifecycle_status(&report.status);
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos stop",
+    about = "Gracefully stop the local node runtime",
+    no_binary_name = true
+)]
+struct StopArgs {
+    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    system_space_dir: Option<PathBuf>,
+
+    /// Fall back to signaling the confirmed live ryeosd process if graceful shutdown times out.
+    #[arg(long)]
+    force: bool,
+}
+
+async fn run_stop_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<StopArgs>(argv)?;
+    let controller = LifecycleController::from_env(local_env(args.system_space_dir)?);
+    let report = controller
+        .stop(StopOptions {
+            force: args.force,
+            ..StopOptions::default()
+        })
+        .await
+        .context("ryeos stop failed")?;
+    if report.already_stopped {
+        println!("already stopped");
+    } else {
+        println!("stopped");
+    }
+    print_lifecycle_status(&report.status);
+    Ok(())
+}
+
+fn local_env(system_space_dir: Option<PathBuf>) -> Result<LocalLifecycleEnv> {
+    LocalLifecycleEnv::load(system_space_dir)
+}
+
+fn print_lifecycle_status(status: &LifecycleStatus) {
+    match status {
+        LifecycleStatus::NotInitialized { diagnostics } => {
+            println!("not initialized — run: ryeos init");
+            println!("detail: {}", diagnostics.message);
+        }
+        LifecycleStatus::Stopped { system_space_dir } => {
+            println!("initialized, stopped — run: ryeos start");
+            println!("system space: {}", system_space_dir.display());
+        }
+        LifecycleStatus::Running { metadata } => {
+            println!("running");
+            if let Some(pid) = metadata.pid {
+                println!("pid: {pid}");
+            }
+            if let Some(bind) = &metadata.bind {
+                println!("url: http://{bind}");
+            }
+            if let Some(socket) = &metadata.uds_path {
+                println!("socket: {}", socket.display());
+            }
+        }
+        LifecycleStatus::Stale { diagnostics, .. } => {
+            println!("stale daemon metadata — {}", diagnostics.message);
+        }
+    }
 }
 
 // ── ryeos authorize-key ──────────────────────────────────────────────

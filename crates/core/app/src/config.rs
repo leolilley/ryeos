@@ -200,28 +200,6 @@ impl Config {
                 }),
         };
 
-        // Only create minimal runtime directories (db parent, socket parent).
-        // Bootstrap directories are created by bootstrap::init().
-        if let Some(parent) = cfg.db_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create db parent {}", parent.display()))?;
-        }
-        if let Some(parent) = cfg.uds_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create uds parent {}", parent.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                    .with_context(|| {
-                        format!(
-                            "failed to set runtime dir permissions on {}",
-                            parent.display()
-                        )
-                    })?;
-            }
-        }
-
         Ok(cfg)
     }
 
@@ -272,5 +250,40 @@ impl Config {
                 .join("auth")
                 .join("authorized_keys"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn load_is_side_effect_free_for_runtime_paths() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user");
+        std::env::set_var("USER_SPACE", &user);
+        let system_space_dir = tmp.path().join("state");
+        let db_path = tmp.path().join("runtime/state/runtime.sqlite3");
+        let uds_path = tmp.path().join("runtime/sock/ryeosd.sock");
+
+        let cfg = Config::load(&ConfigSources {
+            system_space_dir: Some(system_space_dir.clone()),
+            db_path: Some(db_path.clone()),
+            uds_path: Some(uds_path.clone()),
+            ..ConfigSources::default()
+        })
+        .unwrap();
+
+        assert_eq!(cfg.system_space_dir, system_space_dir);
+        assert_eq!(cfg.db_path, db_path);
+        assert_eq!(cfg.uds_path, uds_path);
+        assert!(!cfg.system_space_dir.exists());
+        assert!(!cfg.db_path.parent().unwrap().exists());
+        assert!(!cfg.uds_path.parent().unwrap().exists());
+        std::env::remove_var("USER_SPACE");
     }
 }

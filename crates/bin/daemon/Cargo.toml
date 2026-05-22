@@ -28,6 +28,7 @@ lillux = { path = "../../kernel/lillux" }
 rand = "0.8"
 rmp-serde = "1"
 ryeos-engine = { path = "../../core/engine" }
+ryeos-node = { path = "../../core/node" }
 ryeos-state = { path = "../../core/state" }
 ryeos-scheduler = { path = "../../core/scheduler" }
 ryeos-app = { path = "../../core/app" }

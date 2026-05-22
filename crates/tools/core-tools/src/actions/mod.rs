@@ -9,7 +9,6 @@
 
 pub mod authorize;
 pub mod build_bundle;
-pub mod init;
 pub mod inspect;
 pub mod install;
 pub mod publish;

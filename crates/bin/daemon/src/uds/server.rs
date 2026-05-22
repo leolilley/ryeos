@@ -76,6 +76,23 @@ pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcRespon
         // ── daemon health (lightweight, only ungated method) ─────────
         "system.health" => RpcResponse::ok(request.request_id, json!({ "status": "ok" })),
 
+        // ── local lifecycle control (local UDS only, no public HTTP surface) ─
+        "lifecycle.status" => RpcResponse::ok(
+            request.request_id,
+            json!({
+                "status": "running",
+                "pid": std::process::id(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "started_at": &state.started_at_iso,
+                "bind": state.config.bind.to_string(),
+                "uds_path": state.config.uds_path.display().to_string(),
+            }),
+        ),
+        "lifecycle.shutdown" => {
+            crate::request_shutdown();
+            RpcResponse::ok(request.request_id, json!({ "accepted": true }))
+        }
+
         // ── runtime callbacks (token-gated, used by runtimes) ───────
         other if other.starts_with("runtime.") => rpc_result(
             request.request_id,
@@ -532,6 +549,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_status_returns_readiness() {
+        let (_tmp, state) = setup_app_state();
+        let resp = dispatch(rpc("lifecycle.status", json!({})), &state).await;
+        assert!(resp.error.is_none());
+        assert_eq!(rpc_ok(&resp)["status"], "running");
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_error() {
         let (_tmp, state) = setup_app_state();
         let resp = dispatch(rpc("nonexistent.method", json!({})), &state).await;
@@ -576,17 +601,20 @@ mod tests {
         }
     }
 
-    /// Assert that `system.health` is the ONLY ungated method on the bare UDS
-    /// surface. Every other method must go through token-gated `runtime.*` or
-    /// be unknown.
+    /// Assert that only health and local lifecycle control are ungated on the
+    /// bare UDS surface. Every other method must go through token-gated
+    /// `runtime.*` or be unknown.
     #[tokio::test]
-    async fn only_system_health_is_ungated() {
+    async fn only_health_and_lifecycle_control_are_ungated() {
         let (_tmp, state) = setup_app_state();
 
-        // system.health must work
+        // system.health and lifecycle.status must work
         let resp = dispatch(rpc("system.health", json!({})), &state).await;
         assert!(resp.error.is_none());
         assert_eq!(rpc_ok(&resp)["status"], "ok");
+        let resp = dispatch(rpc("lifecycle.status", json!({})), &state).await;
+        assert!(resp.error.is_none());
+        assert_eq!(rpc_ok(&resp)["status"], "running");
 
         // A sample of methods that MUST NOT be ungated
         for method in [

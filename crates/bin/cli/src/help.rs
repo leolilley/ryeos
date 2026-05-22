@@ -17,12 +17,29 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(out, "USAGE:")?;
     writeln!(out, "  ryeos [-p PROJECT] [--debug] <verb...> [args...]")?;
     writeln!(out)?;
-    writeln!(out, "LOCAL COMMANDS (no daemon required):")?;
+    writeln!(out, "LIFECYCLE:")?;
     writeln!(
         out,
         "  {:<30} {}",
-        "init", "Bootstrap operator keys and core bundle"
+        "init", "Bootstrap local node state and packaged bundles"
     )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "start", "Bring the local node runtime online"
+    )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "stop", "Gracefully stop the local node runtime"
+    )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "status", "Show local node lifecycle status"
+    )?;
+    writeln!(out)?;
+    writeln!(out, "LOCAL TOOLS (no daemon required):")?;
     writeln!(
         out,
         "  {:<30} {}",
@@ -97,7 +114,6 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     } else {
         // Fallback: static list when no bundles are discovered
         writeln!(out, "DAEMON COMMANDS (require running daemon):")?;
-        writeln!(out, "  {:<30} {}", "status", "Show daemon status")?;
         writeln!(
             out,
             "  {:<30} {}",
@@ -179,6 +195,9 @@ fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String
             }
 
             if let Some(tokens) = tokens {
+                if tokens == ["status"] {
+                    continue;
+                }
                 // Skip short aliases (s, f) — they're abbreviations
                 if tokens.len() == 1 && tokens[0].len() <= 1 {
                     continue;
@@ -280,6 +299,27 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(out, "  --system-space-dir <DIR> System space root")?;
             writeln!(out, "  --user-root <DIR>        User space root")?;
         }
+        Some("status") => {
+            writeln!(out, "ryeos status — Show local node lifecycle status")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "USAGE: ryeos status [--json] [--system-space-dir <DIR>]"
+            )?;
+        }
+        Some("start") => {
+            writeln!(out, "ryeos start — Bring the local node runtime online")?;
+            writeln!(out)?;
+            writeln!(out, "USAGE: ryeos start [--system-space-dir <DIR>]")?;
+        }
+        Some("stop") => {
+            writeln!(out, "ryeos stop — Gracefully stop the local node runtime")?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "USAGE: ryeos stop [--force] [--system-space-dir <DIR>]"
+            )?;
+        }
         Some("authorize-key") => {
             writeln!(
                 out,
@@ -365,7 +405,7 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
         }
         Some(other) => {
             writeln!(out, "no local help available for '{}'", other)?;
-            writeln!(out, "start the daemon for full verb help: ryeosd")?;
+            writeln!(out, "run `ryeos init` if Rye OS has not been initialized")?;
         }
         None => {}
     }

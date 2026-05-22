@@ -25,8 +25,8 @@ use lillux::crypto::SigningKey;
 use serde::Serialize;
 
 use crate::actions::build_bundle::{self, RebuildReport};
-use crate::actions::init::{materialize_manifest, BundleManifestSource};
 use crate::actions::sign_bundle::{self, SignBundleReport};
+use ryeos_bundle::manifest::{materialize_manifest, BundleManifestSource};
 
 #[derive(Debug)]
 pub struct PublishOptions {

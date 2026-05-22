@@ -40,24 +40,38 @@ impl StateLock {
                 .with_context(|| format!("create state lock directory {}", parent.display()))?;
         }
 
-        let file = File::create(lock_path)
-            .with_context(|| format!("create state lock file {}", lock_path.display()))?;
+        // IMPORTANT: do NOT truncate before locking. `File::create` would
+        // wipe the holder PID before we even attempt the lock, destroying
+        // diagnostics for the losing process. Open without truncation so
+        // the existing PID remains readable when flock fails.
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .with_context(|| format!("open state lock file {}", lock_path.display()))?;
 
-        // Write our PID for diagnostics (who holds the lock)
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            let _ = writeln!(&file, "{}", std::process::id());
-        }
-
-        // Non-blocking exclusive lock
+        // Non-blocking exclusive lock — try this first.
         match flock_exclusive_nb(&file) {
-            Ok(()) => Ok(StateLock { _file: file }),
+            Ok(()) => {
+                // We hold the lock now. Write our PID for diagnostics.
+                #[cfg(unix)]
+                {
+                    use std::io::{Seek, SeekFrom, Write};
+                    let _ = (&file).set_len(0);
+                    let _ = (&file).seek(SeekFrom::Start(0));
+                    let _ = writeln!(&file, "{}", std::process::id());
+                }
+                Ok(StateLock { _file: file })
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // Another process holds the lock. Try to read its PID.
+                // Another process holds the lock. Read its PID without
+                // having mutated the file.
                 let holder_pid = fs::read_to_string(lock_path)
                     .ok()
-                    .and_then(|s| s.trim().to_string().into())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "unknown".to_string());
                 bail!(
                     "state lock held by another process (pid: {}); stop the daemon or other standalone service before proceeding",
@@ -140,7 +154,7 @@ mod tests {
         let path = default_lock_path(Path::new("/var/lib/ryeosd"));
         assert_eq!(
             path,
-            PathBuf::from("/var/lib/crates/bin/daemon/.ai/state/operator.lock")
+            PathBuf::from("/var/lib/ryeosd/.ai/state/operator.lock")
         );
     }
 

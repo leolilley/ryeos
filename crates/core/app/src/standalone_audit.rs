@@ -183,7 +183,7 @@ mod tests {
         let path = default_audit_path(Path::new("/var/lib/ryeosd"));
         assert_eq!(
             path,
-            PathBuf::from("/var/lib/crates/bin/daemon/.ai/state/audit/standalone.ndjson")
+            PathBuf::from("/var/lib/ryeosd/.ai/state/audit/standalone.ndjson")
         );
     }
 
