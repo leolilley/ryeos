@@ -2,8 +2,7 @@
 //! using Braille subcells for fine lines and block density for fills.
 
 use ryeos_tui_core::scene::{Rgb, ScenePrimitive};
-use ryeos_tui_core::text_surface::{Cell, Color, Style, TextSurface};
-use ryeos_tui_core::theme;
+use ryeos_tui_core::text_surface::{Color, Style, TextSurface};
 
 use crate::braille::BrailleBuffer;
 
@@ -21,15 +20,15 @@ pub fn render_scene(primitives: &[ScenePrimitive], surface: &mut TextSurface) {
     let braille_h = h;
     let mut buf = BrailleBuffer::new(braille_w, braille_h);
 
-    let bg_rgb = Rgb::new(0x1d, 0x20, 0x21); // BG_DARK
+    let _bg_rgb = Rgb::new(0x1d, 0x20, 0x21); // BG_DARK
 
     for prim in primitives {
         match prim {
             ScenePrimitive::Point {
                 pos,
-                color,
+                color: _,
                 size,
-                opacity,
+                opacity: _,
                 ..
             } => {
                 let sub_x = (pos.x * braille_w as f32 * 2.0) as i32;
@@ -68,13 +67,13 @@ pub fn render_scene(primitives: &[ScenePrimitive], surface: &mut TextSurface) {
                 tilt,
                 rotation,
                 color: _,
-                opacity,
+                opacity: _,
             } => {
                 let cx = center.x * braille_w as f32 * 2.0;
                 let cy = center.y * braille_h as f32 * 4.0;
                 let r = *radius * braille_w as f32 * 2.0;
                 let steps = (r * 4.0) as usize;
-                let steps = steps.max(20).min(200);
+                let steps = steps.clamp(20, 200);
 
                 for i in 0..steps {
                     let angle = *rotation + (i as f32 / steps as f32) * std::f32::consts::TAU;

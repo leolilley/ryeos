@@ -8,7 +8,6 @@ use crossterm::{
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
-    terminal::Clear,
 };
 use ryeos_tui_core::text_surface::{Cell, Color as CoreColor, TextSurface};
 use std::io::Write;
@@ -42,10 +41,10 @@ pub fn render_text_surface(
         let prev_surf = prev.as_ref().unwrap();
         for y in 0..new.height {
             // Quick row check: hash first and last cells as heuristic
-            let first_new = new.get(0, y);
-            let last_new = new.get(new.width.saturating_sub(1), y);
-            let first_old = prev_surf.get(0, y);
-            let last_old = prev_surf.get(prev_surf.width.saturating_sub(1), y);
+            let _first_new = new.get(0, y);
+            let _last_new = new.get(new.width.saturating_sub(1), y);
+            let _first_old = prev_surf.get(0, y);
+            let _last_old = prev_surf.get(prev_surf.width.saturating_sub(1), y);
 
             // Always scan full row for correctness
             let mut row_changed = false;

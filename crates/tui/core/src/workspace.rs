@@ -87,7 +87,7 @@ impl ViewSpec {
     pub fn input_capability(&self) -> InputCapability {
         match self {
             ViewSpec::Thread { .. } => InputCapability::Prompt,
-            ViewSpec::ThreadList { .. } => InputCapability::Filter,
+            ViewSpec::ThreadList => InputCapability::Filter,
             ViewSpec::SpaceBrowser { .. } => InputCapability::Filter,
             ViewSpec::EventInspector => InputCapability::Filter,
             ViewSpec::Remotes | ViewSpec::Projects | ViewSpec::Trust | ViewSpec::Graph { .. } => {
@@ -417,26 +417,22 @@ impl Workspace {
     pub fn cursor_up(&mut self) {
         if let Some(tile) = self.tiles.get_mut(&self.focused_tile) {
             match &mut tile.local {
-                ViewLocalState::ThreadList { cursor, .. } => {
-                    if *cursor > 0 {
+                ViewLocalState::ThreadList { cursor, .. }
+                    if *cursor > 0 => {
                         *cursor -= 1;
                     }
-                }
-                ViewLocalState::SpaceBrowser { cursor, .. } => {
-                    if *cursor > 0 {
+                ViewLocalState::SpaceBrowser { cursor, .. }
+                    if *cursor > 0 => {
                         *cursor -= 1;
                     }
-                }
-                ViewLocalState::GenericList { cursor, .. } => {
-                    if *cursor > 0 {
+                ViewLocalState::GenericList { cursor, .. }
+                    if *cursor > 0 => {
                         *cursor -= 1;
                     }
-                }
-                ViewLocalState::Thread(state) => {
-                    if state.timeline_cursor > 0 {
+                ViewLocalState::Thread(state)
+                    if state.timeline_cursor > 0 => {
                         state.timeline_cursor -= 1;
                     }
-                }
                 _ => {}
             }
         }
@@ -449,26 +445,22 @@ impl Workspace {
                 return;
             }
             match &mut tile.local {
-                ViewLocalState::ThreadList { cursor, .. } => {
-                    if *cursor < total_items.saturating_sub(1) {
+                ViewLocalState::ThreadList { cursor, .. }
+                    if *cursor < total_items.saturating_sub(1) => {
                         *cursor += 1;
                     }
-                }
-                ViewLocalState::SpaceBrowser { cursor, .. } => {
-                    if *cursor < total_items.saturating_sub(1) {
+                ViewLocalState::SpaceBrowser { cursor, .. }
+                    if *cursor < total_items.saturating_sub(1) => {
                         *cursor += 1;
                     }
-                }
-                ViewLocalState::GenericList { cursor, .. } => {
-                    if *cursor < total_items.saturating_sub(1) {
+                ViewLocalState::GenericList { cursor, .. }
+                    if *cursor < total_items.saturating_sub(1) => {
                         *cursor += 1;
                     }
-                }
-                ViewLocalState::Thread(state) => {
-                    if state.timeline_cursor < total_items.saturating_sub(1) {
+                ViewLocalState::Thread(state)
+                    if state.timeline_cursor < total_items.saturating_sub(1) => {
                         state.timeline_cursor += 1;
                     }
-                }
                 _ => {}
             }
         }
@@ -507,16 +499,12 @@ fn replace_leaf_with_split(
                     first: Box::new(new_first),
                     second: second.clone(),
                 })
-            } else if let Some(new_second) = replace_leaf_with_split(second, target, axis, new_id) {
-                Some(LayoutTree::Split {
+            } else { replace_leaf_with_split(second, target, axis, new_id).map(|new_second| LayoutTree::Split {
                     axis: *a,
                     ratio: *ratio,
                     first: first.clone(),
                     second: Box::new(new_second),
-                })
-            } else {
-                None
-            }
+                }) }
         }
     }
 }

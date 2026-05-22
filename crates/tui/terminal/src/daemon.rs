@@ -8,13 +8,11 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::Request;
 use ryeos_cli::transport::discovery::discover_audience;
-use ryeos_cli::transport::http::{post_json, read_daemon_bind, resolve_daemon_url};
+use ryeos_cli::transport::http::{post_json, resolve_daemon_url};
 use ryeos_cli::transport::signing::{SignHeaders, Signer};
 use ryeos_tui_core::ids::RemoteId;
 use ryeos_tui_core::update::{PollSnapshot, RemoteSummary, ThreadSummary};
 
-use crate::sse::SseEvent;
-use crate::transport::{DaemonRequest, DaemonResponse, TransportError};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------

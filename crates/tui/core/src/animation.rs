@@ -160,7 +160,7 @@ impl AnimationState {
 
         // Error pulse: red tinted ring
         if matches!(self.mode, SubstrateMode::ErrorPulse) {
-            let pulse = ((t * 4.0).sin() * 0.5 + 0.5) as f32;
+            let pulse = (t * 4.0).sin() * 0.5 + 0.5;
             prims.push(ScenePrimitive::Ring {
                 center,
                 radius: 0.15 + pulse * 0.1,

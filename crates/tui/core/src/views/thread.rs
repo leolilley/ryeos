@@ -143,7 +143,7 @@ fn build_thread_content(
             ThreadPartKind::UserMessage => {
                 // User prompt with word wrap
                 let wrapped = crate::widgets::text::word_wrap(&part.text, w.saturating_sub(4));
-                lines.push((format!("▸ You",), accent));
+                lines.push(("▸ You".to_string(), accent));
                 for line in &wrapped {
                     lines.push((format!("  {}", line), fg));
                 }
@@ -219,7 +219,7 @@ fn build_thread_content(
                 let name = part.tool_name.as_deref().unwrap_or("tool");
                 let dur = part
                     .duration_ms
-                    .map(|d| crate::widgets::text::format_duration_ms(d))
+                    .map(crate::widgets::text::format_duration_ms)
                     .unwrap_or_default();
 
                 if is_expanded && !part.text.is_empty() {

@@ -3,7 +3,6 @@
 
 use ryeos_tui_core::frame::Frame;
 use ryeos_tui_core::text_surface::{Color, Style, TextSurface};
-use ryeos_tui_core::theme;
 
 use crate::render_scene;
 use crate::render_text;

@@ -3,10 +3,9 @@
 //! Allows swapping between signed HTTP, mock, and attach transports.
 
 use ryeos_tui_core::ids::ThreadId;
-use ryeos_tui_core::update::{DaemonEvent, PollSnapshot};
+use ryeos_tui_core::update::PollSnapshot;
 
 use crate::daemon::DaemonClient;
-use crate::sse::SseEvent;
 
 /// Transport-level request to the daemon.
 #[derive(Debug, Clone)]

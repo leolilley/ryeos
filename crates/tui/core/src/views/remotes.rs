@@ -39,9 +39,8 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
     }
 
     // Remotes
-    let mut row = 2;
-    for (_, remote) in &model.store.remotes {
-        if row >= h {
+    for (row_idx, remote) in (2..).zip(model.store.remotes.values()) {
+        if row_idx >= h {
             break;
         }
 
@@ -51,10 +50,10 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
         } else {
             ('○', dead_style)
         };
-        surface.draw_char(1, row, dot, dot_style);
+        surface.draw_char(1, row_idx, dot, dot_style);
 
         // Name
-        surface.draw_text(3, row, &remote.name, dim_style);
+        surface.draw_text(3, row_idx, &remote.name, dim_style);
 
         // URL
         if w > 25 {
@@ -63,7 +62,7 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
             } else {
                 &remote.url
             };
-            surface.draw_text(20, row, url_display, muted_style);
+            surface.draw_text(20, row_idx, url_display, muted_style);
         }
 
         // Sync state
@@ -80,10 +79,8 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
                 RemoteSyncState::Behind => Style::new().fg(theme::YELLOW).bg(theme::BG),
                 RemoteSyncState::Unknown => muted_style,
             };
-            surface.draw_text(w.saturating_sub(sync.len() + 1), row, sync, sync_style);
+            surface.draw_text(w.saturating_sub(sync.len() + 1), row_idx, sync, sync_style);
         }
-
-        row += 1;
     }
 
     // Empty state

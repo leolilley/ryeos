@@ -5,7 +5,7 @@
 
 use ryeos_tui_core::ids::TileId;
 use ryeos_tui_core::layout::{LayoutTree, SplitAxis};
-use ryeos_tui_core::workspace::{TileState, ViewLocalState, ViewSpec};
+use ryeos_tui_core::workspace::{TileState, ViewSpec};
 use std::collections::HashMap;
 use std::path::PathBuf;
 

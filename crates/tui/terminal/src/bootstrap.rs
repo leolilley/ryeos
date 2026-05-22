@@ -4,7 +4,7 @@ use ryeos_tui_core::model::AppModel;
 use ryeos_tui_core::update::{self, AppEvent};
 
 use crate::mock_transport;
-use crate::transport::{DaemonTransport, MockTransport, TransportError};
+use crate::transport::DaemonTransport;
 
 /// Bootstrap result.
 #[derive(Debug)]
@@ -52,6 +52,7 @@ pub async fn blocking_essentials(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::MockTransport;
 
     #[tokio::test]
     async fn bootstrap_partial_state_renders_without_remotes() {

@@ -10,7 +10,7 @@ use crossterm::{
     },
     execute, terminal,
 };
-use std::io::{self, Write};
+use std::io;
 
 pub struct TerminalGuard {
     width: u16,

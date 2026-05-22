@@ -113,17 +113,14 @@ pub struct IdentityModel {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum DaemonStatus {
+    #[default]
     Connecting,
     Connected,
     Disconnected,
 }
 
-impl Default for DaemonStatus {
-    fn default() -> Self {
-        Self::Connecting
-    }
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DaemonModel {

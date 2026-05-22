@@ -60,7 +60,7 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
                 || item
                     .description
                     .as_ref()
-                    .map_or(false, |d| d.to_lowercase().contains(&filter_lower));
+                    .is_some_and(|d| d.to_lowercase().contains(&filter_lower));
             if !matches {
                 continue;
             }

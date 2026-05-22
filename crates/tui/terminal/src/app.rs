@@ -147,13 +147,10 @@ async fn run_effects(
                     }
                 }
             }
-            Effect::RefreshState => match transport.poll_snapshot().await {
-                Ok(snapshot) => {
-                    update::update(model, AppEvent::PollSnapshot(snapshot));
-                }
-                Err(_) => {}
+            Effect::RefreshState => if let Ok(snapshot) = transport.poll_snapshot().await {
+                update::update(model, AppEvent::PollSnapshot(snapshot));
             },
-            Effect::SendThreadCommand { thread_id, command } => {
+            Effect::SendThreadCommand { thread_id, command: _ } => {
                 let req = crate::transport::DaemonRequest::CancelThread {
                     thread_id: *thread_id,
                 };

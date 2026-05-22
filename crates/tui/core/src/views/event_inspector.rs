@@ -30,25 +30,21 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
     }
 
     // Show recent events (newest first, bottom-anchored)
-    let mut row = 2;
-    let start = if count > h - 2 { count - (h - 2) } else { 0 };
+    let start = count.saturating_sub(h - 2);
 
-    for event in model.store.events.iter().skip(start) {
-        if row >= h {
+    for (row_idx, event) in (2..).zip(model.store.events.iter().skip(start)) {
+        if row_idx >= h {
             break;
         }
 
         // Type badge
-        surface.draw_text(1, row, &event.event_type, dim_style);
+        surface.draw_text(1, row_idx, &event.event_type, dim_style);
 
         // Timestamp
         let ts = format!("t={}", event.timestamp_ms % 100_000);
-        let _max_w = w.saturating_sub(event.event_type.len() + ts.len() + 5);
         if w > 30 {
-            surface.draw_text(w.saturating_sub(ts.len() + 1), row, &ts, muted_style);
+            surface.draw_text(w.saturating_sub(ts.len() + 1), row_idx, &ts, muted_style);
         }
-
-        row += 1;
     }
 
     if count == 0 && h > 3 {

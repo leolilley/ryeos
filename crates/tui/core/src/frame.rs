@@ -178,11 +178,7 @@ fn build_status_bar(model: &AppModel, width: usize) -> TextSurface {
 
     let daemon_url = &model.store.daemon.url;
     if !daemon_url.is_empty() {
-        let short_url = if daemon_url.starts_with("http://") {
-            &daemon_url[7..]
-        } else {
-            daemon_url
-        };
+        let short_url = daemon_url.strip_prefix("http://").unwrap_or(daemon_url);
         let max_url = 20.min(short_url.len());
         let url_display = &short_url[..max_url];
         surface.draw_text(x, 0, url_display, Style::new().fg(fg_dim).bg(bg));

@@ -21,7 +21,7 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
     surface.draw_text(0, 0, "Projects", header_style);
 
     let mut row = 2;
-    for (_, project) in &model.store.projects {
+    for project in model.store.projects.values() {
         if row >= h {
             break;
         }

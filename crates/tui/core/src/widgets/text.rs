@@ -111,8 +111,6 @@ pub fn format_cost(usd: f64) -> String {
         "$0".to_string()
     } else if usd < 0.01 {
         format!("${:.4}", usd)
-    } else if usd < 1.0 {
-        format!("${:.2}", usd)
     } else {
         format!("${:.2}", usd)
     }
