@@ -4,7 +4,10 @@ description: "Workflow: directives, graphs, knowledge, model providers, schedule
 requires_kinds:
   - config
   - handler
+  - knowledge
   - parser
   - runtime
   - service
   - tool
+uses_kinds:
+  - knowledge

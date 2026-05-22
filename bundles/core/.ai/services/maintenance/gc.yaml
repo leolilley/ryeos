@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-21T11:11:47Z:42498953542806cda92a080776bd040ee59197fceeb4cbb4bee6e9ea6b8c5f28:PDZXaM0/F4ZPoVYCyp5nQPrl1jxKYpCzTCc7rcqLNG6MMXPV53vfM8apGbpNRlpDueRnQGqyyfHNJO3HSTacDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T03:35:37Z:42498953542806cda92a080776bd040ee59197fceeb4cbb4bee6e9ea6b8c5f28:PDZXaM0/F4ZPoVYCyp5nQPrl1jxKYpCzTCc7rcqLNG6MMXPV53vfM8apGbpNRlpDueRnQGqyyfHNJO3HSTacDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: maintenance.gc
 required_caps: ["ryeos.execute.service.maintenance.gc"]

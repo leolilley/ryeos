@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T03:35:35Z:62e0d67ba5ab2118969765b49f5df0efe5382a95fc933da88c5d037a592f54e6:4clIsk3DxtXpX6UxZAwlhoZSj5VOiRguGt8xjIaBaaPxY5IceaQjDio1rJsS81fFa8F3klUDonRM2lDKdQmdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]

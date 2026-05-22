@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T03:35:36Z:617debe3f4e4bd7de361f63b9899ef8d02f8741d15bfe8344b36857f3d6a5e47:sNqKY81LQ/UMhUVIjQW4gWaSmzWfIN184DbYT4CVXkbuG0OUoKDeRvZxLSNWXl+Rdt0Xgj94trvmh/uNW1HbAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, streaming-tool, subprocess]

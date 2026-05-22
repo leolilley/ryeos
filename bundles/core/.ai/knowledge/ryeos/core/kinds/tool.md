@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T03:35:36Z:758919ffba7cf46a469f3b5ea0a530d1e70ba72419709efb1416c898e0b6284b:CPpQHV4Cm/qoA0dtMCKwcznX47qF+HPvc42S/ABfpWr39HBSIkIU+oQidN4mfa8aSpAGzpSwYkg7DpNmyK/RDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]

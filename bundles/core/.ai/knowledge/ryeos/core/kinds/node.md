@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T03:35:36Z:d0efff1602f944a0f6514319b9f2dad621766380c8dd8770a14af4b977eef36f:Q23MI+uJL3ELT1CkTey4Sb9HuuBgaf6hgdqlalOK5yNPq9OkWpWRkXmIM5zpKoaEceXpehSvGOrmLe2CUxqwCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, node, bootstrap]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-21T11:11:47Z:584e9f98d65e00f39ed5ea70238a25fbf6776f3172edd759b8e0321782796678:lf6htii5/WQV6nZL+i/TL66TFKh47+zlifPucH2tGQTGWjF8h3RyptsCNT4YcxI3j0vCUntZQiccxSNtx9iQCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T03:35:36Z:584e9f98d65e00f39ed5ea70238a25fbf6776f3172edd759b8e0321782796678:lf6htii5/WQV6nZL+i/TL66TFKh47+zlifPucH2tGQTGWjF8h3RyptsCNT4YcxI3j0vCUntZQiccxSNtx9iQCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: project.apply-snapshot
 required_caps: ["ryeos.execute.service.project.apply"]

@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T03:35:36Z:e1015ee2ba758c1e374f462b57c985144884002c0324a33abec8ea17623a621b:gQnmxKa7Y2BAK098ARztlbASFyqoF8VetKLulRidLczsTEmdSsaTQPcVwdVkG9APeQfuSUWcf7jpEUqGqWA7DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, compilation, compose, handlers, plan-builder]

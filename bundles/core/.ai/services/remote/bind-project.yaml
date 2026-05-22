@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-21T11:11:47Z:1e87af55b367926bd76cb5ecc1e7e1d2015ab68fd3bf2cd2743fb541ae5dd0b3:Zdx9Padz/kyavtIVJ+7bFG/g58DT50YagLGMpR7Bx/FE2J2jvatWkReffnmj3SW2dLi4Obg8LqrbFcbPvHtvCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T03:35:36Z:1e87af55b367926bd76cb5ecc1e7e1d2015ab68fd3bf2cd2743fb541ae5dd0b3:Zdx9Padz/kyavtIVJ+7bFG/g58DT50YagLGMpR7Bx/FE2J2jvatWkReffnmj3SW2dLi4Obg8LqrbFcbPvHtvCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.bind-project
 required_caps: ["ryeos.execute.service.remote.bind-project"]

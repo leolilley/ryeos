@@ -18,11 +18,16 @@ pub fn preflight_verify_bundle(
     system_space_dir: &Path,
     user_root: Option<&Path>,
 ) -> Result<()> {
-    // Runtime uses registered bundle paths under .ai/bundles/*, NOT
-    // system_space_dir itself. Generic bundle install verifies against
-    // the current installed set so new bundles can depend on already-
-    // installed bundles.
-    let installed_bundle_roots = discover_installed_bundle_roots(system_space_dir);
+    // Runtime uses signed bundle registrations under `.ai/node/bundles/*.yaml`,
+    // not raw `.ai/bundles/*` scans. Generic bundle install verifies against
+    // the current verified installed set so new bundles can depend on already-
+    // installed bundles without ambient unregistered state affecting preflight.
+    let installed_bundle_roots: Vec<PathBuf> =
+        crate::installed::load_installed_bundle_records(system_space_dir, user_root)
+            .context("preflight: load installed bundle registrations")?
+            .into_iter()
+            .map(|record| record.bundle_root)
+            .collect();
     preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, user_root)
 }
 
@@ -352,31 +357,6 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Enumerate installed bundle roots under `system_space_dir/.ai/bundles/`.
-/// Each immediate child directory that contains an `.ai/` subdirectory is
-/// treated as an installed bundle root (mirrors the daemon's Model B).
-/// Returns an empty Vec if the bundles directory doesn't exist or is empty —
-/// this is valid for a clean first-bundle install.
-fn discover_installed_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
-    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
-
-    let Ok(entries) = fs::read_dir(&bundles_dir) else {
-        return Vec::new();
-    };
-
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.is_dir() && path.join(ryeos_engine::AI_DIR).is_dir() {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,20 +545,6 @@ mod tests {
         assert!(
             verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok(),
             "no manifest should pass (optional)"
-        );
-    }
-
-    #[test]
-    fn installed_bundle_roots_discovers_immediate_installed_bundles() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bundles_dir = tmp.path().join(".ai/bundles");
-        std::fs::create_dir_all(bundles_dir.join("core/.ai")).unwrap();
-        std::fs::create_dir_all(bundles_dir.join("standard/.ai")).unwrap();
-
-        let roots = discover_installed_bundle_roots(tmp.path());
-        assert_eq!(
-            roots,
-            vec![bundles_dir.join("core"), bundles_dir.join("standard")]
         );
     }
 }

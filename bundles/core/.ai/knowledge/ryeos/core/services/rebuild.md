@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T03:35:35Z:7964f20dd51239204a828d6057bb546ea76a0d082296acd2adfd6234ccadbbb8:gRajYKV+f6Jcqf9czxFTf4TadXXXuRylzcnD71872ROdFhBzw15njy4rm+m8r8QBFHMa8P/rcnglpOjytT5CCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, rebuild, projection]

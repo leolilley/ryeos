@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-21T11:11:49Z:83fd94710f232641f596e09467fadfaf8ba7bb511aebc87b23b62b76dad2c785:BDsZrae3Jjs47iaQXOQjRYxcEUykTRmYQuxrb11ivudoGnQKjfvB3j/1YJJvTvOQFIobaeZigBGBnte6oidtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T03:35:37Z:83fd94710f232641f596e09467fadfaf8ba7bb511aebc87b23b62b76dad2c785:BDsZrae3Jjs47iaQXOQjRYxcEUykTRmYQuxrb11ivudoGnQKjfvB3j/1YJJvTvOQFIobaeZigBGBnte6oidtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, threads, execution, lifecycle]
 version: "1.0.0"

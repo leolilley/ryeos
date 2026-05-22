@@ -13,6 +13,8 @@ pub struct BundleManifestSource {
     pub description: String,
     #[serde(default)]
     pub requires_kinds: Vec<String>,
+    #[serde(default)]
+    pub uses_kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +27,8 @@ pub struct BundleManifest {
     pub provides_kinds: Vec<String>,
     #[serde(default)]
     pub requires_kinds: Vec<String>,
+    #[serde(default)]
+    pub uses_kinds: Vec<String>,
 }
 
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
@@ -73,6 +77,7 @@ pub fn materialize_manifest(
         description: source.description,
         provides_kinds,
         requires_kinds: source.requires_kinds,
+        uses_kinds: source.uses_kinds,
     })
 }
 
@@ -125,14 +130,17 @@ pub fn validate_manifest_dependencies(bundles: &[(String, PathBuf)]) -> Result<(
     let mut missing: Vec<(String, Vec<String>)> = Vec::new();
     for (name, mf) in &manifests {
         let Some(m) = mf else { continue };
-        let mut unsatisfied: Vec<String> = Vec::new();
-        for req in &m.requires_kinds {
+        let mut unsatisfied: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for req in m.requires_kinds.iter().chain(m.uses_kinds.iter()) {
+            if m.provides_kinds.contains(req) {
+                continue;
+            }
             if !all_provides.contains(req) {
-                unsatisfied.push(req.clone());
+                unsatisfied.insert(req.clone());
             }
         }
         if !unsatisfied.is_empty() {
-            missing.push((name.clone(), unsatisfied));
+            missing.push((name.clone(), unsatisfied.into_iter().collect()));
         }
     }
 
@@ -169,17 +177,22 @@ pub fn sort_bundles_by_dependency(bundles: &[(String, PathBuf)]) -> Result<Vec<(
 
     let manifests = parse_all_manifests(bundles)?;
 
-    // Build (name, requires_kinds, provides_kinds) for each bundle.
+    // Build (name, external_kinds, provides_kinds) for each bundle.
     // Bundles without manifests get empty deps (treated as leaf nodes).
     let mut bundle_deps: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
     for (name, mf) in &manifests {
         match mf {
             Some(m) => {
-                bundle_deps.push((
-                    name.clone(),
-                    m.requires_kinds.clone(),
-                    m.provides_kinds.clone(),
-                ));
+                let external_kinds: Vec<String> = m
+                    .requires_kinds
+                    .iter()
+                    .chain(m.uses_kinds.iter())
+                    .filter(|k| !m.provides_kinds.contains(k))
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                bundle_deps.push((name.clone(), external_kinds, m.provides_kinds.clone()));
             }
             None => {
                 bundle_deps.push((name.clone(), Vec::new(), Vec::new()));
@@ -347,6 +360,11 @@ mod tests {
         assert!(mf.provides_kinds.contains(&"runtime".to_string()));
         assert!(mf.provides_kinds.contains(&"service".to_string()));
         assert!(mf.provides_kinds.contains(&"tool".to_string()));
+        assert!(
+            mf.provides_kinds.contains(&"knowledge".to_string()),
+            "core must provide knowledge after schema move: {:?}",
+            mf.provides_kinds
+        );
         assert!(mf.requires_kinds.is_empty(), "core should have no requires");
     }
 
@@ -358,7 +376,14 @@ mod tests {
         assert_eq!(mf.name, "standard");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
-        assert!(mf.provides_kinds.contains(&"knowledge".to_string()));
+        assert!(
+            !mf.provides_kinds.contains(&"knowledge".to_string()),
+            "standard must not provide knowledge after move"
+        );
+        assert!(
+            mf.uses_kinds.contains(&"knowledge".to_string()),
+            "standard must use knowledge from core"
+        );
         assert!(
             mf.requires_kinds.contains(&"config".to_string()),
             "standard requires config from core"
@@ -552,6 +577,10 @@ typo_field: oops
             !kinds.contains(&"directive".to_string()),
             "directive is a standard kind, not core: {kinds:?}"
         );
+        assert!(
+            kinds.contains(&"knowledge".to_string()),
+            "core must provide knowledge after schema move: {kinds:?}"
+        );
     }
 
     #[test]
@@ -567,8 +596,8 @@ typo_field: oops
             "standard must provide graph: {kinds:?}"
         );
         assert!(
-            kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge: {kinds:?}"
+            !kinds.contains(&"knowledge".to_string()),
+            "knowledge must NOT be in standard's provides_kinds after move: {kinds:?}"
         );
     }
 
@@ -596,6 +625,7 @@ typo_field: oops
             version: "1.0".to_string(),
             description: "test".to_string(),
             requires_kinds: vec![],
+            uses_kinds: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

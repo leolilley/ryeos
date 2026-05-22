@@ -40,7 +40,6 @@
 //! lack a `.ai/` subdirectory, are silently skipped. Hidden directories
 //! (starting with `.`) are also skipped.
 
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -229,27 +228,47 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         "discovered bundles"
     );
 
-    // ── 6b. Validate bundle manifest dependencies ──
-    validate_manifest_dependencies(&discovered).context("bundle manifest dependency check")?;
-
-    // ── 6c. Sort bundles by dependency order ──
-    // Ensures bundles providing kinds (e.g. core) are installed before
-    // bundles requiring them (e.g. standard), so preflight verification
-    // can resolve parsers and kind schemas from already-installed bundles.
-    let discovered =
-        sort_bundles_by_dependency(&discovered).context("bundle dependency ordering")?;
+    // ── 6b. Build source bundle plan ──
+    // Planning is always performed, even when `skip_preflight` is true: the
+    // flag skips verification jobs only, not manifest policy, ordering,
+    // duplicate-provider checks, or cycle checks.
+    let candidates: Vec<PlanInput> = discovered
+        .iter()
+        .map(|(name, source_path)| PlanInput {
+            name: name.clone(),
+            source: BundleSource::SourceDir(source_path.clone()),
+        })
+        .collect();
+    let plan = build_plan(BundlePlanMode::InitSourceSet, &candidates, &[])
+        .context("bundle source-set planning")?;
     tracing::info!(
-        order = ?discovered.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+        order = ?plan.install_order,
         "installation order determined"
     );
 
     if !opts.skip_preflight {
-        preflight_discovered_source_bundles(&discovered, opts.user_root.as_path())?;
+        for job in &plan.verification_jobs {
+            ryeos_bundle::preflight::preflight_verify_bundle_in_context(
+                &job.subject_root,
+                &job.dependency_roots,
+                Some(opts.user_root.as_path()),
+            )
+            .with_context(|| {
+                format!("verify {} source against pinned publisher key", job.subject)
+            })?;
+        }
     }
 
     // ── 7. Install each bundle (atomic stage → swap) ──
     let mut bundles_installed = Vec::new();
-    for (name, source_path) in &discovered {
+    for name in &plan.install_order {
+        let planned = plan
+            .bundles
+            .get(name)
+            .with_context(|| format!("planned bundle {}", name))?;
+        let BundleSource::SourceDir(source_path) = &planned.source else {
+            bail!("init source-set plan unexpectedly included installed bundle {name}");
+        };
         let target = opts
             .system_space_dir
             .join(ryeos_engine::AI_DIR)
@@ -269,13 +288,16 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 )
             })?;
 
-            ensure_node_bundle_registration(
-                &opts.system_space_dir,
-                name,
-                &target.canonicalize()?,
-                &node_key,
-            )
-            .with_context(|| format!("verify/recreate node/bundles/{}.yaml", name))?;
+            // Re-write the signed registration unconditionally. This keeps init
+            // aligned with the installed-registration loader's structured,
+            // fail-closed semantics instead of preserving malformed-but-signed
+            // legacy records.
+            let node_dir = opts
+                .system_space_dir
+                .join(ryeos_engine::AI_DIR)
+                .join("node");
+            write_node_bundle_registration(&node_dir, name, &target.canonicalize()?, &node_key)
+                .with_context(|| format!("rewrite node/bundles/{}.yaml", name))?;
         } else {
             install_bundle(
                 &opts.system_space_dir,
@@ -454,113 +476,7 @@ pub use ryeos_bundle::manifest::{
     derive_provides_kinds, materialize_manifest, parse_manifest, sort_bundles_by_dependency,
     validate_manifest_dependencies, BundleManifest, BundleManifestSource,
 };
-
-fn preflight_discovered_source_bundles(
-    discovered: &[(String, PathBuf)],
-    user_root: &Path,
-) -> Result<()> {
-    let mut manifests: HashMap<String, Option<BundleManifest>> = HashMap::new();
-    let mut providers_by_kind: HashMap<String, Vec<String>> = HashMap::new();
-
-    for (name, source_path) in discovered {
-        let manifest = parse_manifest(source_path, name)
-            .with_context(|| format!("parse manifest for bundle {}", name))?;
-        if let Some(manifest) = &manifest {
-            for kind in &manifest.provides_kinds {
-                providers_by_kind
-                    .entry(kind.clone())
-                    .or_default()
-                    .push(name.clone());
-            }
-        }
-        manifests.insert(name.clone(), manifest);
-    }
-
-    for providers in providers_by_kind.values_mut() {
-        providers.sort();
-    }
-
-    for (name, source_path) in discovered {
-        let mut dependency_names = HashSet::new();
-        collect_source_bundle_dependencies(
-            name,
-            &manifests,
-            &providers_by_kind,
-            &mut dependency_names,
-            &mut Vec::new(),
-        )?;
-        let dependency_roots: Vec<PathBuf> = discovered
-            .iter()
-            .filter(|(dep_name, _)| dependency_names.contains(dep_name))
-            .map(|(_, dep_path)| dep_path.clone())
-            .collect();
-
-        ryeos_bundle::preflight::preflight_verify_bundle_in_context(
-            source_path,
-            &dependency_roots,
-            Some(user_root),
-        )
-        .with_context(|| format!("verify {} source against pinned publisher key", name))?;
-    }
-
-    Ok(())
-}
-
-fn collect_source_bundle_dependencies(
-    name: &str,
-    manifests: &HashMap<String, Option<BundleManifest>>,
-    providers_by_kind: &HashMap<String, Vec<String>>,
-    out: &mut HashSet<String>,
-    stack: &mut Vec<String>,
-) -> Result<()> {
-    if stack.iter().any(|n| n == name) {
-        bail!(
-            "bundle dependency cycle detected: {} -> {name}",
-            stack.join(" -> ")
-        );
-    }
-    stack.push(name.to_string());
-
-    let Some(Some(manifest)) = manifests.get(name) else {
-        stack.pop();
-        return Ok(());
-    };
-
-    for required_kind in &manifest.requires_kinds {
-        let providers = providers_by_kind
-            .get(required_kind)
-            .cloned()
-            .unwrap_or_default();
-        match providers.as_slice() {
-            [] => bail!(
-                "bundle '{}' requires kind '{}' but no source bundle provides it",
-                name,
-                required_kind
-            ),
-            [provider] if provider == name => {}
-            [provider] => {
-                if out.insert(provider.clone()) {
-                    collect_source_bundle_dependencies(
-                        provider,
-                        manifests,
-                        providers_by_kind,
-                        out,
-                        stack,
-                    )?;
-                }
-            }
-            many => bail!(
-                "bundle '{}' requires kind '{}' but multiple source bundles provide it: {}",
-                name,
-                required_kind,
-                many.join(", ")
-            ),
-        }
-    }
-
-    stack.pop();
-    Ok(())
-}
+use ryeos_bundle::plan::{build_plan, BundlePlanMode, BundleSource, PlanInput};
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
 /// guaranteeing the fingerprint matches [`OFFICIAL_PUBLISHER_FP`].
@@ -833,96 +749,6 @@ fn write_node_bundle_registration(
     Ok(())
 }
 
-/// Ensure a node bundle registration record exists and is valid.
-///
-/// - If missing → write + sign it (idempotent repair).
-/// - If present and signature-valid with correct path → no-op.
-/// - If present but signed by a different key (e.g. after node-key rotation)
-///   → re-write with current key.
-/// - If present but invalid (broken signature, mismatched path) → hard fail.
-fn ensure_node_bundle_registration(
-    system_space_dir: &Path,
-    name: &str,
-    bundle_path: &Path,
-    node_key: &SigningKey,
-) -> Result<()> {
-    let reg_path = system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("bundles")
-        .join(format!("{name}.yaml"));
-
-    if !reg_path.exists() {
-        // Missing — write a fresh registration.
-        let node_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("node");
-        write_node_bundle_registration(&node_dir, name, bundle_path, node_key)?;
-        return Ok(());
-    }
-
-    // Existing record — verify signature and content.
-    let content =
-        fs::read_to_string(&reg_path).with_context(|| format!("read {}", reg_path.display()))?;
-
-    let node_vk = node_key.verifying_key();
-    let node_fp = compute_fingerprint(&node_vk);
-
-    let sig_header =
-        lillux::signature::parse_signature_line(content.lines().next().unwrap_or(""), "#", None)
-            .ok_or_else(|| {
-                anyhow!(
-                    "node bundle registration {} has no valid signature line",
-                    reg_path.display()
-                )
-            })?;
-
-    let body = lillux::signature::strip_signature_lines(&content);
-    let actual_hash = lillux::signature::content_hash(&body);
-    if actual_hash != sig_header.content_hash {
-        bail!(
-            "node bundle registration {} has corrupted content (hash mismatch)",
-            reg_path.display()
-        );
-    }
-
-    // If signed by a different key (e.g. after node-key rotation),
-    // re-write with the current key.
-    if sig_header.signer_fingerprint != node_fp {
-        tracing::info!(
-            name,
-            old_signer = %sig_header.signer_fingerprint,
-            new_signer = %node_fp,
-            "re-signing bundle registration after node-key change"
-        );
-        let node_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("node");
-        write_node_bundle_registration(&node_dir, name, bundle_path, node_key)?;
-        return Ok(());
-    }
-
-    if !lillux::signature::verify_signature(
-        &sig_header.content_hash,
-        &sig_header.signature_b64,
-        &node_vk,
-    ) {
-        bail!(
-            "node bundle registration {} has invalid Ed25519 signature",
-            reg_path.display()
-        );
-    }
-
-    // Signature valid — check the path field matches.
-    if !body.contains(&format!("path: {}", bundle_path.display())) {
-        bail!(
-            "node bundle registration {} references wrong path — \
-             expected {} but record contains a different path. \
-             Wipe and re-init to repair",
-            reg_path.display(),
-            bundle_path.display()
-        );
-    }
-
-    Ok(())
-}
-
 /// Recursive directory copy with symlink preservation (Unix only).
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
@@ -1191,6 +1017,11 @@ mod tests {
         assert!(mf.provides_kinds.contains(&"runtime".to_string()));
         assert!(mf.provides_kinds.contains(&"service".to_string()));
         assert!(mf.provides_kinds.contains(&"tool".to_string()));
+        assert!(
+            mf.provides_kinds.contains(&"knowledge".to_string()),
+            "core must provide knowledge after schema move: {:?}",
+            mf.provides_kinds
+        );
         assert!(mf.requires_kinds.is_empty(), "core should have no requires");
     }
 
@@ -1202,7 +1033,14 @@ mod tests {
         assert_eq!(mf.name, "standard");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
-        assert!(mf.provides_kinds.contains(&"knowledge".to_string()));
+        assert!(
+            !mf.provides_kinds.contains(&"knowledge".to_string()),
+            "standard must not provide knowledge after move"
+        );
+        assert!(
+            mf.uses_kinds.contains(&"knowledge".to_string()),
+            "standard must use knowledge from core"
+        );
         assert!(
             mf.requires_kinds.contains(&"config".to_string()),
             "standard requires config from core"
@@ -1485,6 +1323,10 @@ typo_field: oops
             !kinds.contains(&"directive".to_string()),
             "directive is a standard kind, not core: {kinds:?}"
         );
+        assert!(
+            kinds.contains(&"knowledge".to_string()),
+            "core must provide knowledge after schema move: {kinds:?}"
+        );
     }
 
     #[test]
@@ -1500,8 +1342,8 @@ typo_field: oops
             "standard must provide graph: {kinds:?}"
         );
         assert!(
-            kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge: {kinds:?}"
+            !kinds.contains(&"knowledge".to_string()),
+            "knowledge must NOT be in standard's provides_kinds after move: {kinds:?}"
         );
     }
 
@@ -1529,6 +1371,7 @@ typo_field: oops
             version: "1.0".to_string(),
             description: "test".to_string(),
             requires_kinds: vec![],
+            uses_kinds: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

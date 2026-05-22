@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T03:35:36Z:7050dc3db5de7526487c4b762f571cc9ef88dbb1affbbebd4161dc881d47a262:YEnErwghmzyU915NbwPnD/ZJnEuoBx/BDtcG7lbda7IBEIuFAzdrmanlNGs4EGswpVfC1yMXiJCEmyJLg/TiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, cli, verbs, aliases]
