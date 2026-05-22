@@ -130,6 +130,8 @@ pub struct ConditionalEdge {
 struct GraphFile {
     version: String,
     category: String,
+    #[serde(default)]
+    description: Option<String>,
     config: GraphConfig,
     #[serde(default)]
     permissions: Vec<String>,
