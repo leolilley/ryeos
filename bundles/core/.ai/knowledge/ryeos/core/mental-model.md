@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-05-22T07:21:23Z:330f1d4e1b29c0a8b14b09d855ba88979b5911d55cf4e35835b722c579499175:dYMD//cy0gpuJXvDjWxMYnNbEoth6qyaKyDP9RxUAQLewRfzrb/qxJ8Jd7BWof49bq7fUyWsePo/dwVxd5Y2BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, architecture, overview]

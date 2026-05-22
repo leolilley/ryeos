@@ -229,6 +229,25 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         "discovered bundles"
     );
 
+    // ── 6a. Auto-pin trust docs from discovered bundles ──
+    // Each bundle root may contain a PUBLISHER_TRUST.toml placed by the
+    // publisher. Pinning these automatically means `ryeos init` works
+    // without `--trust-file` in both packaged installs (official key
+    // hardcoded above) and dev/source installs (dev trust doc discovered
+    // from the bundle root).
+    for (name, source_path) in &discovered {
+        let trust_doc = source_path.join("PUBLISHER_TRUST.toml");
+        if trust_doc.exists() {
+            pin_trust_file(&trust_doc, &trust_dir).with_context(|| {
+                format!(
+                    "auto-pin trust doc from bundle {} at {}",
+                    name,
+                    trust_doc.display()
+                )
+            })?;
+        }
+    }
+
     // ── 6b. Build source bundle plan ──
     // Planning is always performed, even when `skip_preflight` is true: the
     // flag skips verification jobs only, not manifest policy, ordering,
@@ -612,9 +631,9 @@ fn verify_bundle_structure(target: &Path) -> Result<()> {
 /// 1. Copies source to a staging directory
 /// 2. Moves old bundle to `.backup.prev`
 /// 3. Moves staging to final location
+/// 4. Cleans up `.backup.prev` (only needed for rollback during step 3)
 ///
 /// If step 3 fails, the old bundle is still at `.backup.prev` for recovery.
-/// One previous generation is kept for rollback; older backups are cleaned up.
 fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
     let parent = target
         .parent()
@@ -651,6 +670,13 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
     // 3. Move staging to final
     fs::rename(&staging, target)
         .with_context(|| format!("swap {} -> {}", staging.display(), target.display()))?;
+
+    // 4. Clean up backup — only needed for rollback during step 3,
+    //    which has now succeeded. Leaving it around causes the CLI
+    //    dispatcher and help scanners to pick up stale aliases.
+    if backup.exists() {
+        let _ = fs::remove_dir_all(&backup);
+    }
 
     Ok(())
 }
@@ -919,6 +945,51 @@ mod tests {
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
         assert_eq!(r1.node_key_fingerprint, r2.node_key_fingerprint);
         assert_eq!(r1.bundles_installed, r2.bundles_installed);
+    }
+
+    #[test]
+    fn run_init_auto_pins_bundle_trust_docs() {
+        // Init without --trust-file should still work when bundles ship
+        // PUBLISHER_TRUST.toml at their root (the dev case).
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = InitOptions {
+            system_space_dir: state.to_path_buf(),
+            user_root: user.to_path_buf(),
+            source_dir: workspace_root().join("bundles"),
+            trust_files: vec![], // no explicit trust file — rely on auto-discovery
+            skip_preflight: true,
+        };
+        let report = run_init(&opts).expect("init without --trust-file");
+        assert!(
+            !report.bundles_installed.is_empty(),
+            "bundles should install"
+        );
+
+        // Every discovered bundle that ships a PUBLISHER_TRUST.toml must
+        // have its publisher key auto-pinned into the trust store.
+        let trust_dir = user.join(".ai/config/keys/trusted");
+        for bundle_name in &report.bundles_installed {
+            let trust_doc = workspace_root()
+                .join("bundles")
+                .join(bundle_name)
+                .join("PUBLISHER_TRUST.toml");
+            if !trust_doc.exists() {
+                continue;
+            }
+            let content = fs::read_to_string(&trust_doc)
+                .with_context(|| format!("read {}", trust_doc.display()))
+                .unwrap();
+            let doc = ryeos_engine::trust::PublisherTrustDoc::parse(&content).unwrap();
+            let pinned = trust_dir.join(format!("{}.toml", doc.fingerprint));
+            assert!(
+                pinned.exists(),
+                "bundle '{}' publisher key should be auto-pinned at {}",
+                bundle_name,
+                pinned.display()
+            );
+        }
     }
 
     #[test]

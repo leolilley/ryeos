@@ -337,12 +337,12 @@ fn source_ai_root(
         SignSource::Project => {
             let p =
                 project_path.ok_or_else(|| anyhow!("source=project requires --project path"))?;
-            Ok(p.join(".ai"))
+            Ok(p.join(ryeos_engine::AI_DIR))
         }
         SignSource::User => {
             let h =
                 user_root.ok_or_else(|| anyhow!("source=user but $HOME (user root) is not set"))?;
-            Ok(h.join(".ai"))
+            Ok(h.join(ryeos_engine::AI_DIR))
         }
     }
 }
@@ -392,7 +392,7 @@ fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Re
     // items use, so this loader scans only system bundle roots.
     let mut search = Vec::new();
     for r in system_roots {
-        let p = r.join(".ai/node/engine/kinds");
+        let p = r.join(ryeos_engine::AI_DIR).join("node/engine/kinds");
         if p.exists() {
             search.push(p);
         }
@@ -480,8 +480,15 @@ pub struct SignatureReport {
 }
 
 fn load_user_signing_key() -> Result<SigningKey> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let path = Path::new(&home).join(".ai/config/keys/signing/private_key.pem");
+    let user_root = roots::user_root()
+        .ok()
+        .context("cannot resolve user root (set USER_SPACE or ensure $HOME is discoverable)")?;
+    let path = user_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config")
+        .join("keys")
+        .join("signing")
+        .join("private_key.pem");
 
     let pem = fs::read_to_string(&path)
         .with_context(|| format!("read signing key from {}", path.display()))?;

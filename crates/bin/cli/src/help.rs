@@ -39,35 +39,6 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
         "status", "Show local node lifecycle status"
     )?;
     writeln!(out)?;
-    writeln!(out, "LOCAL TOOLS (no daemon required):")?;
-    writeln!(
-        out,
-        "  {:<30} {}",
-        "authorize-key", "Authorize a public key to call the daemon"
-    )?;
-    writeln!(
-        out,
-        "  {:<30} {}",
-        "trust pin --from <trust.toml>", "Pin a publisher key from PUBLISHER_TRUST.toml"
-    )?;
-    writeln!(
-        out,
-        "  {:<30} {}",
-        "publish <src>", "Sign and publish a bundle"
-    )?;
-    writeln!(
-        out,
-        "  {:<30} {}",
-        "vault put --name K", "Add a secret to the sealed secret store"
-    )?;
-    writeln!(out, "  {:<30} {}", "vault list", "List sealed secret keys")?;
-    writeln!(
-        out,
-        "  {:<30} {}",
-        "vault remove <K>...", "Remove sealed secret keys"
-    )?;
-    writeln!(out, "  {:<30} {}", "vault rewrap", "Rotate vault keypair")?;
-    writeln!(out)?;
     writeln!(out, "UNIVERSAL ESCAPE HATCH:")?;
     writeln!(
         out,
@@ -148,6 +119,15 @@ fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String
     };
 
     for bundle_entry in bundle_entries.flatten() {
+        let name = bundle_entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip non-bundle artifacts: hidden dirs (e.g. .staging),
+        // backup dirs (e.g. core.backup.prev), and staging dirs.
+        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
+            continue;
+        }
+
         let aliases_dir = bundle_entry.path().join(".ai").join("node").join("aliases");
         if !aliases_dir.is_dir() {
             continue;
@@ -318,76 +298,6 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(
                 out,
                 "USAGE: ryeos stop [--force] [--system-space-dir <DIR>]"
-            )?;
-        }
-        Some("authorize-key") => {
-            writeln!(
-                out,
-                "ryeos authorize-key — Authorize a public key to call the daemon"
-            )?;
-            writeln!(out)?;
-            writeln!(
-                out,
-                "USAGE: ryeos authorize-key --public-key <KEY> [OPTIONS]"
-            )?;
-            writeln!(out)?;
-            writeln!(out, "OPTIONS:")?;
-            writeln!(
-                out,
-                "  --public-key <KEY>  Ed25519 public key in 'ed25519:<base64>' format (required)"
-            )?;
-            writeln!(
-                out,
-                "  --label <LABEL>     Human-readable label (default: cli-authorized)"
-            )?;
-            writeln!(
-                out,
-                "  --scopes <SCOPES>   Comma-separated capabilities in canonical form"
-            )?;
-            writeln!(
-                out,
-                "                      ryeos.<verb>.<kind>.<subject> (required)"
-            )?;
-            writeln!(
-                out,
-                "                      e.g. ryeos.execute.service.remote.admin"
-            )?;
-            writeln!(
-                out,
-                "  --allow-wildcard    Allow wildcard scope '*' (bootstrap only)"
-            )?;
-            writeln!(out, "  --system-space-dir  System space root")?;
-        }
-        Some("trust") => {
-            writeln!(out, "ryeos trust pin — Pin a publisher key")?;
-            writeln!(out)?;
-            writeln!(out, "USAGE:")?;
-            writeln!(out, "  ryeos trust pin --from <trust.toml>")?;
-            writeln!(out, "  ryeos trust pin <fingerprint> --pubkey-file <file>")?;
-        }
-        Some("vault") => {
-            writeln!(out, "ryeos vault — Manage sealed secrets")?;
-            writeln!(out)?;
-            writeln!(out, "COMMANDS:")?;
-            writeln!(
-                out,
-                "  vault put --name <KEY>              Add a secret (reads value from stdin)"
-            )?;
-            writeln!(
-                out,
-                "  vault put --name <KEY> --value-string <VAL>  (insecure, for scripts)"
-            )?;
-            writeln!(
-                out,
-                "  vault list                           List sealed secret keys"
-            )?;
-            writeln!(
-                out,
-                "  vault remove <KEY>...                Remove sealed secret keys"
-            )?;
-            writeln!(
-                out,
-                "  vault rewrap                         Rotate vault keypair"
             )?;
         }
         Some("execute") => {

@@ -32,7 +32,6 @@ ryeos-engine   = { path = "../../core/engine" }
 ryeos-node     = { path = "../../core/node" }
 ryeos-runtime  = { path = "../../core/runtime" }
 ryeos-state    = { path = "../../core/state" }
-ryeos-tools    = { path = "../../tools/core-tools" }
 
 [dev-dependencies]
 tempfile = "3"

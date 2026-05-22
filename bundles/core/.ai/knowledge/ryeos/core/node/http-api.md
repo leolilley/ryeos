@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-05-22T07:21:24Z:775130bfb168c17959705bfa33d3dacfc803be1043c92aa277d483edc7eea6a6:2ZbvTaYGA+wYSY72COmx/4WD5G8aBHEgT/qc02n+Z3nt6Qe/2UiZWZDGg5Pt4hzqh8YBfXtfWacx0ovF18UoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]

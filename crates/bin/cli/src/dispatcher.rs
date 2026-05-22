@@ -281,6 +281,15 @@ fn load_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<AliasDef> {
         return out;
     };
     for bundle_entry in bundle_entries.flatten() {
+        let name = bundle_entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip non-bundle artifacts: hidden dirs (e.g. .staging),
+        // backup dirs (e.g. core.backup.prev), and staging dirs.
+        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
+            continue;
+        }
+
         let aliases_dir = bundle_entry.path().join(".ai/node/aliases");
         let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
             continue;

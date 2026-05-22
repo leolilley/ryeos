@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T15:53:35Z:6309e5e05bbe11baf49c4deb18e9217593485f2da1a319c6d0d8c91ef9e56ec7:fXwJ4xAKThpH4V4D9+CeV8mVd28IOAwv8VDOSO4Oyg2bkQdC6lOG55lYQnwILNBq7seTPL5xsxNfp7H/tZItAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: "ryeos/operations"
 name: "iterating-on-local-package"

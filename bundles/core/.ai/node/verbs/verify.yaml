@@ -1,6 +1,6 @@
-# ryeos:signed:2026-05-22T07:21:25Z:764a941959ed1378b3f7364a9753caf6dc86d650fe04ea2e939f9889e4ef6ae2:FYf8ruAfQ1LQsHn3r+67jUbCfQEXP0AHz8zOBpcEWLgyTrA03Gg+hR79Wr0MbyUftFVKHOJ74onVImgBCdcUDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T16:29:31Z:86ee8cb2a6c89530b894be07c3dd29433d0dbe5c21229b6fbfcc209eb4d94ce5:1nZ4KhHiyrZZEAIL47e/AZDi6RxZxKosoQWrChzhS3gpOwOYOemUFOJ9y0ZoND9JxL2hiCrpmsdXQcf/obvbCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "verbs"
 section: verbs
 name: verify
 description: "Verify an item's signature chain"
-execute: service:verify
+execute: tool:ryeos/core/verify
