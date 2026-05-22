@@ -13,6 +13,7 @@ use crate::routes::invocation::{
     RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_app::event_store_service::EventReplayParams;
+use ryeos_runtime::authorizer::AuthorizationPolicy;
 
 use super::stream_helpers::*;
 
@@ -62,6 +63,35 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                     req.item_ref, e
                 ))
             })?;
+
+        // Capability check: derive the required cap from the item_ref
+        // (e.g. "directive:apps/tv-tracker/ai_chat" →
+        //  "ryeos.execute.directive.apps/tv-tracker/ai_chat") and check
+        // via the unified Authorizer. Supports fine-grained scopes and
+        // wildcards.
+        {
+            let principal = ctx
+                .principal
+                .as_ref()
+                .ok_or(RouteDispatchError::Unauthorized)?;
+            let subject = req.item_ref
+                .split_once(':')
+                .map(|(_, s)| s)
+                .unwrap_or(&req.item_ref);
+            let required_cap = ryeos_runtime::authorizer::canonical_cap(
+                item_ref.kind(),
+                subject,
+                "execute",
+            );
+            let policy = AuthorizationPolicy::require(&required_cap);
+            ctx.state
+                .authorizer
+                .authorize(&principal.scopes, &policy)
+                .map_err(|_| RouteDispatchError::Forbidden(format!(
+                    "missing required capability: {}",
+                    required_cap
+                )))?;
+        }
 
         let project_path =
             crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path)

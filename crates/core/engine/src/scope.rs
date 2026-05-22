@@ -1,28 +1,37 @@
 //! Scope enforcement — checks whether a principal has permission to execute.
 //!
-//! The engine checks scopes during `build_plan`. Scopes are plain strings;
-//! the engine never interprets their contents beyond two checks:
+//! The engine checks scopes during `build_plan`. Scopes are plain strings.
 //!
-//! - `"*"` is the wildcard scope (grants everything)
-//! - `"execute"` is the minimum scope required to run items
+//! A principal is authorised to execute if any of their scopes satisfy
+//! **at least one** of:
+//!
+//! - `"*"` — the global wildcard
+//! - `"execute"` — legacy bare scope
+//! - `"ryeos.execute.*"` or any `ryeos.execute.<kind>.<subject>` —
+//!   capability-style scopes granted by `authorize-key`
 //!
 //! Fail-closed: missing scopes = denied.
 
 use crate::contracts::EffectivePrincipal;
 use crate::error::EngineError;
 
-/// The scope string required for item execution.
+/// The legacy scope string required for item execution.
 const EXECUTE_SCOPE: &str = "execute";
 
 /// The wildcard scope that grants all permissions.
 const WILDCARD_SCOPE: &str = "*";
+
+/// Prefix for capability-style execute scopes.
+const RYEOS_EXECUTE_PREFIX: &str = "ryeos.execute.";
 
 /// Check that the principal has permission to execute an item.
 ///
 /// For `Local` principals, checks `scopes`.
 /// For `Delegated` principals, checks `delegated_scopes`.
 ///
-/// Returns `Ok(())` if the principal has either `"*"` or `"execute"`.
+/// Returns `Ok(())` if the principal has any scope that implies
+/// execute permission: `"*"`, `"execute"`, or `"ryeos.execute.*"` /
+/// `"ryeos.execute.<kind>.<subject>"`.
 /// Returns `EngineError::InsufficientScope` otherwise.
 pub fn check_execution_scope(principal: &EffectivePrincipal) -> Result<(), EngineError> {
     let scopes = match principal {
@@ -30,9 +39,11 @@ pub fn check_execution_scope(principal: &EffectivePrincipal) -> Result<(), Engin
         EffectivePrincipal::Delegated(d) => &d.delegated_scopes,
     };
 
-    let has_permission = scopes
-        .iter()
-        .any(|s| s == WILDCARD_SCOPE || s == EXECUTE_SCOPE);
+    let has_permission = scopes.iter().any(|s| {
+        s == WILDCARD_SCOPE
+            || s == EXECUTE_SCOPE
+            || s.starts_with(RYEOS_EXECUTE_PREFIX)
+    });
 
     if has_permission {
         Ok(())
@@ -139,6 +150,28 @@ mod tests {
         assert!(
             matches!(err, EngineError::InsufficientScope { .. }),
             "expected InsufficientScope, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn local_with_ryeos_execute_wildcard() {
+        assert!(check_execution_scope(&local_principal(vec!["ryeos.execute.*"])).is_ok());
+    }
+
+    #[test]
+    fn local_with_ryeos_execute_specific() {
+        assert!(check_execution_scope(&local_principal(vec![
+            "ryeos.execute.tool.ryeos/bash/bash"
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn local_with_ryeos_fetch_denied() {
+        let err = check_execution_scope(&local_principal(vec!["ryeos.fetch.*"])).unwrap_err();
+        assert!(
+            matches!(err, EngineError::InsufficientScope { .. }),
+            "expected InsufficientScope for non-execute ryeos scope, got: {err:?}"
         );
     }
 }
