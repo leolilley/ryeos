@@ -732,13 +732,14 @@ pub(crate) async fn dispatch_op(
     let single_root = project_single_root(&resolution_output)?;
 
     // 5. Build the envelope payload: merge root + inputs.
+    //    The op-declared inputs are nested under an `inputs` key so
+    //    the runtime binary can deserialize them into its typed struct
+    //    (e.g. `ComposePayload { root: SingleRootPayload, inputs: ComposeInputs }`).
     let op_name = &op_decl.name;
     let mut payload =
         serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?;
     if let Value::Object(ref mut map) = payload {
-        if let Value::Object(inputs) = validated_inputs {
-            map.extend(inputs);
-        }
+        map.insert("inputs".to_string(), validated_inputs);
     }
 
     // 6. Mint thread record + callback token.
