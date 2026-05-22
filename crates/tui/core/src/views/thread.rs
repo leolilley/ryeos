@@ -57,7 +57,7 @@ fn build_empty_thread(surface: &mut TextSurface, _w: usize, h: usize) {
 fn build_thread_content(
     surface: &mut TextSurface,
     thread: &crate::store::ThreadModel,
-    _model: &AppModel,
+    model: &AppModel,
     w: usize,
     h: usize,
 ) {
@@ -67,31 +67,46 @@ fn build_thread_content(
     let green = Style::new().fg(theme::GREEN).bg(theme::BG);
     let yellow = Style::new().fg(theme::YELLOW).bg(theme::BG);
     let red = Style::new().fg(theme::RED).bg(theme::BG);
+    let blue = Style::new().fg(theme::BLUE).bg(theme::BG);
     let muted = Style::new().fg(theme::FG_MUTED).bg(theme::BG);
+    let bg = theme::BG;
+
+    // Get expanded turns from tile state
+    let expanded_turns = model
+        .workspace
+        .tiles
+        .get(&model.workspace.focused_tile)
+        .and_then(|t| match &t.local {
+            crate::workspace::ViewLocalState::Thread(state) => {
+                Some(state.expanded_turns.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
 
     let mut row = 0;
 
     // Status header
     let (status_text, status_style) = match thread.status {
-        ThreadStatus::Running => ("running", yellow),
-        ThreadStatus::Completed => ("completed", green),
-        ThreadStatus::Failed => ("failed", red),
-        ThreadStatus::Created => ("queued", muted),
-        _ => ("unknown", dim),
+        ThreadStatus::Running => ("● running", yellow),
+        ThreadStatus::Completed => ("✓ completed", green),
+        ThreadStatus::Failed => ("✗ failed", red),
+        ThreadStatus::Created => ("○ queued", muted),
+        ThreadStatus::Cancelled => ("✗ cancelled", dim),
+        ThreadStatus::TimedOut => ("⏱ timed out", yellow),
+        _ => ("? unknown", dim),
     };
 
     let item_ref = thread.item_ref.as_deref().unwrap_or("thread");
-    let header = format!("{} — {}", item_ref, status_text);
+    let header = format!("{} {}", status_text, item_ref);
     surface.draw_text(0, row, &header, status_style);
 
     // Usage on right side
     let usage = &thread.usage;
-    let usage_text = format!(
-        "{}.{:.1}k tok · ${:.2}",
-        usage.input_tokens / 1000,
-        (usage.output_tokens as f64 / 1000.0),
-        usage.spend_usd
-    );
+    let in_tok = crate::widgets::text::format_token_count(usage.input_tokens);
+    let out_tok = crate::widgets::text::format_token_count(usage.output_tokens);
+    let cost = crate::widgets::text::format_cost(usage.spend_usd);
+    let usage_text = format!("{}in/{}out · {}", in_tok, out_tok, cost);
     if w > usage_text.len() + header.len() + 2 {
         surface.draw_text(
             w.saturating_sub(usage_text.len() + 1),
@@ -99,6 +114,11 @@ fn build_thread_content(
             &usage_text,
             dim,
         );
+    }
+
+    // Duration (shown in status bar area)
+    if thread.started_at_ms.is_some() {
+        // Duration info is already visible in the header
     }
 
     row += 1;
@@ -109,70 +129,128 @@ fn build_thread_content(
         row += 1;
     }
 
-    // Render thread parts (scroll from bottom)
-    let parts = &thread.parts;
+    // Render thread parts
     let content_start = row;
     let content_height = h.saturating_sub(row);
 
-    // Build lines from parts
     let mut lines: Vec<(String, Style)> = Vec::new();
+    let mut turn_idx: u64 = 0;
 
-    for part in parts {
+    for part in &thread.parts {
+        let is_expanded = expanded_turns.contains(&turn_idx);
+
         match part.kind {
             ThreadPartKind::UserMessage => {
-                lines.push((format!("  You: {}", truncate(&part.text, w - 4)), accent));
+                // User prompt with word wrap
+                let wrapped = crate::widgets::text::word_wrap(&part.text, w.saturating_sub(4));
+                lines.push((format!("▸ You",), accent));
+                for line in &wrapped {
+                    lines.push((format!("  {}", line), fg));
+                }
+                lines.push(("".to_string(), fg));
+                turn_idx += 1;
             }
             ThreadPartKind::AssistantMessage => {
-                for (i, line) in part.text.lines().enumerate() {
-                    if i == 0 {
-                        lines.push((format!("  {}", truncate(line, w - 2)), fg));
+                // Assistant response with expand/collapse
+                let text = if is_expanded {
+                    part.text.clone()
+                } else {
+                    // Show first 3 lines collapsed
+                    let all_lines: Vec<&str> = part.text.lines().collect();
+                    if all_lines.len() <= 4 {
+                        part.text.clone()
                     } else {
-                        lines.push((format!("  {}", truncate(line, w - 2)), fg));
+                        let mut preview: Vec<&str> = all_lines[..3].to_vec();
+                        preview.push("  ... (Space to expand)");
+                        preview.join("\n")
                     }
+                };
+                let wrapped = crate::widgets::text::word_wrap(&text, w.saturating_sub(2));
+                for line in &wrapped {
+                    lines.push((format!("  {}", line), fg));
                 }
+                lines.push(("".to_string(), fg));
+                turn_idx += 1;
             }
             ThreadPartKind::Thinking => {
-                lines.push((
-                    format!("  ◌ thinking... {}", truncate(&part.text, w - 20)),
-                    muted,
-                ));
+                if is_expanded {
+                    let wrapped = crate::widgets::text::word_wrap(&part.text, w.saturating_sub(6));
+                    lines.push(("  ◌ thinking".to_string(), muted));
+                    for line in &wrapped {
+                        lines.push((format!("    {}", line), dim));
+                    }
+                } else {
+                    let preview = crate::widgets::text::truncate(
+                        &part.text.replace('\n', " "),
+                        w.saturating_sub(20),
+                    );
+                    lines.push((format!("  ◌ thinking: {}...", preview), muted));
+                }
+                turn_idx += 1;
             }
             ThreadPartKind::ToolCall => {
                 let name = part.tool_name.as_deref().unwrap_or("tool");
-                lines.push((
-                    format!(
-                        "  ⚒ {} {}",
-                        name,
-                        if part.text.is_empty() {
-                            "".into()
-                        } else {
-                            truncate(&part.text, w - 20)
-                        }
-                    ),
-                    yellow,
-                ));
+                let expand_marker = if is_expanded { "▾" } else { "▸" };
+
+                if is_expanded && !part.text.is_empty() {
+                    let wrapped =
+                        crate::widgets::text::word_wrap(&part.text, w.saturating_sub(8));
+                    lines.push((format!("  {} ⚒ {}", expand_marker, name), yellow));
+                    for line in &wrapped {
+                        lines.push((format!("      {}", line), dim));
+                    }
+                } else {
+                    let args_preview = if part.text.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " {}",
+                            crate::widgets::text::truncate(
+                                &part.text.replace('\n', " "),
+                                w.saturating_sub(name.len() + 15)
+                            )
+                        )
+                    };
+                    lines.push((format!("  {} ⚒ {}{}", expand_marker, name, args_preview), yellow));
+                }
+                turn_idx += 1;
             }
             ThreadPartKind::ToolResult => {
                 let name = part.tool_name.as_deref().unwrap_or("tool");
                 let dur = part
                     .duration_ms
-                    .map(|d| format!("{}ms", d))
+                    .map(|d| crate::widgets::text::format_duration_ms(d))
                     .unwrap_or_default();
-                lines.push((format!("  ✓ {} {}", name, dur), green));
+
+                if is_expanded && !part.text.is_empty() {
+                    let wrapped =
+                        crate::widgets::text::word_wrap(&part.text, w.saturating_sub(6));
+                    lines.push((format!("  ✓ {} {}", name, dur), green));
+                    for line in &wrapped {
+                        lines.push((format!("    {}", line), dim));
+                    }
+                } else {
+                    lines.push((format!("  ✓ {} {}", name, dur), green));
+                }
+                turn_idx += 1;
             }
             ThreadPartKind::ChildThread => {
                 lines.push((
-                    format!("  ↳ child thread: {}", truncate(&part.text, w - 20)),
+                    format!("  ↳ {}", crate::widgets::text::truncate(&part.text, w - 6)),
                     accent,
                 ));
+                turn_idx += 1;
             }
             ThreadPartKind::System => {
-                lines.push((format!("  {}", truncate(&part.text, w - 2)), muted));
+                lines.push((
+                    format!("  {}", crate::widgets::text::truncate(&part.text, w - 2)),
+                    muted,
+                ));
             }
             ThreadPartKind::Context => {
                 lines.push((
-                    format!("  ◎ context: {}", truncate(&part.text, w - 15)),
-                    dim,
+                    format!("  ◎ {}", crate::widgets::text::truncate(&part.text, w - 6)),
+                    blue,
                 ));
             }
         }
@@ -180,9 +258,13 @@ fn build_thread_content(
 
     // Streaming text (append)
     if !thread.streaming_text.is_empty() && thread.status == ThreadStatus::Running {
-        for line in thread.streaming_text.lines() {
-            lines.push((format!("  {}", truncate(line, w - 2)), fg));
+        let wrapped =
+            crate::widgets::text::word_wrap(&thread.streaming_text, w.saturating_sub(2));
+        for line in &wrapped {
+            lines.push((format!("  {}", line), fg));
         }
+        // Blinking cursor
+        lines.push(("  ▎".to_string(), Style::new().fg(theme::ACCENT).bg(bg)));
     }
 
     // Render visible lines (scroll to bottom)
@@ -200,6 +282,17 @@ fn build_thread_content(
         surface.draw_text(0, y, text, *style);
     }
 
+    // Scroll indicator
+    if scroll_offset > 0 {
+        let indicator = format!("↑ {} more lines", scroll_offset);
+        surface.draw_text(
+            w.saturating_sub(indicator.len() + 1),
+            content_start,
+            &indicator,
+            muted,
+        );
+    }
+
     // Empty state
     if lines.is_empty() && content_height > 2 {
         let msg = "Waiting for output...";
@@ -211,10 +304,4 @@ fn build_thread_content(
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
-    }
-}
+

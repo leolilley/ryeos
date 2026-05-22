@@ -18,7 +18,6 @@ pub fn word_wrap(text: &str, max_width: usize) -> Vec<&str> {
         }
 
         let mut remaining: &str = paragraph;
-        let mut first_line = true;
         while !remaining.is_empty() {
             if remaining.len() <= max_width {
                 lines.push(remaining);
@@ -50,7 +49,6 @@ pub fn word_wrap(text: &str, max_width: usize) -> Vec<&str> {
 
             lines.push(remaining[..split_pos].trim_end());
             remaining = remaining[split_pos..].trim_start();
-            first_line = false;
         }
     }
 
