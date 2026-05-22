@@ -17,4 +17,5 @@ pub mod text_surface;
 pub mod theme;
 pub mod update;
 pub mod views;
+pub mod widgets;
 pub mod workspace;

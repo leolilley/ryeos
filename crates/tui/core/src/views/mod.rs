@@ -142,8 +142,8 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
 
     match overlay {
         OverlayState::Help => {
-            let w = 50.min(viewport.w as usize);
-            let h = 20.min(viewport.h as usize);
+            let w = 56.min(viewport.w as usize);
+            let h = 32.min(viewport.h as usize);
             let mut surface = TextSurface::new(w, h);
             surface.fill(Style::new().bg(theme::BG));
             surface.draw_box(
@@ -158,13 +158,26 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             let help_lines = [
                 "Rye OS TUI — Keybindings",
                 "",
-                "  Enter        Submit prompt / command",
+                "  Global:",
+                "  Enter        Submit prompt / confirm",
                 "  Tab          Focus next tile",
                 "  Shift+Tab    Focus previous tile",
                 "  Ctrl+C       Quit (when input empty)",
-                "  Ctrl+N       New session",
+                "  Ctrl+N       New session (clear input)",
                 "  Ctrl+P       Command palette",
                 "  ?            This help",
+                "",
+                "  Tile management:",
+                "  Ctrl+S       Split tile horizontally",
+                "  Ctrl+V       Split tile vertically",
+                "  Ctrl+X       Close focused tile",
+                "  Ctrl+R       Reset layout to default",
+                "  Ctrl+W       Focus next tile",
+                "",
+                "  List navigation (when input empty):",
+                "  j / k        Cursor down / up",
+                "  Space        Expand / collapse (thread)",
+                "  PageUp/Down  Scroll by page",
                 "",
                 "  Input editing:",
                 "  Left/Right   Move cursor",
@@ -179,6 +192,12 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 if i + 1 < h - 1 {
                     let style = if i == 0 {
                         Style::new().fg(theme::ACCENT).bg(theme::BG).bold()
+                    } else if line.starts_with("  Global:")
+                        || line.starts_with("  Tile management:")
+                        || line.starts_with("  List navigation:")
+                        || line.starts_with("  Input editing:")
+                    {
+                        Style::new().fg(theme::YELLOW).bg(theme::BG).bold()
                     } else {
                         Style::new().fg(theme::FG).bg(theme::BG)
                     };
