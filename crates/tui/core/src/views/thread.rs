@@ -93,7 +93,12 @@ fn build_thread_content(
         usage.spend_usd
     );
     if w > usage_text.len() + header.len() + 2 {
-        surface.draw_text(w.saturating_sub(usage_text.len() + 1), row, &usage_text, dim);
+        surface.draw_text(
+            w.saturating_sub(usage_text.len() + 1),
+            row,
+            &usage_text,
+            dim,
+        );
     }
 
     row += 1;
@@ -134,7 +139,18 @@ fn build_thread_content(
             }
             ThreadPartKind::ToolCall => {
                 let name = part.tool_name.as_deref().unwrap_or("tool");
-                lines.push((format!("  ⚒ {} {}", name, if part.text.is_empty() { "".into() } else { truncate(&part.text, w - 20) }), yellow));
+                lines.push((
+                    format!(
+                        "  ⚒ {} {}",
+                        name,
+                        if part.text.is_empty() {
+                            "".into()
+                        } else {
+                            truncate(&part.text, w - 20)
+                        }
+                    ),
+                    yellow,
+                ));
             }
             ThreadPartKind::ToolResult => {
                 let name = part.tool_name.as_deref().unwrap_or("tool");
@@ -145,13 +161,19 @@ fn build_thread_content(
                 lines.push((format!("  ✓ {} {}", name, dur), green));
             }
             ThreadPartKind::ChildThread => {
-                lines.push((format!("  ↳ child thread: {}", truncate(&part.text, w - 20)), accent));
+                lines.push((
+                    format!("  ↳ child thread: {}", truncate(&part.text, w - 20)),
+                    accent,
+                ));
             }
             ThreadPartKind::System => {
                 lines.push((format!("  {}", truncate(&part.text, w - 2)), muted));
             }
             ThreadPartKind::Context => {
-                lines.push((format!("  ◎ context: {}", truncate(&part.text, w - 15)), dim));
+                lines.push((
+                    format!("  ◎ context: {}", truncate(&part.text, w - 15)),
+                    dim,
+                ));
             }
         }
     }

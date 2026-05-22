@@ -4,14 +4,18 @@
 //! execution, state inspection, remotes, and trust.
 
 mod app;
+mod bootstrap;
 mod braille;
 mod capabilities;
 mod daemon;
 mod mock_transport;
+mod persistence;
 mod render;
 mod render_scene;
 mod render_text;
+mod sse;
 mod terminal;
+mod transport;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -41,7 +45,6 @@ fn main() {
         }
     }
 
-    // Build tokio runtime
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
 
     rt.block_on(async {

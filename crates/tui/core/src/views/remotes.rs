@@ -30,7 +30,12 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
         crate::store::DaemonStatus::Disconnected => ("○ disconnected", dead_style),
     };
     if w > 30 {
-        surface.draw_text(w.saturating_sub(daemon_status.len() + 1), 0, daemon_status, daemon_style);
+        surface.draw_text(
+            w.saturating_sub(daemon_status.len() + 1),
+            0,
+            daemon_status,
+            daemon_style,
+        );
     }
 
     // Remotes

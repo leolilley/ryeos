@@ -10,25 +10,32 @@ use ryeos_tui_core::model::AppModel;
 use ryeos_tui_core::update::{self, AppEvent};
 use tokio::sync::mpsc;
 
+use crate::bootstrap;
 use crate::capabilities::RenderCapabilities;
 use crate::mock_transport;
 use crate::render::FrameRenderer;
 use crate::terminal::TerminalGuard;
+use crate::transport::{DaemonTransport, MockTransport};
 
 /// Run the TUI app.
 pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut term = TerminalGuard::init()?;
-    let caps = RenderCapabilities::default();
+    let _caps = RenderCapabilities::default();
 
     let (width, height) = term.size();
     let mut model = AppModel::new_default(project_path);
     model.runtime.viewport = ryeos_tui_core::layout::Rect::new(0, 0, width, height);
 
-    // Apply initial mock data if requested
-    if mock {
-        let snapshot = mock_transport::mock_poll_snapshot();
-        update::update(&mut model, AppEvent::PollSnapshot(snapshot));
-    }
+    // Create transport
+    let mut transport: Box<dyn DaemonTransport> = if mock {
+        Box::new(MockTransport)
+    } else {
+        // Try real daemon, fall back to mock
+        Box::new(MockTransport) // TODO: try DaemonClient::try_connect() first
+    };
+
+    // Bootstrap
+    let _bootstrap_result = bootstrap::blocking_essentials(&mut model, &mut transport).await;
 
     // Channels
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(256);
@@ -40,7 +47,7 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
 
     let mut renderer = FrameRenderer::new();
     let mut stdout = std::io::stdout();
-    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(50)); // 20fps
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(50));
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(5));
 
     // Initial render
@@ -52,21 +59,19 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
 
     loop {
         tokio::select! {
-            // Terminal input events
             Some(input) = input_rx.recv() => {
                 let effects = update::update(&mut model, AppEvent::Input(input));
-                if handle_effects(&model, &effects) {
+                if handle_effects(&effects) {
                     break;
                 }
+                run_effects(&mut model, &mut transport, &effects).await;
             }
 
-            // Terminal resize
             Some((w, h)) = resize_rx.recv() => {
                 let _ = term.update_size();
                 update::update(&mut model, AppEvent::Resize { width: w, height: h });
             }
 
-            // Animation tick
             _ = tick_interval.tick() => {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -75,10 +80,14 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
                 update::update(&mut model, AppEvent::Tick { now_ms });
             }
 
-            // Poll for daemon state (if not mock)
             _ = poll_interval.tick() => {
-                if !mock {
-                    // TODO: real daemon polling in Phase 4
+                match transport.poll_snapshot().await {
+                    Ok(snapshot) => {
+                        update::update(&mut model, AppEvent::PollSnapshot(snapshot));
+                    }
+                    Err(_) => {
+                        // Daemon unreachable, keep running
+                    }
                 }
             }
         }
@@ -86,7 +95,12 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
         // Render if dirty
         if model.dirty {
             let frame = build_frame(&model);
-            renderer.render(&mut stdout, &frame, model.runtime.viewport.w, model.runtime.viewport.h)?;
+            renderer.render(
+                &mut stdout,
+                &frame,
+                model.runtime.viewport.w,
+                model.runtime.viewport.h,
+            )?;
             model.dirty = false;
         }
     }
@@ -95,21 +109,66 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
 }
 
 /// Check if any effect is Quit.
-fn handle_effects(model: &AppModel, effects: &[Effect]) -> bool {
+fn handle_effects(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| matches!(e, Effect::Quit))
+}
+
+/// Execute effects from the core reducer.
+async fn run_effects(
+    model: &mut AppModel,
+    transport: &mut Box<dyn DaemonTransport>,
+    effects: &[Effect],
+) {
     for effect in effects {
-        if matches!(effect, Effect::Quit) {
-            return true;
+        match effect {
+            Effect::Execute {
+                project_path,
+                item_ref,
+                parameters,
+            } => {
+                let req = crate::transport::DaemonRequest::Execute {
+                    item_ref: item_ref.clone(),
+                    project_path: project_path.to_string_lossy().to_string(),
+                    parameters: parameters.clone(),
+                };
+                match transport.request(req).await {
+                    Ok(_resp) => {
+                        // TODO: handle response, start SSE stream
+                    }
+                    Err(e) => {
+                        eprintln!("execute error: {}", e);
+                    }
+                }
+            }
+            Effect::RefreshState => match transport.poll_snapshot().await {
+                Ok(snapshot) => {
+                    update::update(model, AppEvent::PollSnapshot(snapshot));
+                }
+                Err(_) => {}
+            },
+            Effect::SendThreadCommand { thread_id, command } => {
+                let req = crate::transport::DaemonRequest::CancelThread {
+                    thread_id: *thread_id,
+                };
+                let _ = transport.request(req).await;
+            }
+            Effect::PersistSession => {
+                // TODO Phase 5
+            }
+            Effect::Quit => {}
         }
     }
-    false
 }
 
 /// Async event reader — converts crossterm events to core InputEvents.
 async fn event_reader(
-    mut events: EventStream,
+    events: EventStream,
     input_tx: mpsc::Sender<InputEvent>,
     resize_tx: mpsc::Sender<(u16, u16)>,
 ) {
+    use futures_util::pin_mut;
+    pin_mut!(events);
+
     while let Some(result) = events.next().await {
         match result {
             Ok(event) => match event {
@@ -169,7 +228,7 @@ fn convert_key(event: crossterm::event::KeyEvent) -> Key {
         KeyCode::Delete => Key::Delete,
         KeyCode::F(n) => Key::F(n),
 
-        _ => Key::Escape, // unknown → escape
+        _ => Key::Escape,
     }
 }
 
@@ -180,7 +239,6 @@ fn convert_mouse(event: crossterm::event::MouseEvent) -> InputEvent {
                 crossterm::event::MouseButton::Left => MouseButton::Left,
                 crossterm::event::MouseButton::Middle => MouseButton::Middle,
                 crossterm::event::MouseButton::Right => MouseButton::Right,
-                _ => MouseButton::Left,
             };
             MouseAction::Press(btn)
         }
@@ -189,13 +247,18 @@ fn convert_mouse(event: crossterm::event::MouseEvent) -> InputEvent {
                 crossterm::event::MouseButton::Left => MouseButton::Left,
                 crossterm::event::MouseButton::Middle => MouseButton::Middle,
                 crossterm::event::MouseButton::Right => MouseButton::Right,
-                _ => MouseButton::Left,
             };
             MouseAction::Release(btn)
         }
         MouseEventKind::ScrollUp => MouseAction::Scroll(ScrollDirection::Up),
         MouseEventKind::ScrollDown => MouseAction::Scroll(ScrollDirection::Down),
-        _ => MouseAction::Scroll(ScrollDirection::Up), // fallback
+        _ => {
+            return InputEvent::Mouse(Mouse {
+                x: 0,
+                y: 0,
+                action: MouseAction::Scroll(ScrollDirection::Up),
+            })
+        }
     };
 
     InputEvent::Mouse(Mouse {

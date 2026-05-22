@@ -69,7 +69,9 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
                 .as_ref()
                 .map(|r| r.contains(&filter))
                 .unwrap_or(false)
-                || format!("{:?}", thread.status).to_lowercase().contains(&filter.to_lowercase());
+                || format!("{:?}", thread.status)
+                    .to_lowercase()
+                    .contains(&filter.to_lowercase());
             if !matches {
                 continue;
             }
@@ -88,7 +90,8 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
         // Status icon
         let (status_ch, status_style) = match thread.status {
             ThreadStatus::Running => {
-                let frame = SPINNER_FRAMES[(model.visual.animation.time_ms as usize / 100) % SPINNER_FRAMES.len()];
+                let frame = SPINNER_FRAMES
+                    [(model.visual.animation.time_ms as usize / 100) % SPINNER_FRAMES.len()];
                 (frame, running_style)
             }
             ThreadStatus::Completed => ('✓', completed_style),

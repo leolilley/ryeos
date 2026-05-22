@@ -14,7 +14,12 @@ use crate::theme;
 use crate::workspace::ViewSpec;
 
 /// Build a tile's text surface for the given view spec.
-pub fn build_tile_view(model: &AppModel, tile_id: TileId, rect: Rect, focused: bool) -> TextSurface {
+pub fn build_tile_view(
+    model: &AppModel,
+    tile_id: TileId,
+    rect: Rect,
+    focused: bool,
+) -> TextSurface {
     let tile = match model.workspace.tiles.get(&tile_id) {
         Some(t) => t,
         None => return empty_surface(rect),
@@ -34,7 +39,14 @@ pub fn build_tile_view(model: &AppModel, tile_id: TileId, rect: Rect, focused: b
     } else {
         theme::style_border()
     };
-    surface.draw_box(0, 0, rect.w as usize - 1, rect.h as usize - 1, Border::Rounded, border_style);
+    surface.draw_box(
+        0,
+        0,
+        rect.w as usize - 1,
+        rect.h as usize - 1,
+        Border::Rounded,
+        border_style,
+    );
 
     // Title
     let title = tile.view.title();
@@ -103,7 +115,12 @@ pub fn build_input_bar(model: &AppModel, rect: Rect) -> TextSurface {
     // Cursor indicator
     let cursor_x = hint_width + 2 + model.workspace.input_bar.cursor.min(display_text.len());
     if cursor_x < rect.w as usize {
-        surface.draw_char(cursor_x, 0, '▎', Style::new().fg(theme::ACCENT).bg(theme::BG_DARK));
+        surface.draw_char(
+            cursor_x,
+            0,
+            '▎',
+            Style::new().fg(theme::ACCENT).bg(theme::BG_DARK),
+        );
     }
 
     surface
@@ -125,7 +142,14 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             let h = 20.min(viewport.h as usize);
             let mut surface = TextSurface::new(w, h);
             surface.fill(Style::new().bg(theme::BG));
-            surface.draw_box(0, 0, w - 1, h - 1, Border::Rounded, theme::style_border_active());
+            surface.draw_box(
+                0,
+                0,
+                w - 1,
+                h - 1,
+                Border::Rounded,
+                theme::style_border_active(),
+            );
 
             let help_lines = [
                 "Rye OS TUI — Keybindings",
@@ -171,7 +195,14 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             let h = 12.min(viewport.h as usize);
             let mut surface = TextSurface::new(w, h);
             surface.fill(Style::new().bg(theme::BG));
-            surface.draw_box(0, 0, w - 1, h - 1, Border::Rounded, theme::style_border_active());
+            surface.draw_box(
+                0,
+                0,
+                w - 1,
+                h - 1,
+                Border::Rounded,
+                theme::style_border_active(),
+            );
 
             surface.draw_text(
                 2,
@@ -193,12 +224,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             let commands = ["execute", "refresh", "kill-thread", "quit"];
             for (i, cmd) in commands.iter().enumerate() {
                 if 5 + i < h - 1 {
-                    surface.draw_text(
-                        4,
-                        5 + i,
-                        cmd,
-                        Style::new().fg(theme::FG_DIM).bg(theme::BG),
-                    );
+                    surface.draw_text(4, 5 + i, cmd, Style::new().fg(theme::FG_DIM).bg(theme::BG));
                 }
             }
 
@@ -215,14 +241,16 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             let h = 7.min(viewport.h as usize);
             let mut surface = TextSurface::new(w, h);
             surface.fill(Style::new().bg(theme::BG));
-            surface.draw_box(0, 0, w - 1, h - 1, Border::Rounded, theme::style_border_active());
-
-            surface.draw_text(
-                2,
-                2,
-                message,
-                Style::new().fg(theme::FG).bg(theme::BG),
+            surface.draw_box(
+                0,
+                0,
+                w - 1,
+                h - 1,
+                Border::Rounded,
+                theme::style_border_active(),
             );
+
+            surface.draw_text(2, 2, message, Style::new().fg(theme::FG).bg(theme::BG));
             surface.draw_text(
                 2,
                 4,
@@ -279,7 +307,13 @@ fn projects_fallback(model: &AppModel, w: usize, h: usize) -> TextSurface {
         if 2 + i >= h {
             break;
         }
-        let line = format!("  {} — {} items", project.path, project.item_counts.directives + project.item_counts.tools + project.item_counts.knowledge);
+        let line = format!(
+            "  {} — {} items",
+            project.path,
+            project.item_counts.directives
+                + project.item_counts.tools
+                + project.item_counts.knowledge
+        );
         s.draw_text(0, 2 + i, &line, row_style);
     }
 

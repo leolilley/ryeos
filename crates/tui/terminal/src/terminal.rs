@@ -54,7 +54,12 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, Show, DisableMouseCapture, terminal::LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            Show,
+            DisableMouseCapture,
+            terminal::LeaveAlternateScreen
+        );
         let _ = terminal::disable_raw_mode();
     }
 }

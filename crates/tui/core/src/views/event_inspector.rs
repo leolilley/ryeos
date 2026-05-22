@@ -21,7 +21,12 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
     let count = model.store.events.len();
     let count_text = format!("({} events)", count);
     if w > count_text.len() + 10 {
-        surface.draw_text(w.saturating_sub(count_text.len() + 1), 0, &count_text, dim_style);
+        surface.draw_text(
+            w.saturating_sub(count_text.len() + 1),
+            0,
+            &count_text,
+            dim_style,
+        );
     }
 
     // Show recent events (newest first, bottom-anchored)
@@ -40,12 +45,7 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
         let ts = format!("t={}", event.timestamp_ms % 100_000);
         let _max_w = w.saturating_sub(event.event_type.len() + ts.len() + 5);
         if w > 30 {
-            surface.draw_text(
-                w.saturating_sub(ts.len() + 1),
-                row,
-                &ts,
-                muted_style,
-            );
+            surface.draw_text(w.saturating_sub(ts.len() + 1), row, &ts, muted_style);
         }
 
         row += 1;

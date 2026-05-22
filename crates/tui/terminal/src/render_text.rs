@@ -109,8 +109,17 @@ mod tests {
 
     #[test]
     fn terminal_color_adapter_maps_default_index_rgb() {
-        assert!(matches!(to_crossterm_color(CoreColor::Default), Color::Reset));
-        assert!(matches!(to_crossterm_color(CoreColor::Index(42)), Color::AnsiValue(42)));
-        assert!(matches!(to_crossterm_color(CoreColor::Rgb(1, 2, 3)), Color::Rgb { .. }));
+        assert!(matches!(
+            to_crossterm_color(CoreColor::Default),
+            Color::Reset
+        ));
+        assert!(matches!(
+            to_crossterm_color(CoreColor::Index(42)),
+            Color::AnsiValue(42)
+        ));
+        assert!(matches!(
+            to_crossterm_color(CoreColor::Rgb(1, 2, 3)),
+            Color::Rgb { .. }
+        ));
     }
 }

@@ -11,19 +11,13 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ViewSpec {
-    Thread {
-        thread_id: Option<ThreadId>,
-    },
+    Thread { thread_id: Option<ThreadId> },
     ThreadList,
     Remotes,
     Projects,
-    SpaceBrowser {
-        project: Option<String>,
-    },
+    SpaceBrowser { project: Option<String> },
     Trust,
-    Graph {
-        graph_id: Option<String>,
-    },
+    Graph { graph_id: Option<String> },
     EventInspector,
 }
 

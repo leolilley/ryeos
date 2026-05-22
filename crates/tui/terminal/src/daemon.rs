@@ -68,8 +68,7 @@ impl DaemonClient {
             let result = post_json(
                 &self.base_url,
                 signer,
-                &serde_json::to_vec(&serde_json::json!({}))
-                    .unwrap_or_default(),
+                &serde_json::to_vec(&serde_json::json!({})).unwrap_or_default(),
             )
             .await;
             result.is_ok()

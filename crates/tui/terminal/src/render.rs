@@ -15,9 +15,7 @@ pub struct FrameRenderer {
 
 impl FrameRenderer {
     pub fn new() -> Self {
-        Self {
-            prev_surface: None,
-        }
+        Self { prev_surface: None }
     }
 
     /// Render a complete frame to stdout.
@@ -120,5 +118,10 @@ fn render_status_bar(surface: &mut TextSurface, width: usize, y: usize) {
 
     // Help hint
     let help = "? for help";
-    surface.draw_text(width.saturating_sub(help.len() + 1), y, help, Style::new().fg(fg_accent).bg(bg));
+    surface.draw_text(
+        width.saturating_sub(help.len() + 1),
+        y,
+        help,
+        Style::new().fg(fg_accent).bg(bg),
+    );
 }

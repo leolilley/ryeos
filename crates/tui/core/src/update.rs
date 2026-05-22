@@ -27,14 +27,37 @@ pub enum AppEvent {
 
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
-    ThreadCreated { id: ThreadId, item_ref: Option<String> },
-    ThreadStarted { id: ThreadId },
-    ThreadCompleted { id: ThreadId },
-    ThreadFailed { id: ThreadId, error: String },
-    TextDelta { thread_id: ThreadId, text: String },
-    ToolCallStart { thread_id: ThreadId, name: String },
-    ToolCallResult { thread_id: ThreadId, name: String, duration_ms: Option<u64> },
-    UsageUpdate { thread_id: ThreadId, usage: ThreadUsage },
+    ThreadCreated {
+        id: ThreadId,
+        item_ref: Option<String>,
+    },
+    ThreadStarted {
+        id: ThreadId,
+    },
+    ThreadCompleted {
+        id: ThreadId,
+    },
+    ThreadFailed {
+        id: ThreadId,
+        error: String,
+    },
+    TextDelta {
+        thread_id: ThreadId,
+        text: String,
+    },
+    ToolCallStart {
+        thread_id: ThreadId,
+        name: String,
+    },
+    ToolCallResult {
+        thread_id: ThreadId,
+        name: String,
+        duration_ms: Option<u64>,
+    },
+    UsageUpdate {
+        thread_id: ThreadId,
+        usage: ThreadUsage,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -238,9 +261,7 @@ fn handle_input(model: &mut AppModel, event: InputEvent) -> Vec<Effect> {
             Vec::new()
         }
 
-        Key::Enter => {
-            handle_enter(model)
-        }
+        Key::Enter => handle_enter(model),
 
         Key::CtrlEnter | Key::ShiftEnter => {
             // Insert newline (for future multiline input)
@@ -308,27 +329,21 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
                 Key::Char(ch) => {
                     query.push(ch);
                     let cursor = query.len();
-                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
-                        query,
-                        cursor,
-                    });
+                    model.overlay =
+                        Some(crate::model::OverlayState::CommandPalette { query, cursor });
                     model.mark_dirty();
                 }
                 Key::Backspace => {
                     query.pop();
                     let cursor = query.len();
-                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
-                        query,
-                        cursor,
-                    });
+                    model.overlay =
+                        Some(crate::model::OverlayState::CommandPalette { query, cursor });
                     model.mark_dirty();
                 }
                 _ => {
                     let cursor = query.len();
-                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
-                        query,
-                        cursor,
-                    });
+                    model.overlay =
+                        Some(crate::model::OverlayState::CommandPalette { query, cursor });
                 }
             }
         }
@@ -362,14 +377,10 @@ fn reduce_daemon_event(model: &mut AppModel, event: &DaemonEvent) {
             "thread_created",
             serde_json::json!({ "id": id.0, "item_ref": item_ref }),
         ),
-        DaemonEvent::ThreadStarted { id } => (
-            "thread_started",
-            serde_json::json!({ "id": id.0 }),
-        ),
-        DaemonEvent::ThreadCompleted { id } => (
-            "thread_completed",
-            serde_json::json!({ "id": id.0 }),
-        ),
+        DaemonEvent::ThreadStarted { id } => ("thread_started", serde_json::json!({ "id": id.0 })),
+        DaemonEvent::ThreadCompleted { id } => {
+            ("thread_completed", serde_json::json!({ "id": id.0 }))
+        }
         DaemonEvent::ThreadFailed { id, error } => (
             "thread_failed",
             serde_json::json!({ "id": id.0, "error": error }),
@@ -382,7 +393,11 @@ fn reduce_daemon_event(model: &mut AppModel, event: &DaemonEvent) {
             "tool_call_start",
             serde_json::json!({ "thread_id": thread_id.0, "name": name }),
         ),
-        DaemonEvent::ToolCallResult { thread_id, name, duration_ms } => (
+        DaemonEvent::ToolCallResult {
+            thread_id,
+            name,
+            duration_ms,
+        } => (
             "tool_call_result",
             serde_json::json!({ "thread_id": thread_id.0, "name": name, "duration_ms": duration_ms }),
         ),
@@ -452,7 +467,11 @@ fn reduce_daemon_event(model: &mut AppModel, event: &DaemonEvent) {
                 });
             }
         }
-        DaemonEvent::ToolCallResult { thread_id, name, duration_ms } => {
+        DaemonEvent::ToolCallResult {
+            thread_id,
+            name,
+            duration_ms,
+        } => {
             if let Some(t) = model.store.threads.get_mut(thread_id) {
                 t.parts.push(crate::store::ThreadPart {
                     kind: crate::store::ThreadPartKind::ToolResult,
@@ -509,7 +528,11 @@ fn apply_poll_snapshot(model: &mut AppModel, snapshot: &PollSnapshot) {
     // Upsert threads from snapshot
     for ts in &snapshot.threads {
         let id = ts.id;
-        let thread = model.store.threads.entry(id).or_insert_with(|| ThreadModel::new(id));
+        let thread = model
+            .store
+            .threads
+            .entry(id)
+            .or_insert_with(|| ThreadModel::new(id));
         thread.item_ref = ts.item_ref.clone().or(thread.item_ref.clone());
         thread.started_at_ms = ts.started_at_ms.or(thread.started_at_ms);
         // Parse status string
@@ -570,7 +593,13 @@ mod tests {
     fn resize_updates_viewport_and_marks_dirty() {
         let mut model = AppModel::new_default("/tmp/test");
         model.dirty = false;
-        let effects = update(&mut model, AppEvent::Resize { width: 100, height: 40 });
+        let effects = update(
+            &mut model,
+            AppEvent::Resize {
+                width: 100,
+                height: 40,
+            },
+        );
         assert!(effects.is_empty());
         assert_eq!(model.runtime.viewport.w, 100);
         assert_eq!(model.runtime.viewport.h, 40);
@@ -656,10 +685,7 @@ mod tests {
         model.workspace.input_bar.text = "test prompt".into();
         model.workspace.input_bar.cursor = 12;
 
-        let effects = update(
-            &mut model,
-            AppEvent::Input(InputEvent::Key(Key::Enter)),
-        );
+        let effects = update(&mut model, AppEvent::Input(InputEvent::Key(Key::Enter)));
 
         assert_eq!(effects.len(), 1);
         match &effects[0] {

@@ -136,9 +136,15 @@ mod tests {
         let model = AppModel::new_default("/tmp/test");
         let frame = build_frame(&model);
 
-        assert!(!frame.background.is_empty(), "should have substrate primitives");
+        assert!(
+            !frame.background.is_empty(),
+            "should have substrate primitives"
+        );
         assert_eq!(frame.tiles.len(), 3, "should have 3 tiles");
-        assert!(!frame.input.cells.cells.is_empty(), "should have input surface");
+        assert!(
+            !frame.input.cells.cells.is_empty(),
+            "should have input surface"
+        );
         assert!(frame.overlays.is_empty(), "no overlays by default");
     }
 

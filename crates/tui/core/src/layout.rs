@@ -22,7 +22,12 @@ impl Rect {
     }
 
     pub fn zero() -> Self {
-        Self { x: 0, y: 0, w: 0, h: 0 }
+        Self {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }
     }
 
     pub fn area(&self) -> u32 {
@@ -67,11 +72,7 @@ impl LayoutTree {
     }
 
     /// Default 3-pane layout: thread list (left) | thread (right-top) + status (right-bottom).
-    pub fn default_three_pane(
-        list_id: TileId,
-        thread_id: TileId,
-        status_id: TileId,
-    ) -> Self {
+    pub fn default_three_pane(list_id: TileId, thread_id: TileId, status_id: TileId) -> Self {
         LayoutTree::Split {
             axis: SplitAxis::Horizontal,
             ratio: 0.25,
@@ -93,11 +94,7 @@ pub fn layout_rects(tree: &LayoutTree, viewport: Rect) -> HashMap<TileId, Rect> 
     rects
 }
 
-fn layout_rects_recursive(
-    tree: &LayoutTree,
-    rect: Rect,
-    out: &mut HashMap<TileId, Rect>,
-) {
+fn layout_rects_recursive(tree: &LayoutTree, rect: Rect, out: &mut HashMap<TileId, Rect>) {
     match tree {
         LayoutTree::Leaf(id) => {
             out.insert(*id, rect);
@@ -113,16 +110,24 @@ fn layout_rects_recursive(
                 SplitAxis::Horizontal => {
                     let split_x = (rect.w as f32 * ratio) as u16;
                     let first_rect = Rect::new(rect.x, rect.y, split_x, rect.h);
-                    let second_rect =
-                        Rect::new(rect.x + split_x, rect.y, rect.w.saturating_sub(split_x), rect.h);
+                    let second_rect = Rect::new(
+                        rect.x + split_x,
+                        rect.y,
+                        rect.w.saturating_sub(split_x),
+                        rect.h,
+                    );
                     layout_rects_recursive(first, first_rect, out);
                     layout_rects_recursive(second, second_rect, out);
                 }
                 SplitAxis::Vertical => {
                     let split_y = (rect.h as f32 * ratio) as u16;
                     let first_rect = Rect::new(rect.x, rect.y, rect.w, split_y);
-                    let second_rect =
-                        Rect::new(rect.x, rect.y + split_y, rect.w, rect.h.saturating_sub(split_y));
+                    let second_rect = Rect::new(
+                        rect.x,
+                        rect.y + split_y,
+                        rect.w,
+                        rect.h.saturating_sub(split_y),
+                    );
                     layout_rects_recursive(first, first_rect, out);
                     layout_rects_recursive(second, second_rect, out);
                 }
@@ -141,11 +146,7 @@ mod tests {
 
     #[test]
     fn layout_default_workspace_has_expected_tiles() {
-        let tree = LayoutTree::default_three_pane(
-            TileId::new(1),
-            TileId::new(2),
-            TileId::new(3),
-        );
+        let tree = LayoutTree::default_three_pane(TileId::new(1), TileId::new(2), TileId::new(3));
         let ids = tree.tile_ids();
         assert_eq!(ids.len(), 3);
         assert!(ids.contains(&TileId::new(1)));
@@ -155,11 +156,7 @@ mod tests {
 
     #[test]
     fn layout_split_rects_sum_to_viewport() {
-        let tree = LayoutTree::default_three_pane(
-            TileId::new(1),
-            TileId::new(2),
-            TileId::new(3),
-        );
+        let tree = LayoutTree::default_three_pane(TileId::new(1), TileId::new(2), TileId::new(3));
         let vp = Rect::new(0, 0, 200, 60);
         let rects = layout_rects(&tree, vp);
 

@@ -85,14 +85,8 @@ pub struct VisualState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverlayState {
-    CommandPalette {
-        query: String,
-        cursor: usize,
-    },
-    Confirm {
-        message: String,
-        action: String,
-    },
+    CommandPalette { query: String, cursor: usize },
+    Confirm { message: String, action: String },
     Help,
 }
 

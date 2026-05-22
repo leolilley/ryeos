@@ -9,10 +9,7 @@ use crate::braille::BrailleBuffer;
 
 /// Render scene primitives into a TextSurface overlay.
 /// The surface should be pre-filled with the background.
-pub fn render_scene(
-    primitives: &[ScenePrimitive],
-    surface: &mut TextSurface,
-) {
+pub fn render_scene(primitives: &[ScenePrimitive], surface: &mut TextSurface) {
     let w = surface.width;
     let h = surface.height;
     if w == 0 || h == 0 {
