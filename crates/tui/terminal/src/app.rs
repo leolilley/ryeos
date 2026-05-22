@@ -133,6 +133,51 @@ async fn run_effects(
                 item_ref,
                 parameters,
             } => {
+                // Extract the prompt text
+                let prompt = parameters
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(item_ref);
+
+                // Create a synthetic thread for the prompt
+                let fake_thread_id = ryeos_tui_core::ids::ThreadId::new(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                );
+                let thread_event = ryeos_tui_core::update::DaemonEvent::ThreadCreated {
+                    id: fake_thread_id,
+                    item_ref: Some(item_ref.clone()),
+                };
+                let start_event = ryeos_tui_core::update::DaemonEvent::ThreadStarted {
+                    id: fake_thread_id,
+                };
+                let user_part = ryeos_tui_core::update::DaemonEvent::TextDelta {
+                    thread_id: fake_thread_id,
+                    text: format!("{}\n", prompt),
+                };
+                ryeos_tui_core::update::update(
+                    model,
+                    ryeos_tui_core::update::AppEvent::DaemonBatch(vec![
+                        thread_event,
+                        start_event,
+                        user_part,
+                    ]),
+                );
+
+                // Focus the new thread in the thread tile
+                for (tid, t) in model.workspace.tiles.iter_mut() {
+                    if matches!(t.view, ryeos_tui_core::workspace::ViewSpec::Thread { .. }) {
+                        t.view = ryeos_tui_core::workspace::ViewSpec::Thread {
+                            thread_id: Some(fake_thread_id),
+                        };
+                        model.workspace.focused_tile = *tid;
+                        break;
+                    }
+                }
+
+                // Send to daemon
                 let req = crate::transport::DaemonRequest::Execute {
                     item_ref: item_ref.clone(),
                     project_path: project_path.to_string_lossy().to_string(),
@@ -140,10 +185,18 @@ async fn run_effects(
                 };
                 match transport.request(req).await {
                     Ok(_resp) => {
-                        // TODO: handle response, start SSE stream
+                        // SSE streaming will be handled by the poll interval
+                        // feeding daemon events back
                     }
                     Err(e) => {
-                        eprintln!("execute error: {}", e);
+                        let fail_event = ryeos_tui_core::update::DaemonEvent::ThreadFailed {
+                            id: fake_thread_id,
+                            error: format!("execute error: {}", e),
+                        };
+                        ryeos_tui_core::update::update(
+                            model,
+                            ryeos_tui_core::update::AppEvent::DaemonBatch(vec![fail_event]),
+                        );
                     }
                 }
             }
@@ -157,7 +210,14 @@ async fn run_effects(
                 let _ = transport.request(req).await;
             }
             Effect::PersistSession => {
-                // TODO Phase 5
+                crate::persistence::save_session(
+                    &model.workspace.layout,
+                    &model.workspace.tiles,
+                    model.workspace.focused_tile,
+                )
+                .unwrap_or_else(|e| {
+                    tracing::warn!("failed to save session: {e}");
+                });
             }
             Effect::Quit => {}
         }

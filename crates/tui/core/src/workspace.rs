@@ -79,7 +79,7 @@ impl Default for ThreadViewState {
 pub enum InputCapability {
     Prompt,
     Filter,
-    Command,
+    Navigate,
     None,
 }
 
@@ -87,8 +87,9 @@ impl ViewSpec {
     pub fn input_capability(&self) -> InputCapability {
         match self {
             ViewSpec::Thread { .. } => InputCapability::Prompt,
-            ViewSpec::ThreadList => InputCapability::Filter,
-            ViewSpec::SpaceBrowser { .. } => InputCapability::Filter,
+            ViewSpec::ThreadList | ViewSpec::SpaceBrowser { .. } => {
+                InputCapability::Filter
+            }
             ViewSpec::EventInspector => InputCapability::Filter,
             ViewSpec::Remotes | ViewSpec::Projects | ViewSpec::Trust | ViewSpec::Graph { .. } => {
                 InputCapability::None

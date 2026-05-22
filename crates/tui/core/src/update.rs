@@ -5,7 +5,7 @@
 
 use crate::effects::Effect;
 use crate::ids::ThreadId;
-use crate::input::{InputEvent, Key};
+use crate::input::{InputEvent, Key, Mouse, MouseAction, ScrollDirection};
 use crate::layout::{Rect, SplitAxis};
 use crate::model::AppModel;
 use crate::store::{DaemonStatus, EventRecord, ThreadModel, ThreadStatus, ThreadUsage};
@@ -140,9 +140,13 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
 // ---------------------------------------------------------------------------
 
 fn handle_input(model: &mut AppModel, event: InputEvent) -> Vec<Effect> {
-    let InputEvent::Key(key) = event else {
-        return Vec::new();
-    };
+    match event {
+        InputEvent::Key(key) => handle_key(model, key),
+        InputEvent::Mouse(mouse) => handle_mouse(model, mouse),
+    }
+}
+
+fn handle_key(model: &mut AppModel, key: Key) -> Vec<Effect> {
 
     // Overlay captures input first
     if model.overlay.is_some() {
@@ -257,12 +261,21 @@ fn handle_input(model: &mut AppModel, event: InputEvent) -> Vec<Effect> {
 
         // Scrolling
         Key::PageUp => {
-            // TODO: scroll up by page
+            // Move cursor up by ~10
+            for _ in 0..10 {
+                model.workspace.cursor_up();
+            }
+            model.mark_dirty();
             Vec::new()
         }
 
         Key::PageDown => {
-            // TODO: scroll down by page
+            // Move cursor down by ~10
+            let count = list_item_count(model);
+            for _ in 0..10 {
+                model.workspace.cursor_down(count);
+            }
+            model.mark_dirty();
             Vec::new()
         }
 
@@ -366,6 +379,10 @@ fn handle_enter(model: &mut AppModel) -> Vec<Effect> {
             }]
         }
         InputCapability::Filter => {
+            if text.is_empty() {
+                // Empty filter + Enter = navigate into selected item
+                return handle_list_enter(model);
+            }
             // Apply filter to focused list view
             if let Some(tile) = model.workspace.tiles.get_mut(&model.workspace.focused_tile) {
                 match &mut tile.local {
@@ -385,6 +402,40 @@ fn handle_enter(model: &mut AppModel) -> Vec<Effect> {
     }
 }
 
+/// Handle mouse events — click to focus, scroll in lists.
+fn handle_mouse(model: &mut AppModel, mouse: Mouse) -> Vec<Effect> {
+    match mouse.action {
+        MouseAction::Press(_) => {
+            // Click to focus tile — find which tile contains this point
+            let tile_rects =
+                crate::layout::layout_rects(&model.workspace.layout, model.runtime.viewport);
+            for (tile_id, rect) in &tile_rects {
+                let x_in = mouse.x >= rect.x && mouse.x < rect.x + rect.w;
+                let y_in = mouse.y >= rect.y && mouse.y < rect.y + rect.h;
+                if x_in && y_in {
+                    model.workspace.focused_tile = *tile_id;
+                    model.mark_dirty();
+                    break;
+                }
+            }
+        }
+        MouseAction::Scroll(direction) => {
+            match direction {
+                ScrollDirection::Up => {
+                    model.workspace.cursor_up();
+                }
+                ScrollDirection::Down => {
+                    let count = list_item_count(model);
+                    model.workspace.cursor_down(count);
+                }
+            }
+            model.mark_dirty();
+        }
+        MouseAction::Release(_) => {}
+    }
+    Vec::new()
+}
+
 fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
     let overlay = model.overlay.take();
     match overlay {
@@ -392,47 +443,74 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
             // Any key dismisses help
             model.mark_dirty();
         }
-        Some(crate::model::OverlayState::CommandPalette { mut query, .. }) => {
+        Some(crate::model::OverlayState::CommandPalette { ref query, .. }) => {
             match key {
                 Key::Escape => {
                     model.mark_dirty();
                 }
                 Key::Enter => {
-                    // Execute command (TODO: command dispatch)
+                    // Execute the first matching command
+                    let commands = crate::commands::builtin_commands();
+                    let matches = crate::commands::filter_commands(&commands, query);
+                    if let Some(cmd) = matches.first() {
+                        let effects = dispatch_command(model, &cmd.id);
+                        // Re-set overlay to None (already taken above)
+                        return effects;
+                    }
+                    model.mark_dirty();
+                }
+                Key::ArrowDown => {
+                    // TODO: cycle through matches
+                    let cursor = query.len();
+                    model.overlay =
+                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), cursor });
+                    model.mark_dirty();
+                }
+                Key::ArrowUp => {
+                    let cursor = query.len();
+                    model.overlay =
+                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), cursor });
                     model.mark_dirty();
                 }
                 Key::Char(ch) => {
-                    query.push(ch);
-                    let cursor = query.len();
+                    let mut q = query.clone();
+                    q.push(ch);
+                    let cursor = q.len();
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query, cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: q, cursor });
                     model.mark_dirty();
                 }
                 Key::Backspace => {
-                    query.pop();
-                    let cursor = query.len();
+                    let mut q = query.clone();
+                    q.pop();
+                    let cursor = q.len();
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query, cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: q, cursor });
                     model.mark_dirty();
                 }
                 _ => {
                     let cursor = query.len();
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query, cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), cursor });
                 }
             }
         }
-        Some(crate::model::OverlayState::Confirm { message, action }) => {
+        Some(crate::model::OverlayState::Confirm { ref message, ref action }) => {
             match key {
                 Key::Char('y') | Key::Char('Y') => {
+                    // Dispatch the confirmed action
+                    let effects = dispatch_command(model, action);
                     model.mark_dirty();
-                    // TODO: dispatch confirmed action
+                    return effects;
                 }
                 Key::Escape | Key::Char('n') | Key::Char('N') => {
                     model.mark_dirty();
                 }
                 _ => {
-                    model.overlay = Some(crate::model::OverlayState::Confirm { message, action });
+                    model.overlay = Some(crate::model::OverlayState::Confirm {
+                        message: message.clone(),
+                        action: action.clone(),
+                    });
                 }
             }
         }
@@ -517,6 +595,17 @@ fn reduce_daemon_event(model: &mut AppModel, event: &DaemonEvent) {
                         .map(|d| d.as_millis() as i64)
                         .unwrap_or(0),
                 );
+                // Flush streaming text into an AssistantMessage part
+                if !t.streaming_text.is_empty() {
+                    t.parts.push(crate::store::ThreadPart {
+                        kind: crate::store::ThreadPartKind::AssistantMessage,
+                        text: std::mem::take(&mut t.streaming_text),
+                        tool_name: None,
+                        child_thread_id: None,
+                        duration_ms: None,
+                        tokens: None,
+                    });
+                }
             }
         }
         DaemonEvent::ThreadFailed { id, error } => {
@@ -583,6 +672,148 @@ fn reduce_daemon_event(model: &mut AppModel, event: &DaemonEvent) {
                 .sum();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Command dispatch
+// ---------------------------------------------------------------------------
+
+/// Execute a command by ID. Returns effects to perform.
+fn dispatch_command(model: &mut AppModel, command_id: &str) -> Vec<Effect> {
+    model.mark_dirty();
+    match command_id {
+        "view.threads" => {
+            switch_focused_view(model, ViewSpec::ThreadList);
+            Vec::new()
+        }
+        "view.remotes" => {
+            switch_focused_view(model, ViewSpec::Remotes);
+            Vec::new()
+        }
+        "view.projects" => {
+            switch_focused_view(model, ViewSpec::Projects);
+            Vec::new()
+        }
+        "view.items" => {
+            switch_focused_view(model, ViewSpec::SpaceBrowser { project: None });
+            Vec::new()
+        }
+        "view.trust" => {
+            switch_focused_view(model, ViewSpec::Trust);
+            Vec::new()
+        }
+        "view.graph" => {
+            switch_focused_view(model, ViewSpec::Graph { graph_id: None });
+            Vec::new()
+        }
+        "view.events" => {
+            switch_focused_view(model, ViewSpec::EventInspector);
+            Vec::new()
+        }
+        "layout.split-h" => {
+            model
+                .workspace
+                .split_focused(SplitAxis::Horizontal, ViewSpec::EventInspector);
+            Vec::new()
+        }
+        "layout.split-v" => {
+            model
+                .workspace
+                .split_focused(SplitAxis::Vertical, ViewSpec::EventInspector);
+            Vec::new()
+        }
+        "layout.close" => {
+            model.workspace.close_focused();
+            Vec::new()
+        }
+        "layout.reset" => {
+            model.workspace.reset_layout();
+            Vec::new()
+        }
+        "session.new" => {
+            model.workspace.input_bar.clear();
+            Vec::new()
+        }
+        "app.quit" => vec![Effect::Quit],
+        _ => Vec::new(),
+    }
+}
+
+/// Switch the focused tile's view to a new spec.
+fn switch_focused_view(model: &mut AppModel, view: ViewSpec) {
+    let local = default_local_for_view(&view);
+    if let Some(tile) = model.workspace.tiles.get_mut(&model.workspace.focused_tile) {
+        tile.view = view;
+        tile.local = local;
+    }
+}
+
+/// Get default local state for a view spec.
+fn default_local_for_view(view: &ViewSpec) -> crate::workspace::ViewLocalState {
+    match view {
+        ViewSpec::ThreadList => crate::workspace::ViewLocalState::ThreadList {
+            cursor: 0,
+            filter: String::new(),
+        },
+        ViewSpec::SpaceBrowser { .. } => crate::workspace::ViewLocalState::SpaceBrowser {
+            cursor: 0,
+            query: String::new(),
+            scroll: 0,
+        },
+        ViewSpec::Thread { .. } => {
+            crate::workspace::ViewLocalState::Thread(
+                crate::workspace::ThreadViewState::default(),
+            )
+        }
+        _ => crate::workspace::ViewLocalState::GenericList {
+            cursor: 0,
+            scroll: 0,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// List navigation
+// ---------------------------------------------------------------------------
+
+/// Handle Enter on a list view — open the selected item.
+fn handle_list_enter(model: &mut AppModel) -> Vec<Effect> {
+    let focused = model.workspace.focused_tile;
+
+    if let Some(tile) = model.workspace.tiles.get(&focused) {
+        match &tile.view {
+            ViewSpec::ThreadList => {
+                // Find the thread at cursor and switch the thread tile to it
+                let cursor = match &tile.local {
+                    crate::workspace::ViewLocalState::ThreadList { cursor, .. } => *cursor,
+                    _ => return Vec::new(),
+                };
+
+                let threads = model.store.recent_threads();
+                if let Some(selected) = threads.into_iter().nth(cursor) {
+                    let thread_id = selected.id;
+                    // Find the thread tile (ViewSpec::Thread) and update its thread_id
+                    for (tid, t) in model.workspace.tiles.iter_mut() {
+                        if matches!(t.view, ViewSpec::Thread { .. }) {
+                            t.view = ViewSpec::Thread {
+                                thread_id: Some(thread_id),
+                            };
+                            // Focus the thread tile
+                            model.workspace.focused_tile = *tid;
+                            break;
+                        }
+                    }
+                    model.mark_dirty();
+                }
+            }
+            ViewSpec::SpaceBrowser { .. } => {
+                // TODO: Open item detail view (future feature)
+                model.mark_dirty();
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------

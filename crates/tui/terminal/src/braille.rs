@@ -52,6 +52,7 @@ impl BrailleBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         for b in self.bits.iter_mut() {
             *b = 0;
@@ -109,6 +110,7 @@ impl BrailleBuffer {
     }
 
     /// Get the raw bits for a cell.
+    #[allow(dead_code)]
     pub fn get_bits(&self, cell_x: usize, cell_y: usize) -> u8 {
         if cell_x < self.width && cell_y < self.height {
             self.bits[cell_y * self.width + cell_x]

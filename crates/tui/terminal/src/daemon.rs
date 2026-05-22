@@ -48,6 +48,7 @@ pub enum ClientError {
 // ---------------------------------------------------------------------------
 
 pub struct DaemonClient {
+    #[allow(dead_code)]
     system_space_dir: PathBuf,
     base_url: String,
     audience: String,
@@ -80,10 +81,12 @@ impl DaemonClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
+    #[allow(dead_code)]
     pub fn has_identity(&self) -> bool {
         self.signer.is_some()
     }
@@ -201,7 +204,95 @@ impl DaemonClient {
         Ok(parse_remote_summaries(&value))
     }
 
-    /// Execute an item via the daemon.
+    /// Execute an item via the daemon and return the SSE stream.
+    /// The stream yields SSE events as they arrive from the daemon.
+    #[allow(dead_code)]
+    pub async fn execute_stream(
+        &self,
+        item_ref: &str,
+        project_path: &str,
+        parameters: &serde_json::Value,
+    ) -> Result<SseStream, ClientError> {
+        let body = serde_json::json!({
+            "item_id": item_ref,
+            "project_path": project_path,
+            "parameters": parameters,
+            "stream": true,
+        });
+        let url = format!(
+            "{}/execute",
+            self.base_url.trim_end_matches('/')
+        );
+        let body_bytes = serde_json::to_vec(&body)?;
+        let headers = self.sign("POST", "/execute", &body_bytes)?;
+
+        let uri: hyper::Uri = url
+            .parse()
+            .map_err(|e| ClientError::DaemonDown {
+                url: format!("invalid URL: {e}"),
+            })?;
+        let host = uri.host().unwrap_or("127.0.0.1");
+        let port = uri.port_u16().unwrap_or(80);
+        let bind = format!("{host}:{port}");
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri.to_string())
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .header("host", &bind)
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature)
+            .body(Full::new(Bytes::from(body_bytes)))
+            .map_err(|e| ClientError::DaemonDown {
+                url: format!("build request: {e}"),
+            })?;
+
+        let stream = tokio::net::TcpStream::connect(&bind).await
+            .map_err(|e| ClientError::Dispatch(
+                ryeos_cli::error::CliDispatchError::Transport(
+                    ryeos_cli::error::CliTransportError::Unreachable {
+                        bind: bind.clone(),
+                        detail: e.to_string(),
+                    },
+                ),
+            ))?;
+
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| ClientError::Dispatch(
+                ryeos_cli::error::CliDispatchError::Transport(
+                    ryeos_cli::error::CliTransportError::Unreachable {
+                        bind: bind.clone(),
+                        detail: format!("HTTP handshake: {e}"),
+                    },
+                ),
+            ))?;
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                tracing::warn!("SSE connection error: {e}");
+            }
+        });
+
+        let resp = sender.send_request(req)
+            .await
+            .map_err(|e| ClientError::Dispatch(
+                ryeos_cli::error::CliDispatchError::Transport(
+                    ryeos_cli::error::CliTransportError::Unreachable {
+                        bind,
+                        detail: format!("send request: {e}"),
+                    },
+                ),
+            ))?;
+
+        Ok(SseStream::new(resp.into_body()))
+    }
+
+    /// Execute an item via the daemon (non-streaming).
     pub async fn execute(
         &self,
         item_ref: &str,
@@ -231,6 +322,82 @@ impl DaemonClient {
             daemon_url: Some(self.base_url.clone()),
             daemon_alive: alive,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE Stream wrapper
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub struct SseStream {
+    body: hyper::body::Incoming,
+    buffer: String,
+    done: bool,
+}
+
+#[allow(dead_code)]
+impl SseStream {
+    pub fn new(body: hyper::body::Incoming) -> Self {
+        Self {
+            body,
+            buffer: String::new(),
+            done: false,
+        }
+    }
+
+    /// Poll for the next SSE event. Returns None when the stream is done.
+    pub async fn next_event(&mut self) -> Option<crate::sse::SseEvent> {
+        if self.done {
+            return None;
+        }
+
+        // Try to parse a complete event from the buffer
+        if let Some(event) = self.try_parse_event() {
+            return Some(event);
+        }
+
+        // Read more data
+        use http_body_util::BodyExt;
+        match self.body.frame().await {
+            Some(Ok(frame)) => {
+                if let Some(data) = frame.data_ref() {
+                    self.buffer.push_str(&String::from_utf8_lossy(data));
+                }
+                self.try_parse_event()
+            }
+            Some(Err(_)) | None => {
+                self.done = true;
+                None
+            }
+        }
+    }
+
+    fn try_parse_event(&mut self) -> Option<crate::sse::SseEvent> {
+        // Look for double newline (event boundary)
+        let event_end = self.buffer.find("\n\n")?;
+        let event_text = self.buffer[..event_end].to_string();
+        self.buffer = self.buffer[event_end + 2..].to_string();
+
+        let mut event_type = "message";
+        let mut data = String::new();
+
+        for line in event_text.lines() {
+            if let Some(t) = line.strip_prefix("event: ") {
+                event_type = t.trim();
+            } else if let Some(d) = line.strip_prefix("data: ") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(d.trim());
+            }
+        }
+
+        if data.is_empty() {
+            return None;
+        }
+
+        Some(crate::sse::SseEvent::parse(event_type, &data))
     }
 }
 

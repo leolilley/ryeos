@@ -215,7 +215,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
         }
         OverlayState::CommandPalette { query, .. } => {
             let w = 60.min(viewport.w as usize);
-            let h = 12.min(viewport.h as usize);
+            let h = 16.min(viewport.h as usize);
             let mut surface = TextSurface::new(w, h);
             surface.fill(Style::new().bg(theme::BG));
             surface.draw_box(
@@ -235,7 +235,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             );
 
             // Query line
-            let query_display = format!("> {}", query);
+            let query_display = format!("> {}▎", query);
             surface.draw_text(
                 2,
                 3,
@@ -243,12 +243,53 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 Style::new().fg(theme::FG).bg(theme::BG),
             );
 
-            // Placeholder commands
-            let commands = ["execute", "refresh", "kill-thread", "quit"];
-            for (i, cmd) in commands.iter().enumerate() {
-                if 5 + i < h - 1 {
-                    surface.draw_text(4, 5 + i, cmd, Style::new().fg(theme::FG_DIM).bg(theme::BG));
+            // Filter and display commands
+            let all_commands = crate::commands::builtin_commands();
+            let matches = crate::commands::filter_commands(&all_commands, query);
+
+            for (i, cmd) in matches.iter().take(h.saturating_sub(5)).enumerate() {
+                let is_first = i == 0;
+                let bg = if is_first {
+                    theme::ACCENT
+                } else {
+                    theme::BG
+                };
+                let fg = if is_first {
+                    theme::BG
+                } else {
+                    theme::FG_DIM
+                };
+                let style = Style::new().fg(fg).bg(bg);
+
+                let label = crate::widgets::text::truncate(
+                    &format!("{}: {}", cmd.category, cmd.label),
+                    w - 6,
+                );
+                surface.draw_text(3, 5 + i, &label, style);
+
+                // Description on right
+                if is_first && w > label.len() + 10 {
+                    let desc = crate::widgets::text::truncate(
+                        &cmd.description,
+                        w.saturating_sub(label.len() + 8),
+                    );
+                    surface.draw_text(
+                        4 + label.len(),
+                        5 + i,
+                        &desc,
+                        Style::new().fg(theme::FG_MUTED).bg(bg),
+                    );
                 }
+            }
+
+            // No results
+            if matches.is_empty() {
+                surface.draw_text(
+                    4,
+                    5,
+                    "No matching commands",
+                    Style::new().fg(theme::FG_MUTED).bg(theme::BG),
+                );
             }
 
             let x = (viewport.w as usize).saturating_sub(w) / 2;

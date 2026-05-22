@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 /// Parsed SSE event from the daemon.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SseEvent {
     TextDelta {
         text: String,
@@ -31,6 +32,7 @@ pub enum SseEvent {
 
 impl SseEvent {
     /// Parse an SSE event from event type and data strings.
+    #[allow(dead_code)]
     pub fn parse(event_type: &str, data: &str) -> Self {
         match event_type {
             "text_delta" => {

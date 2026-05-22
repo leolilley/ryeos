@@ -9,6 +9,7 @@ use crate::daemon::DaemonClient;
 
 /// Transport-level request to the daemon.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum DaemonRequest {
     GetStatus,
     GetThreads,
@@ -28,6 +29,7 @@ pub enum DaemonRequest {
 
 /// Transport-level response from the daemon.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum DaemonResponse {
     Json(serde_json::Value),
     StreamStarted { thread_id: ThreadId },
@@ -59,6 +61,7 @@ pub trait DaemonTransport {
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("not connected")]
+    #[allow(dead_code)]
     NotConnected,
     #[error("daemon error: {0}")]
     Daemon(String),
@@ -115,6 +118,7 @@ impl SignedHttpTransport {
         Ok(Self { client })
     }
 
+    #[allow(dead_code)]
     pub fn client(&self) -> &DaemonClient {
         &self.client
     }

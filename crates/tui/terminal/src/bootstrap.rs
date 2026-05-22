@@ -8,6 +8,7 @@ use crate::transport::DaemonTransport;
 
 /// Bootstrap result.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct BootstrapResult {
     pub daemon_reachable: bool,
     pub identity_available: bool,
@@ -27,10 +28,20 @@ pub async fn blocking_essentials(
             let daemon_alive = snapshot.daemon_alive;
             update::update(model, AppEvent::PollSnapshot(snapshot));
 
-            // If using mock transport, inject demo thread events
+            // If using mock transport, inject demo data
             if transport.as_ref().name() == "mock" {
                 let events = mock_transport::mock_thread_events();
                 update::update(model, AppEvent::DaemonBatch(events));
+
+                // Inject mock items, projects, identity
+                for item in mock_transport::mock_items() {
+                    model.store.items.insert(item.id, item);
+                }
+                for project in mock_transport::mock_projects() {
+                    model.store.projects.insert(project.id, project);
+                }
+                model.store.identity = Some(mock_transport::mock_identity());
+                model.mark_dirty();
             }
 
             BootstrapResult {

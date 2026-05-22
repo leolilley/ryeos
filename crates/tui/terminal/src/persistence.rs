@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
     pub animation_enabled: bool,
@@ -30,6 +31,7 @@ impl Default for TuiConfig {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiSession {
     pub layout: LayoutTreeSer,
@@ -38,6 +40,7 @@ pub struct TuiSession {
 }
 
 /// Serializable layout tree.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LayoutTreeSer {
     Leaf(u64),
@@ -50,12 +53,14 @@ pub enum LayoutTreeSer {
 }
 
 /// Serializable tile state.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TileStateSer {
     pub view: ViewSpecSer,
 }
 
 /// Serializable view spec.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ViewSpecSer {
     Thread { thread_id: Option<u64> },
@@ -120,11 +125,13 @@ impl From<&ViewSpec> for ViewSpecSer {
 // File I/O
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn config_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ai").join("config").join("tui"))
 }
 
 /// Load config from disk. Returns default if not found.
+#[allow(dead_code)]
 pub fn load_config() -> TuiConfig {
     let path = config_dir().map(|d| d.join("config.json"));
     match path {
@@ -137,6 +144,7 @@ pub fn load_config() -> TuiConfig {
 }
 
 /// Save config to disk.
+#[allow(dead_code)]
 pub fn save_config(config: &TuiConfig) -> std::io::Result<()> {
     let dir = config_dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory"))?;

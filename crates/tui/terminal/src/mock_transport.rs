@@ -1,6 +1,9 @@
 //! Mock transport — returns sample data for testing without a daemon.
 
-use ryeos_tui_core::ids::RemoteId;
+use ryeos_tui_core::ids::{ItemId, ProjectId, RemoteId};
+use ryeos_tui_core::store::{
+    IdentityModel, ItemCounts, ItemModel, ProjectModel,
+};
 use ryeos_tui_core::update::{DaemonEvent, PollSnapshot, RemoteSummary, ThreadSummary};
 
 /// Generate a mock poll snapshot with sample data.
@@ -111,4 +114,108 @@ pub fn mock_thread_events() -> Vec<DaemonEvent> {
         },
         DaemonEvent::ThreadCompleted { id: tid },
     ]
+}
+
+/// Generate mock items for space browser.
+pub fn mock_items() -> Vec<ItemModel> {
+    vec![
+        ItemModel {
+            id: ItemId::new(1),
+            kind: "directive".into(),
+            name: "init".into(),
+            category: Some("rye/core".into()),
+            description: Some("Initialize a new Rye OS project".into()),
+            signed: true,
+        },
+        ItemModel {
+            id: ItemId::new(2),
+            kind: "directive".into(),
+            name: "rye/core/create_tool".into(),
+            category: Some("rye/core".into()),
+            description: Some("Create a new tool from template".into()),
+            signed: true,
+        },
+        ItemModel {
+            id: ItemId::new(3),
+            kind: "tool".into(),
+            name: "rye/bash/bash".into(),
+            category: Some("rye/core".into()),
+            description: Some("Execute bash commands".into()),
+            signed: true,
+        },
+        ItemModel {
+            id: ItemId::new(4),
+            kind: "tool".into(),
+            name: "rye/file-system/read".into(),
+            category: Some("rye/core".into()),
+            description: Some("Read file contents".into()),
+            signed: true,
+        },
+        ItemModel {
+            id: ItemId::new(5),
+            kind: "tool".into(),
+            name: "rye/file-system/write".into(),
+            category: Some("rye/core".into()),
+            description: Some("Write content to a file".into()),
+            signed: true,
+        },
+        ItemModel {
+            id: ItemId::new(6),
+            kind: "knowledge".into(),
+            name: "rye/core/signing".into(),
+            category: Some("rye/core".into()),
+            description: Some("Signing and verification reference".into()),
+            signed: true,
+        },
+        ItemModel {
+            id: ItemId::new(7),
+            kind: "directive".into(),
+            name: "deploy".into(),
+            category: None,
+            description: Some("Deploy project to remote".into()),
+            signed: false,
+        },
+        ItemModel {
+            id: ItemId::new(8),
+            kind: "tool".into(),
+            name: "rye/web/fetch".into(),
+            category: Some("rye/web".into()),
+            description: Some("Fetch URL content".into()),
+            signed: true,
+        },
+    ]
+}
+
+/// Generate mock projects.
+pub fn mock_projects() -> Vec<ProjectModel> {
+    vec![
+        ProjectModel {
+            id: ProjectId::new(1),
+            path: "/home/user/projects/my-app".into(),
+            name: "my-app".into(),
+            item_counts: ItemCounts {
+                directives: 12,
+                tools: 8,
+                knowledge: 5,
+            },
+        },
+        ProjectModel {
+            id: ProjectId::new(2),
+            path: "/home/user/projects/api-server".into(),
+            name: "api-server".into(),
+            item_counts: ItemCounts {
+                directives: 6,
+                tools: 3,
+                knowledge: 2,
+            },
+        },
+    ]
+}
+
+/// Generate mock identity.
+pub fn mock_identity() -> IdentityModel {
+    IdentityModel {
+        fingerprint: "SHA256:abc123def456...789".into(),
+        has_signing_key: true,
+    }
 }

@@ -1,6 +1,7 @@
 //! Terminal capabilities detection — truecolor, unicode, animation.
 
 /// Detected rendering capabilities.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RenderCapabilities {
     pub truecolor: bool,
