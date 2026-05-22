@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T03:35:35Z:89235656a2091cc9a86472abf8e7b4c4825b7de1c0944f0cab59a8d2b00621c3:DlfXrNXeYhRFwMrO6gzCEFug8bYrMzOj1+og+nzhYHVm7p1AESlmYZZy/0GDjFpt1UL6ap4vRG5wcLUmVQlnBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:06Z:f10af9474c040c35202a50bf4bd8ade2f17bb9fbd1b287b18047ba5cfeb7eefd:w9DDPLPUkpGc4aZHbpVapwMBG9xUFAP+7A1tK8JIlqzJVoH22ZOF7NYEn5RTfIqXMJf5W/Tq8gSSeYGz/iy6CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -24,38 +24,35 @@ ryeos init
 ```
 
 This creates:
-1. **Node identity** — Ed25519 key pair for the daemon
-2. **State directory** — `<XDG_DATA_HOME>/crates/bin/daemon/<node-id>/`
-3. **CAS store** — content-addressed storage for items and events
-4. **Projection database** — `projection.sqlite3` for queries
-5. **Bundle registry** — registers core and standard bundles
+1. **User identity** — Ed25519 key pair used by the CLI
+2. **Node identity** — Ed25519 key pair used by the runtime
+3. **System space** — default `<XDG_DATA_HOME>/ryeos/`
+4. **CAS state** — content-addressed storage for items and events
+5. **Bundle registrations** — signed records for installed bundles
 
 The node ID is derived from the public key fingerprint.
 
 ## State Directory Structure
 
 ```
-<state_dir>/
+<system-space>/
 ├── .ai/
 │   ├── bundles/
-│   │   ├── core/           ← Core bundle (always present)
-│   │   ├── standard/       ← Standard bundle (always present)
+│   │   ├── core/           ← Core bundle
+│   │   ├── standard/       ← Standard bundle
 │   │   └── <custom>/       ← User-installed bundles
 │   └── node/
 │       ├── identity/       ← Node signing keys (private_key.pem, public-identity.json)
-│       └── config.yaml     ← Node-level config
-├── cas/
-│   └── <content-hash>...   ← Content-addressed objects
-├── projection.sqlite3      ← Query database
-└── threads/
-    └── <thread-id>/
-        ├── events.jsonl    ← Append-only event log
-        └── state.json      ← Thread state snapshot
+│       └── bundles/        ← Signed bundle registration records
+└── state/
+    ├── objects/            ← Content-addressed objects
+    ├── refs/               ← CAS refs
+    └── runtime.sqlite3     ← Runtime projection database
 ```
 
 ## Startup Sequence
 
-When `ryeosd` starts:
+When the runtime process starts:
 
 1. **Load bundles** — scan registered bundle directories
 2. **Bootstrap engine** — load kind schemas, parsers, handlers

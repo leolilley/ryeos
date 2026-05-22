@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T03:35:35Z:b9bc61c81874fe2dfa851103d6128859c028438b91f58f4dab885cfe0419be47:3UUqtuzIGuxF/vDED1wUtAw/lnglBcH59XlqAdNgvD3X6CQU/3MQFrITd/T3JE96M7txHWk5wAXncMtc4iMhBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:06Z:b9bc61c81874fe2dfa851103d6128859c028438b91f58f4dab885cfe0419be47:3UUqtuzIGuxF/vDED1wUtAw/lnglBcH59XlqAdNgvD3X6CQU/3MQFrITd/T3JE96M7txHWk5wAXncMtc4iMhBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault]

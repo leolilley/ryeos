@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T03:35:37Z:d237a4d9465ecadc2860f6f7602f31ea2377e96fcb64f1c4bdf762a0560266a5:ULCcMZGSk3k0rCm8GdhQyuBtN+0BaH4njOWJewP9zc4tMeJLHhH/25VGvDb9WhaS2aRqO0M84oSoCbipMPkVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:10Z:d237a4d9465ecadc2860f6f7602f31ea2377e96fcb64f1c4bdf762a0560266a5:ULCcMZGSk3k0rCm8GdhQyuBtN+0BaH4njOWJewP9zc4tMeJLHhH/25VGvDb9WhaS2aRqO0M84oSoCbipMPkVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/handlers
 tags: [handler, directive, extends]

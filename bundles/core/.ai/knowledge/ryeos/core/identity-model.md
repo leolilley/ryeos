@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T03:35:36Z:0c0103c047810f05b05d67c9f42264479dd76c1daf595c090c875c534148cfe4:oShSJxFWyPEXFdpk+lpp9c0fbI5vABWPzw95BrKOhRM29kbd7VqdRqZ1ANiOMMv8UkIC0KirQEHvLji7qy7tDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:07Z:f400f808a090e7894e0b1b4bddeecb16809f4805009aa73f88461165a00a32d5:9FsXvgY/zsIBLoxYd//cqE3c9bwZMsUH8hI/63L0daoO6kIeUhTYgT9UX3dVU04emNFy3R26gffYyUhLk/KABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -21,8 +21,8 @@ and lifecycle.
 | --------------------- | ------------------------------------------------------------------------ | -------------------------------------------------- | -------------------------------- |
 | **Publisher trust**   | Verify signed bundle items                                               | `~/.ryeos/.ai/config/keys/trusted/<fp>.toml`       | `ryeos trust pin`                |
 | **User (CLI) key**    | Sign local HTTP requests from CLI to your own daemon                     | `~/.ryeos/.ai/config/keys/signing/private_key.pem` | `ryeos init`                     |
-| **Node (daemon) key** | Sign outbound HTTP requests to remote daemons; sign authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem`       | `ryeos init` or daemon auto-init |
-| **Vault X25519**      | Seal/unseal vault secrets (XChaCha20-Poly1305 envelopes)                 | `<system>/.ai/node/vault/private_key.pem`          | `ryeos init` or daemon auto-init |
+| **Node (daemon) key** | Sign outbound HTTP requests to remote daemons; sign authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem`       | `ryeos init`                     |
+| **Vault X25519**      | Seal/unseal vault secrets (XChaCha20-Poly1305 envelopes)                 | `<system>/.ai/node/vault/private_key.pem`          | `ryeos init`                     |
 
 ### Publisher trust
 
@@ -86,7 +86,7 @@ all entries).
 ### Fresh install
 
 ```
-ryeos init --source <bundles>
+ryeos init
 ```
 
 Creates all four layers:
@@ -98,15 +98,12 @@ Creates all four layers:
 5. Self-trust entries for both user and node keys
 6. User authorized-key TOML (node-signed, scopes `["*"]`)
 
-### Daemon startup
+### Runtime startup
 
-```
-ryeosd
-```
-
-The daemon verifies initialization (keys, bundles, registrations exist)
-and loads the two-phase node config. If any key artefacts are missing,
-the daemon auto-initializes by running `bootstrap::init` idempotently.
+After `ryeos init`, the runtime verifies initialization (keys, bundles,
+registrations exist) and loads the two-phase node config. Runtime
+bootstrap may repair a few missing daemon-local artifacts, but it does
+not install or register bundles and is not a substitute for `ryeos init`.
 
 ### Remote bootstrap
 

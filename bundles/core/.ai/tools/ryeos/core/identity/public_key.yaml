@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T03:35:35Z:0dcf07a6315a7cf7a92c4d4efec7375359392ea276713c34bb7d1387909a0d61:chan10F6J0miFPjXDkdyCc+Ei97LbBYqSnZcoD5Lt08vvHuvm6d5/FHgyhPbspreYctoH9WzNnRRrE1sZdwMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T04:30:09Z:ea9802e01990026c9bb226dae4822dccd40b899f9e0272c4cdb29ffe4f8a6b8f:9ig2waknQUwHgkSB9av/f+wZUSBd+oKYSIUTqtrhqrnyGwYfoH+2yxb+9tKz2lIEZmjYU3unBCpQXv0aWlfmDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/identity"
 name: "public_key"
 executor_id: "@subprocess"
@@ -18,4 +18,4 @@ config_schema:
   properties:
     system_space_dir:
       type: string
-      description: "System space root (parent of .ai/). Defaults to RYEOS_SYSTEM_SPACE_DIR env or XDG data dir / ryeosd."
+      description: "System space root (parent of .ai/). Defaults to RYEOS_SYSTEM_SPACE_DIR env or XDG data dir / ryeos."

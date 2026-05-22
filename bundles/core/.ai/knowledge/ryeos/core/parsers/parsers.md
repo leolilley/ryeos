@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T03:35:36Z:4be533dd23d3addf2890db5b1ee44d328d4ef169f18044e8236c6e009958eb57:hly3/o1//Mg3jWhIYpjM4WQKD1Qn/eXDmqeKcUSj3rBXwdOpljKTxwoymdo8bRVrgGkS5dlw1FNqNfyLtNxQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:07Z:4be533dd23d3addf2890db5b1ee44d328d4ef169f18044e8236c6e009958eb57:hly3/o1//Mg3jWhIYpjM4WQKD1Qn/eXDmqeKcUSj3rBXwdOpljKTxwoymdo8bRVrgGkS5dlw1FNqNfyLtNxQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, parsers, formats, parsing]

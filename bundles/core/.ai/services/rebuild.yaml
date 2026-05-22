@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T03:35:37Z:a72eaa06c77953e8f29322dcbbe17bd3faed6a80dd84984c3964d32ee8fdeb6e:HvA5gmwjBzZaVUjLUhHO1aUAgIS+xMeVkw+exxbODeAoIsoShIXz4uJOjB5JhaJmnML8Bn1S2pLgo3koDxhNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T04:30:09Z:a72eaa06c77953e8f29322dcbbe17bd3faed6a80dd84984c3964d32ee8fdeb6e:HvA5gmwjBzZaVUjLUhHO1aUAgIS+xMeVkw+exxbODeAoIsoShIXz4uJOjB5JhaJmnML8Bn1S2pLgo3koDxhNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: rebuild
 required_caps: ["ryeos.execute.service.rebuild"]

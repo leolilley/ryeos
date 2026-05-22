@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-05-22T03:35:36Z:b607e476bb9dfa2296ec461fc192cc8ec84ed34e7ba0e579c393a6140c3d6762:4i1/9ErmXzhXKS6b7s10R0ww75a/G+qjD1BmDvdPyv8EelFgyla5OL5CN/wAiCUBBm/qIXxvdY7YyVL87I0NAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:07Z:71b0943aef491729263c4ccb2df135fe7658d46759b9a3ddc072a3a16eda410e:XJyzdtm7Ldn2HocAT5oGa10gdfXBjONGlM7bo74KhCCaktCUWMU5W/LvSbGWa2Kq82fl8h5XoaWdfbDbXQY5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
 version: "2.0.0"
 description: >
-  How to install and set up ryEOS — from package to running daemon.
+  How to install and set up ryEOS — from package to initialized CLI environment.
   Covers init, bundle discovery, trust pinning, identity model,
   and the full directory layout after setup.
 ---
@@ -14,23 +14,16 @@ description: >
 ## Quick Start
 
 ```bash
-# 1. Install the package (Arch Linux example)
-sudo pacman -U ryeos-0.5.0-1-x86_64.pkg.tar.zst
+# 1. Install the package (Arch Linux / AUR example)
+yay -S ryeos
 
 # 2. Initialize (discovers bundles from /usr/share/ryeos by default)
 ryeos init
-
-# 3. Start the daemon
-ryeosd
-
-# 4. Verify it's running
-ryeos status
 ```
 
-The daemon auto-initializes missing key artefacts on startup. You do
-not need a separate init flag — `ryeosd` runs `bootstrap::init`
-idempotently whenever the node key, vault key, or public-identity.json
-is absent.
+For packaged installs, `ryeos init` is the one required setup command.
+It uses `/usr/share/ryeos` as the default bundle source and the default
+system/user spaces unless you pass explicit override flags.
 
 ## First-Boot Authentication
 
@@ -38,9 +31,9 @@ is absent.
 operator's user key with scopes `["*"]`. This is what lets the CLI
 authenticate to the daemon over HTTP.
 
-If the daemon auto-initializes (because `ryeos init` was not run
-manually), the same bootstrap step runs automatically. Either way, the
-local CLI gets full access on first boot.
+`ryeos init` must run before normal CLI-dispatched commands. Daemon
+bootstrap can repair a few daemon-local artifacts, but it does not
+install or register bundles and is not a substitute for `ryeos init`.
 
 To authorize additional callers (e.g. for remote nodes), see
 [`ryeos authorize-key`](#authorizing-callers).
@@ -62,9 +55,9 @@ Init is a one-time setup that creates the full runtime environment. It's
 5. **Pin publisher key** — hardcoded official publisher Ed25519 key
    written to trust store (no on-disk trust needed)
 6. **Pin additional trust files** — any `--trust-file` args processed
-7. **Discover bundles** — scan `--source` for child dirs with `.ai/`
-8. **Validate dependencies** — cross-bundle requires_kinds check
-9. **Install each bundle** — preflight verification + copy + registration
+7. **Discover bundles** — scan source for child dirs with `.ai/`
+8. **Plan bundle graph** — resolve `(requires_kinds ∪ uses_kinds) - provides_kinds`, detect duplicate providers and cycles
+9. **Install each bundle** — preflight verification + copy + signed registration
 10. **Vault keypair** — X25519 for sealed secrets (separate from identity)
 11. **Post-init verification** — reload trust store, confirm all keys present
 
@@ -219,21 +212,20 @@ ryeos init
 ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
-## Daemon Startup
+## Runtime Startup
 
-When `ryeosd` starts:
+After `ryeos init`, the runtime process starts from the initialized
+system space and uses the signed registrations that init wrote:
 
-1. **Auto-init** — if any key artefact is missing, runs idempotent
-   bootstrap to create it
-2. **Verify initialized** — checks system space exists, at least one
+1. **Verify initialized** — checks system space exists, at least one
    bundle registration present, keys exist
-3. **Phase 1** — reads bundle registrations, discovers effective roots
-4. **Build engine** — loads kind schemas, parsers, handlers from all
+2. **Phase 1** — reads bundle registrations, discovers effective roots
+3. **Build engine** — loads kind schemas, parsers, handlers from all
    registered bundles
-5. **Phase 2** — full node-config scan across all sections
-6. **Bind** — starts HTTP listener (default `127.0.0.1:9420`)
+4. **Phase 2** — full node-config scan across all sections
+5. **Bind** — starts the local control-plane listener
 
-The daemon does NOT install or modify bundles — it only reads what
+Runtime startup does NOT install or modify bundles — it only reads what
 `ryeos init` wrote.
 
 For the identity model and trust layers, see

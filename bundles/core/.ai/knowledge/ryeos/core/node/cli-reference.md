@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T03:35:36Z:7050dc3db5de7526487c4b762f571cc9ef88dbb1affbbebd4161dc881d47a262:YEnErwghmzyU915NbwPnD/ZJnEuoBx/BDtcG7lbda7IBEIuFAzdrmanlNGs4EGswpVfC1yMXiJCEmyJLg/TiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:07Z:885e57bce38826402f3e480761ee47446705723712c5c0ee059cbc7b3485911a:sGKuhVsWPqFHyc+FiagykzhZooS2NrpTkpeprkv8pQr+VAI1bZK9ZcClZkAZntnEYLFGcs4rS/z8ARlj3hDRBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, cli, verbs, aliases]
@@ -18,10 +18,17 @@ verbs such as threads, events, scheduler, commands, and compose.
 ## Setup
 
 ### `ryeos init`
-Bootstrap user + node keys, discover and install bundles from a source
-directory, pin publisher keys. Must be run before starting the daemon.
+Bootstrap user + node keys, discover and install packaged bundles, and
+pin publisher keys. For packaged installs, run it with no flags:
 
 ```
+ryeos init
+```
+
+Advanced/development overrides are available when using a non-packaged
+bundle source or custom state locations:
+
+```bash
 ryeos init [--source <dir>] [--system-space-dir <dir>] [--user-root <dir>]
            [--trust-file <file>...]
 ```

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T03:35:36Z:14e1be886b183dfba6921c463c824d18ac141cf3c3ea50513972fbb811eb0480:RTVIB3IYKVK7i+y/99tfxvh5vI+ydEEnzgj9foYEVYvxFkq1cHGdsA/kakf95LgqqMsbGWcoGwRexgBQwi5HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T04:30:07Z:14e1be886b183dfba6921c463c824d18ac141cf3c3ea50513972fbb811eb0480:RTVIB3IYKVK7i+y/99tfxvh5vI+ydEEnzgj9foYEVYvxFkq1cHGdsA/kakf95LgqqMsbGWcoGwRexgBQwi5HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/tools
 tags: [tool, verbs, aliases]
