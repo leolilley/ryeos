@@ -1,9 +1,10 @@
 //! Workspace — layout tree, tile state, focus, input bar.
 
 use crate::ids::{ThreadId, TileId};
-use crate::layout::LayoutTree;
+use crate::layout::{LayoutTree, SplitAxis};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // View specs
@@ -353,6 +354,210 @@ impl Workspace {
         if let Some(pos) = ids.iter().position(|id| *id == self.focused_tile) {
             let prev = if pos == 0 { ids.len() - 1 } else { pos - 1 };
             self.focused_tile = ids[prev];
+        }
+    }
+
+    /// Allocate a fresh TileId.
+    fn next_tile_id() -> TileId {
+        static COUNTER: AtomicU64 = AtomicU64::new(100);
+        TileId::new(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Split the focused tile along the given axis.
+    /// The existing tile becomes `first`, a new tile is `second`.
+    /// Returns the new TileId.
+    pub fn split_focused(&mut self, axis: SplitAxis, new_view: ViewSpec) -> Option<TileId> {
+        let focused = self.focused_tile;
+        let new_id = Self::next_tile_id();
+
+        // Insert new tile state
+        self.tiles.insert(
+            new_id,
+            TileState {
+                view: new_view,
+                local: ViewLocalState::None,
+            },
+        );
+
+        // Replace the focused leaf with a split
+        self.layout = replace_leaf_with_split(&self.layout, focused, axis, new_id)?;
+        Some(new_id)
+    }
+
+    /// Close the focused tile. If it's the last tile, do nothing.
+    /// Returns to the previous tile in order.
+    pub fn close_focused(&mut self) {
+        let ids = self.layout.tile_ids();
+        if ids.len() <= 1 {
+            return; // Don't close last tile
+        }
+
+        let focused = self.focused_tile;
+        self.tiles.remove(&focused);
+
+        // Remove the leaf from the tree, collapsing its parent split
+        if let Some(new_tree) = remove_leaf(&self.layout, focused) {
+            self.layout = new_tree;
+        }
+
+        // Focus the next available tile
+        let remaining = self.layout.tile_ids();
+        self.focused_tile = remaining.first().copied().unwrap_or(focused);
+    }
+
+    /// Reset layout to the default 3-pane.
+    pub fn reset_layout(&mut self) {
+        let default = Self::default_three_pane();
+        self.layout = default.layout;
+        self.tiles = default.tiles;
+        self.focused_tile = default.focused_tile;
+    }
+
+    /// Move cursor up in the focused list view.
+    pub fn cursor_up(&mut self) {
+        if let Some(tile) = self.tiles.get_mut(&self.focused_tile) {
+            match &mut tile.local {
+                ViewLocalState::ThreadList { cursor, .. } => {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                    }
+                }
+                ViewLocalState::SpaceBrowser { cursor, .. } => {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                    }
+                }
+                ViewLocalState::GenericList { cursor, .. } => {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                    }
+                }
+                ViewLocalState::Thread(state) => {
+                    if state.timeline_cursor > 0 {
+                        state.timeline_cursor -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Move cursor down in the focused list view.
+    pub fn cursor_down(&mut self, total_items: usize) {
+        if let Some(tile) = self.tiles.get_mut(&self.focused_tile) {
+            if total_items == 0 {
+                return;
+            }
+            match &mut tile.local {
+                ViewLocalState::ThreadList { cursor, .. } => {
+                    if *cursor < total_items.saturating_sub(1) {
+                        *cursor += 1;
+                    }
+                }
+                ViewLocalState::SpaceBrowser { cursor, .. } => {
+                    if *cursor < total_items.saturating_sub(1) {
+                        *cursor += 1;
+                    }
+                }
+                ViewLocalState::GenericList { cursor, .. } => {
+                    if *cursor < total_items.saturating_sub(1) {
+                        *cursor += 1;
+                    }
+                }
+                ViewLocalState::Thread(state) => {
+                    if state.timeline_cursor < total_items.saturating_sub(1) {
+                        state.timeline_cursor += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tree manipulation helpers
+// ---------------------------------------------------------------------------
+
+/// Replace a leaf node with a split containing the original leaf + a new leaf.
+fn replace_leaf_with_split(
+    tree: &LayoutTree,
+    target: TileId,
+    axis: SplitAxis,
+    new_id: TileId,
+) -> Option<LayoutTree> {
+    match tree {
+        LayoutTree::Leaf(id) if *id == target => Some(LayoutTree::Split {
+            axis,
+            ratio: 0.5,
+            first: Box::new(LayoutTree::Leaf(target)),
+            second: Box::new(LayoutTree::Leaf(new_id)),
+        }),
+        LayoutTree::Leaf(_) => None,
+        LayoutTree::Split {
+            axis: a,
+            ratio,
+            first,
+            second,
+        } => {
+            if let Some(new_first) = replace_leaf_with_split(first, target, axis, new_id) {
+                Some(LayoutTree::Split {
+                    axis: *a,
+                    ratio: *ratio,
+                    first: Box::new(new_first),
+                    second: second.clone(),
+                })
+            } else if let Some(new_second) = replace_leaf_with_split(second, target, axis, new_id) {
+                Some(LayoutTree::Split {
+                    axis: *a,
+                    ratio: *ratio,
+                    first: first.clone(),
+                    second: Box::new(new_second),
+                })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Remove a leaf from the tree, collapsing its parent split node.
+/// Returns the collapsed tree, or None if the leaf wasn't found.
+fn remove_leaf(tree: &LayoutTree, target: TileId) -> Option<LayoutTree> {
+    match tree {
+        LayoutTree::Leaf(id) if *id == target => {
+            // Can't remove root leaf
+            None
+        }
+        LayoutTree::Leaf(_) => None,
+        LayoutTree::Split {
+            first, second, ..
+        } => {
+            match (first.as_ref(), second.as_ref()) {
+                (LayoutTree::Leaf(a), LayoutTree::Leaf(b)) => {
+                    if *a == target {
+                        // Remove first, keep second
+                        Some(*second.clone())
+                    } else if *b == target {
+                        // Remove second, keep first
+                        Some(*first.clone())
+                    } else {
+                        // Neither child is the target — recurse
+                        None
+                    }
+                }
+                _ => {
+                    // Try removing from first
+                    if let Some(new_first) = remove_leaf(first, target) {
+                        return Some(new_first);
+                    }
+                    // Try removing from second
+                    if let Some(new_second) = remove_leaf(second, target) {
+                        return Some(new_second);
+                    }
+                    None
+                }
+            }
         }
     }
 }

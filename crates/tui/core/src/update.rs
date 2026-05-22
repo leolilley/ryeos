@@ -6,10 +6,11 @@
 use crate::effects::Effect;
 use crate::ids::ThreadId;
 use crate::input::{InputEvent, Key};
-use crate::layout::Rect;
+use crate::layout::{Rect, SplitAxis};
 use crate::model::AppModel;
 use crate::store::{DaemonStatus, EventRecord, ThreadModel, ThreadStatus, ThreadUsage};
 use crate::workspace::InputCapability;
+use crate::workspace::ViewSpec;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -189,6 +190,79 @@ fn handle_input(model: &mut AppModel, event: InputEvent) -> Vec<Effect> {
             // Next tile focus (simplified from vim-style h/j/k/l)
             model.workspace.focus_next();
             model.mark_dirty();
+            Vec::new()
+        }
+
+        // Tile management
+        Key::Ctrl('s') => {
+            // Split focused tile horizontally
+            let new_view = ViewSpec::ThreadList;
+            model.workspace.split_focused(SplitAxis::Horizontal, new_view);
+            model.mark_dirty();
+            Vec::new()
+        }
+
+        Key::Ctrl('v') => {
+            // Split focused tile vertically
+            let new_view = ViewSpec::EventInspector;
+            model.workspace.split_focused(SplitAxis::Vertical, new_view);
+            model.mark_dirty();
+            Vec::new()
+        }
+
+        Key::Ctrl('x') => {
+            // Close focused tile
+            model.workspace.close_focused();
+            model.mark_dirty();
+            Vec::new()
+        }
+
+        Key::Ctrl('r') => {
+            // Reset layout to default 3-pane
+            model.workspace.reset_layout();
+            model.mark_dirty();
+            Vec::new()
+        }
+
+        // List navigation (when input is empty)
+        Key::Char('j') if model.workspace.input_bar.text.is_empty() => {
+            let count = list_item_count(model);
+            model.workspace.cursor_down(count);
+            model.mark_dirty();
+            Vec::new()
+        }
+
+        Key::Char('k') if model.workspace.input_bar.text.is_empty() => {
+            model.workspace.cursor_up();
+            model.mark_dirty();
+            Vec::new()
+        }
+
+        Key::Char(' ') if model.workspace.input_bar.text.is_empty() => {
+            // Toggle expand/collapse in thread view
+            if let Some(tile) = model.workspace.tiles.get_mut(&model.workspace.focused_tile) {
+                if let crate::workspace::ViewLocalState::Thread(ref mut state) = tile.local {
+                    // Toggle the turn at the cursor
+                    let turn_id = state.timeline_cursor as u64;
+                    if state.expanded_turns.contains(&turn_id) {
+                        state.expanded_turns.remove(&turn_id);
+                    } else {
+                        state.expanded_turns.insert(turn_id);
+                    }
+                    model.mark_dirty();
+                }
+            }
+            Vec::new()
+        }
+
+        // Scrolling
+        Key::PageUp => {
+            // TODO: scroll up by page
+            Vec::new()
+        }
+
+        Key::PageDown => {
+            // TODO: scroll down by page
             Vec::new()
         }
 
@@ -578,6 +652,33 @@ fn parse_thread_status(s: &str) -> Result<ThreadStatus, ()> {
         "continued" => Ok(ThreadStatus::Continued),
         _ => Err(()),
     }
+}
+
+/// Get the number of list items for the focused view, for cursor bounds.
+fn list_item_count(model: &AppModel) -> usize {
+    model
+        .workspace
+        .tiles
+        .get(&model.workspace.focused_tile)
+        .map(|tile| match &tile.view {
+            ViewSpec::ThreadList => model.store.recent_threads().len(),
+            ViewSpec::SpaceBrowser { .. } => model.store.items.len(),
+            ViewSpec::Projects => model.store.projects.len(),
+            ViewSpec::Remotes => model.store.remotes.len(),
+            ViewSpec::Trust => model.store.trust_alerts.len(),
+            ViewSpec::Thread { .. } => {
+                // Parts count for thread view
+                model
+                    .store
+                    .threads
+                    .values()
+                    .next()
+                    .map(|t| t.parts.len())
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        })
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
