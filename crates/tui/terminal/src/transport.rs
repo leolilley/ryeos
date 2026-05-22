@@ -38,6 +38,11 @@ pub enum DaemonResponse {
 
 /// Trait for daemon transport implementations.
 pub trait DaemonTransport {
+    /// Transport name for debugging and feature detection.
+    fn name(&self) -> &str {
+        "unknown"
+    }
+
     fn request(
         &self,
         req: DaemonRequest,
@@ -71,6 +76,10 @@ use crate::mock_transport;
 pub struct MockTransport;
 
 impl DaemonTransport for MockTransport {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
     fn request(
         &self,
         _req: DaemonRequest,
@@ -113,6 +122,10 @@ impl SignedHttpTransport {
 }
 
 impl DaemonTransport for SignedHttpTransport {
+    fn name(&self) -> &str {
+        "signed-http"
+    }
+
     fn request(
         &self,
         req: DaemonRequest,

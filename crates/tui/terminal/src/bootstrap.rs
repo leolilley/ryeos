@@ -3,6 +3,7 @@
 use ryeos_tui_core::model::AppModel;
 use ryeos_tui_core::update::{self, AppEvent};
 
+use crate::mock_transport;
 use crate::transport::{DaemonTransport, MockTransport, TransportError};
 
 /// Bootstrap result.
@@ -25,6 +26,13 @@ pub async fn blocking_essentials(
             let remote_count = snapshot.remotes.len();
             let daemon_alive = snapshot.daemon_alive;
             update::update(model, AppEvent::PollSnapshot(snapshot));
+
+            // If using mock transport, inject demo thread events
+            if transport.as_ref().name() == "mock" {
+                let events = mock_transport::mock_thread_events();
+                update::update(model, AppEvent::DaemonBatch(events));
+            }
+
             BootstrapResult {
                 daemon_reachable: daemon_alive,
                 identity_available: true, // TODO: check from transport
