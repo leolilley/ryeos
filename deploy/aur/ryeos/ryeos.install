@@ -7,7 +7,15 @@ post_install() {
     done
 
     echo "ryeos bundles installed to /usr/share/ryeos"
-    echo "Initialize with: ryeos init"
+    echo
+    echo "Initialize with:"
+    echo "  ryeos init \\"
+    echo "    --trust-file /usr/share/ryeos/core/PUBLISHER_TRUST.toml \\"
+    echo "    --trust-file /usr/share/ryeos/standard/PUBLISHER_TRUST.toml"
+    echo
+    echo "(The --trust-file flags pin the packaged bundle signers."
+    echo " Production installs may omit them once bundles are signed"
+    echo " with the official publisher key.)"
 }
 
 post_upgrade() {

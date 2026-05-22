@@ -619,11 +619,11 @@ mod tests {
         write_object(&cas_root, &manifest_hash, &manifest);
         write_object(&cas_root, &item_source_hash, &item_source);
 
-        let head_path = refs_root.join("projects/test_project/head");
+        let head_path = refs_root.join("projects/principal-test/test_project/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
         let ref_value = serde_json::json!({
             "schema": 1, "kind": "signed_ref",
-            "ref_path": "projects/test_project",
+            "ref_path": "projects/principal-test/test_project",
             "target_hash": proj_snap_hash,
             "updated_at": "2026-04-22T00:00:00Z",
             "signer": "test", "signature": "test"

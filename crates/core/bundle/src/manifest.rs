@@ -361,8 +361,8 @@ mod tests {
         assert!(mf.provides_kinds.contains(&"service".to_string()));
         assert!(mf.provides_kinds.contains(&"tool".to_string()));
         assert!(
-            mf.provides_kinds.contains(&"knowledge".to_string()),
-            "core must provide knowledge after schema move: {:?}",
+            !mf.provides_kinds.contains(&"knowledge".to_string()),
+            "core must NOT provide knowledge after schema move to standard: {:?}",
             mf.provides_kinds
         );
         assert!(mf.requires_kinds.is_empty(), "core should have no requires");
@@ -377,12 +377,12 @@ mod tests {
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
         assert!(
-            !mf.provides_kinds.contains(&"knowledge".to_string()),
-            "standard must not provide knowledge after move"
+            mf.provides_kinds.contains(&"knowledge".to_string()),
+            "standard must provide knowledge after schema move from core"
         );
         assert!(
-            mf.uses_kinds.contains(&"knowledge".to_string()),
-            "standard must use knowledge from core"
+            !mf.uses_kinds.contains(&"knowledge".to_string()),
+            "standard must not use knowledge externally since it now provides it"
         );
         assert!(
             mf.requires_kinds.contains(&"config".to_string()),
@@ -578,8 +578,8 @@ typo_field: oops
             "directive is a standard kind, not core: {kinds:?}"
         );
         assert!(
-            kinds.contains(&"knowledge".to_string()),
-            "core must provide knowledge after schema move: {kinds:?}"
+            !kinds.contains(&"knowledge".to_string()),
+            "core must NOT provide knowledge after schema move to standard: {kinds:?}"
         );
     }
 
@@ -596,8 +596,8 @@ typo_field: oops
             "standard must provide graph: {kinds:?}"
         );
         assert!(
-            !kinds.contains(&"knowledge".to_string()),
-            "knowledge must NOT be in standard's provides_kinds after move: {kinds:?}"
+            kinds.contains(&"knowledge".to_string()),
+            "standard must provide knowledge after schema move from core: {kinds:?}"
         );
     }
 

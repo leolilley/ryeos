@@ -391,12 +391,8 @@ fn discover_system_space_dir() -> PathBuf {
 mod tests {
     use super::*;
     use ryeos_runtime::{PositionalMatcher, PositionalSlot};
-    use std::sync::Mutex;
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     fn with_user_space<T>(f: impl FnOnce() -> T) -> T {
-        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env::lock();
         let saved = std::env::var_os("USER_SPACE");
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(ryeos_engine::AI_DIR)).unwrap();

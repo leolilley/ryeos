@@ -155,12 +155,8 @@ fn ensure_user_space_available() -> Result<PathBuf, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     fn with_user_space<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env::lock();
         let saved = std::env::var_os("USER_SPACE");
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(ryeos_engine::AI_DIR)).unwrap();
@@ -252,7 +248,7 @@ mod tests {
 
     #[test]
     fn no_project_errors_when_user_space_is_missing() {
-        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env::lock();
         let saved = std::env::var_os("USER_SPACE");
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("missing-user-space");

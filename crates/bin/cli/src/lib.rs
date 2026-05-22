@@ -7,4 +7,6 @@ pub mod error;
 pub mod exit;
 pub mod help;
 pub mod project_resolve;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod transport;

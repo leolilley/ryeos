@@ -7,6 +7,8 @@ mod exit;
 mod help;
 mod local_verbs;
 mod project_resolve;
+#[cfg(test)]
+mod test_env;
 mod transport;
 
 fn init_tracing(debug: bool) {

@@ -8,6 +8,12 @@ url="https://github.com/leolilley/ryeos"
 license=('MIT')
 install=ryeos.install
 
+# Bundle binaries are content-addressed: their hashes are recorded in
+# signed manifests at populate time. makepkg's default `strip` step
+# rewrites the binaries and would invalidate those signatures, so we
+# disable strip (and `lto` for the same reason).
+options=('!strip' '!lto')
+
 # SQLite is bundled (libsqlite3-sys), TLS via rustls — no runtime system deps
 depends=('gcc-libs' 'glibc')
 
@@ -66,6 +72,13 @@ package() {
         name=$(basename "$bundle_dir")
         mkdir -p "$pkgdir/usr/share/ryeos/$name"
         cp -ra "$bundle_dir/.ai" "$pkgdir/usr/share/ryeos/$name/.ai"
+        # Ship the per-bundle PUBLISHER_TRUST.toml alongside .ai so
+        # operators can pin the bundle's signer at `ryeos init` time
+        # via --trust-file.
+        if [[ -f "$bundle_dir/PUBLISHER_TRUST.toml" ]]; then
+            install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
+                "$pkgdir/usr/share/ryeos/$name/PUBLISHER_TRUST.toml"
+        fi
     done
 
     # ── License ─────────────────────────────────────────────
