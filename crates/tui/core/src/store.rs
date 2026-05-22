@@ -1,6 +1,6 @@
 //! Normalized store — canonical model of daemon/project facts.
 
-use crate::ids::{ItemId, ProjectId, RemoteId, ThreadId};
+use crate::ids::{ProjectId, RemoteId, ThreadId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -117,6 +117,12 @@ pub enum DaemonStatus {
     Connecting,
     Connected,
     Disconnected,
+}
+
+impl Default for DaemonStatus {
+    fn default() -> Self {
+        Self::Connecting
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -253,8 +259,7 @@ impl Store {
 }
 
 /// Lightweight item reference.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ItemId(pub String);
+pub type ItemId = crate::ids::ItemId;
 
 /// Lightweight item model for space browsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]

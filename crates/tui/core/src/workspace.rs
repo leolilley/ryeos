@@ -1,8 +1,7 @@
 //! Workspace — layout tree, tile state, focus, input bar.
 
-use crate::ids::TileId;
+use crate::ids::{ThreadId, TileId};
 use crate::layout::LayoutTree;
-use crate::store::ThreadId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 

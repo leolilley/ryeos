@@ -33,6 +33,7 @@ id_type!(RemoteId);
 id_type!(ProjectId);
 id_type!(GraphId);
 id_type!(ExecutionId);
+id_type!(ItemId);
 
 /// Reference to a RYE item (directive, tool, knowledge, config).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -5,7 +5,6 @@
 
 use crate::scene::{Rgb, ScenePrimitive, Vec2};
 use crate::store::Store;
-use crate::theme;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

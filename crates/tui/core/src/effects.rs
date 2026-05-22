@@ -2,7 +2,7 @@
 //!
 //! Core returns effects; the terminal/web shell performs them.
 
-use crate::ids::{ExecutionId, ThreadId};
+use crate::ids::ThreadId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
