@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T16:29:31Z:7a6e087c61a9b3685e92878cc0ae65a0b6d8d6222efd814b2a5908a17dc22161:EHFkNOkIoCxRHX9ymbBu9+gz5kupK7etxGa4Jv0GcTmYiukg6t//RbfFgYN2fxMglirHz5TPbhz66E10bkG+Ag==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-22T16:49:59Z:7a6e087c61a9b3685e92878cc0ae65a0b6d8d6222efd814b2a5908a17dc22161:EHFkNOkIoCxRHX9ymbBu9+gz5kupK7etxGa4Jv0GcTmYiukg6t//RbfFgYN2fxMglirHz5TPbhz66E10bkG+Ag==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "engine/kinds/node"
 version: "1.0.0"
 # `node` items are signed YAMLs that describe per-node configuration

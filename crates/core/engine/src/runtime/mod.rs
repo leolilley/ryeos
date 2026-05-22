@@ -444,6 +444,21 @@ pub fn compile_with_handlers(
         host_env,
     };
     ctx.template_ctx.project_path = project_root.map(|p| p.to_path_buf());
+
+    // Inject project_path into params so tools that accept it in their
+    // config_schema receive it via {params_json}. Tools that don't
+    // declare it will ignore the extra field (serde deny_unknown_fields
+    // is NOT used by the subprocess — it's only for the config_schema
+    // validation hint). This ensures subprocess tools can locate project
+    // items without a separate --project CLI arg.
+    if let (Some(ref pp), Some(obj)) = (
+        project_root,
+        ctx.params.as_object_mut(),
+    ) {
+        obj.entry("project_path")
+            .or_insert_with(|| Value::String(pp.to_string_lossy().into_owned()));
+    }
+
     ctx.template_ctx.params_json = params.to_string();
 
     // Seed always-present template tokens computed from the chain

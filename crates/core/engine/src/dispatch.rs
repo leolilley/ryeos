@@ -119,8 +119,8 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
             result: None,
             error: Some(serde_json::json!({
                 "message": "subprocess timed out",
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stdout": truncate_for_error(&result.stdout, 2000),
+                "stderr": truncate_for_error(&result.stderr, 2000),
             })),
             artifacts: Vec::new(),
             final_cost: None,
@@ -151,8 +151,8 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
     let error_value = if !result.success {
         Some(serde_json::json!({
             "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": truncate_for_error(&result.stdout, 2000),
+            "stderr": truncate_for_error(&result.stderr, 2000),
         }))
     } else {
         None
@@ -493,5 +493,20 @@ mod tests {
         let env_map: HashMap<String, String> = request.envs.into_iter().collect();
         assert_eq!(env_map.get("RYEOS_THREAD_ID").unwrap(), "thread:test");
         assert_eq!(env_map.get("RYEOS_CHAIN_ROOT_ID").unwrap(), "chain:test");
+    }
+}
+
+/// Truncate a string for inclusion in error payloads.
+/// Returns the original if already short enough; otherwise returns
+/// the first `max_len` chars + "… (truncated, N bytes total)".
+fn truncate_for_error(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_owned()
+    } else {
+        format!(
+            "{}… (truncated, {} bytes total)",
+            &s[..max_len],
+            s.len()
+        )
     }
 }

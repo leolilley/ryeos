@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-22T16:29:32Z:83b53d6018e1e17dafccb2c6458ecdfee85f715ae72a36719902db94c9dccb74:PXRIQnjZrL/FcpbfDUSpH7Xvq4mV/Uz74zEf4NwTdMZN7hUg5gJIBuF0RThZrnjkHQpBvgP+j8J/l532b9CWAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-22T16:50:00Z:4733d6fab5ecf37888cc565a8f9c443d0cdc2e46b175ddbd7c56592157b9bf92:rSNDmKXCbHFBYa6+YdmZxOZ6kGZLHFULt+KmF8mZ8bt6Sm2FAUBrTtYuc0mkTp1ECLXOJvyB6SBb2TrOt0EDAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "aliases"
 section: aliases
 tokens: ["s"]
 verb: sign
 description: "Sign (short form)"
+positional_field: item_ref

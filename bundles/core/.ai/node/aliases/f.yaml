@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-22T16:29:32Z:30dfc4323d923184b2a72e753a42fdb5230ddd7df0dbf598c046e62689c90975:zBu7m2l7D7AT8rJHRb7dz6/qJUGpAAQRsf/7JJ5xnPzeuSN5dMJNlnVGhV2d/9jOy3uXQOSOn6nqPWVg+4atCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-22T16:49:59Z:302cad2e378d1c3720a10e0e912c11425aa0c37cd74eab5014edd9ff06dadef4:kafbSqJK9fiiqTS3gzALG2qB4epjJBTIV0J6iyWTTBE1/lNy9Dihwuulkr48aE/uxx9ZNZLzbRDDPvvdChkSAQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "aliases"
 section: aliases
 tokens: ["f"]
 verb: fetch
 description: "Fetch (short form)"
+positional_field: item_ref
