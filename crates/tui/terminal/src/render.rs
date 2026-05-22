@@ -52,11 +52,13 @@ impl FrameRenderer {
             frame.input.rect.y as usize,
         );
 
-        // Status bar (row between tiles and input)
-        if viewport_h >= 2 {
-            let status_y = viewport_h as usize - 2;
-            render_status_bar(&mut composite, w, status_y);
-        }
+        // Status bar (second from bottom)
+        blit_surface_at(
+            &mut composite,
+            &frame.status_bar.cells,
+            frame.status_bar.rect.x as usize,
+            frame.status_bar.rect.y as usize,
+        );
 
         // Blit overlays
         for overlay in &frame.overlays {
@@ -92,36 +94,4 @@ fn blit_surface_at(dst: &mut TextSurface, src: &TextSurface, offset_x: usize, of
     }
 }
 
-/// Render a minimal status bar.
-fn render_status_bar(surface: &mut TextSurface, width: usize, y: usize) {
-    if y >= surface.height {
-        return;
-    }
 
-    let bg = Color::Rgb(0x1d, 0x20, 0x21);
-    let fg_dim = Color::Rgb(0xa8, 0x99, 0x84);
-    let fg_accent = Color::Rgb(0x83, 0xa5, 0x98);
-    let sep_style = Style::new().fg(Color::Rgb(0x50, 0x49, 0x45)).bg(bg);
-
-    // Fill bar
-    surface.draw_hline(0, y, width - 1, ' ', Style::new().bg(bg));
-
-    // Left side
-    let left = " ryeos-tui v0.1.0";
-    surface.draw_text(0, y, left, Style::new().fg(fg_dim).bg(bg));
-
-    let mut x = left.len();
-
-    // Separator
-    surface.draw_text(x, y, " │ ", sep_style);
-    x += 3;
-
-    // Help hint
-    let help = "? for help";
-    surface.draw_text(
-        width.saturating_sub(help.len() + 1),
-        y,
-        help,
-        Style::new().fg(fg_accent).bg(bg),
-    );
-}

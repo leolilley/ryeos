@@ -2,9 +2,13 @@
 //! a TextSurface from model state.
 
 pub mod event_inspector;
+pub mod graph;
+pub mod projects;
 pub mod remotes;
+pub mod space;
 pub mod thread;
 pub mod thread_list;
+pub mod trust;
 
 use crate::ids::TileId;
 use crate::layout::Rect;
@@ -70,10 +74,10 @@ pub fn build_tile_view(
         ViewSpec::Thread { .. } => thread::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Remotes => remotes::build(model, inner_w, inner_h),
         ViewSpec::EventInspector => event_inspector::build(model, inner_w, inner_h),
-        ViewSpec::Projects => projects_fallback(model, inner_w, inner_h),
-        ViewSpec::SpaceBrowser { .. } => placeholder("Space Browser", inner_w, inner_h),
-        ViewSpec::Trust => placeholder("Trust", inner_w, inner_h),
-        ViewSpec::Graph { .. } => placeholder("Graph", inner_w, inner_h),
+        ViewSpec::Projects => projects::build(model, inner_w, inner_h),
+        ViewSpec::SpaceBrowser { .. } => space::build(model, inner_w, inner_h),
+        ViewSpec::Trust => trust::build(model, inner_w, inner_h),
+        ViewSpec::Graph { .. } => graph::build(model, inner_w, inner_h),
     };
 
     // Blit content inside border
@@ -276,47 +280,6 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
 fn empty_surface(rect: Rect) -> TextSurface {
     let mut s = TextSurface::new(rect.w.max(1) as usize, rect.h.max(1) as usize);
     s.fill(Style::new().bg(theme::BG));
-    s
-}
-
-fn placeholder(name: &str, w: usize, h: usize) -> TextSurface {
-    let mut s = TextSurface::new(w, h);
-    s.fill(Style::new().bg(theme::BG));
-    let msg = format!("{} (coming soon)", name);
-    let style = Style::new().fg(theme::FG_MUTED).bg(theme::BG);
-    if h > 0 {
-        let x = w.saturating_sub(msg.len()) / 2;
-        let y = h / 2;
-        s.draw_text(x, y, &msg, style);
-    }
-    s
-}
-
-fn projects_fallback(model: &AppModel, w: usize, h: usize) -> TextSurface {
-    let mut s = TextSurface::new(w, h);
-    s.fill(Style::new().bg(theme::BG));
-
-    let header = Style::new().fg(theme::FG).bg(theme::BG).bold();
-    let row_style = Style::new().fg(theme::FG_DIM).bg(theme::BG);
-
-    if h > 0 {
-        s.draw_text(0, 0, "Projects", header);
-    }
-
-    for (i, (_, project)) in model.store.projects.iter().enumerate() {
-        if 2 + i >= h {
-            break;
-        }
-        let line = format!(
-            "  {} — {} items",
-            project.path,
-            project.item_counts.directives
-                + project.item_counts.tools
-                + project.item_counts.knowledge
-        );
-        s.draw_text(0, 2 + i, &line, row_style);
-    }
-
     s
 }
 

@@ -12,10 +12,9 @@ use tokio::sync::mpsc;
 
 use crate::bootstrap;
 use crate::capabilities::RenderCapabilities;
-use crate::mock_transport;
 use crate::render::FrameRenderer;
 use crate::terminal::TerminalGuard;
-use crate::transport::{DaemonTransport, MockTransport};
+use crate::transport::{DaemonTransport, MockTransport, SignedHttpTransport};
 
 /// Run the TUI app.
 pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -26,12 +25,20 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
     let mut model = AppModel::new_default(project_path);
     model.runtime.viewport = ryeos_tui_core::layout::Rect::new(0, 0, width, height);
 
-    // Create transport
+    // Create transport: try real daemon first, fall back to mock
     let mut transport: Box<dyn DaemonTransport> = if mock {
         Box::new(MockTransport)
     } else {
-        // Try real daemon, fall back to mock
-        Box::new(MockTransport) // TODO: try DaemonClient::try_connect() first
+        match SignedHttpTransport::connect().await {
+            Ok(t) => {
+                tracing::info!("connected to daemon");
+                Box::new(t)
+            }
+            Err(e) => {
+                tracing::warn!("daemon not available ({}), using mock data", e);
+                Box::new(MockTransport)
+            }
+        }
     };
 
     // Bootstrap

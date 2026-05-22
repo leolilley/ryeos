@@ -10,6 +10,7 @@ use crate::layout::Rect;
 use crate::model::AppModel;
 use crate::store::{DaemonStatus, EventRecord, ThreadModel, ThreadStatus, ThreadUsage};
 use crate::workspace::InputCapability;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // AppEvent — events fed into core by platform shells
@@ -68,7 +69,7 @@ pub struct PollSnapshot {
     pub daemon_alive: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSummary {
     pub id: ThreadId,
     pub status: String,
@@ -79,7 +80,7 @@ pub struct ThreadSummary {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteSummary {
     pub id: crate::ids::RemoteId,
     pub name: String,
