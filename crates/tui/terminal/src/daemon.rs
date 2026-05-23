@@ -310,6 +310,33 @@ impl DaemonClient {
         .await
     }
 
+    /// Call a daemon service endpoint by name.
+    pub async fn call_service(
+        &self,
+        endpoint: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.signed_post(
+            &format!("/services/{}", endpoint),
+            params,
+        )
+        .await
+    }
+
+    /// Resolve an effective item via the daemon's items.effective service.
+    pub async fn resolve_effective_item(
+        &self,
+        canonical_ref: &str,
+        project_path: Option<&str>,
+    ) -> Result<serde_json::Value, ClientError> {
+        let params = if let Some(pp) = project_path {
+            serde_json::json!({ "canonical_ref": canonical_ref, "project_path": pp })
+        } else {
+            serde_json::json!({ "canonical_ref": canonical_ref })
+        };
+        self.call_service("items.effective", &params).await
+    }
+
     /// Fetch a full poll snapshot (threads + remotes + status).
     pub async fn poll_snapshot(&self) -> Result<PollSnapshot, ClientError> {
         let threads = self.get_threads().await.unwrap_or_default();

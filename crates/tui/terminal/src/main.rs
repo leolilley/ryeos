@@ -72,9 +72,50 @@ fn main() {
     // Load surface
     let surface_opts = ryeos_tui_core::surface::SurfaceLoadOptions {
         explicit_file: surface_file.map(std::path::PathBuf::from),
-        surface_name,
+        surface_name: None,
     };
-    let loaded = ryeos_tui_core::surface::load_surface(&surface_opts);
+
+    // If --surface was given, resolve through daemon (when available)
+    // --surface always means daemon resolution, not local preview
+    let loaded = if surface_name.is_some() && !mock {
+        // Try daemon resolution first
+        match tokio::runtime::Runtime::new() {
+            Ok(rt) => {
+                let result = rt.block_on(async {
+                    match daemon::DaemonClient::try_connect().await {
+                        Ok(client) => {
+                            let ref_str = surface_name.as_deref().unwrap();
+                            eprintln!("info: resolving {} via daemon...", ref_str);
+                            match client.resolve_effective_item(ref_str, Some(&project_path)).await {
+                                Ok(value) => {
+                                    ryeos_tui_core::surface::LoadedSurface::from_daemon(
+                                        ref_str,
+                                        value,
+                                    )
+                                }
+                                Err(e) => {
+                                    eprintln!("warn: daemon resolution failed for {}: {}, falling back to builtin", ref_str, e);
+                                    eprintln!("info: use --surface-file for local preview");
+                                    ryeos_tui_core::surface::load_surface(&surface_opts)
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!("warn: daemon not available, falling back to builtin");
+                            ryeos_tui_core::surface::load_surface(&surface_opts)
+                        }
+                    }
+                });
+                result
+            }
+            Err(e) => {
+                eprintln!("warn: failed to create tokio runtime: {}, falling back to builtin", e);
+                ryeos_tui_core::surface::load_surface(&surface_opts)
+            }
+        }
+    } else {
+        ryeos_tui_core::surface::load_surface(&surface_opts)
+    };
 
     // Surface diagnostics
     for diag in loaded.all_diagnostics() {

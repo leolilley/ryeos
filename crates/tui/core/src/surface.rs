@@ -295,6 +295,58 @@ impl LoadedSurface {
         matches!(self, LoadedSurface::LocalPreview { .. })
     }
 
+    /// Create a RyeResolved surface from daemon response.
+    ///
+    /// The `value` is the JSON returned by `items.effective`:
+    /// `{ "canonical_ref", "kind", "resolved_path", "signed", "composed", ... }`
+    pub fn from_daemon(requested_ref: &str, value: serde_json::Value) -> Self {
+        let composed = value.get("composed").cloned().unwrap_or(serde_json::Value::Null);
+        let trusted = value.get("signed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let provenance = value
+            .get("provenance")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let composed = value.get("composed").cloned().unwrap_or(serde_json::Value::Null);
+
+        // Parse composed value as SurfaceSpec
+        let spec = match serde_json::from_value::<SurfaceSpec>(composed) {
+            Ok(s) => s,
+            Err(e) => {
+                let mut diags = Vec::new();
+                diags.push(SurfaceDiagnostic::ValidationError {
+                    message: format!("daemon returned invalid surface: {}", e),
+                });
+                builtin_default()
+            }
+        };
+
+        let mut item_diagnostics = Vec::new();
+        let mut tui_diagnostics = Vec::new();
+
+        if trusted && !value.get("signed").and_then(|v| v.as_bool()).unwrap_or(false) {
+            // Signed surfaces from daemon are trusted
+        } else if !trusted {
+            item_diagnostics.push(SurfaceDiagnostic::ValidationError {
+                message: "surface is not signed".into(),
+            });
+        }
+
+        LoadedSurface::RyeResolved {
+            requested_ref: requested_ref.to_string(),
+            spec,
+            trusted,
+            provenance,
+            item_diagnostics,
+            tui_diagnostics,
+        }
+    }
+
     /// All diagnostics combined.
     pub fn all_diagnostics(&self) -> Vec<&SurfaceDiagnostic> {
         match self {

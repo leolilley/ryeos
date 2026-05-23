@@ -188,7 +188,14 @@ impl DaemonTransport for SignedHttpTransport {
                         Err(e) => Err(TransportError::Daemon(e.to_string())),
                     }
                 }
-                _ => Err(TransportError::Transport("not implemented".into())),
+                DaemonRequest::GetEffectiveSurface { ref ref_str } => {
+                    match self.client.resolve_effective_item(ref_str, None).await {
+                        Ok(v) => Ok(DaemonResponse::Json(v)),
+                        Err(e) => Err(TransportError::Daemon(e.to_string())),
+                    }
+                }
+                DaemonRequest::GetRemotes => todo!("GetRemotes via signed-http"),
+                DaemonRequest::ExecuteStream { .. } => todo!("ExecuteStream via signed-http"),
             }
         })
     }
