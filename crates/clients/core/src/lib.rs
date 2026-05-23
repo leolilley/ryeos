@@ -5,8 +5,10 @@
 //! wasm-bindgen, or any platform-specific I/O.
 
 pub mod animation;
+pub mod command_registry;
 pub mod commands;
 pub mod effects;
+pub mod effective_surface;
 pub mod frame;
 pub mod ids;
 pub mod input;

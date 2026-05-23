@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-23T13:58:13Z:8aeb7bd18b5b85b144db3680d9265cc8fb0427eacc51c002f4e1c577acb43f4b:wyJn9Y4PU72nfmOHA0bHYEY0+2+vLLZYcnZt8Ox/4giFCujZLxcFJKNzomzfqUjZt91n4yrfzIBoAZ/U+zFUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: ui.bootstrap
+availability: daemon_only
+required_caps: []
+schema:
+  surface_ref: string
+  project_path: string?
+  renderer: "terminal | browser?"
+description: "Resolve a surface, mint a session, and return a renderer-agnostic bootstrap envelope."
