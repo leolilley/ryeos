@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-23T07:57:48Z:01d89694edc92b97b1e6055c6f39e5cebe26e8ddc055be8d0cafa7d6c53518ba:l1qqe39PLUiyDXW3Ftzew6XmV69PDWFH8eIHBau5EG8awuYFc9ozo5bl56AE9werOTNIbzlkQS49BD7Uwk1iDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: bundle.verify
+availability: offline
+required_caps: []
+schema:
+  source: string
+  registry_root: string?
+description: "Validate all bundle items, signatures, metadata anchoring, and manifest. Does not rewrite any files."

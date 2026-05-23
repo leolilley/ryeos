@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-23T07:57:49Z:f3140b9284a6eb7792fab3a1ebda23ac5dadf31447ba0f3accc34b4cf3bcac7b:uPS3iGqYDzvj4gMjp5/G25KaDBbfDTS/Bo1MRvksa/j4O4au86oHv8CjKxQoYY/zobXpUJt3m9iXnCr57LYcBw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: bundle.publish
+availability: offline
+required_caps: []
+schema:
+  source: string
+  registry_root: string?
+  owner: string?
+  no_trust_doc: boolean?
+description: "Full bundle release pipeline: bootstrap-sign, rebuild CAS, sign items, generate manifest, emit trust doc."
