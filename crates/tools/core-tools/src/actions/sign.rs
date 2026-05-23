@@ -536,19 +536,13 @@ fn is_already_validly_signed_operator(
         return false;
     };
 
-    let expected_hash = lillux::signature::content_hash(body);
-    if header.content_hash != expected_hash {
-        return false;
-    }
-
-    if header.signer_fingerprint != fingerprint {
-        return false;
-    }
-
-    lillux::signature::verify_signature(
+    lillux::signature::is_valid_signature_for(
         &header.content_hash,
         &header.signature_b64,
+        &header.signer_fingerprint,
+        body,
         verifying_key,
+        fingerprint,
     )
 }
 

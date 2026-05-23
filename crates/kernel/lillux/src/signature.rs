@@ -166,6 +166,39 @@ pub fn verify_signature(
     }
 }
 
+/// Check whether a parsed signature's components represent a valid
+/// signature for the given body content and signer.
+///
+/// Returns `true` only when all three conditions hold:
+///   1. `content_hash` matches `content_hash(body)`,
+///   2. `signer_fingerprint` matches `expected_fingerprint`, and
+///   3. `signature_b64` verifies against the hash with `verifying_key`.
+///
+/// This accepts raw field values so it works with both
+/// `lillux::signature::SignatureHeader` and
+/// `ryeos_engine::contracts::SignatureHeader` (which have the same
+/// fields but are distinct types).
+///
+/// This is the single canonical validity check used by all idempotent
+/// signing paths (operator sign, bundle sign, and publish).
+pub fn is_valid_signature_for(
+    header_hash: &str,
+    signature_b64: &str,
+    signer_fingerprint: &str,
+    body: &str,
+    verifying_key: &VerifyingKey,
+    expected_fingerprint: &str,
+) -> bool {
+    let expected_hash = content_hash(body);
+    if header_hash != expected_hash {
+        return false;
+    }
+    if signer_fingerprint != expected_fingerprint {
+        return false;
+    }
+    verify_signature(header_hash, signature_b64, verifying_key)
+}
+
 pub fn content_hash_after_signature(
     content: &str,
     prefix: &str,

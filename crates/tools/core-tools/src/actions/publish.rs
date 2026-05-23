@@ -250,17 +250,16 @@ fn already_signed_for_body(
         return false;
     };
 
-    let expected_hash = lillux::signature::content_hash(body);
-    if header.content_hash != expected_hash {
-        return false;
-    }
-
     let verifying_key = signing_key.verifying_key();
-    if header.signer_fingerprint != lillux::signature::compute_fingerprint(&verifying_key) {
-        return false;
-    }
-
-    lillux::signature::verify_signature(&header.content_hash, &header.signature_b64, &verifying_key)
+    let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
+    lillux::signature::is_valid_signature_for(
+        &header.content_hash,
+        &header.signature_b64,
+        &header.signer_fingerprint,
+        body,
+        &verifying_key,
+        &fingerprint,
+    )
 }
 
 /// Atomic write: stage to a temp file, then rename over the target.
@@ -470,7 +469,7 @@ fn write_publisher_trust_doc(
         }
     }
 
-    let tmp = target.with_extension("tmp");
+    let tmp = target.with_extension(format!("trust-doc.tmp.{}", std::process::id()));
     fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &target)
         .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;

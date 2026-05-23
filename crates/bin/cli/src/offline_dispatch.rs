@@ -244,7 +244,38 @@ fn bind_params_shared(
         params = ryeos_runtime::bind_argv(&canonical_tail);
     }
 
-    Ok(normalize_project_param(params, service, project_path))
+    let mut params = normalize_project_param(params, service, project_path);
+
+    // Reject unknown flags. Typos like `--regstry-root` would otherwise
+    // silently pass through as an extra parameter.
+    if let Some(obj) = params.as_object() {
+        for key in obj.keys() {
+            let normalized_key = key.replace('_', "-");
+            if !service.schema.contains_key(key.as_str())
+                && !service.schema.contains_key(&normalized_key)
+                && key != "input"
+            {
+                bail!(
+                    "unknown parameter --{normalized_key} for this command{}",
+                    if service.schema.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " (expected: {})",
+                            service
+                                .schema
+                                .keys()
+                                .map(|k| format!("--{}", k.replace('_', "-")))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                );
+            }
+        }
+    }
+
+    Ok(params)
 }
 
 fn normalize_project_param(

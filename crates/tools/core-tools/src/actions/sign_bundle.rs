@@ -290,18 +290,16 @@ fn is_already_validly_signed(
         return false;
     };
 
-    let expected_hash = lillux::signature::content_hash(body);
-    if header.content_hash != expected_hash {
-        return false;
-    }
-
     let verifying_key = signing_key.verifying_key();
-    let expected_fp = lillux::signature::compute_fingerprint(&verifying_key);
-    if header.signer_fingerprint != expected_fp {
-        return false;
-    }
-
-    lillux::signature::verify_signature(&header.content_hash, &header.signature_b64, &verifying_key)
+    let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
+    lillux::signature::is_valid_signature_for(
+        &header.content_hash,
+        &header.signature_b64,
+        &header.signer_fingerprint,
+        body,
+        &verifying_key,
+        &fingerprint,
+    )
 }
 
 /// Derive a bare-id from a file path relative to its kind directory,
