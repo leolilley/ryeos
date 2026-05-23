@@ -51,10 +51,8 @@ async fn main() -> Result<()> {
     // standalone service) from racing in and removing the first
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
-    let _state_lock = state_lock::StateLock::acquire(&state_lock::default_lock_path(
-        &config.system_space_dir,
-    ))
-    .context(
+    let state_lock_path = state_lock::default_lock_path(&config.system_space_dir);
+    let _state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
 
@@ -73,14 +71,6 @@ async fn main() -> Result<()> {
     // The daemon start path is fail-closed on unsigned trust-sensitive items.
     // Use `ryeos init` to install bundle registrations before daemon startup.
 
-    // Acquire operator state lock before touching daemon-owned runtime files.
-    // In particular, never unlink the UDS socket until we know this process is
-    // the sole operator for the state dir: a failed second daemon start must
-    // not orphan the live daemon's callback socket.
-    let state_lock_path = state_lock::default_lock_path(&config.system_space_dir);
-    let _state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
-        "failed to acquire state lock — is another ryeosd instance or standalone service running?",
-    )?;
     tracing::info!("State lock acquired");
 
     process::remove_stale_socket(&config.uds_path)?;
