@@ -1,0 +1,5 @@
+category: "verbs"
+section: verbs
+name: tui
+description: "Open the terminal RyeOS cockpit"
+execute: service:client/open

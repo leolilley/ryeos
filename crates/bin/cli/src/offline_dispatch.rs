@@ -70,10 +70,11 @@ struct VerbDescriptor {
 
 /// In-process handler for an offline-capable endpoint.
 ///
-/// Receives validated parameters as a JSON Value, returns a JSON Value result.
-/// This is the implementation table — NOT the source of truth for which
-/// commands may run offline (that's the service descriptor's job).
-type OfflineHandler = fn(Value) -> Result<Value>;
+/// Receives validated parameters as a JSON Value and context about the
+/// system space, returns a JSON Value result. For most endpoints this is
+/// a simple request/response. For `client.open`, this handler execs the
+/// client binary and does not return.
+type OfflineHandler = fn(Value, &Path) -> Result<Value>;
 
 struct OfflineEndpoint {
     handler: OfflineHandler,
@@ -102,12 +103,18 @@ fn offline_endpoints() -> HashMap<&'static str, OfflineEndpoint> {
             handler: offline_sign,
         },
     );
+    m.insert(
+        "client.open",
+        OfflineEndpoint {
+            handler: offline_client_open,
+        },
+    );
     m
 }
 
 // ── In-process handlers ────────────────────────────────────────────
 
-fn offline_verify(params: Value) -> Result<Value> {
+fn offline_verify(params: Value, _system_space_dir: &Path) -> Result<Value> {
     let p: ryeos_tools::actions::inspect::verify::VerifyParams =
         serde_json::from_value(params).context("invalid verify params")?;
     let engine = ryeos_tools::actions::inspect::boot(
@@ -118,7 +125,7 @@ fn offline_verify(params: Value) -> Result<Value> {
         .context("offline verify failed")
 }
 
-fn offline_fetch(params: Value) -> Result<Value> {
+fn offline_fetch(params: Value, _system_space_dir: &Path) -> Result<Value> {
     let p: ryeos_tools::actions::inspect::fetch::FetchParams =
         serde_json::from_value(params).context("invalid fetch params")?;
     let engine = ryeos_tools::actions::inspect::boot(
@@ -129,7 +136,7 @@ fn offline_fetch(params: Value) -> Result<Value> {
         .context("offline fetch failed")
 }
 
-fn offline_sign(params: Value) -> Result<Value> {
+fn offline_sign(params: Value, _system_space_dir: &Path) -> Result<Value> {
     let item_ref = params
         .get("item_ref")
         .and_then(|v| v.as_str())
@@ -151,6 +158,224 @@ fn offline_sign(params: Value) -> Result<Value> {
     let report = ryeos_tools::actions::sign::run_sign(&item_ref, Some(&project), source)
         .context("offline sign failed")?;
     serde_json::to_value(report).context("serialize sign result")
+}
+
+// ── client.open handler ────────────────────────────────────────────
+
+/// Parameters for the client.open offline service.
+#[derive(Debug, serde::Deserialize)]
+struct ClientOpenParams {
+    client_ref: Option<String>,
+    #[allow(dead_code)]
+    renderer: Option<String>,
+    surface: Option<String>,
+    surface_file: Option<String>,
+    mock: Option<bool>,
+    #[allow(dead_code)]
+    read_only: Option<bool>,
+    #[allow(dead_code)]
+    project: Option<String>,
+    /// Injected by dispatcher — the verb name that triggered this handler.
+    #[serde(rename = "_verb")]
+    _verb: Option<String>,
+}
+
+/// Offline handler for `client.open` — resolves a descriptor from
+/// installed bundles and execs the declared binary.
+///
+/// Fully generic: reads the descriptor as raw value, pulls launch config,
+/// and execs. No typed structs — the CLI does not define what a "client" is.
+fn offline_client_open(params: Value, system_space_dir: &Path) -> Result<Value> {
+    let p: ClientOpenParams =
+        serde_json::from_value(params).context("invalid client.open params")?;
+
+    // 1. Determine client_ref from params
+    //    If not explicitly provided, derive from the verb: verb "tui" → "client:ryeos/tui"
+    let client_ref = match &p.client_ref {
+        Some(r) => r.clone(),
+        None => {
+            let verb = p._verb.as_deref().unwrap_or("unknown");
+            format!("client:ryeos/{}", verb)
+        }
+    };
+
+    // 2. Parse the canonical ref
+    let parsed = ryeos_engine::canonical_ref::CanonicalRef::parse(&client_ref)
+        .map_err(|e| anyhow::anyhow!("invalid client ref '{client_ref}': {e}"))?;
+
+    if parsed.kind != "client" {
+        anyhow::bail!(
+            "ref '{client_ref}' is kind '{}', expected 'client'",
+            parsed.kind
+        );
+    }
+
+    // 3. Find the descriptor YAML in installed bundles and read as raw value
+    let descriptor = find_bundle_item(system_space_dir, "clients", &parsed.bare_id, ".yaml")
+        .context(format!("failed to resolve '{client_ref}'"))?;
+
+    // 4. Read launch config from the descriptor
+    let launch = descriptor
+        .get("launch")
+        .context("descriptor missing 'launch' block")?;
+    let mode = launch
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .context("launch missing 'mode' field")?;
+
+    match mode {
+        "cli_exec" => {
+            let binary_ref = launch
+                .get("binary_ref")
+                .and_then(|v| v.as_str())
+                .context("cli_exec launch missing 'binary_ref'")?;
+            let args_map = launch
+                .get("args")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+
+            exec_binary(binary_ref, &args_map, &p, system_space_dir, &parsed)
+        }
+        other => anyhow::bail!("launch mode '{other}' not yet implemented"),
+    }
+}
+
+/// Find an item file in installed bundles by kind directory and bare_id.
+///
+/// Searches `<bundle>/.ai/<kind_dir>/<bare_id>.<ext>` across all bundles.
+fn find_bundle_item(
+    system_space_dir: &Path,
+    kind_dir: &str,
+    bare_id: &str,
+    ext: &str,
+) -> Result<Value> {
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let entries = std::fs::read_dir(&bundles_dir)
+        .context(format!("no bundles directory at {}", bundles_dir.display()))?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
+            continue;
+        }
+
+        let item_path = entry
+            .path()
+            .join(".ai")
+            .join(kind_dir)
+            .join(bare_id)
+            .with_extension(ext.trim_start_matches('.'));
+
+        if item_path.is_file() {
+            let content = std::fs::read_to_string(&item_path)
+                .context(format!("read {}", item_path.display()))?;
+            let value: Value = serde_yaml::from_str(&content)
+                .context(format!("parse {}", item_path.display()))?;
+            return Ok(value);
+        }
+    }
+
+    anyhow::bail!("'{}' not found in any installed bundle", bare_id)
+}
+
+/// Resolve a binary_ref relative to the bundle containing the descriptor.
+fn resolve_binary_in_bundle(
+    binary_ref: &str,
+    system_space_dir: &Path,
+    kind_dir: &str,
+    bare_id: &str,
+) -> Result<std::path::PathBuf> {
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let entries = std::fs::read_dir(&bundles_dir)
+        .context("no bundles directory")?;
+
+    for entry in entries.flatten() {
+        let item_path = entry
+            .path()
+            .join(".ai")
+            .join(kind_dir)
+            .join(bare_id)
+            .with_extension("yaml");
+
+        if item_path.is_file() {
+            let binary_path = entry.path().join(binary_ref);
+            if binary_path.is_file() {
+                return Ok(binary_path);
+            } else {
+                anyhow::bail!("binary '{}' not found at {}", binary_ref, binary_path.display());
+            }
+        }
+    }
+
+    anyhow::bail!("binary '{}' not found in any bundle", binary_ref)
+}
+
+/// Translate params to argv using the descriptor's args mapping and exec.
+fn exec_binary(
+    binary_ref: &str,
+    args_map: &serde_json::Map<String, Value>,
+    params: &ClientOpenParams,
+    system_space_dir: &Path,
+    canonical_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+) -> Result<Value> {
+    let binary_path = resolve_binary_in_bundle(
+        binary_ref,
+        system_space_dir,
+        "clients",
+        &canonical_ref.bare_id,
+    )?;
+
+    // Build argv from args mapping + params
+    let mut argv: Vec<String> = Vec::new();
+    let param_fields: Vec<(&str, Option<&String>, bool)> = vec![
+        ("surface", params.surface.as_ref(), false),
+        ("surface_file", params.surface_file.as_ref(), false),
+        ("mock", None, params.mock.unwrap_or(false)),
+        ("read_only", None, params.read_only.unwrap_or(false)),
+    ];
+
+    for (field, value, is_bool) in param_fields {
+        let flag = match args_map.get(field).and_then(|v| v.as_str()) {
+            Some(f) => f.to_string(),
+            None => continue,
+        };
+        if is_bool {
+            argv.push(flag);
+        } else if let Some(val) = value {
+            argv.push(flag);
+            argv.push(val.clone());
+        }
+    }
+
+    // Exec, replacing the current process
+    eprintln!("info: launching {} via {}", canonical_ref, binary_path.display());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let result = std::process::Command::new(&binary_path)
+            .args(&argv)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .exec();
+        // exec only returns on error
+        anyhow::bail!("failed to exec '{}': {}", binary_path.display(), result);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = std::process::Command::new(&binary_path)
+            .args(&argv)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to exec '{}': {}", binary_path.display(), e))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 // ── Main entry point ───────────────────────────────────────────────
@@ -213,12 +438,18 @@ pub fn try_offline_dispatch(
 
     // 6. Bind parameters from tail args
     let tail = &argv[consumed..];
-    let params = bind_params(tail, &alias, &service, project_path).map_err(|e| CliError::Local {
+    let mut params = bind_params(tail, &alias, &service, project_path).map_err(|e| CliError::Local {
         detail: format!("{e:#}"),
     })?;
 
+    // Inject verb name so handlers can derive defaults from it
+    if let Some(obj) = params.as_object_mut() {
+        obj.entry("_verb".to_string())
+            .or_insert_with(|| Value::String(alias.verb.clone()));
+    }
+
     // 7. Run the handler
-    let result = (endpoint.handler)(params).map_err(|e| CliError::Local {
+    let result = (endpoint.handler)(params, system_space_dir).map_err(|e| CliError::Local {
         detail: format!("{e:#}"),
     })?;
 
