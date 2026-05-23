@@ -190,12 +190,22 @@ fn offline_client_open(params: Value, system_space_dir: &Path) -> Result<Value> 
         serde_json::from_value(params).context("invalid client.open params")?;
 
     // 1. Determine client_ref from params
-    //    If not explicitly provided, derive from the verb: verb "tui" → "client:ryeos/tui"
+    //    If not explicitly provided, try verb-derived ref, then fall back to client:ryeos/tui
     let client_ref = match &p.client_ref {
         Some(r) => r.clone(),
         None => {
             let verb = p._verb.as_deref().unwrap_or("unknown");
-            format!("client:ryeos/{}", verb)
+            let verb_ref = format!("client:ryeos/{}", verb);
+            // If the verb-derived ref exists in a bundle, use it
+            if ryeos_engine::canonical_ref::CanonicalRef::parse(&verb_ref).is_ok() {
+                match find_bundle_item(system_space_dir, "clients",
+                    &ryeos_engine::canonical_ref::CanonicalRef::parse(&verb_ref).unwrap().bare_id, ".yaml") {
+                    Ok(_) => verb_ref,
+                    Err(_) => "client:ryeos/tui".to_string(),
+                }
+            } else {
+                "client:ryeos/tui".to_string()
+            }
         }
     };
 
@@ -280,18 +290,81 @@ fn find_bundle_item(
     anyhow::bail!("'{}' not found in any installed bundle", bare_id)
 }
 
+/// Detect the current host target triple.
+///
+/// Uses the same triple format as Cargo/Rustc (e.g. "x86_64-unknown-linux-gnu").
+fn detect_host_triple() -> String {
+    // Try rustc first — most reliable since we're always built with Rust
+    std::process::Command::new("rustc")
+        .args(["-vV"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            let stdout = String::from_utf8(out.stdout).ok()?;
+            for line in stdout.lines() {
+                if let Some(triple) = line.strip_prefix("host: ") {
+                    return Some(triple.trim().to_string());
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| {
+            // Fallback: compile-time triple from cfg
+            #[cfg(target_arch = "x86_64")]
+            {
+                #[cfg(target_os = "linux")]
+                #[cfg(target_env = "gnu")]
+                return "x86_64-unknown-linux-gnu".to_string();
+                #[cfg(target_os = "linux")]
+                #[cfg(target_env = "musl")]
+                return "x86_64-unknown-linux-musl".to_string();
+                #[cfg(target_os = "macos")]
+                return "x86_64-apple-darwin".to_string();
+                #[cfg(target_os = "windows")]
+                return "x86_64-pc-windows-msvc".to_string();
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                #[cfg(target_os = "linux")]
+                #[cfg(target_env = "gnu")]
+                return "aarch64-unknown-linux-gnu".to_string();
+                #[cfg(target_os = "linux")]
+                #[cfg(target_env = "musl")]
+                return "aarch64-unknown-linux-musl".to_string();
+                #[cfg(target_os = "macos")]
+                return "aarch64-apple-darwin".to_string();
+            }
+            "unknown".to_string()
+        })
+}
+
 /// Resolve a binary_ref relative to the bundle containing the descriptor.
+///
+/// If `binary_ref` contains `{triple}`, it's expanded to the detected host triple.
+/// Falls back through available triples in the bundle's `bin/` directory if the
+/// exact triple doesn't match.
 fn resolve_binary_in_bundle(
     binary_ref: &str,
     system_space_dir: &Path,
     kind_dir: &str,
     bare_id: &str,
 ) -> Result<std::path::PathBuf> {
+    let host_triple = detect_host_triple();
+
+    // Expand {triple} placeholder if present
+    let expanded_ref = binary_ref.replace("{triple}", &host_triple);
+
     let bundles_dir = system_space_dir.join(".ai").join("bundles");
     let entries = std::fs::read_dir(&bundles_dir)
         .context("no bundles directory")?;
 
     for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
+            continue;
+        }
+
         let item_path = entry
             .path()
             .join(".ai")
@@ -299,17 +372,66 @@ fn resolve_binary_in_bundle(
             .join(bare_id)
             .with_extension("yaml");
 
-        if item_path.is_file() {
-            let binary_path = entry.path().join(binary_ref);
-            if binary_path.is_file() {
-                return Ok(binary_path);
-            } else {
-                anyhow::bail!("binary '{}' not found at {}", binary_ref, binary_path.display());
+        if !item_path.is_file() {
+            continue;
+        }
+
+        // Try the expanded ref first
+        let binary_path = entry.path().join(&expanded_ref);
+        if binary_path.is_file() {
+            return Ok(binary_path);
+        }
+
+        // If expanded didn't match, scan available triples in bin/
+        let bin_dir = entry.path().join("bin");
+        if bin_dir.is_dir() {
+            if let Ok(triple_dirs) = std::fs::read_dir(&bin_dir) {
+                for triple_entry in triple_dirs.flatten() {
+                    let triple_name = triple_entry.file_name();
+                    let candidate = triple_entry.path().join(
+                        binary_ref
+                            .split('/')
+                            .last()
+                            .context("binary_ref has no filename")?,
+                    );
+                    if candidate.is_file() {
+                        if triple_name == host_triple.as_str() {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+            }
+
+            // Last resort: use any available triple
+            if let Ok(triple_dirs) = std::fs::read_dir(&bin_dir) {
+                for triple_entry in triple_dirs.flatten() {
+                    let candidate = triple_entry.path().join(
+                        binary_ref
+                            .split('/')
+                            .last()
+                            .context("binary_ref has no filename")?,
+                    );
+                    if candidate.is_file() {
+                        eprintln!(
+                            "warn: host triple '{}' not found, falling back to '{}'",
+                            host_triple,
+                            triple_entry.file_name().display()
+                        );
+                        return Ok(candidate);
+                    }
+                }
             }
         }
+
+        anyhow::bail!(
+            "binary '{}' not found in bundle '{}' (tried triple '{}', checked bin/ directory)",
+            expanded_ref,
+            name_str,
+            host_triple
+        );
     }
 
-    anyhow::bail!("binary '{}' not found in any bundle", binary_ref)
+    anyhow::bail!("descriptor '{}' not found in any bundle", bare_id)
 }
 
 /// Translate params to argv using the descriptor's args mapping and exec.
@@ -607,4 +729,182 @@ fn match_alias<'a>(
 fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_yaml::from_str(&content).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_bundle_env(
+        bundle_name: &str,
+        kind_dir: &str,
+        bare_id: &str,
+        content: &str,
+    ) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let bundles = ai.join("bundles");
+        // bare_id like "ryeos/tui" needs the parent dir created
+        let item_path = bundles
+            .join(bundle_name)
+            .join(".ai")
+            .join(kind_dir)
+            .join(bare_id)
+            .with_extension("yaml");
+        std::fs::create_dir_all(item_path.parent().unwrap()).unwrap();
+        std::fs::write(&item_path, content).unwrap();
+        tmp
+    }
+
+    // ── find_bundle_item ────────────────────────────────────────────
+
+    #[test]
+    fn find_bundle_item_finds_item_in_correct_bundle() {
+        let tmp = make_bundle_env(
+            "standard",
+            "clients",
+            "ryeos/tui",
+            "kind: client\nname: tui\nlaunch:\n  mode: cli_exec\n  binary_ref: bin/test/ryeos-tui",
+        );
+        let result = find_bundle_item(
+            tmp.path(),
+            "clients",
+            "ryeos/tui",
+            ".yaml",
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["kind"], "client");
+    }
+
+    #[test]
+    fn find_bundle_item_errors_when_missing() {
+        let tmp = make_bundle_env("standard", "clients", "ryeos/other", "kind: client\nname: other\n");
+        let result = find_bundle_item(tmp.path(), "clients", "ryeos/tui", ".yaml");
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("not found in any installed bundle"));
+    }
+
+    // ── resolve_binary_in_bundle ────────────────────────────────────
+
+    #[test]
+    fn resolve_binary_in_bundle_finds_expanded_triple() {
+        let tmp = make_bundle_env(
+            "standard",
+            "clients",
+            "ryeos/tui",
+            "kind: client\nlaunch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/ryeos-tui",
+        );
+        // Create a bin/ dir with the current triple
+        let triple = detect_host_triple();
+        let bin_dir = tmp.path().join(".ai").join("bundles/standard/bin").join(&triple);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("ryeos-tui"), "#!/bin/sh\necho hi").unwrap();
+
+        let result = resolve_binary_in_bundle(
+            "bin/{triple}/ryeos-tui",
+            tmp.path(),
+            "clients",
+            "ryeos/tui",
+        );
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(path.ends_with("ryeos-tui"));
+        assert!(path.to_string_lossy().contains(&triple));
+    }
+
+    #[test]
+    fn resolve_binary_in_bundle_errors_when_no_binary() {
+        let tmp = make_bundle_env(
+            "standard",
+            "clients",
+            "ryeos/tui",
+            "kind: client\nlaunch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/ryeos-tui",
+        );
+        let result = resolve_binary_in_bundle(
+            "bin/{triple}/ryeos-tui",
+            tmp.path(),
+            "clients",
+            "ryeos/tui",
+        );
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("not found"));
+    }
+
+    // ── detect_host_triple ──────────────────────────────────────────
+
+    #[test]
+    fn detect_host_triple_returns_non_empty() {
+        let triple = detect_host_triple();
+        assert!(!triple.is_empty());
+        assert!(!triple.contains(' '), "triple should not contain spaces: {triple}");
+        // Should have the expected format: arch-vendor-os[-env]
+        assert!(triple.matches('-').count() >= 2, "expected multi-part triple, got: {triple}");
+    }
+
+    // ── offline_client_open integration ──────────────────────────────
+
+    #[test]
+    fn offline_client_open_resolves_descriptor_and_launch_info() {
+        let tmp = make_bundle_env(
+            "standard",
+            "clients",
+            "ryeos/tui",
+            "kind: client\nname: tui\nlaunch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/ryeos-tui\n  args:\n    surface: \"--surface\"\n    mock: \"--mock\"",
+        );
+
+        let params = serde_json::json!({
+            "surface": "surface:ryeos/cockpit/base",
+            "mock": true,
+            "_verb": "tui"
+        });
+
+        // This will fail at the exec stage (no actual binary), but should
+        // successfully resolve the descriptor and binary_ref
+        let result = offline_client_open(params, tmp.path());
+        // We expect it to fail trying to exec (no real binary exists)
+        // but NOT fail at descriptor resolution
+        let err = result.unwrap_err();
+        let msg = format!("{:#}", err);
+        // Should have gotten past descriptor resolution to binary resolution
+        assert!(
+            msg.contains("not found"),
+            "expected binary-not-found error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn offline_client_open_errors_on_missing_descriptor() {
+        // Empty bundle with no client descriptor
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        std::fs::create_dir_all(ai.join("bundles/standard/.ai")).unwrap();
+
+        let params = serde_json::json!({
+            "_verb": "tui"
+        });
+
+        let result = offline_client_open(params, tmp.path());
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("not found in any installed bundle"), "got: {msg}");
+    }
+
+    #[test]
+    fn offline_client_open_errors_on_missing_launch_block() {
+        let tmp = make_bundle_env(
+            "standard",
+            "clients",
+            "ryeos/tui",
+            "kind: client\nname: tui\n# no launch block",
+        );
+
+        let params = serde_json::json!({ "_verb": "tui" });
+        let result = offline_client_open(params, tmp.path());
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("missing 'launch' block"), "got: {msg}");
+    }
 }

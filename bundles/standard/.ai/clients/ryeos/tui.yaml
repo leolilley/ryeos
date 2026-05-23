@@ -9,7 +9,7 @@ serves:
 
 launch:
   mode: cli_exec
-  binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-tui
+  binary_ref: bin/{triple}/ryeos-tui
   args:
     surface: "--surface"
     surface_file: "--surface-file"

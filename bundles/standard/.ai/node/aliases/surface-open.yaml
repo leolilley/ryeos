@@ -1,0 +1,7 @@
+category: "aliases"
+section: aliases
+tokens: ["surface", "open"]
+verb: surface-open
+description: "Open a surface in the selected renderer"
+positional_field: surface
+project_resolution: optional
