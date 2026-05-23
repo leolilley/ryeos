@@ -1,0 +1,45 @@
+extends: surface:ryeos/cockpit/base
+name: trust-console
+version: "1.0.0"
+description: Trust/security-focused RyeOS cockpit
+
+layout:
+  root: main
+  nodes:
+    main:
+      type: split
+      axis: horizontal
+      ratio: 0.35
+      first: trust
+      second: right
+    trust:
+      type: pane
+      view: trust
+    right:
+      type: split
+      axis: vertical
+      ratio: 0.6
+      first: thread_list
+      second: items
+    thread_list:
+      type: pane
+      view: thread_list
+    items:
+      type: pane
+      view: space_browser
+
+commands:
+  - id: view.trust
+    label: Trust Dashboard
+    category: Trust
+  - id: view.items
+    label: Item Signatures
+    category: Trust
+
+instruments:
+  - id: trust_summary
+    kind: facet_status
+    source: global
+    facets:
+      - trust.summary
+      - trust.untrusted_count

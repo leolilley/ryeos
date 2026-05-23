@@ -4,6 +4,8 @@ use crate::animation::AnimationState;
 use crate::ids::ExecutionId;
 use crate::layout::Rect;
 use crate::store::{DaemonStatus, Store};
+use crate::surface::LoadedSurface;
+use crate::surface::SurfaceSpec;
 use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub struct AppModel {
     pub store: Store,
     pub workspace: Workspace,
+    pub surface: LoadedSurfaceSerde,
     pub overlay: Option<OverlayState>,
     pub runtime: RuntimeStatus,
     pub visual: VisualState,
@@ -18,12 +21,73 @@ pub struct AppModel {
     pub dirty: bool,
 }
 
+/// Serializable wrapper for LoadedSurface.
+/// Retains the SurfaceSpec so reset_layout can rebuild from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadedSurfaceSerde {
+    pub spec: SurfaceSpec,
+    pub name: String,
+    pub source_label: String,
+    pub is_trusted: bool,
+    pub is_local_preview: bool,
+}
+
+impl LoadedSurfaceSerde {
+    pub fn from_loaded(loaded: &LoadedSurface) -> Self {
+        Self {
+            spec: loaded.spec().clone(),
+            name: loaded.spec().name.clone(),
+            source_label: loaded.source_label().to_string(),
+            is_trusted: loaded.is_trusted(),
+            is_local_preview: loaded.is_local_preview(),
+        }
+    }
+
+    /// Rebuild the workspace from the retained surface spec.
+    pub fn rebuild_workspace(&self) -> Workspace {
+        self.spec.to_workspace()
+    }
+}
+
 impl AppModel {
     /// Create a default model for the given project path.
     pub fn new_default(_project_path: &str) -> Self {
+        let spec = crate::surface::builtin_default();
         Self {
             store: Store::new(),
-            workspace: Workspace::default_three_pane(),
+            workspace: spec.to_workspace(),
+            surface: LoadedSurfaceSerde {
+                spec,
+                name: "cockpit-base".into(),
+                source_label: "builtin".into(),
+                is_trusted: false,
+                is_local_preview: false,
+            },
+            overlay: None,
+            runtime: RuntimeStatus {
+                daemon_status: DaemonStatus::Connecting,
+                active_execution: None,
+                viewport: Rect::new(0, 0, 200, 60),
+                started_at_ms: now_ms(),
+                last_render_at_ms: 0,
+                last_daemon_poll_at_ms: 0,
+            },
+            visual: VisualState {
+                animation: AnimationState::default(),
+            },
+            generation: 0,
+            dirty: true,
+        }
+    }
+
+    /// Create a model with a loaded surface.
+    pub fn from_surface(_project_path: &str, loaded: &LoadedSurface) -> Self {
+        let workspace = loaded.spec().to_workspace();
+        let surface_info = LoadedSurfaceSerde::from_loaded(loaded);
+        Self {
+            store: Store::new(),
+            workspace,
+            surface: surface_info,
             overlay: None,
             runtime: RuntimeStatus {
                 daemon_status: DaemonStatus::Connecting,
@@ -95,10 +159,17 @@ pub enum OverlayState {
 // ---------------------------------------------------------------------------
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +192,15 @@ mod tests {
         model.mark_dirty();
         assert!(model.dirty);
         assert_eq!(model.generation, 1);
+    }
+
+    #[test]
+    fn from_surface_uses_loaded_workspace() {
+        let loaded = crate::surface::LoadedSurface::Builtin {
+            spec: crate::surface::builtin_default(),
+        };
+        let model = AppModel::from_surface("/tmp/test", &loaded);
+        assert_eq!(model.workspace.tiles.len(), 3);
+        assert_eq!(model.surface.name, "cockpit-base");
     }
 }

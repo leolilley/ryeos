@@ -83,8 +83,9 @@ fn render_primitive_js(js: &mut String, prim: &ScenePrimitive) {
             if vertices.len() < 2 {
                 return;
             }
+            // Stroke the polygon outline (used for orbital ring outlines)
             js.push_str(&format!(
-                "ctx.fillStyle = '{}';\nctx.globalAlpha = {:.2};\nctx.beginPath();\nctx.moveTo({}*W, {}*H);\n",
+                "ctx.strokeStyle = '{}';\nctx.globalAlpha = {:.2};\nctx.lineWidth = 1.5;\nctx.beginPath();\nctx.moveTo({}*W, {}*H);\n",
                 rgb_to_js(color),
                 opacity,
                 vertices[0].x, vertices[0].y
@@ -92,7 +93,7 @@ fn render_primitive_js(js: &mut String, prim: &ScenePrimitive) {
             for v in &vertices[1..] {
                 js.push_str(&format!("ctx.lineTo({}*W, {}*H);\n", v.x, v.y));
             }
-            js.push_str("ctx.closePath();\nctx.fill();\n");
+            js.push_str("ctx.closePath();\nctx.stroke();\n");
         }
     }
 }

@@ -6,7 +6,7 @@
 use crate::effects::Effect;
 use crate::ids::ThreadId;
 use crate::input::{InputEvent, Key, Mouse, MouseAction, ScrollDirection};
-use crate::layout::{Rect, SplitAxis};
+use crate::layout::Rect;
 use crate::model::AppModel;
 use crate::store::{DaemonStatus, EventRecord, ThreadModel, ThreadStatus, ThreadUsage};
 use crate::workspace::InputCapability;
@@ -184,48 +184,59 @@ fn handle_key(model: &mut AppModel, key: Key) -> Vec<Effect> {
         }
 
         Key::Char('?') if model.workspace.input_bar.text.is_empty() => {
-            model.overlay = Some(crate::model::OverlayState::Help);
-            model.mark_dirty();
-            Vec::new()
+            let inv = crate::commands::InvocationSpec::Ui(
+                crate::commands::UiInvocation { verb: crate::commands::UiVerb::ToggleHelp, args: serde_json::Value::Null }
+            );
+            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
+            effects
         }
 
         // Focus navigation
         Key::Ctrl('w') => {
-            // Next tile focus (simplified from vim-style h/j/k/l)
-            model.workspace.focus_next();
-            model.mark_dirty();
-            Vec::new()
+            let inv = crate::commands::InvocationSpec::Ui(
+                crate::commands::UiInvocation { verb: crate::commands::UiVerb::FocusNext, args: serde_json::Value::Null }
+            );
+            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
+            effects
         }
 
         // Tile management
         Key::Ctrl('s') => {
-            // Split focused tile horizontally
-            let new_view = ViewSpec::ThreadList;
-            model.workspace.split_focused(SplitAxis::Horizontal, new_view);
-            model.mark_dirty();
-            Vec::new()
+            let inv = crate::commands::InvocationSpec::Ui(
+                crate::commands::UiInvocation {
+                    verb: crate::commands::UiVerb::SplitPane,
+                    args: serde_json::json!({ "axis": "horizontal", "view": "thread_list" }),
+                }
+            );
+            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
+            effects
         }
 
         Key::Ctrl('v') => {
-            // Split focused tile vertically
-            let new_view = ViewSpec::EventInspector;
-            model.workspace.split_focused(SplitAxis::Vertical, new_view);
-            model.mark_dirty();
-            Vec::new()
+            let inv = crate::commands::InvocationSpec::Ui(
+                crate::commands::UiInvocation {
+                    verb: crate::commands::UiVerb::SplitPane,
+                    args: serde_json::json!({ "axis": "vertical", "view": "event_inspector" }),
+                }
+            );
+            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
+            effects
         }
 
         Key::Ctrl('x') => {
-            // Close focused tile
-            model.workspace.close_focused();
-            model.mark_dirty();
-            Vec::new()
+            let inv = crate::commands::InvocationSpec::Ui(
+                crate::commands::UiInvocation { verb: crate::commands::UiVerb::ClosePane, args: serde_json::Value::Null }
+            );
+            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
+            effects
         }
 
         Key::Ctrl('r') => {
-            // Reset layout to default 3-pane
-            model.workspace.reset_layout();
-            model.mark_dirty();
-            Vec::new()
+            let inv = crate::commands::InvocationSpec::Ui(
+                crate::commands::UiInvocation { verb: crate::commands::UiVerb::ResetLayout, args: serde_json::Value::Null }
+            );
+            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
+            effects
         }
 
         // List navigation (when input is empty)
@@ -449,13 +460,15 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
                     model.mark_dirty();
                 }
                 Key::Enter => {
-                    // Execute the first matching command
-                    let commands = crate::commands::builtin_commands();
-                    let matches = crate::commands::filter_commands(&commands, query);
-                    if let Some(cmd) = matches.first() {
-                        let effects = dispatch_command(model, &cmd.id);
-                        // Re-set overlay to None (already taken above)
-                        return effects;
+                    // Execute the first matching affordance through the registry
+                    let affordances = crate::commands::builtin_affordances();
+                    let matches = crate::commands::filter_affordances(&affordances, query);
+                    if let Some(aff) = matches.first() {
+                        let (handled, effects) = crate::commands::dispatch_affordance(&aff.invoke, model);
+                        // overlay already taken above
+                        if handled {
+                            return effects;
+                        }
                     }
                     model.mark_dirty();
                 }
@@ -498,8 +511,8 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
         Some(crate::model::OverlayState::Confirm { ref message, ref action }) => {
             match key {
                 Key::Char('y') | Key::Char('Y') => {
-                    // Dispatch the confirmed action
-                    let effects = dispatch_command(model, action);
+                    // Dispatch the confirmed affordance
+                    let effects = dispatch_affordance_by_id(model, action);
                     model.mark_dirty();
                     return effects;
                 }
@@ -675,100 +688,22 @@ fn reduce_daemon_event(model: &mut AppModel, event: &DaemonEvent) {
 }
 
 // ---------------------------------------------------------------------------
-// Command dispatch
+// Affordance dispatch
 // ---------------------------------------------------------------------------
 
-/// Execute a command by ID. Returns effects to perform.
-fn dispatch_command(model: &mut AppModel, command_id: &str) -> Vec<Effect> {
-    model.mark_dirty();
-    match command_id {
-        "view.threads" => {
-            switch_focused_view(model, ViewSpec::ThreadList);
-            Vec::new()
-        }
-        "view.remotes" => {
-            switch_focused_view(model, ViewSpec::Remotes);
-            Vec::new()
-        }
-        "view.projects" => {
-            switch_focused_view(model, ViewSpec::Projects);
-            Vec::new()
-        }
-        "view.items" => {
-            switch_focused_view(model, ViewSpec::SpaceBrowser { project: None });
-            Vec::new()
-        }
-        "view.trust" => {
-            switch_focused_view(model, ViewSpec::Trust);
-            Vec::new()
-        }
-        "view.graph" => {
-            switch_focused_view(model, ViewSpec::Graph { graph_id: None });
-            Vec::new()
-        }
-        "view.events" => {
-            switch_focused_view(model, ViewSpec::EventInspector);
-            Vec::new()
-        }
-        "layout.split-h" => {
-            model
-                .workspace
-                .split_focused(SplitAxis::Horizontal, ViewSpec::EventInspector);
-            Vec::new()
-        }
-        "layout.split-v" => {
-            model
-                .workspace
-                .split_focused(SplitAxis::Vertical, ViewSpec::EventInspector);
-            Vec::new()
-        }
-        "layout.close" => {
-            model.workspace.close_focused();
-            Vec::new()
-        }
-        "layout.reset" => {
-            model.workspace.reset_layout();
-            Vec::new()
-        }
-        "session.new" => {
-            model.workspace.input_bar.clear();
-            Vec::new()
-        }
-        "app.quit" => vec![Effect::Quit],
-        _ => Vec::new(),
-    }
-}
-
-/// Switch the focused tile's view to a new spec.
-fn switch_focused_view(model: &mut AppModel, view: ViewSpec) {
-    let local = default_local_for_view(&view);
-    if let Some(tile) = model.workspace.tiles.get_mut(&model.workspace.focused_tile) {
-        tile.view = view;
-        tile.local = local;
-    }
-}
-
-/// Get default local state for a view spec.
-fn default_local_for_view(view: &ViewSpec) -> crate::workspace::ViewLocalState {
-    match view {
-        ViewSpec::ThreadList => crate::workspace::ViewLocalState::ThreadList {
-            cursor: 0,
-            filter: String::new(),
-        },
-        ViewSpec::SpaceBrowser { .. } => crate::workspace::ViewLocalState::SpaceBrowser {
-            cursor: 0,
-            query: String::new(),
-            scroll: 0,
-        },
-        ViewSpec::Thread { .. } => {
-            crate::workspace::ViewLocalState::Thread(
-                crate::workspace::ThreadViewState::default(),
-            )
-        }
-        _ => crate::workspace::ViewLocalState::GenericList {
-            cursor: 0,
-            scroll: 0,
-        },
+/// Execute an affordance by ID through the affordance registry.
+fn dispatch_affordance_by_id(model: &mut AppModel, affordance_id: &str) -> Vec<Effect> {
+    let affordances = crate::commands::builtin_affordances();
+    let aff = match affordances.iter().find(|a| a.id == affordance_id) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let (handled, effects) = crate::commands::dispatch_affordance(&aff.invoke, model);
+    if handled {
+        effects
+    } else {
+        model.mark_dirty();
+        Vec::new()
     }
 }
 
@@ -920,7 +855,6 @@ fn list_item_count(model: &AppModel) -> usize {
 mod tests {
     use super::*;
     use crate::ids::TileId;
-    use crate::workspace::ViewSpec;
 
     #[test]
     fn resize_updates_viewport_and_marks_dirty() {
@@ -1013,8 +947,15 @@ mod tests {
     #[test]
     fn input_enter_on_thread_returns_execute_effect() {
         let mut model = AppModel::new_default("/tmp/test");
-        // Focus the thread tile
-        model.workspace.focused_tile = TileId::new(2);
+        // Focus the thread tile (find it by view spec, not hardcoded ID)
+        let thread_tile = model
+            .workspace
+            .tiles
+            .iter()
+            .find(|(_, t)| matches!(t.view, ViewSpec::Thread { .. }))
+            .map(|(id, _)| *id)
+            .expect("workspace must have a thread tile");
+        model.workspace.focused_tile = thread_tile;
         model.workspace.input_bar.text = "test prompt".into();
         model.workspace.input_bar.cursor = 12;
 
@@ -1032,8 +973,8 @@ mod tests {
     #[test]
     fn tab_cycles_focus() {
         let mut model = AppModel::new_default("/tmp/test");
-        assert_eq!(model.workspace.focused_tile, TileId::new(2));
+        let initial = model.workspace.focused_tile;
         update(&mut model, AppEvent::Input(InputEvent::Key(Key::Tab)));
-        assert_eq!(model.workspace.focused_tile, TileId::new(3));
+        assert_ne!(model.workspace.focused_tile, initial, "Tab should cycle focus");
     }
 }

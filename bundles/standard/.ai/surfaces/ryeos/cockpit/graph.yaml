@@ -1,0 +1,46 @@
+extends: surface:ryeos/cockpit/base
+name: graph-operator
+version: "1.0.0"
+description: Graph-focused RyeOS cockpit
+
+layout:
+  root: main
+  nodes:
+    main:
+      type: split
+      axis: horizontal
+      ratio: 0.28
+      first: graph
+      second: details
+    graph:
+      type: pane
+      view: graph
+    details:
+      type: split
+      axis: vertical
+      ratio: 0.6
+      first: event_timeline
+      second: thread_list
+    event_timeline:
+      type: pane
+      view: event_inspector
+    thread_list:
+      type: pane
+      view: thread_list
+
+commands:
+  - id: view.graph
+    label: Graph Topology
+    category: Graph
+  - id: view.events
+    label: Event Timeline
+    category: Graph
+
+instruments:
+  - id: graph_progress
+    kind: facet_status
+    source: focused.thread
+    facets:
+      - graph.current_node
+      - graph.progress
+      - graph.retry_count

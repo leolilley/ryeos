@@ -2,49 +2,65 @@
 //!
 //! Core produces a Frame. Terminal converts to ANSI cells.
 //! Web converts to DOM/HTML + Canvas.
+//!
+//! A frame contains:
+//! - `background`: 3D scene primitives for the animated substrate
+//! - `tiles`: text surfaces for each visible workspace tile
+//! - `status_bar`: the bottom status bar surface
+//! - `input`: the input bar surface (at the very bottom)
+//! - `overlays`: modal overlays (help, command palette, confirm)
 
 use crate::ids::TileId;
-use crate::layout::Rect;
+use crate::layout::{layout_rects, Rect};
 use crate::scene::ScenePrimitive;
-use crate::text_surface::TextSurface;
+use crate::text_surface::{Style, TextSurface};
+use crate::theme;
+#[allow(unused_imports)]
+use crate::workspace::InputCapability;
 use serde::{Deserialize, Serialize};
 
-/// A complete rendering frame.
+// ---------------------------------------------------------------------------
+// Frame types
+// ---------------------------------------------------------------------------
+
+/// A complete rendering frame with all layers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
+    /// 3D scene primitives for the background.
     pub background: Vec<ScenePrimitive>,
+    /// Tile text surfaces keyed by tile ID.
     pub tiles: Vec<TileSurface>,
+    /// Bottom status bar.
     pub status_bar: StatusBarSurface,
+    /// Input bar (prompt/filter) at the very bottom.
     pub input: InputSurface,
+    /// Modal overlays drawn on top of everything.
     pub overlays: Vec<OverlaySurface>,
 }
 
-/// A tile's rendered text surface with position metadata.
+/// A tile's rendered text surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TileSurface {
     pub tile_id: TileId,
     pub rect: Rect,
-    pub focused: bool,
-    pub title: String,
     pub cells: TextSurface,
 }
 
-/// The global input bar surface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InputSurface {
-    pub rect: Rect,
-    pub cells: TextSurface,
-    pub hint: String,
-}
-
-/// Status bar surface showing daemon/thread/budget info.
+/// Status bar surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarSurface {
     pub rect: Rect,
     pub cells: TextSurface,
 }
 
-/// An overlay surface (modal, command palette, help).
+/// Input bar surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputSurface {
+    pub rect: Rect,
+    pub cells: TextSurface,
+}
+
+/// An overlay surface (help, command palette, confirm).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlaySurface {
     pub rect: Rect,
@@ -57,79 +73,73 @@ pub enum OverlayType {
     CommandPalette,
     Confirm,
     Help,
+    SplashText,
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Height of the status bar in terminal rows.
+const STATUS_BAR_HEIGHT: u16 = 1;
+
+/// Height of the input bar in terminal rows.
+const INPUT_BAR_HEIGHT: u16 = 1;
 
 // ---------------------------------------------------------------------------
 // Frame construction
 // ---------------------------------------------------------------------------
 
-use crate::layout::layout_rects;
 use crate::model::AppModel;
 
 /// Build a complete frame from the current model state.
-/// This is the main entry point for rendering.
-pub fn build_frame(model: &AppModel) -> Frame {
+///
+/// The frame includes all layers: background scene, workspace tiles,
+/// status bar, input bar, and any active overlays.
+pub fn build_frame(model: &mut AppModel) -> Frame {
     let viewport = model.runtime.viewport;
 
-    // Background primitives (animated substrate)
+    // 1. Generate 3D scene primitives
     let background = model.visual.animation.generate_primitives();
 
-    // Layout rects for tiles
-    let _tile_rects = layout_rects(&model.workspace.layout, viewport);
+    // 2. Compute layout rects for workspace tiles
+    //    Reserve bottom rows for status bar + input bar
+    let workspace_viewport = Rect::new(
+        viewport.x,
+        viewport.y,
+        viewport.w,
+        viewport.h.saturating_sub(STATUS_BAR_HEIGHT + INPUT_BAR_HEIGHT),
+    );
+    let tile_rects = layout_rects(&model.workspace.layout, workspace_viewport);
 
-    // Reserve 1 row at bottom for input bar + 1 for status
-    let tiles_height = viewport.h.saturating_sub(2);
-    let tiles_viewport = Rect::new(viewport.x, viewport.y, viewport.w, tiles_height);
+    // 3. Build tile surfaces
+    let tiles: Vec<TileSurface> = tile_rects
+        .iter()
+        .map(|(&tile_id, &rect)| {
+            let focused = tile_id == model.workspace.focused_tile;
+            let cells = crate::views::build_tile_view(model, tile_id, rect, focused);
+            TileSurface {
+                tile_id,
+                rect,
+                cells,
+            }
+        })
+        .collect();
 
-    let tile_rects_adjusted = layout_rects(&model.workspace.layout, tiles_viewport);
+    // 4. Build status bar
+    let status_bar_y = viewport.h.saturating_sub(STATUS_BAR_HEIGHT + INPUT_BAR_HEIGHT);
+    let status_bar_rect = Rect::new(0, status_bar_y, viewport.w, STATUS_BAR_HEIGHT);
+    let status_bar = build_status_bar(model, status_bar_rect);
 
-    // Build tile surfaces
-    let mut tiles = Vec::new();
-    for (tile_id, rect) in &tile_rects_adjusted {
-        if rect.is_empty() {
-            continue;
-        }
-        let focused = *tile_id == model.workspace.focused_tile;
-        let surface = crate::views::build_tile_view(model, *tile_id, *rect, focused);
-        tiles.push(TileSurface {
-            tile_id: *tile_id,
-            rect: *rect,
-            focused,
-            title: model
-                .workspace
-                .tiles
-                .get(tile_id)
-                .map(|t| t.view.title())
-                .unwrap_or_default(),
-            cells: surface,
-        });
-    }
-
-    // Input bar (bottom row)
-    let input_rect = Rect::new(viewport.x, viewport.y + tiles_height, viewport.w, 1);
-    let input_cells = crate::views::build_input_bar(model, input_rect);
-    let input_hint = model
-        .workspace
-        .focused_view()
-        .map(|v| v.input_hint())
-        .unwrap_or("input")
-        .to_string();
+    // 5. Build input bar
+    let input_bar_y = viewport.h.saturating_sub(INPUT_BAR_HEIGHT);
+    let input_bar_rect = Rect::new(0, input_bar_y, viewport.w, INPUT_BAR_HEIGHT);
     let input = InputSurface {
-        rect: input_rect,
-        cells: input_cells,
-        hint: input_hint,
+        rect: input_bar_rect,
+        cells: crate::views::build_input_bar(model, input_bar_rect),
     };
 
-    // Status bar (second from bottom)
-    let status_y = tiles_height.saturating_sub(1);
-    let status_rect = Rect::new(viewport.x, status_y, viewport.w, 1);
-    let status_cells = build_status_bar(model, viewport.w as usize);
-    let status_bar = StatusBarSurface {
-        rect: status_rect,
-        cells: status_cells,
-    };
-
-    // Overlays
+    // 6. Build overlays
     let overlays = crate::views::build_overlays(model, viewport);
 
     Frame {
@@ -141,137 +151,146 @@ pub fn build_frame(model: &AppModel) -> Frame {
     }
 }
 
-/// Build status bar surface from model data.
-fn build_status_bar(model: &AppModel, width: usize) -> TextSurface {
-    use crate::store::DaemonStatus;
-    use crate::text_surface::Style;
-    use crate::theme;
+// ---------------------------------------------------------------------------
+// Status bar builder
+// ---------------------------------------------------------------------------
 
-    let mut surface = TextSurface::new(width, 1);
-    surface.fill(Style::new().bg(theme::BG));
+fn build_status_bar(model: &AppModel, rect: Rect) -> StatusBarSurface {
+    let mut surface = TextSurface::new(rect.w as usize, rect.h as usize);
+    surface.fill(theme::style_status_bar());
 
-    if width == 0 {
-        return surface;
-    }
+    let w = rect.w as usize;
 
-    let bg = theme::BG;
-    let fg = theme::FG;
-    let fg_dim = theme::FG_MUTED;
-    let fg_accent = theme::ACCENT;
-    let fg_green = theme::GREEN;
-    let fg_red = theme::RED;
-    let fg_yellow = theme::YELLOW;
-    let fg_orange = theme::ORANGE;
-
-    let sep_style = Style::new().fg(theme::FG_DIM).bg(bg);
-
-    let mut x = 1;
-
-    // Daemon status
-    let (daemon_icon, daemon_style) = match model.store.daemon.status {
-        DaemonStatus::Connected => ('●', Style::new().fg(fg_green).bg(bg)),
-        DaemonStatus::Connecting => ('◌', Style::new().fg(fg_yellow).bg(bg)),
-        DaemonStatus::Disconnected => ('○', Style::new().fg(fg_red).bg(bg)),
+    // Left section: daemon status
+    let status_text = match &model.store.daemon.status {
+        crate::store::DaemonStatus::Connected => "● ryeos",
+        crate::store::DaemonStatus::Connecting => "◌ connecting…",
+        crate::store::DaemonStatus::Disconnected => "○ disconnected",
     };
-    surface.draw_char(x, 0, daemon_icon, daemon_style);
-    x += 2;
-
-    let daemon_url = &model.store.daemon.url;
-    if !daemon_url.is_empty() {
-        let short_url = daemon_url.strip_prefix("http://").unwrap_or(daemon_url);
-        let max_url = 20.min(short_url.len());
-        let url_display = &short_url[..max_url];
-        surface.draw_text(x, 0, url_display, Style::new().fg(fg_dim).bg(bg));
-        x += url_display.len() + 1;
-    }
-
-    // Separator
-    surface.draw_text(x, 0, "│", sep_style);
-    x += 2;
-
-    // Thread count
-    let total_threads = model.store.threads.len();
-    let running = model.store.running_thread_count();
-    let thread_text = if running > 0 {
-        format!("{} threads ({} running)", total_threads, running)
-    } else {
-        format!("{} threads", total_threads)
+    let status_color = match &model.store.daemon.status {
+        crate::store::DaemonStatus::Connected => theme::STATUS_OK,
+        crate::store::DaemonStatus::Connecting => theme::STATUS_BUSY,
+        crate::store::DaemonStatus::Disconnected => theme::STATUS_ERR,
     };
-    let thread_style = if running > 0 {
-        Style::new().fg(fg_yellow).bg(bg)
-    } else {
-        Style::new().fg(fg_dim).bg(bg)
-    };
-    surface.draw_text(x, 0, &thread_text, thread_style);
-    x += thread_text.len() + 1;
-
-    // Separator
-    surface.draw_text(x, 0, "│", sep_style);
-    x += 2;
-
-    // Budget
-    let spend = model.store.budget.total_spend_usd;
-    let budget_style = if spend > 5.0 {
-        Style::new().fg(fg_red).bg(bg)
-    } else if spend > 2.0 {
-        Style::new().fg(fg_orange).bg(bg)
-    } else {
-        Style::new().fg(fg).bg(bg)
-    };
-    let budget_text = format!("${:.2}", spend);
-    surface.draw_text(x, 0, &budget_text, budget_style);
-    x += budget_text.len() + 1;
-
-    // Token count
-    let total_tokens = model.store.budget.total_input_tokens + model.store.budget.total_output_tokens;
-    if total_tokens > 0 {
-        let tok_text = if total_tokens > 1_000_000 {
-            format!("{:.1}M tok", total_tokens as f64 / 1_000_000.0)
-        } else {
-            format!("{:.1}k tok", total_tokens as f64 / 1000.0)
-        };
-        surface.draw_text(x, 0, &tok_text, Style::new().fg(fg_dim).bg(bg));
-    }
-
-    // Right side: help hint
-    let help = "? help";
     surface.draw_text(
-        width.saturating_sub(help.len() + 1),
+        1,
         0,
-        help,
-        Style::new().fg(fg_accent).bg(bg),
+        status_text,
+        Style::new().fg(status_color).bg(theme::BG_DARK),
     );
 
-    surface
+    // Middle section: thread count
+    let running = model.store.running_thread_count();
+    let total = model.store.threads.len();
+    let thread_text = format!("threads:{}/{}", running, total);
+    let mid_x = w.saturating_sub(thread_text.len()) / 2;
+    surface.draw_text(
+        mid_x,
+        0,
+        &thread_text,
+        Style::new().fg(theme::FG_DIM).bg(theme::BG_DARK),
+    );
+
+    // Right section: surface source + identity / trust status
+    let mut right_parts: Vec<String> = Vec::new();
+    right_parts.push(model.surface.source_label.to_string());
+    if let Some(id) = &model.store.identity {
+        if id.has_signing_key {
+            right_parts.push(format!("🔑 {}", &id.fingerprint[..8.min(id.fingerprint.len())]));
+        } else {
+            right_parts.push("⚠ no key".into());
+        }
+    }
+    let right_text = right_parts.join(" ");
+    let right_x = w.saturating_sub(right_text.len() + 1);
+    let right_style = if model.surface.is_local_preview {
+        Style::new().fg(theme::YELLOW).bg(theme::BG_DARK)
+    } else if model.surface.is_trusted {
+        Style::new().fg(theme::GREEN).bg(theme::BG_DARK)
+    } else {
+        Style::new().fg(theme::FG_DIM).bg(theme::BG_DARK)
+    };
+    surface.draw_text(right_x, 0, &right_text, right_style);
+
+    StatusBarSurface {
+        rect,
+        cells: surface,
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::TileId;
 
     #[test]
-    fn build_frame_returns_default_tiles_input_and_background() {
-        let model = AppModel::new_default("/tmp/test");
-        let frame = build_frame(&model);
+    fn build_frame_returns_primitives() {
+        let mut model = AppModel::new_default("/tmp/test");
+        // Tick to initialize the 3D scene
+        model.visual.animation.tick(16, &crate::store::Store::new());
+        model.runtime.viewport = Rect::new(0, 0, 200, 60);
+        let frame = build_frame(&mut model);
 
         assert!(
             !frame.background.is_empty(),
-            "should have substrate primitives"
+            "should have scene primitives"
         );
-        assert_eq!(frame.tiles.len(), 3, "should have 3 tiles");
-        assert!(
-            !frame.input.cells.cells.is_empty(),
-            "should have input surface"
-        );
+    }
+
+    #[test]
+    fn build_frame_has_tiles() {
+        let mut model = AppModel::new_default("/tmp/test");
+        model.visual.animation.tick(16, &crate::store::Store::new());
+        model.runtime.viewport = Rect::new(0, 0, 200, 60);
+        let frame = build_frame(&mut model);
+
+        assert_eq!(frame.tiles.len(), 3, "default workspace should have 3 tiles");
+    }
+
+    #[test]
+    fn build_frame_has_status_bar() {
+        let mut model = AppModel::new_default("/tmp/test");
+        model.visual.animation.tick(16, &crate::store::Store::new());
+        model.runtime.viewport = Rect::new(0, 0, 200, 60);
+        let frame = build_frame(&mut model);
+
+        assert_eq!(frame.status_bar.rect.h, 1);
+        assert_eq!(frame.status_bar.rect.w, 200);
+    }
+
+    #[test]
+    fn build_frame_has_input_bar() {
+        let mut model = AppModel::new_default("/tmp/test");
+        model.visual.animation.tick(16, &crate::store::Store::new());
+        model.runtime.viewport = Rect::new(0, 0, 200, 60);
+        let frame = build_frame(&mut model);
+
+        assert_eq!(frame.input.rect.h, 1);
+        assert!(frame.input.rect.y > 0, "input should be below tiles");
+    }
+
+    #[test]
+    fn build_frame_overlays_default_empty() {
+        let mut model = AppModel::new_default("/tmp/test");
+        model.visual.animation.tick(16, &crate::store::Store::new());
+        model.runtime.viewport = Rect::new(0, 0, 200, 60);
+        let frame = build_frame(&mut model);
+
         assert!(frame.overlays.is_empty(), "no overlays by default");
     }
 
     #[test]
-    fn build_frame_with_overlay() {
+    fn build_frame_with_help_overlay() {
         let mut model = AppModel::new_default("/tmp/test");
+        model.visual.animation.tick(16, &crate::store::Store::new());
+        model.runtime.viewport = Rect::new(0, 0, 200, 60);
         model.overlay = Some(crate::model::OverlayState::Help);
-        let frame = build_frame(&model);
+        let frame = build_frame(&mut model);
+
         assert_eq!(frame.overlays.len(), 1);
+        assert_eq!(frame.overlays[0].overlay_type, OverlayType::Help);
     }
 }

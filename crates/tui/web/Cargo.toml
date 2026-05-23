@@ -22,6 +22,7 @@ web-sys = { version = "0.3", features = [
     "Performance", "console",
 ] }
 serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.2", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
@@ -31,3 +32,10 @@ tower-http = { version = "0.5", features = ["cors"], optional = true }
 [features]
 default = []
 server = ["axum", "tower-http", "tokio"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.bin]
+# The axum-based demo server only makes sense on native
+[[bin]]
+name = "ryeos-web-demo"
+path = "src/bin/web-demo.rs"
+required-features = ["server"]

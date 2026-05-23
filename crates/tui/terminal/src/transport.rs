@@ -25,6 +25,8 @@ pub enum DaemonRequest {
         parameters: serde_json::Value,
     },
     CancelThread { thread_id: ThreadId },
+    /// Resolve an effective surface by canonical ref.
+    GetEffectiveSurface { ref_str: String },
 }
 
 /// Transport-level response from the daemon.
@@ -56,6 +58,17 @@ pub trait DaemonTransport {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<PollSnapshot, TransportError>> + Send + '_>,
     >;
+
+    /// Resolve an effective surface from the daemon's item services.
+    /// Returns the composed_value JSON if the daemon supports it.
+    fn resolve_effective_surface(
+        &self,
+        _ref_str: &str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, TransportError>> + Send + '_>,
+    > {
+        Box::pin(async { Err(TransportError::Transport("not implemented".into())) })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

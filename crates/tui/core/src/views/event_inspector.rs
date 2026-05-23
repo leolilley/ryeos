@@ -1,10 +1,11 @@
 //! Event inspector — raw event stream fallback view.
 
+use crate::ids::TileId;
 use crate::model::AppModel;
 use crate::text_surface::{Style, TextSurface};
 use crate::theme;
 
-pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
+pub fn build(model: &AppModel, _tile_id: TileId, w: usize, h: usize) -> TextSurface {
     let mut surface = TextSurface::new(w, h);
     surface.fill(Style::new().bg(theme::BG));
 

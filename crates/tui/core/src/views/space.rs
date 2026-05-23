@@ -1,12 +1,13 @@
 //! Space browser view — browse items across project/user/system.
 
+use crate::ids::TileId;
 use crate::model::AppModel;
 use crate::text_surface::Style;
 use crate::text_surface::TextSurface;
 use crate::theme;
 use crate::workspace::ViewLocalState;
 
-pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
+pub fn build(model: &AppModel, tile_id: TileId, w: usize, h: usize) -> TextSurface {
     let mut surface = TextSurface::new(w, h);
     surface.fill(Style::new().bg(theme::BG));
 
@@ -21,11 +22,11 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
     let cat_style = Style::new().fg(theme::ACCENT).bg(theme::BG);
     let dim_style = Style::new().fg(theme::FG_MUTED).bg(theme::BG);
 
-    // Get filter state
+    // Get filter state from THIS tile
     let (filter, cursor) = model
         .workspace
         .tiles
-        .get(&model.workspace.focused_tile)
+        .get(&tile_id)
         .and_then(|t| match &t.local {
             ViewLocalState::SpaceBrowser {
                 query,

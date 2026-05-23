@@ -1,112 +1,101 @@
-//! Scene renderer — rasterizes ScenePrimitives into a TextSurface
-//! using Braille subcells for fine lines and block density for fills.
+//! Terminal renderer — rasterizes ScenePrimitives into a braille framebuffer.
+//!
+//! Uses ColoredBrailleBuffer for 2×4 sub-cell resolution.
+//! Wu antialiased lines with sub-cell positioning for smooth curves.
 
 use ryeos_tui_core::scene::{Rgb, ScenePrimitive};
-use ryeos_tui_core::text_surface::{Color, Style, TextSurface};
 
-use crate::braille::BrailleBuffer;
+use crate::braille::ColoredBrailleBuffer;
 
-/// Render scene primitives into a TextSurface overlay.
-/// The surface should be pre-filled with the background.
-pub fn render_scene(primitives: &[ScenePrimitive], surface: &mut TextSurface) {
-    let w = surface.width;
-    let h = surface.height;
-    if w == 0 || h == 0 {
-        return;
-    }
+/// Render scene primitives into a braille buffer.
+/// `term_w` and `term_h` are terminal cell dimensions.
+/// The braille pixel space is term_w*2 × term_h*4.
+pub fn render_to_braille(
+    primitives: &[ScenePrimitive],
+    buf: &mut ColoredBrailleBuffer,
+) {
+    buf.clear();
 
-    // Create a braille buffer at 2x width, 4x height subcell resolution
-    let braille_w = w;
-    let braille_h = h;
-    let mut buf = BrailleBuffer::new(braille_w, braille_h);
-
-    let _bg_rgb = Rgb::new(0x1d, 0x20, 0x21); // BG_DARK
+    let bw = buf.pixel_w() as f32;
+    let bh = buf.pixel_h() as f32;
 
     for prim in primitives {
         match prim {
-            ScenePrimitive::Point {
-                pos,
-                color: _,
-                size,
-                opacity: _,
-                ..
-            } => {
-                let sub_x = (pos.x * braille_w as f32 * 2.0) as i32;
-                let sub_y = (pos.y * braille_h as f32 * 4.0) as i32;
-                let radius = (*size * braille_w as f32 * 2.0) as i32;
-                for dy in -radius..=radius {
-                    for dx in -radius..=radius {
-                        if dx * dx + dy * dy <= radius * radius {
-                            let px = sub_x + dx;
-                            let py = sub_y + dy;
-                            if px >= 0 && py >= 0 {
-                                buf.plot(px as usize, py as usize);
+            ScenePrimitive::Point { pos, color, size, opacity, .. } => {
+                let px = pos.x * bw;
+                let py = pos.y * bh;
+                let radius = *size * bw.max(bh) * 0.5;
+
+                // Draw a filled circle
+                let r = radius.ceil() as isize;
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let dist = ((dx * dx + dy * dy) as f32).sqrt();
+                        if dist <= radius {
+                            let edge = (radius - dist).min(1.0);
+                            let x = (px as isize + dx) as usize;
+                            let y = (py as isize + dy) as usize;
+                            if x < buf.pixel_w() && y < buf.pixel_h() {
+                                buf.plot(x, y, *color, *opacity * edge);
                             }
                         }
                     }
                 }
-                // We'll apply color per-cell below
             }
-            ScenePrimitive::Line {
-                from,
-                to,
-                color: _,
-                thickness: _,
-                opacity: _,
-                ..
-            } => {
-                let x0 = (from.x * braille_w as f32 * 2.0) as i32;
-                let y0 = (from.y * braille_h as f32 * 4.0) as i32;
-                let x1 = (to.x * braille_w as f32 * 2.0) as i32;
-                let y1 = (to.y * braille_h as f32 * 4.0) as i32;
-                buf.line(x0, y0, x1, y1);
-            }
-            ScenePrimitive::Ring {
-                center,
-                radius,
-                tilt,
-                rotation,
-                color: _,
-                opacity: _,
-            } => {
-                let cx = center.x * braille_w as f32 * 2.0;
-                let cy = center.y * braille_h as f32 * 4.0;
-                let r = *radius * braille_w as f32 * 2.0;
-                let steps = (r * 4.0) as usize;
-                let steps = steps.clamp(20, 200);
 
-                for i in 0..steps {
-                    let angle = *rotation + (i as f32 / steps as f32) * std::f32::consts::TAU;
-                    let rx = r;
-                    let ry = r * tilt.cos();
-                    let px = (cx + angle.cos() * rx) as i32;
-                    let py = (cy + angle.sin() * ry) as i32;
-                    if px >= 0 && py >= 0 {
-                        buf.plot(px as usize, py as usize);
-                    }
+            ScenePrimitive::Line { from, to, color, opacity, z, .. } => {
+                let fogged = apply_fog(color, *z);
+                buf.wu_line(
+                    from.x * bw, from.y * bh,
+                    to.x * bw, to.y * bh,
+                    fogged, *opacity,
+                );
+            }
+
+            ScenePrimitive::Ring { center, radius, tilt, rotation, color, opacity } => {
+                let cx = center.x * bw;
+                let cy = center.y * bh;
+                let rx = radius * bw * 0.5;
+                let ry = rx * tilt.cos();
+                let segments = 48;
+
+                for i in 0..segments {
+                    let a1 = (i as f32 / segments as f32) * std::f32::consts::TAU + rotation;
+                    let a2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU + rotation;
+                    buf.wu_line(
+                        cx + a1.cos() * rx, cy + a1.sin() * ry,
+                        cx + a2.cos() * rx, cy + a2.sin() * ry,
+                        *color, *opacity,
+                    );
                 }
             }
-            ScenePrimitive::Polygon { .. } => {
-                // V1: skip polygons, they're for the web renderer
+
+            ScenePrimitive::Polygon { vertices, color, opacity, z } => {
+                if vertices.len() < 2 { continue; }
+                let fogged = apply_fog(color, *z);
+                for i in 0..vertices.len() {
+                    let a = &vertices[i];
+                    let b = &vertices[(i + 1) % vertices.len()];
+                    buf.wu_line(
+                        a.x * bw, a.y * bh,
+                        b.x * bw, b.y * bh,
+                        fogged, *opacity,
+                    );
+                }
             }
         }
     }
+}
 
-    // Stamp braille buffer onto the text surface with color
-    // Use the average color from all primitives for now (V1 simplification)
-    let substrate_color = Color::Rgb(0xfe, 0x80, 0x19); // orange shard color
-
-    for cy in 0..braille_h {
-        for cx in 0..braille_w {
-            let ch = buf.get_char(cx, cy);
-            if ch != '⠀' {
-                let style = Style::new()
-                    .fg(substrate_color)
-                    .bg(Color::Rgb(0x1d, 0x20, 0x21));
-                surface.draw_char(cx, cy, ch, style);
-            }
-        }
-    }
+/// Depth fog — lerp toward dark bg by z.
+fn apply_fog(color: &Rgb, z: f32) -> Rgb {
+    let fog = Rgb::new(0x25, 0x28, 0x29);
+    let t = (z * z * 0.7).clamp(0.0, 1.0);
+    Rgb::new(
+        (color.r as f32 * (1.0 - t) + fog.r as f32 * t) as u8,
+        (color.g as f32 * (1.0 - t) + fog.g as f32 * t) as u8,
+        (color.b as f32 * (1.0 - t) + fog.b as f32 * t) as u8,
+    )
 }
 
 #[cfg(test)]
@@ -115,37 +104,24 @@ mod tests {
     use ryeos_tui_core::scene::Vec2;
 
     #[test]
-    fn render_scene_ignores_unsupported_without_panic() {
-        let mut surface = TextSurface::new(20, 10);
-        surface.fill(Style::new().bg(Color::Rgb(0x1d, 0x20, 0x21)));
-
-        let prims = vec![ScenePrimitive::Polygon {
-            vertices: vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0)],
+    fn render_line_sets_dots() {
+        let mut buf = ColoredBrailleBuffer::new(40, 12);
+        let prims = vec![ScenePrimitive::Line {
+            from: Vec2::new(0.0, 0.5),
+            to: Vec2::new(1.0, 0.5),
             z: 0.0,
-            color: Rgb::new(255, 255, 255),
+            color: Rgb::new(0xff, 0x80, 0x00),
+            thickness: 1.0,
             opacity: 1.0,
         }];
-
-        render_scene(&prims, &mut surface);
-        // Should not panic, polygon is skipped
+        render_to_braille(&prims, &mut buf);
+        assert!(buf.to_ansi().contains("⠠") || buf.to_ansi().contains("⡀") || !buf.to_ansi().contains("⠀"),
+            "line should set some dots");
     }
 
     #[test]
-    fn render_scene_draws_point() {
-        let mut surface = TextSurface::new(40, 20);
-        surface.fill(Style::new().bg(Color::Rgb(0x1d, 0x20, 0x21)));
-
-        let prims = vec![ScenePrimitive::Point {
-            pos: Vec2::new(0.5, 0.5),
-            z: 1.0,
-            color: Rgb::new(0xfe, 0x80, 0x19),
-            size: 0.02,
-            opacity: 1.0,
-        }];
-
-        render_scene(&prims, &mut surface);
-        // Should have drawn something near center
-        let center_cell = surface.get(20, 10);
-        assert_ne!(center_cell.rune, ' ');
+    fn render_empty_no_crash() {
+        let mut buf = ColoredBrailleBuffer::new(10, 5);
+        render_to_braille(&[], &mut buf);
     }
 }

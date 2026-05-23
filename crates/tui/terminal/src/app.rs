@@ -4,7 +4,6 @@
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::StreamExt;
 use ryeos_tui_core::effects::Effect;
-use ryeos_tui_core::frame::build_frame;
 use ryeos_tui_core::input::{InputEvent, Key, Mouse, MouseAction, MouseButton, ScrollDirection};
 use ryeos_tui_core::model::AppModel;
 use ryeos_tui_core::update::{self, AppEvent};
@@ -17,13 +16,22 @@ use crate::terminal::TerminalGuard;
 use crate::transport::{DaemonTransport, MockTransport, SignedHttpTransport};
 
 /// Run the TUI app.
-pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    project_path: &str,
+    mock: bool,
+    loaded_surface: ryeos_tui_core::surface::LoadedSurface,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut term = TerminalGuard::init()?;
     let _caps = RenderCapabilities::default();
 
+    // Load scene config from scene.toml (CWD or ~/.config/ryeos/)
+    let config = ryeos_tui_core::scene_config::SceneConfig::find();
+    let tick_ms = config.animation.tick_ms;
+
     let (width, height) = term.size();
-    let mut model = AppModel::new_default(project_path);
+    let mut model = ryeos_tui_core::model::AppModel::from_surface(project_path, &loaded_surface);
     model.runtime.viewport = ryeos_tui_core::layout::Rect::new(0, 0, width, height);
+    model.visual.animation.set_config(config);
 
     // Create transport: try real daemon first, fall back to mock
     let mut transport: Box<dyn DaemonTransport> = if mock {
@@ -54,13 +62,12 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
 
     let mut renderer = FrameRenderer::new();
     let mut stdout = std::io::stdout();
-    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(5));
 
     // Initial render
     if model.dirty {
-        let frame = build_frame(&model);
-        renderer.render(&mut stdout, &frame, width, height)?;
+        renderer.render(&mut stdout, &mut model, width, height)?;
         model.dirty = false;
     }
 
@@ -101,13 +108,9 @@ pub async fn run(project_path: &str, mock: bool) -> Result<(), Box<dyn std::erro
 
         // Render if dirty
         if model.dirty {
-            let frame = build_frame(&model);
-            renderer.render(
-                &mut stdout,
-                &frame,
-                model.runtime.viewport.w,
-                model.runtime.viewport.h,
-            )?;
+            let w = model.runtime.viewport.w;
+            let h = model.runtime.viewport.h;
+            renderer.render(&mut stdout, &mut model, w, h)?;
             model.dirty = false;
         }
     }

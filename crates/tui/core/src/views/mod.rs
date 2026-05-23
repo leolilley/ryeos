@@ -70,12 +70,12 @@ pub fn build_tile_view(
 
     // Build inner content
     let content = match &tile.view {
-        ViewSpec::ThreadList => thread_list::build(model, inner_w, inner_h),
+        ViewSpec::ThreadList => thread_list::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Thread { .. } => thread::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Remotes => remotes::build(model, inner_w, inner_h),
-        ViewSpec::EventInspector => event_inspector::build(model, inner_w, inner_h),
+        ViewSpec::EventInspector => event_inspector::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Projects => projects::build(model, inner_w, inner_h),
-        ViewSpec::SpaceBrowser { .. } => space::build(model, inner_w, inner_h),
+        ViewSpec::SpaceBrowser { .. } => space::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Trust => trust::build(model, inner_w, inner_h),
         ViewSpec::Graph { .. } => graph::build(model, inner_w, inner_h),
     };
@@ -243,11 +243,11 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 Style::new().fg(theme::FG).bg(theme::BG),
             );
 
-            // Filter and display commands
-            let all_commands = crate::commands::builtin_commands();
-            let matches = crate::commands::filter_commands(&all_commands, query);
+            // Filter and display affordances
+            let all_affordances = crate::commands::builtin_affordances();
+            let matches = crate::commands::filter_affordances(&all_affordances, query);
 
-            for (i, cmd) in matches.iter().take(h.saturating_sub(5)).enumerate() {
+            for (i, aff) in matches.iter().take(h.saturating_sub(5)).enumerate() {
                 let is_first = i == 0;
                 let bg = if is_first {
                     theme::ACCENT
@@ -262,7 +262,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 let style = Style::new().fg(fg).bg(bg);
 
                 let label = crate::widgets::text::truncate(
-                    &format!("{}: {}", cmd.category, cmd.label),
+                    &format!("{}: {}", aff.category, aff.label),
                     w - 6,
                 );
                 surface.draw_text(3, 5 + i, &label, style);
@@ -270,7 +270,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 // Description on right
                 if is_first && w > label.len() + 10 {
                     let desc = crate::widgets::text::truncate(
-                        &cmd.description,
+                        &aff.description,
                         w.saturating_sub(label.len() + 8),
                     );
                     surface.draw_text(

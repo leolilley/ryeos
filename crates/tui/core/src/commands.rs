@@ -1,113 +1,838 @@
-//! Command palette — registry of commands for the command palette overlay.
+//! Affordance system — operator actions backed by UI verbs or Rye invocations.
+//!
+//! Surfaces declare affordances (palette entries, keybindings, contextual actions).
+//! Each affordance invokes either:
+//! - A **UI-local verb** for cockpit behavior (focus, split, quit, etc.)
+//! - A **Rye-native invocation** for daemon behavior (aliases, verbs, operations)
+//!
+//! Dispatch is code-owned. Surfaces expose data; Rust owns execution.
+//! The TUI does NOT expand aliases or duplicate Rye dispatch rules.
 
+use crate::effects::Effect;
+use crate::ids::ThreadId;
+use crate::ids::TileId;
+use crate::layout::SplitAxis;
+use crate::surface::ViewKindSpec;
 use serde::{Deserialize, Serialize};
 
-/// A command that can be dispatched from the command palette.
+// ---------------------------------------------------------------------------
+// Invocation — the target of an affordance
+// ---------------------------------------------------------------------------
+
+/// What an affordance invokes.
+///
+/// UI verbs are cockpit-local — they mutate the model through the reducer.
+/// Rye invocations go through the daemon unexpanded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InvocationSpec {
+    Ui(UiInvocation),
+    Rye(RyeInvocation),
+}
+
+/// A UI-local verb invocation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiInvocation {
+    pub verb: UiVerb,
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+/// Closed enum of UI verbs — intentionally small, cockpit-only.
+///
+/// Rye operations (cancel_thread, execute_item, etc.) belong in `InvocationSpec::Rye`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiVerb {
+    FocusNext,
+    FocusPrevious,
+    SwitchView,
+    SplitPane,
+    ClosePane,
+    OpenOverlay,
+    ResetLayout,
+    NewSession,
+    ToggleHelp,
+    ToggleCommandPalette,
+    Quit,
+}
+
+/// A Rye-native invocation sent to the daemon.
+///
+/// The TUI resolves selectors but does NOT expand aliases or
+/// interpret verbs/operations locally. Those travel as-is to Rye.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeInvocation {
+    /// UI context selector resolved by the TUI before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<TargetSelector>,
+    /// Rye alias to execute (e.g. "@deploy-prod").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// Canonical item ref (e.g. "graph:deploy").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_ref: Option<String>,
+    /// Rye verb (e.g. "cancel", "resume").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verb: Option<String>,
+    /// Rye operation (e.g. "retry_failed_step").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Additional arguments passed through.
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// Selectors — TUI-owned context resolution
+// ---------------------------------------------------------------------------
+
+/// A UI context selector that the TUI resolves to a concrete target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetSelector {
+    FocusedThread,
+    SelectedThread,
+    HoveredNode,
+    FocusedPane,
+    FocusedPaneItem,
+}
+
+/// Result of resolving a target selector against UI context.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedTarget {
+    Thread { thread_id: ThreadId },
+    Item { item_ref: String },
+    Node { node_id: String },
+    Pane { tile_id: TileId },
+    None,
+}
+
+// ---------------------------------------------------------------------------
+// Affordance — a user-facing action declaration
+// ---------------------------------------------------------------------------
+
+/// An affordance that can be dispatched from the palette, keybinding, or action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Command {
+pub struct Affordance {
     pub id: String,
     pub label: String,
     pub category: String,
     pub description: String,
+    pub invoke: InvocationSpec,
+    #[serde(default)]
+    pub requires_capabilities: Vec<String>,
 }
 
-/// Built-in command registry.
-pub fn builtin_commands() -> Vec<Command> {
+// ---------------------------------------------------------------------------
+// Built-in affordances
+// ---------------------------------------------------------------------------
+
+/// Built-in affordance registry.
+pub fn builtin_affordances() -> Vec<Affordance> {
     vec![
-        Command {
-            id: "view.threads".into(),
-            label: "Threads".into(),
-            category: "View".into(),
-            description: "Switch to thread list".into(),
-        },
-        Command {
-            id: "view.remotes".into(),
-            label: "Remotes".into(),
-            category: "View".into(),
-            description: "Switch to remotes view".into(),
-        },
-        Command {
-            id: "view.projects".into(),
-            label: "Projects".into(),
-            category: "View".into(),
-            description: "Switch to projects view".into(),
-        },
-        Command {
-            id: "view.items".into(),
-            label: "Items".into(),
-            category: "View".into(),
-            description: "Browse items in space".into(),
-        },
-        Command {
-            id: "view.trust".into(),
-            label: "Trust".into(),
-            category: "View".into(),
-            description: "View trust status".into(),
-        },
-        Command {
-            id: "view.graph".into(),
-            label: "Graph".into(),
-            category: "View".into(),
-            description: "View graph topology".into(),
-        },
-        Command {
-            id: "view.events".into(),
-            label: "Events".into(),
-            category: "View".into(),
-            description: "Inspect raw events".into(),
-        },
-        Command {
-            id: "layout.split-h".into(),
-            label: "Split Horizontal".into(),
-            category: "Layout".into(),
-            description: "Split focused tile left/right".into(),
-        },
-        Command {
-            id: "layout.split-v".into(),
-            label: "Split Vertical".into(),
-            category: "Layout".into(),
-            description: "Split focused tile top/bottom".into(),
-        },
-        Command {
-            id: "layout.close".into(),
-            label: "Close Tile".into(),
-            category: "Layout".into(),
-            description: "Close the focused tile".into(),
-        },
-        Command {
-            id: "layout.reset".into(),
-            label: "Reset Layout".into(),
-            category: "Layout".into(),
-            description: "Reset to default 3-pane layout".into(),
-        },
-        Command {
-            id: "session.new".into(),
-            label: "New Session".into(),
-            category: "Session".into(),
-            description: "Clear input and start fresh".into(),
-        },
-        Command {
-            id: "app.quit".into(),
-            label: "Quit".into(),
-            category: "App".into(),
-            description: "Exit the TUI".into(),
-        },
+        affordance("focus.next", "Focus Next", "UI", "Move focus to next tile",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::FocusNext, args: serde_json::Value::Null })),
+        affordance("focus.prev", "Focus Previous", "UI", "Move focus to previous tile",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::FocusPrevious, args: serde_json::Value::Null })),
+        affordance("view.thread_list", "Threads", "View", "Switch focused tile to thread list",
+            ui_switch(ViewKindSpec::ThreadList)),
+        affordance("view.thread", "Thread", "View", "Switch to thread view",
+            ui_switch(ViewKindSpec::Thread)),
+        affordance("view.remotes", "Remotes", "View", "Switch to remotes view",
+            ui_switch(ViewKindSpec::Remotes)),
+        affordance("view.projects", "Projects", "View", "Switch to projects view",
+            ui_switch(ViewKindSpec::Projects)),
+        affordance("view.items", "Items", "View", "Browse items in space",
+            ui_switch(ViewKindSpec::SpaceBrowser)),
+        affordance("view.trust", "Trust", "View", "View trust status",
+            ui_switch(ViewKindSpec::Trust)),
+        affordance("view.graph", "Graph", "View", "View graph topology",
+            ui_switch(ViewKindSpec::Graph)),
+        affordance("view.events", "Events", "View", "Inspect raw events",
+            ui_switch(ViewKindSpec::EventInspector)),
+        affordance("layout.split_h", "Split Horizontal", "Layout", "Split focused tile left/right",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::SplitPane,
+                args: serde_json::json!({ "axis": "horizontal", "view": "thread_list" }),
+            })),
+        affordance("layout.split_v", "Split Vertical", "Layout", "Split focused tile top/bottom",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::SplitPane,
+                args: serde_json::json!({ "axis": "vertical", "view": "event_inspector" }),
+            })),
+        affordance("layout.close", "Close Tile", "Layout", "Close the focused tile",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ClosePane, args: serde_json::Value::Null })),
+        affordance("layout.reset", "Reset Layout", "Layout", "Reset to surface layout",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ResetLayout, args: serde_json::Value::Null })),
+        affordance("session.new", "New Session", "Session", "Clear input and start fresh",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::NewSession, args: serde_json::Value::Null })),
+        affordance("help", "Help", "App", "Show help overlay",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ToggleHelp, args: serde_json::Value::Null })),
+        affordance("palette", "Command Palette", "App", "Open command palette",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ToggleCommandPalette, args: serde_json::Value::Null })),
+        affordance("app.quit", "Quit", "App", "Exit the TUI",
+            InvocationSpec::Ui(UiInvocation { verb: UiVerb::Quit, args: serde_json::Value::Null })),
     ]
 }
 
-/// Filter commands by a query string (matches label, category, or description).
-pub fn filter_commands<'a>(commands: &'a [Command], query: &str) -> Vec<&'a Command> {
+fn affordance(id: &str, label: &str, category: &str, desc: &str, invoke: InvocationSpec) -> Affordance {
+    Affordance {
+        id: id.into(),
+        label: label.into(),
+        category: category.into(),
+        description: desc.into(),
+        invoke,
+        requires_capabilities: Vec::new(),
+    }
+}
+
+fn ui_switch(view: ViewKindSpec) -> InvocationSpec {
+    InvocationSpec::Ui(UiInvocation {
+        verb: UiVerb::SwitchView,
+        args: serde_json::to_value(&view).unwrap_or(serde_json::Value::Null),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Merge — built-in + surface affordances
+// ---------------------------------------------------------------------------
+
+/// Merge built-in affordances with surface-declared affordances.
+/// Surface affordances override built-in affordances with the same id.
+/// Surface affordances with unknown invoke kinds are filtered out with warnings.
+pub fn merge_affordances(
+    surface_affordances: &[crate::surface::AffordanceSpec],
+) -> (Vec<Affordance>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut registry: Vec<Affordance> = builtin_affordances();
+
+    for spec in surface_affordances {
+        let invoke = match spec_to_invocation(spec) {
+            Some(inv) => inv,
+            None => {
+                warnings.push(format!(
+                    "surface affordance '{}' has no invocable target, ignored",
+                    spec.id
+                ));
+                continue;
+            }
+        };
+
+        if let Some(pos) = registry.iter().position(|a| a.id == spec.id) {
+            // Override built-in by id
+            registry[pos].label.clone_from(&spec.label);
+            registry[pos].description.clone_from(&spec.description);
+            if !spec.category.is_empty() {
+                registry[pos].category.clone_from(&spec.category);
+            }
+            registry[pos].invoke = invoke;
+            if !spec.requires_capabilities.is_empty() {
+                registry[pos].requires_capabilities.clone_from(&spec.requires_capabilities);
+            }
+        } else {
+            registry.push(Affordance {
+                id: spec.id.clone(),
+                label: spec.label.clone(),
+                category: spec.category.clone(),
+                description: spec.description.clone(),
+                invoke,
+                requires_capabilities: spec.requires_capabilities.clone(),
+            });
+        }
+    }
+
+    (registry, warnings)
+}
+
+/// Convert a surface `AffordanceSpec` to an `InvocationSpec`.
+/// Returns None if the affordance has no invocable target.
+fn spec_to_invocation(spec: &crate::surface::AffordanceSpec) -> Option<InvocationSpec> {
+    spec.invoke.clone()
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+/// Dispatch an affordance invocation against the model.
+/// Returns (handled, effects).
+pub fn dispatch_affordance(
+    invocation: &InvocationSpec,
+    model: &mut crate::model::AppModel,
+) -> (bool, Vec<Effect>) {
+    match invocation {
+        InvocationSpec::Ui(ui) => dispatch_ui_verb(&ui.verb, &ui.args, model),
+        InvocationSpec::Rye(rye) => dispatch_rye_invocation(rye, model),
+    }
+}
+
+/// Dispatch a UI verb against the model.
+fn dispatch_ui_verb(
+    verb: &UiVerb,
+    args: &serde_json::Value,
+    model: &mut crate::model::AppModel,
+) -> (bool, Vec<Effect>) {
+    match verb {
+        UiVerb::FocusNext => {
+            model.workspace.focus_next();
+            model.mark_dirty();
+            (true, Vec::new())
+        }
+        UiVerb::FocusPrevious => {
+            model.workspace.focus_prev();
+            model.mark_dirty();
+            (true, Vec::new())
+        }
+        UiVerb::SwitchView => {
+            let view: ViewKindSpec = match serde_json::from_value(args.clone()) {
+                Ok(v) => v,
+                Err(_) => return (false, Vec::new()),
+            };
+            let tile_id = model.workspace.focused_tile;
+            if let Some(tile) = model.workspace.tiles.get_mut(&tile_id) {
+                tile.view = view.to_view_spec();
+                tile.local = view.initial_local_state();
+            }
+            model.mark_dirty();
+            (true, Vec::new())
+        }
+        UiVerb::SplitPane => {
+            let axis = args.get("axis")
+                .and_then(|v| v.as_str())
+                .and_then(|s| match s {
+                    "horizontal" => Some(SplitAxis::Horizontal),
+                    "vertical" => Some(SplitAxis::Vertical),
+                    _ => None,
+                })
+                .unwrap_or(SplitAxis::Horizontal);
+            let view_kind = args.get("view")
+                .and_then(|v| v.as_str())
+                .and_then(|s| parse_view_kind(s))
+                .unwrap_or(ViewKindSpec::ThreadList);
+            model.workspace.split_focused(axis, view_kind.to_view_spec());
+            model.mark_dirty();
+            (true, vec![Effect::PersistSession])
+        }
+        UiVerb::ClosePane => {
+            model.workspace.close_focused();
+            model.mark_dirty();
+            (true, vec![Effect::PersistSession])
+        }
+        UiVerb::ResetLayout => {
+            model.workspace = model.surface.rebuild_workspace();
+            model.mark_dirty();
+            (true, vec![Effect::PersistSession])
+        }
+        UiVerb::NewSession => {
+            model.workspace.input_bar.clear();
+            model.mark_dirty();
+            (true, Vec::new())
+        }
+        UiVerb::ToggleHelp => {
+            model.overlay = match model.overlay {
+                Some(crate::model::OverlayState::Help) => None,
+                _ => Some(crate::model::OverlayState::Help),
+            };
+            model.mark_dirty();
+            (true, Vec::new())
+        }
+        UiVerb::ToggleCommandPalette => {
+            model.overlay = match model.overlay {
+                Some(crate::model::OverlayState::CommandPalette { .. }) => None,
+                _ => Some(crate::model::OverlayState::CommandPalette {
+                    query: String::new(),
+                    cursor: 0,
+                }),
+            };
+            model.mark_dirty();
+            (true, Vec::new())
+        }
+        UiVerb::OpenOverlay => {
+            // Overlays are opened via ToggleHelp/ToggleCommandPalette or Confirm.
+            // If args specify a type, open that overlay; otherwise no-op.
+            let overlay_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match overlay_type {
+                "help" => {
+                    model.overlay = Some(crate::model::OverlayState::Help);
+                }
+                "palette" => {
+                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
+                        query: String::new(),
+                        cursor: 0,
+                    });
+                }
+                "confirm" => {
+                    let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("Confirm?");
+                    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                    model.overlay = Some(crate::model::OverlayState::Confirm {
+                        message: message.to_string(),
+                        action: action.to_string(),
+                    });
+                }
+                _ => return (false, Vec::new()),
+            }
+            model.mark_dirty();
+            (true, Vec::new())
+        }
+        UiVerb::Quit => (true, vec![Effect::Quit]),
+    }
+}
+
+/// Parse a view kind string from affordance args.
+fn parse_view_kind(s: &str) -> Option<ViewKindSpec> {
+    match s {
+        "thread_list" => Some(ViewKindSpec::ThreadList),
+        "thread" => Some(ViewKindSpec::Thread),
+        "remotes" => Some(ViewKindSpec::Remotes),
+        "projects" => Some(ViewKindSpec::Projects),
+        "space_browser" => Some(ViewKindSpec::SpaceBrowser),
+        "trust" => Some(ViewKindSpec::Trust),
+        "graph" => Some(ViewKindSpec::Graph),
+        "event_inspector" => Some(ViewKindSpec::EventInspector),
+        _ => None,
+    }
+}
+
+/// Dispatch a Rye invocation.
+///
+/// The TUI resolves selectors and constructs daemon requests.
+/// It does NOT expand aliases or interpret verbs/operations locally.
+fn dispatch_rye_invocation(
+    invocation: &RyeInvocation,
+    model: &mut crate::model::AppModel,
+) -> (bool, Vec<Effect>) {
+    // If the invocation has an alias, send it to the daemon for execution.
+    if let Some(alias) = &invocation.alias {
+        // Build an execute request with the alias as the item_ref.
+        // The daemon resolves the alias according to its own rules.
+        let project_path = std::path::PathBuf::from("/tmp/ryeos");
+        return (true, vec![Effect::Execute {
+            project_path,
+            item_ref: alias.clone(),
+            parameters: invocation.args.clone(),
+        }]);
+    }
+
+    // If the invocation has an item_ref + operation/verb, send to daemon.
+    if let Some(item_ref) = &invocation.item_ref {
+        // Resolve target selector if present
+        let _resolved = invocation.target.as_ref().map(|sel| resolve_selector(sel, model));
+
+        // For now, construct an execute effect. When daemon supports
+        // targeted verb/operation APIs, this will use the appropriate
+        // request type instead of generic execute.
+        let project_path = std::path::PathBuf::from("/tmp/ryeos");
+        return (true, vec![Effect::Execute {
+            project_path,
+            item_ref: item_ref.clone(),
+            parameters: invocation.args.clone(),
+        }]);
+    }
+
+    // If the invocation has a target + verb (e.g. cancel focused thread),
+    // resolve the selector and dispatch.
+    if let (Some(target), Some(verb)) = (&invocation.target, &invocation.verb) {
+        let resolved = resolve_selector(target, model);
+        match resolved {
+            ResolvedTarget::Thread { thread_id } => {
+                return (true, vec![Effect::SendThreadCommand {
+                    thread_id,
+                    command: verb_to_thread_command(verb),
+                }]);
+            }
+            _ => return (false, Vec::new()),
+        }
+    }
+
+    (false, Vec::new())
+}
+
+/// Resolve a target selector against the current UI context.
+pub fn resolve_selector(
+    selector: &TargetSelector,
+    model: &crate::model::AppModel,
+) -> ResolvedTarget {
+    match selector {
+        TargetSelector::FocusedThread => {
+            // Find the thread tile and check if it has a thread_id
+            let focused = model.workspace.focused_tile;
+            if let Some(tile) = model.workspace.tiles.get(&focused) {
+                if let crate::workspace::ViewSpec::Thread { thread_id: Some(tid) } = tile.view {
+                    return ResolvedTarget::Thread { thread_id: tid };
+                }
+            }
+            ResolvedTarget::None
+        }
+        TargetSelector::SelectedThread => {
+            // Find the thread list tile and check cursor
+            for (_tile_id, tile) in &model.workspace.tiles {
+                if let crate::workspace::ViewSpec::ThreadList = tile.view {
+                    if let crate::workspace::ViewLocalState::ThreadList { cursor, .. } = &tile.local {
+                        let threads: Vec<_> = model.store.recent_threads();
+                        if let Some(selected) = threads.into_iter().nth(*cursor) {
+                            return ResolvedTarget::Thread { thread_id: selected.id };
+                        }
+                    }
+                    break;
+                }
+            }
+            ResolvedTarget::None
+        }
+        TargetSelector::FocusedPane => {
+            ResolvedTarget::Pane { tile_id: model.workspace.focused_tile }
+        }
+        TargetSelector::FocusedPaneItem => ResolvedTarget::None,
+        TargetSelector::HoveredNode => ResolvedTarget::None,
+    }
+}
+
+/// Map a Rye verb string to a thread command.
+fn verb_to_thread_command(verb: &str) -> crate::effects::ThreadCommand {
+    match verb {
+        "cancel" => crate::effects::ThreadCommand::Cancel,
+        "kill" => crate::effects::ThreadCommand::Kill,
+        "interrupt" => crate::effects::ThreadCommand::Interrupt,
+        _ => crate::effects::ThreadCommand::Interrupt,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filtering
+// ---------------------------------------------------------------------------
+
+/// Filter affordances by a query string (matches label, category, description, or id).
+pub fn filter_affordances<'a>(affordances: &'a [Affordance], query: &str) -> Vec<&'a Affordance> {
     if query.is_empty() {
-        return commands.iter().collect();
+        return affordances.iter().collect();
     }
     let query_lower = query.to_lowercase();
-    commands
+    affordances
         .iter()
-        .filter(|c| {
-            c.label.to_lowercase().contains(&query_lower)
-                || c.category.to_lowercase().contains(&query_lower)
-                || c.description.to_lowercase().contains(&query_lower)
-                || c.id.to_lowercase().contains(&query_lower)
+        .filter(|a| {
+            a.label.to_lowercase().contains(&query_lower)
+                || a.category.to_lowercase().contains(&query_lower)
+                || a.description.to_lowercase().contains(&query_lower)
+                || a.id.to_lowercase().contains(&query_lower)
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_affordances_use_invocation_spec() {
+        let affs = builtin_affordances();
+        assert!(affs.len() >= 16, "should have at least 16 affordances");
+        let ui_count = affs.iter().filter(|a| matches!(a.invoke, InvocationSpec::Ui(_))).count();
+        assert!(ui_count >= 15, "most builtins should be UI verbs");
+    }
+
+    #[test]
+    fn filter_finds_by_label() {
+        let affs = builtin_affordances();
+        let results = filter_affordances(&affs, "thread");
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|a| a.label.contains("Thread")));
+    }
+
+    #[test]
+    fn filter_finds_by_category() {
+        let affs = builtin_affordances();
+        let results = filter_affordances(&affs, "layout");
+        assert!(results.iter().any(|a| a.category == "Layout"));
+    }
+
+    #[test]
+    fn dispatch_ui_switch_view() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let inv = InvocationSpec::Ui(UiInvocation {
+            verb: UiVerb::SwitchView,
+            args: serde_json::to_value(ViewKindSpec::Trust).unwrap(),
+        });
+        let (handled, effects) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert!(effects.is_empty());
+        let focused_view = model.workspace.focused_view();
+        assert!(matches!(focused_view, Some(crate::workspace::ViewSpec::Trust)));
+    }
+
+    #[test]
+    fn dispatch_ui_split_pane() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let initial_tiles = model.workspace.tiles.len();
+        let inv = InvocationSpec::Ui(UiInvocation {
+            verb: UiVerb::SplitPane,
+            args: serde_json::json!({ "axis": "vertical", "view": "event_inspector" }),
+        });
+        let (handled, effects) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert_eq!(model.workspace.tiles.len(), initial_tiles + 1);
+        assert!(effects.iter().any(|e| matches!(e, Effect::PersistSession)));
+    }
+
+    #[test]
+    fn dispatch_ui_close_pane() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        model.workspace.split_focused(SplitAxis::Vertical, crate::workspace::ViewSpec::EventInspector);
+        let tiles_after_split = model.workspace.tiles.len();
+        assert!(tiles_after_split > 3);
+
+        let inv = InvocationSpec::Ui(UiInvocation {
+            verb: UiVerb::ClosePane,
+            args: serde_json::Value::Null,
+        });
+        let (handled, _) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert!(model.workspace.tiles.len() < tiles_after_split);
+    }
+
+    #[test]
+    fn dispatch_ui_quit() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let inv = InvocationSpec::Ui(UiInvocation {
+            verb: UiVerb::Quit,
+            args: serde_json::Value::Null,
+        });
+        let (handled, effects) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert!(effects.iter().any(|e| matches!(e, Effect::Quit)));
+    }
+
+    #[test]
+    fn dispatch_ui_toggle_help() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let inv = InvocationSpec::Ui(UiInvocation {
+            verb: UiVerb::ToggleHelp,
+            args: serde_json::Value::Null,
+        });
+        let (handled, _) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert!(matches!(model.overlay, Some(crate::model::OverlayState::Help)));
+        // Toggle off
+        let (handled, _) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert!(model.overlay.is_none());
+    }
+
+    #[test]
+    fn dispatch_ui_reset_layout_rebuilds_from_surface() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let initial_tiles = model.workspace.tiles.len();
+        model.workspace.split_focused(SplitAxis::Horizontal, crate::workspace::ViewSpec::Remotes);
+        assert!(model.workspace.tiles.len() > initial_tiles);
+
+        let inv = InvocationSpec::Ui(UiInvocation {
+            verb: UiVerb::ResetLayout,
+            args: serde_json::Value::Null,
+        });
+        let (handled, _) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert_eq!(model.workspace.tiles.len(), initial_tiles);
+    }
+
+    #[test]
+    fn dispatch_rye_alias_produces_execute_effect() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let inv = InvocationSpec::Rye(RyeInvocation {
+            target: None,
+            alias: Some("@deploy-prod".into()),
+            item_ref: None,
+            verb: None,
+            operation: None,
+            args: serde_json::Value::Null,
+        });
+        let (handled, effects) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], Effect::Execute { ref item_ref, .. } if item_ref == "@deploy-prod"));
+    }
+
+    #[test]
+    fn dispatch_rye_target_verb_cancel_focused_thread() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let thread_id = crate::ids::ThreadId::new(42);
+        // Find the thread tile, set its thread_id, and focus it
+        for (tid, tile) in model.workspace.tiles.iter_mut() {
+            if matches!(tile.view, crate::workspace::ViewSpec::Thread { .. }) {
+                tile.view = crate::workspace::ViewSpec::Thread { thread_id: Some(thread_id) };
+                model.workspace.focused_tile = *tid;
+                break;
+            }
+        }
+
+        let inv = InvocationSpec::Rye(RyeInvocation {
+            target: Some(TargetSelector::FocusedThread),
+            alias: None,
+            item_ref: None,
+            verb: Some("cancel".into()),
+            operation: None,
+            args: serde_json::Value::Null,
+        });
+        let (handled, effects) = dispatch_affordance(&inv, &mut model);
+        assert!(handled);
+        assert!(matches!(effects[0], Effect::SendThreadCommand { command: crate::effects::ThreadCommand::Cancel, .. }));
+    }
+
+    #[test]
+    fn selector_resolve_focused_thread_returns_none_when_no_thread() {
+        let model = crate::model::AppModel::new_default("/tmp/test");
+        let resolved = resolve_selector(&TargetSelector::FocusedThread, &model);
+        // If focused tile is a thread_list (not Thread view), returns None
+        assert!(matches!(resolved, ResolvedTarget::None));
+    }
+
+    #[test]
+    fn selector_resolve_focused_thread_returns_thread() {
+        let mut model = crate::model::AppModel::new_default("/tmp/test");
+        let thread_id = crate::ids::ThreadId::new(99);
+        // Set the focused tile to Thread view with a thread_id
+        for (tid, tile) in model.workspace.tiles.iter_mut() {
+            if matches!(tile.view, crate::workspace::ViewSpec::Thread { .. }) {
+                tile.view = crate::workspace::ViewSpec::Thread { thread_id: Some(thread_id) };
+                model.workspace.focused_tile = *tid;
+                break;
+            }
+        }
+        let resolved = resolve_selector(&TargetSelector::FocusedThread, &model);
+        assert_eq!(resolved, ResolvedTarget::Thread { thread_id });
+    }
+
+    #[test]
+    fn merge_affordances_surface_overrides_builtin() {
+        let surface_affs = vec![crate::surface::AffordanceSpec {
+            id: "layout.reset".into(),
+            label: "Revert".into(),
+            category: "Ops".into(),
+            description: "Revert layout".into(),
+            invoke: Some(InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::ResetLayout,
+                args: serde_json::Value::Null,
+            })),
+            requires_capabilities: vec!["ui.layout.reset".into()],
+        }];
+        let (merged, _) = merge_affordances(&surface_affs);
+        let reset = merged.iter().find(|a| a.id == "layout.reset").unwrap();
+        assert_eq!(reset.label, "Revert");
+        assert_eq!(reset.category, "Ops");
+        assert_eq!(reset.requires_capabilities, vec!["ui.layout.reset"]);
+    }
+
+    #[test]
+    fn merge_affordances_new_from_surface() {
+        let surface_affs = vec![crate::surface::AffordanceSpec {
+            id: "thread.cancel".into(),
+            label: "Cancel".into(),
+            category: "Thread".into(),
+            description: "Cancel focused thread".into(),
+            invoke: Some(InvocationSpec::Rye(RyeInvocation {
+                target: Some(TargetSelector::FocusedThread),
+                alias: None,
+                item_ref: None,
+                verb: Some("cancel".into()),
+                operation: None,
+                args: serde_json::Value::Null,
+            })),
+            requires_capabilities: vec!["thread.cancel".into()],
+        }];
+        let (merged, warnings) = merge_affordances(&surface_affs);
+        assert!(warnings.is_empty());
+        let cancel = merged.iter().find(|a| a.id == "thread.cancel").unwrap();
+        assert_eq!(cancel.label, "Cancel");
+        assert!(matches!(cancel.invoke, InvocationSpec::Rye(_)));
+    }
+
+    #[test]
+    fn merge_affordances_warns_on_no_invoke() {
+        let surface_affs = vec![crate::surface::AffordanceSpec {
+            id: "ghost.action".into(),
+            label: "Ghost".into(),
+            category: "".into(),
+            description: "".into(),
+            invoke: None,
+            requires_capabilities: Vec::new(),
+        }];
+        let (_, warnings) = merge_affordances(&surface_affs);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("ghost.action"));
+    }
+
+    #[test]
+    fn rye_invocation_alias_serializes() {
+        let inv = RyeInvocation {
+            target: None,
+            alias: Some("@deploy".into()),
+            item_ref: None,
+            verb: None,
+            operation: None,
+            args: serde_json::json!({ "env": "prod" }),
+        };
+        let json = serde_json::to_string(&inv).unwrap();
+        assert!(json.contains("\"alias\":\"@deploy\""));
+
+        let parsed: RyeInvocation = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, inv);
+    }
+
+    #[test]
+    fn rye_invocation_target_verb_serializes() {
+        let inv = RyeInvocation {
+            target: Some(TargetSelector::FocusedThread),
+            alias: None,
+            item_ref: None,
+            verb: Some("cancel".into()),
+            operation: None,
+            args: serde_json::Value::Null,
+        };
+        let yaml = serde_yaml::to_string(&inv).unwrap();
+        assert!(yaml.contains("focused_thread"));
+        assert!(yaml.contains("cancel"));
+
+        let parsed: RyeInvocation = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, inv);
+    }
+
+    #[test]
+    fn ui_verb_serializes() {
+        let inv = InvocationSpec::Ui(UiInvocation {
+            verb: UiVerb::SwitchView,
+            args: serde_json::json!("trust"),
+        });
+        let yaml = serde_yaml::to_string(&inv).unwrap();
+        assert!(yaml.contains("ui"));
+        assert!(yaml.contains("switch_view"));
+
+        let parsed: InvocationSpec = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, inv);
+    }
+
+    #[test]
+    fn affordance_spec_yaml_roundtrip() {
+        let yaml = r#"
+id: thread.cancel
+label: Cancel Thread
+category: Thread
+description: Cancel the focused thread
+invoke:
+  kind: rye
+  target: focused_thread
+  verb: cancel
+requires_capabilities:
+  - thread.cancel
+"#;
+        let spec: crate::surface::AffordanceSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.id, "thread.cancel");
+        assert_eq!(spec.label, "Cancel Thread");
+        assert!(spec.invoke.is_some());
+        assert_eq!(spec.requires_capabilities, vec!["thread.cancel"]);
+
+        let inv = spec.invoke.unwrap();
+        assert!(matches!(inv, InvocationSpec::Rye(_)));
+    }
 }

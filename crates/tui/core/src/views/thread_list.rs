@@ -1,6 +1,7 @@
 //! Thread list view — recent threads from the store.
 
 use crate::model::AppModel;
+use crate::ids::TileId;
 use crate::store::ThreadStatus;
 use crate::text_surface::Style;
 use crate::text_surface::TextSurface;
@@ -9,7 +10,7 @@ use crate::workspace::ViewLocalState;
 
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
+pub fn build(model: &AppModel, tile_id: TileId, w: usize, h: usize) -> TextSurface {
     let mut surface = TextSurface::new(w, h);
     surface.fill(Style::new().bg(theme::BG));
 
@@ -17,13 +18,15 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
         return surface;
     }
 
-    // Get filter from view-local state
-    let filter = model
+    // Get filter from THIS tile's view-local state
+    let (filter, cursor) = model
         .workspace
         .tiles
-        .get(&model.workspace.focused_tile)
+        .get(&tile_id)
         .and_then(|t| match &t.local {
-            ViewLocalState::ThreadList { filter, .. } => Some(filter.clone()),
+            ViewLocalState::ThreadList { filter, cursor } => {
+                Some((filter.clone(), *cursor))
+            }
             _ => None,
         })
         .unwrap_or_default();
@@ -48,17 +51,6 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
     // Thread rows
     let threads = model.store.recent_threads();
     let mut row = 2;
-
-    // Get cursor position
-    let cursor = model
-        .workspace
-        .tiles
-        .get(&model.workspace.focused_tile)
-        .and_then(|t| match &t.local {
-            ViewLocalState::ThreadList { cursor, .. } => Some(*cursor),
-            _ => None,
-        })
-        .unwrap_or(0);
 
     let mut visible_idx = 0;
     for thread in &threads {
