@@ -46,7 +46,7 @@ mod tests {
     #[test]
     fn service_registry_count() {
         let reg = build_service_registry();
-        assert_eq!(reg.endpoints().len(), 55);
+        assert_eq!(reg.endpoints().len(), handlers::ALL.len());
     }
 
     #[test]

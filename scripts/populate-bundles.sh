@@ -80,7 +80,8 @@ echo "[populate-bundles] building all release binaries (workspace)…"
   -p ryeos-knowledge-runtime \
   -p ryeos-handler-bins \
   -p ryeos-cli \
-  -p ryeos-tools
+  -p ryeos-tools \
+  -p ryeos-tui-terminal
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 
@@ -98,6 +99,7 @@ install -m 0755 \
   "$TARGET/release/ryeos-directive-runtime" \
   "$TARGET/release/ryeos-graph-runtime" \
   "$TARGET/release/ryeos-knowledge-runtime" \
+  "$TARGET/release/ryeos-tui" \
   "$TARGET/release/rye-composer-extends-chain" \
   "$TARGET/release/rye-composer-graph-permissions" \
   "$STD_BIN/"

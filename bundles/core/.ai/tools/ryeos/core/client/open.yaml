@@ -1,0 +1,43 @@
+# ryeos:signed:2026-05-23T12:54:56Z:77618f18485dda255d4fe2ae6f2c13a43479273cec80308ddc6f013fa5075bd7:G4/K6mtzVeQLCWqubur0xeDsAFf/GxoaL98G7HsW2hNHe1ds04gKk6ZwHrFYN/dvi1gda/Oa9nxIiROcNoJqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/client"
+name: "open"
+executor_id: "@subprocess"
+required_caps: []
+description: "Resolve an effective client descriptor and launch its declared local binary."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "client-open"
+    - "--params-json"
+    - "{params_json}"
+    - "--project-path"
+    - "{project_path}"
+  inherit_stdio: true
+  inherit_env: true
+  timeout_secs: 0
+
+config_schema:
+  type: object
+  properties:
+    client_ref:
+      type: string
+      description: "Canonical client ref. Defaults to the client derived from the invoking verb, then client:ryeos/tui."
+    renderer:
+      type: string
+      description: "Renderer selector for default client choice."
+    surface:
+      type: string
+      description: "Surface ref to open."
+    surface_file:
+      type: string
+      description: "Local surface preview file."
+    mock:
+      type: boolean
+      default: false
+    read_only:
+      type: boolean
+      default: false
+    project:
+      type: string
+      description: "Project root path."

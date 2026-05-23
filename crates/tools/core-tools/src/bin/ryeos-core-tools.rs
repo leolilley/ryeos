@@ -139,6 +139,17 @@ enum Cmd {
         label: String,
     },
 
+    /// Resolve a client item through the effective-item engine and launch it.
+    ClientOpen {
+        /// Client-open params as JSON. Used by descriptor-driven offline dispatch.
+        #[arg(long)]
+        params_json: Option<String>,
+
+        /// Project root path for effective item/project resolution.
+        #[arg(long)]
+        project_path: Option<String>,
+    },
+
     /// Manage sealed secrets in the daemon vault.
     Vault {
         #[command(subcommand)]
@@ -315,6 +326,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             ))?;
             run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json)
         }
+        Cmd::ClientOpen {
+            params_json,
+            project_path,
+        } => run_client_open(params_json, project_path, cli.stdin_json),
         Cmd::Vault { cmd } => run_vault(cmd),
     }
 }
@@ -687,6 +702,211 @@ fn run_authorize_client(
     );
 
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ClientOpenParams {
+    client_ref: Option<String>,
+    // `renderer` is accepted at the service-descriptor schema layer
+    // for forward compatibility but is intentionally not consumed
+    // here: there is no Rust-side renderer→client mapping. Verb-named
+    // client descriptors are the only data-driven dispatch path.
+    surface: Option<String>,
+    surface_file: Option<String>,
+    #[serde(default)]
+    mock: Option<bool>,
+    #[serde(default)]
+    read_only: Option<bool>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(rename = "_verb")]
+    #[serde(default)]
+    verb: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EffectiveClientDescriptor {
+    launch: ClientLaunchDescriptor,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ClientLaunchDescriptor {
+    mode: String,
+    binary_ref: String,
+    #[serde(default)]
+    args: std::collections::HashMap<String, String>,
+}
+
+fn run_client_open(
+    params_json: Option<String>,
+    project_path: Option<String>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    let raw = if stdin_json {
+        read_stdin_json()?
+    } else {
+        let params_json = params_json.ok_or_else(|| anyhow::anyhow!("--params-json required"))?;
+        serde_json::from_str(&params_json).map_err(|e| anyhow::anyhow!("parse --params-json: {e}"))?
+    };
+    let params: ClientOpenParams = serde_json::from_value(raw)?;
+
+    let project = params.project.as_deref().or(project_path.as_deref());
+    let engine = ryeos_tools::actions::inspect::boot(project.map(Path::new))?;
+
+    let effective = resolve_effective_client(&engine, &params, project)?;
+
+    if !effective.trusted {
+        anyhow::bail!("refusing to launch untrusted client `{}`", effective.canonical_ref);
+    }
+
+    let descriptor: EffectiveClientDescriptor = serde_json::from_value(effective.composed_value)
+        .map_err(|e| anyhow::anyhow!("invalid effective client descriptor: {e}"))?;
+    if descriptor.launch.mode != "cli_exec" {
+        anyhow::bail!(
+            "client `{}` launch mode `{}` is not supported by offline client.open",
+            effective.canonical_ref,
+            descriptor.launch.mode
+        );
+    }
+
+    let bundle_root = engine
+        .system_roots
+        .iter()
+        .find(|root| effective.source.path.starts_with(root))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "effective client source {} is not in an installed bundle root",
+                effective.source.path.display()
+            )
+        })?;
+    let binary = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
+        &descriptor.launch.binary_ref,
+        bundle_root,
+        |fp| engine.trust_store.is_trusted(fp),
+        effective.root_trust_class,
+    )
+    .with_context(|| format!("resolve client binary `{}`", descriptor.launch.binary_ref))?;
+
+    let mut argv = Vec::new();
+    push_client_arg(&mut argv, &descriptor.launch.args, "surface", params.surface.as_deref());
+    push_client_arg(
+        &mut argv,
+        &descriptor.launch.args,
+        "surface_file",
+        params.surface_file.as_deref(),
+    );
+    push_client_bool(&mut argv, &descriptor.launch.args, "mock", params.mock.unwrap_or(false));
+    push_client_bool(
+        &mut argv,
+        &descriptor.launch.args,
+        "read_only",
+        params.read_only.unwrap_or(false),
+    );
+    push_client_arg(&mut argv, &descriptor.launch.args, "project", project);
+
+    eprintln!(
+        "info: launching {} via {}",
+        effective.canonical_ref,
+        binary.absolute_path.display()
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&binary.absolute_path)
+            .args(&argv)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .exec();
+        anyhow::bail!("failed to exec '{}': {err}", binary.absolute_path.display());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = std::process::Command::new(&binary.absolute_path)
+            .args(&argv)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .with_context(|| format!("launch {}", binary.absolute_path.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+fn resolve_effective_client(
+    engine: &ryeos_engine::engine::Engine,
+    params: &ClientOpenParams,
+    project: Option<&str>,
+) -> anyhow::Result<ryeos_engine::engine::EffectiveItem> {
+    // Explicit client_ref wins.
+    if let Some(client_ref) = params.client_ref.as_deref() {
+        return effective_client(engine, client_ref, project);
+    }
+
+    // Otherwise the invoking verb names the client: verb `foo` →
+    // `client:ryeos/foo`. Authors who want a verb to dispatch to a
+    // particular client install a matching client descriptor in a
+    // bundle. There is intentionally no Rust-side fallback to a
+    // specific renderer; if no descriptor exists, we surface the error
+    // from the engine.
+    if let Some(verb) = params.verb.as_deref() {
+        let candidate = format!("client:ryeos/{verb}");
+        return effective_client(engine, &candidate, project).with_context(|| {
+            format!(
+                "no client descriptor for verb `{verb}` (looked up `{candidate}`); \
+                 install a client descriptor or pass --client-ref"
+            )
+        });
+    }
+
+    anyhow::bail!(
+        "client.open invoked without a client_ref or invoking verb; \
+         pass --client-ref or invoke through a verb whose descriptor \
+         derives a client (e.g. `tui` → `client:ryeos/tui`)"
+    );
+}
+
+fn effective_client(
+    engine: &ryeos_engine::engine::Engine,
+    client_ref: &str,
+    project: Option<&str>,
+) -> anyhow::Result<ryeos_engine::engine::EffectiveItem> {
+    let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(client_ref)
+        .map_err(|e| anyhow::anyhow!("invalid client ref '{client_ref}': {e}"))?;
+    engine
+        .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+            item_ref,
+            expected_kind: Some("client".to_string()),
+            project_root: project.map(PathBuf::from),
+        })
+        .with_context(|| format!("resolve effective client `{client_ref}`"))
+}
+
+fn push_client_arg(
+    argv: &mut Vec<String>,
+    args: &std::collections::HashMap<String, String>,
+    field: &str,
+    value: Option<&str>,
+) {
+    if let (Some(flag), Some(value)) = (args.get(field), value) {
+        argv.push(flag.clone());
+        argv.push(value.to_string());
+    }
+}
+
+fn push_client_bool(
+    argv: &mut Vec<String>,
+    args: &std::collections::HashMap<String, String>,
+    field: &str,
+    value: bool,
+) {
+    if value {
+        if let Some(flag) = args.get(field) {
+            argv.push(flag.clone());
+        }
+    }
 }
 
 fn read_stdin_json() -> anyhow::Result<serde_json::Value> {

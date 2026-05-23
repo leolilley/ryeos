@@ -101,6 +101,10 @@ struct ToolConfig {
     cwd: Option<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    #[serde(default)]
+    inherit_stdio: bool,
+    #[serde(default)]
+    inherit_env: bool,
 }
 
 /// Try to dispatch a command through the offline descriptor path.
@@ -154,8 +158,11 @@ pub fn try_offline_dispatch(
     };
 
     let tail = &argv[consumed..];
-    let params =
+    let mut params =
         bind_params_shared(tail, &alias.def, &service.value, project_path).map_err(local_err)?;
+    if let Some(obj) = params.as_object_mut() {
+        obj.insert("_verb".to_string(), Value::String(alias.def.verb.clone()));
+    }
 
     let result = execute_offline_tool(&catalog, &offline_execute, params, project_path)
         .map_err(local_err)?;
@@ -414,6 +421,17 @@ fn execute_offline_tool(
         catalog.system_space_dir.to_string_lossy().into_owned(),
     ));
 
+    if tool.value.config.inherit_stdio {
+        return execute_inherited_offline_tool(
+            tool_ref,
+            &cmd,
+            &args,
+            cwd.as_deref(),
+            &envs,
+            tool.value.config.inherit_env,
+        );
+    }
+
     let result = lillux::run(lillux::SubprocessRequest {
         cmd: cmd.to_string_lossy().into_owned(),
         args,
@@ -433,6 +451,42 @@ fn execute_offline_tool(
     }
 
     serde_json::from_str(&result.stdout).or_else(|_| Ok(Value::String(result.stdout)))
+}
+
+fn execute_inherited_offline_tool(
+    tool_ref: &str,
+    cmd: &Path,
+    args: &[String],
+    cwd: Option<&str>,
+    envs: &[(String, String)],
+    inherit_env: bool,
+) -> Result<Value> {
+    let mut command = std::process::Command::new(cmd);
+    command.args(args);
+    if !inherit_env {
+        command.env_clear();
+    }
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    command
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+
+    let status = command
+        .status()
+        .with_context(|| format!("run inherited offline tool `{tool_ref}`"))?;
+    if !status.success() {
+        bail!(
+            "offline tool `{tool_ref}` failed with exit {:?}",
+            status.code()
+        );
+    }
+    Ok(serde_json::json!({ "status": "ok" }))
 }
 
 fn expand_template(template: &str, params_json: &str, project_path: &str) -> Result<String> {

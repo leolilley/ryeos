@@ -33,11 +33,22 @@ fn main() {
         .unwrap_or_else(|_| ".".into());
     let mut surface_file: Option<String> = None;
     let mut surface_name: Option<String> = None;
+    let mut read_only = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--mock" => mock = true,
+            "--read-only" => read_only = true,
+            "--project" => {
+                i += 1;
+                if i < args.len() {
+                    project_path = args[i].clone();
+                } else {
+                    eprintln!("--project requires a path argument");
+                    std::process::exit(1);
+                }
+            }
             "--surface-file" => {
                 i += 1;
                 if i < args.len() {
@@ -65,6 +76,8 @@ fn main() {
                     "  --surface-file <PATH>   Load surface spec from a local file (untrusted)"
                 );
                 eprintln!("  --surface <REF>         Load surface by canonical ref via daemon");
+                eprintln!("  --project <PATH>        Project root for daemon-backed resolution");
+                eprintln!("  --read-only             Accepted for launcher compatibility");
                 eprintln!("  --help                  Show this help");
                 std::process::exit(0);
             }
@@ -77,6 +90,10 @@ fn main() {
             }
         }
         i += 1;
+    }
+
+    if read_only {
+        eprintln!("warn: --read-only is accepted but not enforced yet");
     }
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");

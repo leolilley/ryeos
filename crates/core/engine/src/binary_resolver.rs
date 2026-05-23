@@ -15,7 +15,14 @@
 //!     bundle can ship multiple architectures side-by-side and the
 //!     descriptor unambiguously names which one it covers.
 //!
-//! Both shapes go through the same manifest-hash + trust-store
+//!   - `bin/{triple}/<name>` — the literal-placeholder variant of the
+//!     path-style form. Authors who want the explicit `bin/<triple>/<name>`
+//!     shape (so a descriptor visibly declares it's pointing at an
+//!     architecture-namespaced binary) but don't want to hard-code one
+//!     architecture write `{triple}` and the resolver substitutes the
+//!     host triple before the normal explicit-path verification runs.
+//!
+//! All three shapes go through the same manifest-hash + trust-store
 //! verification path below.
 
 use std::collections::HashMap;
@@ -81,6 +88,11 @@ pub fn resolve_bundle_binary_ref(
         (name.to_string(), iref, path)
     } else if binary_ref.starts_with("bin/") {
         // Path-style shape: bin/<triple>/<name>
+        //
+        // Authors may write the literal placeholder `{triple}` in the
+        // triple segment; we substitute the host triple here so the
+        // descriptor stays portable across architectures while still
+        // visibly carrying the architecture-namespaced shape.
         let parts: Vec<&str> = binary_ref.splitn(4, '/').collect();
         if parts.len() != 3 {
             return Err(EngineError::InvalidBinPrefix {
@@ -88,8 +100,14 @@ pub fn resolve_bundle_binary_ref(
                 detail: "path-style binary_ref must be `bin/<triple>/<name>`".into(),
             });
         }
-        let ref_triple = parts[1];
+        let raw_ref_triple = parts[1];
         let name = parts[2];
+
+        let ref_triple = if raw_ref_triple == "{triple}" {
+            triple
+        } else {
+            raw_ref_triple
+        };
 
         if ref_triple != triple {
             return Err(EngineError::InvalidBinPrefix {
@@ -113,7 +131,10 @@ pub fn resolve_bundle_binary_ref(
             .join("bin")
             .join(triple)
             .join(name);
-        (name.to_string(), binary_ref.to_string(), path)
+        // Normalize the item_ref used for manifest lookup to the
+        // resolved triple so manifests don't have to track placeholders.
+        let iref = format!("bin/{triple}/{name}");
+        (name.to_string(), iref, path)
     } else {
         return Err(EngineError::InvalidBinPrefix {
             raw: binary_ref.to_string(),
@@ -339,5 +360,90 @@ mod tests {
     fn untrusted_and_unsigned_are_never_dispatchable() {
         assert!(!is_dispatchable_trust_class(TrustClass::UntrustedUserSpace));
         assert!(!is_dispatchable_trust_class(TrustClass::Unsigned));
+    }
+
+    /// Build a minimally valid bundle in `bundle_root` containing a
+    /// single binary named `bin_name`, its CAS-stored item_source/manifest,
+    /// and the `refs/bundles/manifest` pointer. Returns the signer
+    /// fingerprint embedded in the item_source.
+    fn write_resolver_fixture(bundle_root: &Path, bin_name: &str) -> String {
+        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        let ai = bundle_root.join(crate::AI_DIR);
+        let bin_dir = ai.join("bin").join(triple);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin_path = bin_dir.join(bin_name);
+        let bin_bytes = b"placeholder-binary\n";
+        std::fs::write(&bin_path, bin_bytes).unwrap();
+        let content_blob_hash = lillux::sha256_hex(bin_bytes);
+
+        let cas = lillux::cas::CasStore::new(ai.join("objects"));
+        let item_source = serde_json::json!({
+            "content_blob_hash": content_blob_hash,
+            "signature_info": { "fingerprint": "test-fp" }
+        });
+        let item_source_hash = cas.store_object(&item_source).unwrap();
+        let manifest = serde_json::json!({
+            "item_source_hashes": {
+                format!("bin/{triple}/{bin_name}"): item_source_hash
+            }
+        });
+        let manifest_hash = cas.store_object(&manifest).unwrap();
+
+        let ref_path = ai.join("refs").join("bundles").join("manifest");
+        std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+        std::fs::write(ref_path, manifest_hash).unwrap();
+
+        "test-fp".into()
+    }
+
+    /// `bin/{triple}/<name>` resolves identically to the canonical
+    /// `bin/<host-triple>/<name>` shape, including manifest lookup.
+    #[test]
+    fn placeholder_triple_resolves_against_host_triple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let fp = write_resolver_fixture(&bundle, "demo");
+
+        let resolved = resolve_bundle_binary_ref(
+            "bin/{triple}/demo",
+            &bundle,
+            |f| f == fp,
+            TrustClass::TrustedSystem,
+        )
+        .expect("placeholder triple ref must resolve");
+
+        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        assert!(resolved
+            .absolute_path
+            .ends_with(format!("{}/bin/{triple}/demo", crate::AI_DIR)));
+        assert_eq!(resolved.signer_fingerprint, fp);
+    }
+
+    /// `bin:<name>` and `bin/{triple}/<name>` must agree on the
+    /// resolved path so descriptors can pick whichever shape reads
+    /// best without changing the verified target.
+    #[test]
+    fn short_form_and_placeholder_form_resolve_to_same_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let fp = write_resolver_fixture(&bundle, "demo");
+
+        let short = resolve_bundle_binary_ref(
+            "bin:demo",
+            &bundle,
+            |f| f == fp,
+            TrustClass::TrustedSystem,
+        )
+        .expect("short form must resolve");
+        let placeholder = resolve_bundle_binary_ref(
+            "bin/{triple}/demo",
+            &bundle,
+            |f| f == fp,
+            TrustClass::TrustedSystem,
+        )
+        .expect("placeholder form must resolve");
+
+        assert_eq!(short.absolute_path, placeholder.absolute_path);
+        assert_eq!(short.manifest_hash, placeholder.manifest_hash);
     }
 }

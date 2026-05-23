@@ -1,7 +1,8 @@
-# ryeos:signed:2026-05-23T12:11:50Z:d09029360a59ed614caa4d0605ecfb0891dd2f167684c60e83c2cb231100174b:4tefZd/0BixrP0Ru/pmwuQjCEjfmIECl3AhO2ezjqGNmYATjR9aSabVpukdEGe3h6QNGNNoAVnHi5sKUE5/QCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-23T12:54:57Z:68bc9a506f00fad40387879eb859963fa3b64df867b8167e30f1558bcaea2818:u9zKOjGy+rX7Wtrv3LB3PqXf591xs2HnMsCIpve3t0LliCxXMLrTzSx3dAnunJYFnzDUvmqsroATiJpc54fhDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: client.open
 availability: offline
+offline_execute: tool:ryeos/core/client/open
 required_caps:
   - ryeos.execute.service.client_open
 schema:
