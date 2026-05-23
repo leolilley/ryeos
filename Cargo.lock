@@ -2080,6 +2080,7 @@ dependencies = [
  "ryeos-node",
  "ryeos-runtime",
  "ryeos-state",
+ "ryeos-tools",
  "serde",
  "serde_json",
  "serde_yaml",
