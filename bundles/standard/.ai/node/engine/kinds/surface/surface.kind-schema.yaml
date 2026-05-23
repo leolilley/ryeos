@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:26Z:473c7e84d86c6e50ef082931d252cd2a223f3ecda19fb9b3d28ebe6a1e3f6675:G8UDmZ02V49MecKtkQWYSO/Bnju52yaLS6YfCOhe9wO1rT9ikn8JCuWMA6ghQNv78gpBswatHZZjRMDNNufFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-23T13:47:52Z:5f94687a0996fccbde8e4d8fa53b5b95e01ac71fb4169f71f8816bb2f7b88000:mDAnr21pvA97Vog+e3aNCV3sKGx9p1iJXOet7FnZzJO7lRkDLOzjscXjlAVABjFJbJ9zTL2N7VAJ6LWXFOQyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -30,7 +30,7 @@ composer_config:
     - name: ambient
       strategy: dict_merge_root_last
       expect_value_type: mapping
-    - name: commands
+    - name: affordances
       strategy: keyed_seq_merge_root_last
       key: id
       expect_value_type: array
@@ -58,7 +58,7 @@ composed_value_contract:
     ambient:
       type: single
       prim: mapping
-    commands:
+    affordances:
       type: single
       prim: array
     instruments:

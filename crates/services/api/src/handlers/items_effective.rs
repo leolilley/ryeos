@@ -10,10 +10,12 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
+use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItemRequest;
+use ryeos_engine::error::EngineError;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
@@ -34,15 +36,47 @@ pub struct Request {
 
 pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let item_ref = CanonicalRef::parse(&req.canonical_ref)
-        .map_err(|e| anyhow::anyhow!("invalid canonical ref '{}': {e}", req.canonical_ref))?;
+        .map_err(|e| HandlerError::BadRequest(format!("invalid canonical ref '{}': {e}", req.canonical_ref)))?;
 
-    let effective = state.engine.effective_item(EffectiveItemRequest {
-        item_ref,
-        expected_kind: req.expected_kind,
-        project_root: req.project_path.map(std::path::PathBuf::from),
-    })?;
+    let effective = state
+        .engine
+        .effective_item(EffectiveItemRequest {
+            item_ref,
+            expected_kind: req.expected_kind,
+            project_root: req.project_path.map(std::path::PathBuf::from),
+        })
+        .map_err(map_engine_error)?;
 
     serde_json::to_value(effective).map_err(Into::into)
+}
+
+/// Map typed engine errors to HTTP-appropriate handler errors with
+/// stable error codes. Renderers can branch on these instead of
+/// parsing error messages.
+fn map_engine_error(e: EngineError) -> HandlerError {
+    match &e {
+        EngineError::EffectiveItemNotFound { canonical_ref } => HandlerError::NotFound,
+        EngineError::EffectiveItemWrongKind {
+            expected,
+            found,
+            canonical_ref,
+        } => HandlerError::BadRequest(format!(
+            "wrong_kind: expected `{expected}`, got `{found}` for `{canonical_ref}`"
+        )),
+        EngineError::EffectiveItemUntrusted {
+            canonical_ref,
+            fingerprint,
+        } => HandlerError::Forbidden(format!(
+            "untrusted: `{canonical_ref}` (fingerprint: {fingerprint})"
+        )),
+        EngineError::EffectiveItemCompositionFailed { reason, .. } => {
+            HandlerError::BadRequest(format!("composition_failed: {reason}"))
+        }
+        EngineError::EffectiveItemParseFailed { reason, .. } => {
+            HandlerError::BadRequest(format!("parse_failed: {reason}"))
+        }
+        _ => HandlerError::Internal(e.to_string()),
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

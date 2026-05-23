@@ -69,7 +69,7 @@ pub struct SurfaceSpec {
     #[serde(default)]
     pub ambient: Option<AmbientSpec>,
     #[serde(default)]
-    pub commands: Vec<SurfaceCommandSpec>,
+    pub affordances: Vec<SurfaceCommandSpec>,
     #[serde(default)]
     pub instruments: Vec<InstrumentSpec>,
     #[serde(default)]
@@ -501,7 +501,7 @@ pub fn builtin_default() -> SurfaceSpec {
             nodes,
         },
         ambient: None,
-        commands: Vec::new(),
+        affordances: Vec::new(),
         instruments: Vec::new(),
         capabilities: None,
     }
@@ -925,7 +925,7 @@ mod tests {
                 nodes: std::collections::HashMap::new(),
             },
             ambient: None,
-            commands: Vec::new(),
+            affordances: Vec::new(),
             instruments: Vec::new(),
             capabilities: None,
         };
@@ -964,7 +964,7 @@ mod tests {
                 nodes,
             },
             ambient: None,
-            commands: Vec::new(),
+            affordances: Vec::new(),
             instruments: Vec::new(),
             capabilities: None,
         };
@@ -1128,7 +1128,7 @@ view = "thread_list"
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
             .unwrap_or_else(|e| panic!("failed to parse bundled base surface: {}", e));
         assert_eq!(spec.name, "cockpit-base");
-        assert!(!spec.commands.is_empty());
+        assert!(!spec.affordances.is_empty());
         assert!(spec.layout.nodes.contains_key("main"));
         let warnings = validate_surface(&spec);
         assert!(
@@ -1261,7 +1261,7 @@ id = "test"
                         "sidebar": { "type": "pane", "view": "thread" }
                     }
                 },
-                "commands": [
+                "affordances": [
                     { "id": "view.thread", "label": "Thread", "category": "View" }
                 ]
             },
@@ -1283,8 +1283,8 @@ id = "test"
             } => {
                 assert_eq!(requested_ref, "surface:ryeos/cockpit/base");
                 assert_eq!(spec.name, "base");
-                assert_eq!(spec.commands.len(), 1);
-                assert_eq!(spec.commands[0].id, "view.thread");
+                assert_eq!(spec.affordances.len(), 1);
+                assert_eq!(spec.affordances[0].id, "view.thread");
                 assert!(*trusted, "signed surface should be trusted");
                 assert_eq!(provenance.root.resolved_ref, "surface:ryeos/cockpit/base");
                 assert!(provenance.ancestors.is_empty());
@@ -1320,7 +1320,7 @@ id = "test"
                         "main": { "type": "pane", "view": "graph" }
                     }
                 },
-                "commands": []
+                "affordances": []
             },
             "derived": {},
             "policy_facts": {},
@@ -1364,7 +1364,7 @@ id = "test"
     }
 
     #[test]
-    fn from_daemon_rejects_legacy_affordances_field() {
+    fn from_daemon_rejects_legacy_commands_field() {
         let response = serde_json::json!({
             "requested_ref": "surface:ryeos/cockpit/legacy",
             "canonical_ref": "surface:ryeos/cockpit/legacy",
@@ -1382,7 +1382,7 @@ id = "test"
                         "main": { "type": "pane", "view": "thread" }
                     }
                 },
-                "affordances": []
+                "commands": []
             },
             "derived": {},
             "policy_facts": {},
@@ -1392,7 +1392,7 @@ id = "test"
         let err = LoadedSurface::from_daemon("surface:ryeos/cockpit/legacy", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
-                assert!(message.contains("unknown field `affordances`"));
+                assert!(message.contains("unknown field `commands`"));
             }
             other => panic!("expected ValidationError, got {:?}", other),
         }
@@ -1417,7 +1417,7 @@ id = "test"
                         "main": { "type": "pane", "view": "thread" }
                     }
                 },
-                "commands": []
+                "affordances": []
             },
             "derived": {},
             "policy_facts": {},
@@ -1456,7 +1456,7 @@ id = "test"
                         "main": { "type": "pane", "view": "thread" }
                     }
                 },
-                "commands": []
+                "affordances": []
             },
             "derived": {},
             "policy_facts": {},

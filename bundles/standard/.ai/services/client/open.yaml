@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:54:57Z:68bc9a506f00fad40387879eb859963fa3b64df867b8167e30f1558bcaea2818:u9zKOjGy+rX7Wtrv3LB3PqXf591xs2HnMsCIpve3t0LliCxXMLrTzSx3dAnunJYFnzDUvmqsroATiJpc54fhDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-23T13:47:52Z:7043b4d4334cc9b2937b5e89cf50d27583ac4e840059724e892373e4f69d5e14:iPu8Al+iVmC8Xc+lTtye3fI9DWOG5GgPCR8RWjUWBHfP8wzHL1rd8d9/afY7Q5Tc/DqnapQLgnK5c3waTUQADA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: client.open
 availability: offline
@@ -7,7 +7,6 @@ required_caps:
   - ryeos.execute.service.client_open
 schema:
   client_ref: string?
-  renderer: string?
   surface: string?
   surface_file: string?
   mock: boolean?

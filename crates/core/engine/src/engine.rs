@@ -31,6 +31,12 @@ pub struct EffectiveItemRequest {
 #[serde(deny_unknown_fields)]
 pub struct EffectiveItemSource {
     pub path: PathBuf,
+    /// The installed bundle root (parent of `.ai/`) when the item
+    /// came from an installed bundle space. `None` for project-space
+    /// or user-space items, or when the resolver cannot determine
+    /// the bundle boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_root: Option<PathBuf>,
 }
 
 /// Diagnostic emitted while producing an effective item.
@@ -299,14 +305,14 @@ impl Engine {
         &self,
         request: EffectiveItemRequest,
     ) -> Result<EffectiveItem, EngineError> {
+        let ref_str = request.item_ref.to_string();
+
         if let Some(expected) = &request.expected_kind {
             if expected != &request.item_ref.kind {
-                return Err(EngineError::InvalidMetadata {
-                    canonical_ref: request.item_ref.to_string(),
-                    reason: format!(
-                        "expected kind `{expected}`, got `{}`",
-                        request.item_ref.kind
-                    ),
+                return Err(EngineError::EffectiveItemWrongKind {
+                    canonical_ref: ref_str,
+                    expected: expected.clone(),
+                    found: request.item_ref.kind.clone(),
                 });
             }
         }
@@ -322,9 +328,53 @@ impl Engine {
             &self.trust_store,
             &self.composers,
         )
-        .map_err(|e| EngineError::InvalidMetadata {
-            canonical_ref: request.item_ref.to_string(),
-            reason: format!("effective item resolution failed: {e}"),
+        .map_err(|e| {
+            // Map resolution pipeline errors to typed effective-item
+            // error variants so consumers can branch on error code.
+            use crate::resolution::ResolutionError;
+            match &e {
+                ResolutionError::StepFailed { reason, .. } => {
+                    if reason.starts_with("unknown kind:") {
+                        EngineError::EffectiveItemNotFound {
+                            canonical_ref: ref_str.clone(),
+                        }
+                    } else if reason.contains("not found")
+                        || reason.contains("not in manifest")
+                        || reason.contains("missing")
+                    {
+                        EngineError::EffectiveItemNotFound {
+                            canonical_ref: ref_str.clone(),
+                        }
+                    } else {
+                        EngineError::EffectiveItemCompositionFailed {
+                            canonical_ref: ref_str.clone(),
+                            reason: e.to_string(),
+                        }
+                    }
+                }
+                ResolutionError::CycleDetected { .. }
+                | ResolutionError::MaxDepthExceeded { .. } => {
+                    EngineError::EffectiveItemCompositionFailed {
+                        canonical_ref: ref_str.clone(),
+                        reason: e.to_string(),
+                    }
+                }
+                ResolutionError::IntegrityFailure { reason, .. } => {
+                    EngineError::EffectiveItemUntrusted {
+                        canonical_ref: ref_str.clone(),
+                        fingerprint: reason.clone(),
+                    }
+                }
+                ResolutionError::MissingItem { item_ref, .. } => {
+                    EngineError::EffectiveItemNotFound {
+                        canonical_ref: item_ref.clone(),
+                    }
+                }
+                _ => EngineError::EffectiveItemCompositionFailed {
+                    canonical_ref: ref_str.clone(),
+                    reason: e.to_string(),
+                },
+            }
         })?;
 
         let trust_class = output.effective_trust_class;
@@ -335,6 +385,36 @@ impl Engine {
         );
         let provenance = output.provenance();
 
+        // Determine bundle_root: check if the source path falls under
+        // one of the system roots (installed bundle spaces). The bundle
+        // root is the parent of the `.ai/` directory.
+        let bundle_root = self
+            .system_roots
+            .iter()
+            .find(|root| output.root.source_path.starts_with(root))
+            .cloned();
+
+        // Build diagnostics from the resolution output.
+        let mut diagnostics = Vec::new();
+
+        // Shadowing diagnostics: if ancestors exist, note the extends
+        // chain.
+        if !output.ancestors.is_empty() {
+            diagnostics.push(EffectiveItemDiagnostic {
+                level: "info".into(),
+                message: format!(
+                    "extends chain: {} -> {}",
+                    output.root.resolved_ref,
+                    output
+                        .ancestors
+                        .iter()
+                        .map(|a| a.resolved_ref.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                ),
+            });
+        }
+
         Ok(EffectiveItem {
             requested_ref: request.item_ref.to_string(),
             canonical_ref: output.root.resolved_ref.clone(),
@@ -344,12 +424,13 @@ impl Engine {
             root_trust_class: output.root.trust_class,
             source: EffectiveItemSource {
                 path: output.root.source_path,
+                bundle_root,
             },
             provenance,
             composed_value: output.composed.composed,
             derived: output.composed.derived,
             policy_facts: output.composed.policy_facts,
-            diagnostics: Vec::new(),
+            diagnostics,
         })
     }
 

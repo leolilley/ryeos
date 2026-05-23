@@ -91,6 +91,35 @@ pub enum EngineError {
         reason: String,
     },
 
+    // ── Effective item resolution ──────────────────────────────────────
+    #[error("effective item not found: `{canonical_ref}`")]
+    EffectiveItemNotFound { canonical_ref: String },
+
+    #[error("effective item kind mismatch for `{canonical_ref}`: expected `{expected}`, got `{found}`")]
+    EffectiveItemWrongKind {
+        canonical_ref: String,
+        expected: String,
+        found: String,
+    },
+
+    #[error("effective item `{canonical_ref}` is not trusted (fingerprint: `{fingerprint}`)")]
+    EffectiveItemUntrusted {
+        canonical_ref: String,
+        fingerprint: String,
+    },
+
+    #[error("effective item composition failed for `{canonical_ref}`: {reason}")]
+    EffectiveItemCompositionFailed {
+        canonical_ref: String,
+        reason: String,
+    },
+
+    #[error("effective item parse failed for `{canonical_ref}`: {reason}")]
+    EffectiveItemParseFailed {
+        canonical_ref: String,
+        reason: String,
+    },
+
     /// Path-anchoring validator caught a mismatch between metadata
     /// and on-disk location (or a missing required field). The inner
     /// `MetadataAnchoringError` carries the structured detail; the
@@ -163,6 +192,18 @@ pub enum EngineError {
         "binary `{bin}` not trusted: signature from fingerprint `{fingerprint}` not in trust store"
     )]
     BinUntrusted { bin: String, fingerprint: String },
+
+    #[error(
+        "binary `{bin}` resolves outside the bundle bin directory: resolved `{resolved}` is not under `{bin_dir}`"
+    )]
+    BinOutsideBundle {
+        bin: String,
+        resolved: String,
+        bin_dir: String,
+    },
+
+    #[error("binary `{bin}` is not a regular file (symlink/FIFO/device outside bundle bin dir)")]
+    BinNotRegularFile { bin: String },
 
     #[error("unknown template token: {{{token}}}")]
     UnknownTemplateToken { token: String },

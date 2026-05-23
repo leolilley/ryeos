@@ -1,13 +1,12 @@
-# ryeos:signed:2026-05-23T12:54:57Z:784307698540362e6dda1aae90114b13a3b086b48374a966c385b7945ec17c6d:+HU1BtJ4QQdzroQO51YaEK8MmecUq+I0uBtN9RgdHMKgTyYjK0pZ6BZCPQ3y7f5Ea+Pr92oaZzy0C/hBqWofDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-23T13:47:52Z:a5c556205809de6e87f6373b2812ba620af23e14983ad43a3f80b22ec3201833:uBqJ1kbfonli9u+QQjrnekS6giWKrR6JT95i0sJVDC7G3yVbQN20prJstg1bHtLcoIi8tm/I9G0/i6Ft3RHaAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: client
 name: surface-open
 version: "1.0.0"
 description: >-
-  Verb-named alias of the terminal RyeOS cockpit. The `surface open`
-  alias has verb `surface-open`, and client.open derives the client
-  ref `client:ryeos/surface-open` from the invoking verb when no
-  explicit `--client-ref` is given. This descriptor wires that verb
-  data-drivenly to the same launcher the `tui` verb uses.
+  Verb-named terminal surface renderer. The `surface open` alias maps
+  to verb `surface-open`, and client.open derives `client:ryeos/surface-open`
+  from that verb. This descriptor wires the verb data-drivenly to the
+  same TUI launcher that the `tui` verb uses.
 
 serves:
   kind: surface

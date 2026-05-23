@@ -123,7 +123,7 @@ impl AppModel {
     /// dispatch both use this merged registry.
     pub fn active_affordances(&self) -> Vec<crate::commands::Affordance> {
         let (affordances, _warnings) =
-            crate::commands::merge_affordances(&self.surface.spec.commands);
+            crate::commands::merge_affordances(&self.surface.spec.affordances);
         affordances
     }
 }
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn active_affordances_use_surface_commands() {
         let mut spec = crate::surface::builtin_default();
-        spec.commands.push(crate::surface::SurfaceCommandSpec {
+        spec.affordances.push(crate::surface::SurfaceCommandSpec {
             id: "surface.only".into(),
             label: "Surface Only".into(),
             category: "Surface".into(),

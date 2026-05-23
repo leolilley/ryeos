@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:54:56Z:77618f18485dda255d4fe2ae6f2c13a43479273cec80308ddc6f013fa5075bd7:G4/K6mtzVeQLCWqubur0xeDsAFf/GxoaL98G7HsW2hNHe1ds04gKk6ZwHrFYN/dvi1gda/Oa9nxIiROcNoJqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-23T13:47:50Z:867bb52fe6eccf873a15727b2f073f152197fc38695039e2059c490d027bde9c:CZhrDX7ZMYC/3zKtz3YdKwg4E8ak8mpIBT2KMXZC3XgMVRyvTJnbNA0JJruOa7JhHyFHop1k96ZWVt2AYd/rBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/client"
 name: "open"
 executor_id: "@subprocess"
@@ -22,10 +22,7 @@ config_schema:
   properties:
     client_ref:
       type: string
-      description: "Canonical client ref. Defaults to the client derived from the invoking verb, then client:ryeos/tui."
-    renderer:
-      type: string
-      description: "Renderer selector for default client choice."
+      description: "Canonical client ref. Derived from the invoking verb when absent."
     surface:
       type: string
       description: "Surface ref to open."

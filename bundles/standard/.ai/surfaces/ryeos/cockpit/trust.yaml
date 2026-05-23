@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:11:51Z:48e167c630fe90828059961783cc3c066755f8c6b3b3a143a44171d9422c2866:XE6DUsmdiH0FeHyRDmWTo9YqYtJZQRnqdcOgUsQ8O3s3STGW+6h9Tv9BFoYO9yHfXbLgPPU8kc6Fpm0W+g4oCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-23T13:47:53Z:0bcdc659655140a92d75ae05946889a83359f43aace6812aea82bb87e8fce191:w4B4eAaPyrA9LQOtcE+2PUiTEHFInvRXMzEhHlJq0RXlYP++pyBQye1e66+ZWi1ZynN4K0EWhcrQKX93X+kFCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 extends: surface:ryeos/cockpit/base
 name: trust-console
 version: "1.0.0"
@@ -29,7 +29,7 @@ layout:
       type: pane
       view: space_browser
 
-commands:
+affordances:
   - id: view.trust
     label: Trust Dashboard
     category: Trust

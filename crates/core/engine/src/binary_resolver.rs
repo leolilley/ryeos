@@ -34,6 +34,7 @@ use crate::error::EngineError;
 use crate::resolution::TrustClass;
 
 /// Result of resolving a binary reference.
+#[derive(Debug)]
 pub struct ResolvedBinary {
     pub absolute_path: PathBuf,
     pub manifest_hash: String,
@@ -67,18 +68,7 @@ pub fn resolve_bundle_binary_ref(
     let (bin_name, item_ref, bin_path) = if let Some(name) = binary_ref.strip_prefix("bin:") {
         // Canonical short shape: bin:<name> (triple implicit = host)
         let name = name.trim();
-        if name.is_empty() {
-            return Err(EngineError::InvalidBinPrefix {
-                raw: binary_ref.to_string(),
-                detail: "no binary name after `bin:`".into(),
-            });
-        }
-        if name.contains(' ') {
-            return Err(EngineError::InvalidBinPrefix {
-                raw: binary_ref.to_string(),
-                detail: "binary name must not contain spaces — put subcommand args in the YAML's `args` list".into(),
-            });
-        }
+        validate_bin_name(name, binary_ref)?;
         let path = bundle_root
             .join(crate::AI_DIR)
             .join("bin")
@@ -118,13 +108,7 @@ pub fn resolve_bundle_binary_ref(
             });
         }
 
-        // Path traversal check.
-        if name.contains("..") || name.contains('/') {
-            return Err(EngineError::InvalidBinPrefix {
-                raw: binary_ref.to_string(),
-                detail: "binary name must not contain path traversal or slashes".into(),
-            });
-        }
+        validate_bin_name(name, binary_ref)?;
 
         let path = bundle_root
             .join(crate::AI_DIR)
@@ -160,6 +144,42 @@ pub fn resolve_bundle_binary_ref(
         return Err(EngineError::BinNotFound {
             bin: bin_name.clone(),
             searched: bin_path.display().to_string(),
+        });
+    }
+
+    // --- Confinement: resolved path must be under the canonical bin dir ---
+
+    let canonical_bin_dir = bin_dir
+        .canonicalize()
+        .map_err(|e| EngineError::Internal(format!(
+            "failed to canonicalize bin dir {}: {e}", bin_dir.display()
+        )))?;
+    let canonical_resolved = bin_path
+        .canonicalize()
+        .map_err(|e| EngineError::Internal(format!(
+            "failed to canonicalize resolved path {}: {e}", bin_path.display()
+        )))?;
+
+    // Verify the canonical resolved path starts with the canonical bin dir.
+    if !canonical_resolved.starts_with(&canonical_bin_dir) {
+        return Err(EngineError::BinOutsideBundle {
+            bin: bin_name.clone(),
+            resolved: canonical_resolved.display().to_string(),
+            bin_dir: canonical_bin_dir.display().to_string(),
+        });
+    }
+
+    // --- Regular file check: reject symlinks that escape, FIFOs, dirs, devices ---
+
+    let metadata = std::fs::metadata(&canonical_resolved).map_err(|e| {
+        EngineError::Internal(format!(
+            "failed to stat resolved binary {}: {e}",
+            canonical_resolved.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(EngineError::BinNotRegularFile {
+            bin: bin_name.clone(),
         });
     }
 
@@ -265,6 +285,55 @@ pub fn resolve_bundle_binary_ref(
         manifest_hash,
         signer_fingerprint,
     })
+}
+
+/// Validate a binary name for both `bin:<name>` and `bin/<triple>/<name>`.
+///
+/// Rejects:
+///   - empty
+///   - any `/`
+///   - any `..` segment
+///   - leading `.` (hidden file)
+///   - any control char or NUL
+///   - spaces
+fn validate_bin_name(name: &str, raw_ref: &str) -> Result<(), EngineError> {
+    if name.is_empty() {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "no binary name after prefix".into(),
+        });
+    }
+    if name.contains('/') {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "binary name must not contain slashes".into(),
+        });
+    }
+    if name.contains("..") {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "binary name must not contain path traversal (`..`)".into(),
+        });
+    }
+    if name.starts_with('.') {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "binary name must not start with `.` (hidden file)".into(),
+        });
+    }
+    if name.contains(' ') {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "binary name must not contain spaces — put subcommand args in the YAML's `args` list".into(),
+        });
+    }
+    if name.chars().any(|c| c.is_control() || c == '\0') {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "binary name must not contain control characters".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Decide whether the trust class returned by
@@ -445,5 +514,144 @@ mod tests {
 
         assert_eq!(short.absolute_path, placeholder.absolute_path);
         assert_eq!(short.manifest_hash, placeholder.manifest_hash);
+    }
+
+    // ── Phase 1A new tests ─────────────────────────────────────────
+
+    #[test]
+    fn short_form_rejects_traversal() {
+        let err = resolve_bundle_binary_ref(
+            "bin:../demo",
+            Path::new("/tmp/bundle"),
+            |_| false,
+            TrustClass::TrustedSystem,
+        )
+        .unwrap_err();
+        // `..` contains no `/` in the `bin:../demo` name (`../demo` does
+        // contain `/` though), so the rejection depends on order: the
+        // slash check fires first. Either slash or path traversal is fine.
+        assert!(
+            matches!(err, EngineError::InvalidBinPrefix { ref detail, .. }
+                if detail.contains("path traversal") || detail.contains("slashes")),
+            "expected path traversal or slash rejection, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn short_form_rejects_slash() {
+        let err = resolve_bundle_binary_ref(
+            "bin:subdir/demo",
+            Path::new("/tmp/bundle"),
+            |_| false,
+            TrustClass::TrustedSystem,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EngineError::InvalidBinPrefix { ref detail, .. } if detail.contains("slashes")),
+            "expected slash rejection, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn path_form_rejects_empty_name() {
+        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        let err = resolve_bundle_binary_ref(
+            &format!("bin/{triple}/"),
+            Path::new("/tmp/bundle"),
+            |_| false,
+            TrustClass::TrustedSystem,
+        )
+        .unwrap_err();
+        // splitn(4, '/') on "bin/x86_64-unknown-linux-gnu/" gives
+        // ["bin", "x86_64...", ""], so name is empty.
+        assert!(
+            matches!(err, EngineError::InvalidBinPrefix { ref detail, .. } if detail.contains("no binary name")),
+            "expected empty name rejection, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn symlink_escaping_bundle_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        let bin_dir = bundle.join(crate::AI_DIR).join("bin").join(triple);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Place the real binary outside the bundle.
+        let outside = tmp.path().join("outside-binary");
+        std::fs::write(&outside, b"evil").unwrap();
+
+        // Create a symlink inside the bin dir pointing outside.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(&outside, bin_dir.join("escaped")).unwrap();
+        }
+
+        // Build a manifest that includes the symlink target hash.
+        let bin_bytes = b"evil";
+        let content_blob_hash = lillux::sha256_hex(bin_bytes);
+        let cas = lillux::cas::CasStore::new(bundle.join(crate::AI_DIR).join("objects"));
+        let item_source = serde_json::json!({
+            "content_blob_hash": content_blob_hash,
+            "signature_info": { "fingerprint": "test-fp" }
+        });
+        let item_source_hash = cas.store_object(&item_source).unwrap();
+        let manifest = serde_json::json!({
+            "item_source_hashes": {
+                format!("bin/{triple}/escaped"): item_source_hash
+            }
+        });
+        let manifest_hash = cas.store_object(&manifest).unwrap();
+        let ref_path = bundle.join(crate::AI_DIR).join("refs").join("bundles").join("manifest");
+        std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+        std::fs::write(&ref_path, manifest_hash).unwrap();
+
+        let err = resolve_bundle_binary_ref(
+            "bin:escaped",
+            &bundle,
+            |f| f == "test-fp",
+            TrustClass::TrustedSystem,
+        )
+        .unwrap_err();
+
+        // The symlink resolves outside the bundle bin dir.
+        // Either BinOutsideBundle or BinNotRegularFile is acceptable
+        // depending on whether the outside target is a regular file.
+        // Since the outside file IS a regular file, we expect
+        // BinOutsideBundle.
+        assert!(
+            matches!(err, EngineError::BinOutsideBundle { .. }),
+            "expected BinOutsideBundle for symlink escaping bundle, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn non_regular_file_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        let bin_dir = bundle.join(crate::AI_DIR).join("bin").join(triple);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Create a directory where a binary would go.
+        let dir_path = bin_dir.join("not-a-file");
+        std::fs::create_dir(&dir_path).unwrap();
+
+        let err = resolve_bundle_binary_ref(
+            "bin:not-a-file",
+            &bundle,
+            |_| false,
+            TrustClass::TrustedSystem,
+        )
+        .unwrap_err();
+
+        // A directory is not a regular file.
+        assert!(
+            matches!(err, EngineError::BinNotRegularFile { .. })
+                || matches!(err, EngineError::BinNotFound { .. }),
+            "expected BinNotRegularFile or BinNotFound for directory, got: {err:?}"
+        );
     }
 }

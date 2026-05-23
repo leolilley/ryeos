@@ -726,7 +726,16 @@ struct ClientOpenParams {
 
 #[derive(Debug, serde::Deserialize)]
 struct EffectiveClientDescriptor {
+    #[serde(default)]
+    serves: Option<ClientServesDescriptor>,
     launch: ClientLaunchDescriptor,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ClientServesDescriptor {
+    kind: String,
+    #[serde(default)]
+    renderer: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -759,8 +768,30 @@ fn run_client_open(
         anyhow::bail!("refusing to launch untrusted client `{}`", effective.canonical_ref);
     }
 
+    // Validate kind.
+    if effective.kind != "client" {
+        anyhow::bail!(
+            "expected kind `client`, got `{}` for `{}`",
+            effective.kind,
+            effective.canonical_ref
+        );
+    }
+
     let descriptor: EffectiveClientDescriptor = serde_json::from_value(effective.composed_value)
         .map_err(|e| anyhow::anyhow!("invalid effective client descriptor: {e}"))?;
+
+    // Validate serves.kind == "surface".
+    if let Some(serves) = &descriptor.serves {
+        if serves.kind != "surface" {
+            anyhow::bail!(
+                "client `{}` serves.kind must be `surface`, got `{}`",
+                effective.canonical_ref,
+                serves.kind
+            );
+        }
+    }
+
+    // Validate launch mode for offline dispatch.
     if descriptor.launch.mode != "cli_exec" {
         anyhow::bail!(
             "client `{}` launch mode `{}` is not supported by offline client.open",
@@ -769,19 +800,17 @@ fn run_client_open(
         );
     }
 
-    let bundle_root = engine
-        .system_roots
-        .iter()
-        .find(|root| effective.source.path.starts_with(root))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "effective client source {} is not in an installed bundle root",
-                effective.source.path.display()
-            )
-        })?;
+    // Use the bundle_root from EffectiveItemSource — no path-prefix dance.
+    let bundle_root = effective.source.bundle_root.ok_or_else(|| {
+        anyhow::anyhow!(
+            "effective client `{}` is not in an installed bundle (source: {})",
+            effective.canonical_ref,
+            effective.source.path.display()
+        )
+    })?;
     let binary = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
         &descriptor.launch.binary_ref,
-        bundle_root,
+        &bundle_root,
         |fp| engine.trust_store.is_trusted(fp),
         effective.root_trust_class,
     )
