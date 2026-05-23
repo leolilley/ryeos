@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T19:55:06Z:e02a43c5ec646cb61c6e04bb27d350688d578215889d244c09abe929c977858e:9rwMzoyHrri/QTtZuCjDTnstdmgRJR0w8rnCabLt/hqFQkfw6p8Bn5T7Ov2d2Aldp6GXWQqZMZ4XF/bRKgEDAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/standard/handlers
 tags: [handler, graph, permissions]

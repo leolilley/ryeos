@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-22T19:55:06Z:83fd94710f232641f596e09467fadfaf8ba7bb511aebc87b23b62b76dad2c785:1pXRf3S2bB2rBip9mMnLr1G6sGPqXAvQ44uNghpKOGQG+p+pIKYcDKdPtb3cb9bu1tK+yv9jD4SPU/cQXYEfDg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 tags: [fundamentals, threads, execution, lifecycle]
 version: "1.0.0"

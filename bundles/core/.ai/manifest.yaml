@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T16:50:00Z:16ece2e010445e11f441592a20dcf2e11bc0a3bc236e3e6784661e840dd6a941:OVVEcqL+jwbGoeJn3kJuhz6OtF17naObbdZEgv9mNeDY6ThRVMmLbWPjn1qqTEkpYpgE53XIwDC9zbGK2SJ6Cg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-22T19:55:02Z:16ece2e010445e11f441592a20dcf2e11bc0a3bc236e3e6784661e840dd6a941:OVVEcqL+jwbGoeJn3kJuhz6OtF17naObbdZEgv9mNeDY6ThRVMmLbWPjn1qqTEkpYpgE53XIwDC9zbGK2SJ6Cg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'

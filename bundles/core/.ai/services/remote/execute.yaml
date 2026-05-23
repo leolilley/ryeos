@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T16:49:58Z:4879332b214dca4bb5ab668003afe25de466cb10e7ce32abfec50158514d4448:0/LuAuN4sFhgJGr4czr7DiJB4p3HQxDOiLxijUazzw4JQ+jeVSDsr319YmOXtyKCOQip5hvlYKW94DzjFfZADw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-22T19:55:00Z:4879332b214dca4bb5ab668003afe25de466cb10e7ce32abfec50158514d4448:0/LuAuN4sFhgJGr4czr7DiJB4p3HQxDOiLxijUazzw4JQ+jeVSDsr319YmOXtyKCOQip5hvlYKW94DzjFfZADw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: service
 endpoint: remote.execute
 required_caps: ["ryeos.execute.service.remote.admin"]

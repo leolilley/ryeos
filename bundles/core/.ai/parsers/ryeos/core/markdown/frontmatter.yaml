@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T16:50:00Z:cd357950f5cab0678ee692c09aac977b0886e2cdb3bada6ef677e2df2be29966:FSKTv11RCflPc/VuWq/b3fOgt3BtROyZhtsW85ClwL0B5GnKqYfL01LJYG5RdijDPrxJeeR/vyQzW5KG4iHpDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-22T19:55:00Z:cd357950f5cab0678ee692c09aac977b0886e2cdb3bada6ef677e2df2be29966:FSKTv11RCflPc/VuWq/b3fOgt3BtROyZhtsW85ClwL0B5GnKqYfL01LJYG5RdijDPrxJeeR/vyQzW5KG4iHpDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 version: "1.0.0"
 category: "ryeos/core/markdown"
 description: "Frontmatter parser: extracts optional YAML fenced block from markdown knowledge"

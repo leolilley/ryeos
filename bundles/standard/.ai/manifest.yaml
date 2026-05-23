@@ -1,0 +1,16 @@
+# ryeos:signed:2026-05-22T19:55:07Z:50ec236db90411e964881c851d6594f62d57dd72e3c414da9c23c57915f18c7e:7CTy5mP0/uU08vVAPrjhRehaBCe95/ftmXusjX9IelNjFTCh0BEaq9NBm1TCWm3LJxsao7Rs2gn/5goEwgG/BA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+name: standard
+version: 0.5.0
+description: 'Workflow: directives, graphs, knowledge, model providers, scheduler, threads'
+provides_kinds:
+- directive
+- graph
+- knowledge
+requires_kinds:
+- config
+- handler
+- parser
+- runtime
+- service
+- tool
+uses_kinds: []

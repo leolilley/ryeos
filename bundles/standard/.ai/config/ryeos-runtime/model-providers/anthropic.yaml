@@ -1,3 +1,4 @@
+# ryeos:signed:2026-05-22T19:55:06Z:2e8e11bcd7623bb1091882483d7f6d721743edc3f3f4d4d7d9da4377ef47d14a:Hq3J0wMTeb0ydM2Tj/ep9HFZ84q3c7YYULsypuriZt5wo1mLNxte3BJf1+WaafvfSPZFBq9Wstupb0YYGdOaDg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "ryeos-runtime/model-providers"
 family: anthropic_messages
 base_url: "https://api.anthropic.com/v1/messages"
