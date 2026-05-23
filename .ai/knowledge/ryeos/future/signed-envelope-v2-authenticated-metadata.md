@@ -1,3 +1,4 @@
+<!-- rye:signed:2026-05-23T08:22:20Z:bfc6b9211ec4b2bdd91940469348a6d56eb575e654167a88a7fd2b1aab9c7149:TLSei3NQ1ykNPh0u1zOTXHnd3dstwGj2GY1RUtmtFgfvOfWZslK3W1cffhm7hXn0FSidtfQEJTk7___EZ7N-Bg:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future
 name: signed-envelope-v2-authenticated-metadata

@@ -27,6 +27,8 @@ use serde_json::Value;
 
 use crate::error::CliError;
 
+use ryeos_engine::AI_DIR;
+
 // ── Service descriptor (subset of fields we need) ──────────────────
 
 /// Parsed subset of a service YAML descriptor.
@@ -260,7 +262,7 @@ fn find_bundle_item(
     bare_id: &str,
     ext: &str,
 ) -> Result<Value> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(AI_DIR).join("bundles");
     let entries = std::fs::read_dir(&bundles_dir)
         .context(format!("no bundles directory at {}", bundles_dir.display()))?;
 
@@ -273,7 +275,7 @@ fn find_bundle_item(
 
         let item_path = entry
             .path()
-            .join(".ai")
+            .join(AI_DIR)
             .join(kind_dir)
             .join(bare_id)
             .with_extension(ext.trim_start_matches('.'));
@@ -354,7 +356,7 @@ fn resolve_binary_in_bundle(
     // Expand {triple} placeholder if present
     let expanded_ref = binary_ref.replace("{triple}", &host_triple);
 
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(AI_DIR).join("bundles");
     let entries = std::fs::read_dir(&bundles_dir)
         .context("no bundles directory")?;
 
@@ -367,7 +369,7 @@ fn resolve_binary_in_bundle(
 
         let item_path = entry
             .path()
-            .join(".ai")
+            .join(AI_DIR)
             .join(kind_dir)
             .join(bare_id)
             .with_extension("yaml");
@@ -642,7 +644,7 @@ fn bind_params(
 
 fn load_aliases(system_space_dir: &Path) -> Vec<AliasDescriptor> {
     let mut out = Vec::new();
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(AI_DIR).join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
         return out;
     };
@@ -653,7 +655,7 @@ fn load_aliases(system_space_dir: &Path) -> Vec<AliasDescriptor> {
         if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
             continue;
         }
-        let aliases_dir = entry.path().join(".ai").join("node").join("aliases");
+        let aliases_dir = entry.path().join(AI_DIR).join("node").join("aliases");
         let Ok(files) = std::fs::read_dir(aliases_dir) else {
             continue;
         };
@@ -671,7 +673,7 @@ fn load_aliases(system_space_dir: &Path) -> Vec<AliasDescriptor> {
 }
 
 fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(AI_DIR).join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
         return None;
     };
@@ -679,7 +681,7 @@ fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor>
     for entry in entries.flatten() {
         let path = entry
             .path()
-            .join(".ai")
+            .join(AI_DIR)
             .join("node")
             .join("verbs")
             .join(format!("{verb_name}.yaml"));
@@ -693,7 +695,7 @@ fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor>
 /// Find a service descriptor file by verb name.
 /// Looks for `.ai/services/{verb_name}.yaml` in each bundle.
 fn find_service_path(system_space_dir: &Path, verb_name: &str) -> Option<std::path::PathBuf> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(AI_DIR).join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
         return None;
     };
@@ -701,7 +703,7 @@ fn find_service_path(system_space_dir: &Path, verb_name: &str) -> Option<std::pa
     for entry in entries.flatten() {
         let path = entry
             .path()
-            .join(".ai")
+            .join(AI_DIR)
             .join("services")
             .join(format!("{verb_name}.yaml"));
         if path.is_file() {
@@ -742,12 +744,12 @@ mod tests {
         content: &str,
     ) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        let ai = tmp.path().join(".ai");
+        let ai = tmp.path().join(AI_DIR);
         let bundles = ai.join("bundles");
         // bare_id like "ryeos/tui" needs the parent dir created
         let item_path = bundles
             .join(bundle_name)
-            .join(".ai")
+            .join(AI_DIR)
             .join(kind_dir)
             .join(bare_id)
             .with_extension("yaml");
@@ -798,7 +800,7 @@ mod tests {
         );
         // Create a bin/ dir with the current triple
         let triple = detect_host_triple();
-        let bin_dir = tmp.path().join(".ai").join("bundles/standard/bin").join(&triple);
+        let bin_dir = tmp.path().join(AI_DIR).join("bundles/standard/bin").join(&triple);
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::write(bin_dir.join("ryeos-tui"), "#!/bin/sh\necho hi").unwrap();
 
@@ -879,7 +881,7 @@ mod tests {
     fn offline_client_open_errors_on_missing_descriptor() {
         // Empty bundle with no client descriptor
         let tmp = tempfile::tempdir().unwrap();
-        let ai = tmp.path().join(".ai");
+        let ai = tmp.path().join(AI_DIR);
         std::fs::create_dir_all(ai.join("bundles/standard/.ai")).unwrap();
 
         let params = serde_json::json!({
