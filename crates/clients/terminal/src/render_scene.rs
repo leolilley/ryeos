@@ -10,10 +10,7 @@ use crate::braille::ColoredBrailleBuffer;
 /// Render scene primitives into a braille buffer.
 /// `term_w` and `term_h` are terminal cell dimensions.
 /// The braille pixel space is term_w*2 × term_h*4.
-pub fn render_to_braille(
-    primitives: &[ScenePrimitive],
-    buf: &mut ColoredBrailleBuffer,
-) {
+pub fn render_to_braille(primitives: &[ScenePrimitive], buf: &mut ColoredBrailleBuffer) {
     buf.clear();
 
     let bw = buf.pixel_w() as f32;
@@ -21,7 +18,13 @@ pub fn render_to_braille(
 
     for prim in primitives {
         match prim {
-            ScenePrimitive::Point { pos, color, size, opacity, .. } => {
+            ScenePrimitive::Point {
+                pos,
+                color,
+                size,
+                opacity,
+                ..
+            } => {
                 let px = pos.x * bw;
                 let py = pos.y * bh;
                 let radius = *size * bw.max(bh) * 0.5;
@@ -43,16 +46,33 @@ pub fn render_to_braille(
                 }
             }
 
-            ScenePrimitive::Line { from, to, color, opacity, z, .. } => {
+            ScenePrimitive::Line {
+                from,
+                to,
+                color,
+                opacity,
+                z,
+                ..
+            } => {
                 let fogged = apply_fog(color, *z);
                 buf.wu_line(
-                    from.x * bw, from.y * bh,
-                    to.x * bw, to.y * bh,
-                    fogged, *opacity,
+                    from.x * bw,
+                    from.y * bh,
+                    to.x * bw,
+                    to.y * bh,
+                    fogged,
+                    *opacity,
                 );
             }
 
-            ScenePrimitive::Ring { center, radius, tilt, rotation, color, opacity } => {
+            ScenePrimitive::Ring {
+                center,
+                radius,
+                tilt,
+                rotation,
+                color,
+                opacity,
+            } => {
                 let cx = center.x * bw;
                 let cy = center.y * bh;
                 let rx = radius * bw * 0.5;
@@ -63,24 +83,30 @@ pub fn render_to_braille(
                     let a1 = (i as f32 / segments as f32) * std::f32::consts::TAU + rotation;
                     let a2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU + rotation;
                     buf.wu_line(
-                        cx + a1.cos() * rx, cy + a1.sin() * ry,
-                        cx + a2.cos() * rx, cy + a2.sin() * ry,
-                        *color, *opacity,
+                        cx + a1.cos() * rx,
+                        cy + a1.sin() * ry,
+                        cx + a2.cos() * rx,
+                        cy + a2.sin() * ry,
+                        *color,
+                        *opacity,
                     );
                 }
             }
 
-            ScenePrimitive::Polygon { vertices, color, opacity, z } => {
-                if vertices.len() < 2 { continue; }
+            ScenePrimitive::Polygon {
+                vertices,
+                color,
+                opacity,
+                z,
+            } => {
+                if vertices.len() < 2 {
+                    continue;
+                }
                 let fogged = apply_fog(color, *z);
                 for i in 0..vertices.len() {
                     let a = &vertices[i];
                     let b = &vertices[(i + 1) % vertices.len()];
-                    buf.wu_line(
-                        a.x * bw, a.y * bh,
-                        b.x * bw, b.y * bh,
-                        fogged, *opacity,
-                    );
+                    buf.wu_line(a.x * bw, a.y * bh, b.x * bw, b.y * bh, fogged, *opacity);
                 }
             }
         }
@@ -115,8 +141,12 @@ mod tests {
             opacity: 1.0,
         }];
         render_to_braille(&prims, &mut buf);
-        assert!(buf.to_ansi().contains("⠠") || buf.to_ansi().contains("⡀") || !buf.to_ansi().contains("⠀"),
-            "line should set some dots");
+        assert!(
+            buf.to_ansi().contains("⠠")
+                || buf.to_ansi().contains("⡀")
+                || !buf.to_ansi().contains("⠀"),
+            "line should set some dots"
+        );
     }
 
     #[test]

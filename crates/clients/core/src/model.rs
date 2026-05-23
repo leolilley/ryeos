@@ -115,6 +115,17 @@ impl AppModel {
         self.dirty = true;
         self.generation = self.generation.wrapping_add(1);
     }
+
+    /// Effective command registry for the active surface.
+    ///
+    /// Built-ins are the baseline; surface-declared `commands` can
+    /// override by id or add new entries. Palette rendering and command
+    /// dispatch both use this merged registry.
+    pub fn active_affordances(&self) -> Vec<crate::commands::Affordance> {
+        let (affordances, _warnings) =
+            crate::commands::merge_affordances(&self.surface.spec.commands);
+        affordances
+    }
 }
 
 /// Bootstrap status for progressive startup.
@@ -207,5 +218,32 @@ mod tests {
         let model = AppModel::from_surface("/tmp/test", &loaded);
         assert_eq!(model.workspace.tiles.len(), 3);
         assert_eq!(model.surface.name, "cockpit-base");
+    }
+
+    #[test]
+    fn active_affordances_use_surface_commands() {
+        let mut spec = crate::surface::builtin_default();
+        spec.commands.push(crate::surface::SurfaceCommandSpec {
+            id: "surface.only".into(),
+            label: "Surface Only".into(),
+            category: "Surface".into(),
+            description: "Declared by the effective surface".into(),
+            invoke: Some(crate::commands::InvocationSpec::Ui(
+                crate::commands::UiInvocation {
+                    verb: crate::commands::UiVerb::ToggleHelp,
+                    args: serde_json::Value::Null,
+                },
+            )),
+            requires_capabilities: Vec::new(),
+        });
+        let loaded = crate::surface::LoadedSurface::Builtin { spec };
+        let model = AppModel::from_surface("/tmp/test", &loaded);
+
+        let affordances = model.active_affordances();
+        let surface_command = affordances
+            .iter()
+            .find(|affordance| affordance.id == "surface.only")
+            .expect("surface command should be in active affordance registry");
+        assert_eq!(surface_command.label, "Surface Only");
     }
 }

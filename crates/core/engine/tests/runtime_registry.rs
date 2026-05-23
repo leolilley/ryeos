@@ -67,11 +67,17 @@ fn directive_kind_registry(bundle_root: &Path) -> KindRegistry {
 version: "1.0.0"
 location:
   directory: directives
+resolution: []
+effective_trust:
+  include_references: false
 execution:
   delegate:
     via: runtime_registry
-  thread_profile: directive_run
-  resolution: []
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -434,12 +440,18 @@ fn runtime_serves_kind_with_wrong_protocol_fails() {
 version: "1.0.0"
 location:
   directory: fake_items
+resolution: []
+effective_trust:
+  include_references: false
 execution:
   terminator:
     kind: subprocess
     protocol: protocol:ryeos/core/opaque
-  thread_profile: fake_run
-  resolution: []
+  thread_profile:
+    name: fake_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -514,6 +526,8 @@ fn runtime_serves_kind_without_execution_fails() {
 version: "1.0.0"
 location:
   directory: no_exec_items
+effective_trust:
+  include_references: false
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml

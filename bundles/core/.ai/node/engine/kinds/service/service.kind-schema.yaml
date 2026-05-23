@@ -1,8 +1,11 @@
-# ryeos:signed:2026-05-22T19:55:01Z:68a501b87aa23ad5d7f4e3355186ff32e061feab780d88dd26ca7634d9419948:rarK8nqp9rFlZ6hIoov/stU4q5slBX6klJoTV6t38th+aGvK74u3qmYPRQU+bUYlz0Et3ODV3G4SXVCqMhgzCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T11:10:57Z:ac661ea9d5d9ce0e469bb4d76e862d91347a5e9f6774752b18caa62a42a37ddc:gUOrlvl9BtDwMPYa9PrtES3r31yv0KojgncpEdhEWUpAen/hu2X4YL/c5K4PuIVXqzE502WEgOT/18NEhsCYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
   directory: services
+effective_trust:
+  include_references: false
+resolution: []
 execution:
   terminator:
     kind: in_process
@@ -12,7 +15,6 @@ execution:
     root_executable: true
     supports_interrupt: false
     supports_continuation: false
-  resolution: []
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

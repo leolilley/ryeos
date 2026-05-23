@@ -1,9 +1,7 @@
 //! Mock transport — returns sample data for testing without a daemon.
 
 use ryeos_tui_core::ids::{ItemId, ProjectId, RemoteId};
-use ryeos_tui_core::store::{
-    IdentityModel, ItemCounts, ItemModel, ProjectModel,
-};
+use ryeos_tui_core::store::{IdentityModel, ItemCounts, ItemModel, ProjectModel};
 use ryeos_tui_core::update::{DaemonEvent, PollSnapshot, RemoteSummary, ThreadSummary};
 
 /// Generate a mock poll snapshot with sample data.

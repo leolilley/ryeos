@@ -1,9 +1,12 @@
-# ryeos:signed:2026-05-22T19:55:01Z:08e0b664cab99fae93cc3fdc4dbff27bb1ef8e67f26e695ea27c5e722997f1f3:OPtf3P8Zu/aG2CoxTc/nH04rZabAGuO1TEuBDDfr8tOwu+MP+Nq4qaYf+ZppmGjiOyO95XaRinlZBmE9Q/PqBg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T11:10:57Z:59eadcc66c74fb0a26e8c8bae331124b4d9df6f4fa8df2e1ff02040e8b2a022e:Jje6B60iOBYjM7N6Ilt+PiHI4knzu5KH7NzcT9ARtCcb6uYWM8Btj3cBgMw88rQr+CnFJGFwONEiw+PasiR5DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # rye:unsigned
 category: "engine/kinds/runtime"
 version: "1.0.0"
 location:
   directory: runtimes
+effective_trust:
+  include_references: false
+resolution: []
 execution:
   terminator:
     kind: subprocess
@@ -13,7 +16,6 @@ execution:
     root_executable: true
     supports_interrupt: false
     supports_continuation: false
-  resolution: []
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

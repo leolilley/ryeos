@@ -61,14 +61,24 @@ impl ColoredBrailleBuffer {
 
     pub fn clear(&mut self) {
         let bg = Rgb::new(0x1d, 0x20, 0x21);
-        for b in self.bits.iter_mut() { *b = 0; }
-        for c in self.colors.iter_mut() { *c = bg; }
-        for b in self.brightness.iter_mut() { *b = 0.0; }
+        for b in self.bits.iter_mut() {
+            *b = 0;
+        }
+        for c in self.colors.iter_mut() {
+            *c = bg;
+        }
+        for b in self.brightness.iter_mut() {
+            *b = 0.0;
+        }
     }
 
     /// Braille pixel dimensions.
-    pub fn pixel_w(&self) -> usize { self.width * 2 }
-    pub fn pixel_h(&self) -> usize { self.height * 4 }
+    pub fn pixel_w(&self) -> usize {
+        self.width * 2
+    }
+    pub fn pixel_h(&self) -> usize {
+        self.height * 4
+    }
 
     /// Set a dot in braille pixel space with sub-cell positioning.
     /// (px, py) in [0, pixel_w) × [0, pixel_h).
@@ -118,11 +128,31 @@ impl ColoredBrailleBuffer {
         let fpart = yend - yend.floor();
 
         if steep {
-            self.plot_checked(xpxl1, yend.floor() as isize, color, opacity * (1.0 - fpart) * xgap);
-            self.plot_checked(xpxl1, yend.floor() as isize + 1, color, opacity * fpart * xgap);
+            self.plot_checked(
+                xpxl1,
+                yend.floor() as isize,
+                color,
+                opacity * (1.0 - fpart) * xgap,
+            );
+            self.plot_checked(
+                xpxl1,
+                yend.floor() as isize + 1,
+                color,
+                opacity * fpart * xgap,
+            );
         } else {
-            self.plot_checked(xpxl1, yend.floor() as isize, color, opacity * (1.0 - fpart) * xgap);
-            self.plot_checked(xpxl1, yend.floor() as isize + 1, color, opacity * fpart * xgap);
+            self.plot_checked(
+                xpxl1,
+                yend.floor() as isize,
+                color,
+                opacity * (1.0 - fpart) * xgap,
+            );
+            self.plot_checked(
+                xpxl1,
+                yend.floor() as isize + 1,
+                color,
+                opacity * fpart * xgap,
+            );
         }
 
         let mut intery = yend + gradient;
@@ -135,11 +165,31 @@ impl ColoredBrailleBuffer {
         let fpart = yend - yend.floor();
 
         if steep {
-            self.plot_checked(xpxl2, yend.floor() as isize, color, opacity * (1.0 - fpart) * xgap);
-            self.plot_checked(xpxl2, yend.floor() as isize + 1, color, opacity * fpart * xgap);
+            self.plot_checked(
+                xpxl2,
+                yend.floor() as isize,
+                color,
+                opacity * (1.0 - fpart) * xgap,
+            );
+            self.plot_checked(
+                xpxl2,
+                yend.floor() as isize + 1,
+                color,
+                opacity * fpart * xgap,
+            );
         } else {
-            self.plot_checked(xpxl2, yend.floor() as isize, color, opacity * (1.0 - fpart) * xgap);
-            self.plot_checked(xpxl2, yend.floor() as isize + 1, color, opacity * fpart * xgap);
+            self.plot_checked(
+                xpxl2,
+                yend.floor() as isize,
+                color,
+                opacity * (1.0 - fpart) * xgap,
+            );
+            self.plot_checked(
+                xpxl2,
+                yend.floor() as isize + 1,
+                color,
+                opacity * fpart * xgap,
+            );
         }
 
         // Main loop
@@ -208,9 +258,12 @@ impl ColoredBrailleBuffer {
                     let color = self.colors[idx];
                     // Set fg color, output braille char
                     use std::fmt::Write;
-                    write!(out, "\x1b[38;2;{}\x1b[48;2;29;32;33m",
+                    write!(
+                        out,
+                        "\x1b[38;2;{}\x1b[48;2;29;32;33m",
                         format!("{};{};{}m", color.r, color.g, color.b)
-                    ).unwrap();
+                    )
+                    .unwrap();
                     out.push(braille_char(bits));
                 }
             }
@@ -248,7 +301,14 @@ mod tests {
         let pw = buf.pixel_w() as f32;
         let ph = buf.pixel_h() as f32;
         // Draw a horizontal line across the middle
-        buf.wu_line(0.0, ph / 2.0, pw - 1.0, ph / 2.0, Rgb::new(0xff, 0x80, 0x00), 1.0);
+        buf.wu_line(
+            0.0,
+            ph / 2.0,
+            pw - 1.0,
+            ph / 2.0,
+            Rgb::new(0xff, 0x80, 0x00),
+            1.0,
+        );
         // Should have set dots in the middle row
         assert!(buf.bits.iter().any(|&b| b != 0), "wu line should set dots");
     }
@@ -258,6 +318,11 @@ mod tests {
         let mut buf = ColoredBrailleBuffer::new(10, 5);
         buf.plot(3, 7, Rgb::new(0xff, 0x80, 0x00), 1.0);
         let ansi = buf.to_ansi();
-        assert!(ansi.contains("254;128;0") || ansi.contains("255;128;0") || ansi.contains("⠠") || ansi.contains("⡀"));
+        assert!(
+            ansi.contains("254;128;0")
+                || ansi.contains("255;128;0")
+                || ansi.contains("⠠")
+                || ansi.contains("⡀")
+        );
     }
 }

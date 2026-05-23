@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
 use std::sync::Arc;
@@ -33,10 +34,14 @@ pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
             .with_context(|| "load trust store")?;
 
     let kinds = build_kind_registry(&system_roots, &trust_store)?;
-    let parsers =
+    let (parsers, handlers) =
         build_parser_dispatcher(&system_roots, user_root.as_deref(), &kinds, &trust_store)?;
+    let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
+        .with_context(|| "load composer registry")?;
 
-    Ok(Engine::new(kinds, parsers, user_root, system_roots).with_trust_store(trust_store))
+    Ok(Engine::new(kinds, parsers, user_root, system_roots)
+        .with_trust_store(trust_store)
+        .with_composers(composers))
 }
 
 fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
@@ -55,7 +60,7 @@ fn build_parser_dispatcher(
     user_root: Option<&Path>,
     kinds: &KindRegistry,
     trust_store: &TrustStore,
-) -> Result<ParserDispatcher> {
+) -> Result<(ParserDispatcher, Arc<HandlerRegistry>)> {
     let mut search: Vec<PathBuf> = system_roots.to_vec();
     let mut tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = system_roots
         .iter()
@@ -77,7 +82,11 @@ fn build_parser_dispatcher(
         .with_context(|| "load parser tool descriptors")?;
     let handlers = HandlerRegistry::load_base(&tagged_search, trust_store)
         .with_context(|| "load handler descriptors")?;
-    Ok(ParserDispatcher::new(parser_tools, Arc::new(handlers)))
+    let handlers = Arc::new(handlers);
+    Ok((
+        ParserDispatcher::new(parser_tools, handlers.clone()),
+        handlers,
+    ))
 }
 
 /// Discover installed bundle roots from the daemon state directory.

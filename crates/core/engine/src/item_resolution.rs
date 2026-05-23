@@ -367,10 +367,11 @@ mod tests {
         KindSchema {
             directory: directory.to_owned(),
             extraction_rules: std::collections::HashMap::new(),
+            resolution: Vec::new(),
+            effective_trust: crate::kind_registry::EffectiveTrustPolicy::default(),
             execution: Some(crate::kind_registry::ExecutionSchema {
                 aliases: std::collections::HashMap::new(),
                 alias_max_depth: 8,
-                resolution: Vec::new(),
                 terminator: None,
                 delegate: None,
                 thread_profile: None,

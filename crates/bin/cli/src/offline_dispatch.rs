@@ -64,7 +64,6 @@ struct AliasDescriptor {
 #[derive(Debug, serde::Deserialize)]
 struct VerbDescriptor {
     /// Execution target ref: `service:...` or `tool:...`.
-    #[allow(dead_code)]
     execute: String,
 }
 
@@ -521,14 +520,13 @@ pub fn try_offline_dispatch(
         return Ok(None);
     };
 
-    // 2. Look up verb — confirm the verb descriptor exists
-    let Some(_verb) = load_verb(system_space_dir, &alias.verb) else {
+    // 2. Look up verb — its execute ref is the authoritative service target.
+    let Some(verb) = load_verb(system_space_dir, &alias.verb) else {
         return Ok(None);
     };
 
-    // 3. Resolve service descriptor by verb name
-    //    Service files are at .ai/services/{name}.yaml with endpoint: {name}
-    let service_path = find_service_path(system_space_dir, &alias.verb);
+    // 3. Resolve service descriptor from verb.execute.
+    let service_path = resolve_service_path(system_space_dir, &verb);
     let Some(service_path) = service_path else {
         // No service descriptor for this verb — not our concern
         return Ok(None);
@@ -692,9 +690,20 @@ fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor>
     None
 }
 
-/// Find a service descriptor file by verb name.
-/// Looks for `.ai/services/{verb_name}.yaml` in each bundle.
-fn find_service_path(system_space_dir: &Path, verb_name: &str) -> Option<std::path::PathBuf> {
+fn resolve_service_path(
+    system_space_dir: &Path,
+    verb: &VerbDescriptor,
+) -> Option<std::path::PathBuf> {
+    if let Some(service_ref) = verb.execute.strip_prefix("service:") {
+        find_service_path(system_space_dir, service_ref)
+    } else {
+        None
+    }
+}
+
+/// Find a service descriptor file by relative service name.
+/// Looks for `.ai/services/{service_rel}.yaml` in each bundle.
+fn find_service_path(system_space_dir: &Path, service_rel: &str) -> Option<std::path::PathBuf> {
     let bundles_dir = system_space_dir.join(AI_DIR).join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
         return None;
@@ -705,7 +714,7 @@ fn find_service_path(system_space_dir: &Path, verb_name: &str) -> Option<std::pa
             .path()
             .join(AI_DIR)
             .join("services")
-            .join(format!("{verb_name}.yaml"));
+            .join(format!("{service_rel}.yaml"));
         if path.is_file() {
             return Some(path);
         }

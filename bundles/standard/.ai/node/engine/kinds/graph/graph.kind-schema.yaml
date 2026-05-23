@@ -1,8 +1,12 @@
-# ryeos:signed:2026-05-22T19:55:07Z:c76b8ddfebc43b9eb44501340b606aa0cdc9e90450fcb4498553faa9fad19523:6K5K9vosds/oDxQzGe34g04wUMkVRWR2ZNQfdgoZZ87qtQsvQnAh4qg3ESOgiRoxydC4qZflvogcx7phGgawAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T10:47:35Z:4ae8dfd0d508247db707ed1e8acc2cc61dbfa9940b29ad6c345d34a9fed59890:xJ0WLjzySPQ7T1Aj7N0iac1YOqTwnabUURTs1x9izcxV67P6a2nD5J3+md9IUnsujbPSuKZD/jKaPMpHJh9zAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
   directory: graphs
+resolution:
+  - step: resolve_extends_chain
+effective_trust:
+  include_references: false
 execution:
   # Explicit delegation to the runtime registry. The dispatcher will
   # call `RuntimeRegistry::lookup_for("graph")` to find the default
@@ -16,8 +20,6 @@ execution:
     root_executable: true
     supports_interrupt: true
     supports_continuation: true
-  resolution:
-    - step: resolve_extends_chain
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

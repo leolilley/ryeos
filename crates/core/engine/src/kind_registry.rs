@@ -651,9 +651,6 @@ pub struct ExecutionSchema {
     /// Hard cap for recursive alias expansion (default 8).
     #[serde(default = "default_alias_depth")]
     pub alias_max_depth: usize,
-    /// Ordered preprocessing pipeline run before dispatch.
-    #[serde(default)]
-    pub resolution: Vec<ResolutionStepDecl>,
     /// How this kind terminates dispatch. Optional because a kind may
     /// instead dispatch by alias chain (the `aliases` field above) or
     /// by explicit delegation (the `delegate` field below). Exactly
@@ -704,6 +701,25 @@ fn default_alias_depth() -> usize {
     8
 }
 
+/// Policy for folding resolved graph nodes into an item's effective
+/// trust class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveTrustPolicy {
+    /// When true, items reached through `resolve_references` are folded
+    /// into `ResolutionOutput.effective_trust_class` along with root +
+    /// extends ancestors. When false, references remain explicit
+    /// provenance/edge trust only.
+    pub include_references: bool,
+}
+
+impl Default for EffectiveTrustPolicy {
+    fn default() -> Self {
+        Self {
+            include_references: false,
+        }
+    }
+}
+
 /// Complete schema for a single item kind, loaded from a kind schema
 /// YAML. One struct per kind — no parallel maps, no split state.
 #[derive(Debug, Clone)]
@@ -716,7 +732,17 @@ pub struct KindSchema {
     /// Data-driven extraction rules: output field name → rule
     /// (extractor + per-rule path-anchoring attrs).
     pub extraction_rules: HashMap<String, MetadataRule>,
-    /// Execution configuration (resolution pipeline + aliases).
+    /// Ordered item-resolution pipeline used to produce an effective
+    /// composed item value. This is the single resolution declaration
+    /// for every kind. Execution is a consumer of the resulting
+    /// effective item; dispatch mechanics live under `execution` and
+    /// never declare their own resolution pipeline.
+    pub resolution: Vec<ResolutionStepDecl>,
+    /// Explicit effective trust folding policy for the resolution
+    /// graph. This keeps inheritance trust and reference trust
+    /// semantics schema-owned rather than hardcoded in consumers.
+    pub effective_trust: EffectiveTrustPolicy,
+    /// Execution configuration (dispatch, operations, aliases).
     /// `None` if this kind is not executable (e.g., config kind).
     pub execution: Option<ExecutionSchema>,
     /// Declared shape contract on the parsed `Value` that the parser
@@ -785,7 +811,7 @@ impl KindSchema {
         })
     }
 
-    /// Get the execution schema (aliases + resolution pipeline).
+    /// Get the execution schema (dispatch, operations, aliases).
     /// Returns `None` if this kind is not executable.
     pub fn execution(&self) -> Option<&ExecutionSchema> {
         self.execution.as_ref()
@@ -1125,6 +1151,8 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             reason: format!("{display}: missing required field `location.directory`"),
         })?;
 
+    let resolution = parse_top_level_resolution(&data, display)?;
+    let effective_trust = parse_effective_trust_policy(&data, display)?;
     let execution = parse_execution_schema(&data, display)?;
 
     let formats_seq = data
@@ -1250,6 +1278,8 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         directory,
         extensions,
         extraction_rules,
+        resolution,
+        effective_trust,
         execution,
         composed_value_contract,
         composer,
@@ -1258,6 +1288,81 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_kinds,
         inventory_schema_keys,
     })
+}
+
+fn parse_effective_trust_policy(
+    data: &serde_yaml::Value,
+    display: &str,
+) -> Result<EffectiveTrustPolicy, EngineError> {
+    let Some(value) = data.get("effective_trust") else {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: missing required field `effective_trust` \
+                 (declare `include_references: true|false`)"
+            ),
+        });
+    };
+    let mapping = value
+        .as_mapping()
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: `effective_trust` must be a mapping"),
+        })?;
+    for key in mapping.keys() {
+        let Some(key) = key.as_str() else {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!("{display}: `effective_trust` keys must be strings"),
+            });
+        };
+        if key != "include_references" {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: unknown `effective_trust.{key}` \
+                     (accepted: include_references)"
+                ),
+            });
+        }
+    }
+    let include_references = match mapping
+        .get(serde_yaml::Value::String("include_references".into()))
+    {
+        None => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!("{display}: `effective_trust.include_references` is required"),
+            });
+        }
+        Some(v) => v.as_bool().ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: `effective_trust.include_references` must be a boolean"),
+        })?,
+    };
+    Ok(EffectiveTrustPolicy { include_references })
+}
+
+fn parse_top_level_resolution(
+    data: &serde_yaml::Value,
+    display: &str,
+) -> Result<Vec<ResolutionStepDecl>, EngineError> {
+    let res_value = data
+        .get("resolution")
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: top-level `resolution` is required; declare `resolution: []` \
+                 for identity kinds"
+            ),
+        })?;
+    let res_seq = res_value
+        .as_sequence()
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: `resolution` must be a sequence"),
+        })?;
+    let mut resolution = Vec::new();
+    for item in res_seq {
+        let step: ResolutionStepDecl =
+            serde_yaml::from_value(item.clone()).map_err(|e| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid resolution step: {e}"),
+            })?;
+        resolution.push(step);
+    }
+    Ok(resolution)
 }
 
 fn parse_optional_string_seq(
@@ -1559,10 +1664,11 @@ fn parse_extraction_rules(
     Ok(rules)
 }
 
-/// Parse the `execution.aliases` block from a kind schema.
+/// Parse the `execution` block from a kind schema.
 ///
-/// Maps `@`-prefixed shorthand names to canonical refs.
-/// If no `execution` block exists, returns empty HashMap (kind is not executable).
+/// Resolution is intentionally not accepted here. All kinds use the
+/// top-level `resolution:` declaration; `execution:` only describes how
+/// an already-effective item is consumed by launch/dispatch.
 fn parse_execution_schema(
     data: &serde_yaml::Value,
     display: &str,
@@ -1577,6 +1683,15 @@ fn parse_execution_schema(
         .ok_or_else(|| EngineError::SchemaLoaderError {
             reason: format!("{display}: `execution` must be a mapping"),
         })?;
+
+    if execution_value.get("resolution").is_some() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: `execution.resolution` is not supported; declare effective \
+                 item resolution once at top-level `resolution:`"
+            ),
+        });
+    }
 
     let mut aliases = HashMap::new();
     if let Some(aliases_value) = execution_value.get("aliases") {
@@ -1595,21 +1710,6 @@ fn parse_execution_schema(
         .map(|n| n as usize)
         .unwrap_or(8);
 
-    let mut resolution = Vec::new();
-    if let Some(res_value) = execution_value.get("resolution") {
-        if let Some(res_seq) = res_value.as_sequence() {
-            for item in res_seq {
-                let step: ResolutionStepDecl =
-                    serde_yaml::from_value(item.clone()).map_err(|e| {
-                        EngineError::SchemaLoaderError {
-                            reason: format!("{display}: invalid resolution step: {e}"),
-                        }
-                    })?;
-                resolution.push(step);
-            }
-        }
-    }
-
     let terminator = if let Some(t_value) = execution_value.get("terminator") {
         Some(serde_yaml::from_value(t_value.clone()).map_err(|e| {
             EngineError::SchemaLoaderError {
@@ -1622,7 +1722,7 @@ fn parse_execution_schema(
 
     let delegate = parse_delegation_spec(execution_value, display)?;
 
-    let thread_profile = parse_thread_profile(execution_value, display);
+    let thread_profile = parse_thread_profile(execution_value, display)?;
 
     // Parse default_operation
     let default_operation = execution_value
@@ -1744,7 +1844,6 @@ fn parse_execution_schema(
     Ok(Some(ExecutionSchema {
         aliases,
         alias_max_depth,
-        resolution,
         terminator,
         delegate,
         thread_profile,
@@ -1756,32 +1855,30 @@ fn parse_execution_schema(
 
 /// Parse the `execution.thread_profile` block from a kind schema.
 ///
-/// Accepts two formats for backward compatibility during migration:
-/// - **String**: `"directive_run"` (legacy — defaults all flags)
-/// - **Mapping**: `{ name: knowledge_run, root_executable: true, ... }`
-///
-/// New schemas should use the mapping form. String form is accepted so
-/// existing schemas don't break during rollout.
+/// Mapping-only. The legacy string form is intentionally rejected so
+/// thread lifecycle flags are explicit schema data, not parser defaults.
 fn parse_thread_profile(
     execution_value: &serde_yaml::Value,
-    _display: &str,
-) -> Option<ThreadProfileDecl> {
-    let tp_value = execution_value.get("thread_profile")?;
+    display: &str,
+) -> Result<Option<ThreadProfileDecl>, EngineError> {
+    let Some(tp_value) = execution_value.get("thread_profile") else {
+        return Ok(None);
+    };
 
-    match tp_value {
-        // Legacy string form: `"directive_run"`
-        serde_yaml::Value::String(s) => Some(ThreadProfileDecl {
-            name: s.clone(),
-            root_executable: true,
-            supports_interrupt: false,
-            supports_continuation: false,
-        }),
-        // New mapping form: `{ name: ..., root_executable: ..., ... }`
-        serde_yaml::Value::Mapping(_) => {
-            serde_yaml::from_value::<ThreadProfileDecl>(tp_value.clone()).ok()
-        }
-        _ => None,
+    if !tp_value.is_mapping() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: `execution.thread_profile` must be a mapping \
+                 with explicit lifecycle flags"
+            ),
+        });
     }
+
+    serde_yaml::from_value::<ThreadProfileDecl>(tp_value.clone())
+        .map(Some)
+        .map_err(|e| EngineError::SchemaLoaderError {
+            reason: format!("{display}: invalid `execution.thread_profile`: {e}"),
+        })
 }
 
 /// Parse the `execution.delegate` block from a kind schema. Returns
@@ -1895,13 +1992,17 @@ metadata:
     const SCHEMA_WITH_RESOLUTION: &str = "\
 location:
   directory: directives
+resolution:
+  - step: resolve_extends_chain
+  - step: resolve_references
 execution:
-  thread_profile: directive_run
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   delegate:
     via: runtime_registry
-  resolution:
-    - step: resolve_extends_chain
-    - step: resolve_references
 formats:
   - extensions: [\".md\"]
     parser: parser:ryeos/core/markdown/directive
@@ -1934,6 +2035,16 @@ formats:
             yaml.to_string()
         } else {
             format!("{yaml}composed_value_contract:\n  root_type: mapping\n  required: {{}}\n")
+        };
+        let yaml = if yaml.contains("effective_trust:") {
+            yaml
+        } else {
+            format!("{yaml}effective_trust:\n  include_references: false\n")
+        };
+        let yaml = if yaml.contains("resolution:") {
+            yaml
+        } else {
+            format!("{yaml}resolution: []\n")
         };
         let yaml = if yaml.contains("composer:") {
             yaml
@@ -2387,11 +2498,11 @@ formats:
 
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let dir = reg.get("directive").unwrap();
-        assert_eq!(dir.execution.as_ref().map(|e| e.resolution.len()), Some(2));
+        assert_eq!(dir.resolution.len(), 2);
     }
 
     #[test]
-    fn resolution_defaults_to_empty() {
+    fn empty_resolution_is_explicit() {
         let tmp = tempdir();
         let sk = test_signing_key();
         let ts = test_trust_store(&sk);
@@ -2399,10 +2510,112 @@ formats:
 
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let tool = reg.get("tool").unwrap();
-        assert!(tool
-            .execution
-            .as_ref()
-            .is_none_or(|e| e.resolution.is_empty()));
+        assert!(tool.resolution.is_empty());
+    }
+
+    #[test]
+    fn missing_top_level_resolution_rejected() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let kind_dir = tmp.join("config");
+        fs::create_dir_all(&kind_dir).unwrap();
+        let yaml = "\
+location:
+  directory: configs
+effective_trust:
+  include_references: false
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+        let signed = lillux::signature::sign_content(yaml, &sk, "#", None);
+        fs::write(kind_dir.join("config.kind-schema.yaml"), signed).unwrap();
+
+        let err = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("top-level `resolution` is required"),
+            "expected missing resolution rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn effective_trust_policy_parsed() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let yaml = "\
+location:
+  directory: configs
+effective_trust:
+  include_references: true
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+        sign_and_write_schema(&tmp, "config", yaml, &sk);
+
+        let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        let config = reg.get("config").unwrap();
+        assert!(config.effective_trust.include_references);
+    }
+
+    #[test]
+    fn effective_trust_policy_rejects_unknown_fields() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let yaml = "\
+location:
+  directory: configs
+effective_trust:
+  include_references: false
+  typo: true
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+        sign_and_write_schema(&tmp, "config", yaml, &sk);
+
+        let err = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown `effective_trust.typo`"),
+            "expected unknown effective_trust field rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn legacy_string_thread_profile_rejected() {
+        let yaml = "\
+execution:
+  thread_profile: directive_run
+  delegate:
+    via: runtime_registry
+";
+        let err = parse_exec(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("thread_profile") && err.to_string().contains("mapping"),
+            "expected mapping-only thread_profile rejection, got: {err}"
+        );
     }
 
     // Removed: `project_overlay_replaces_resolution` — kind schemas are
@@ -2480,7 +2693,11 @@ execution:
         // was declared; that path is removed.
         let yaml = "\
 execution:
-  thread_profile: directive_run
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   delegate:
     via: runtime_registry
 ";
@@ -2500,7 +2717,11 @@ execution:
         let yaml = "\
 execution:
   aliases: {}
-  thread_profile: directive_run
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
 ";
         let err = parse_exec(yaml).expect_err("non-actionable schema must reject");
         let msg = err.to_string();
@@ -2518,7 +2739,11 @@ execution:
     fn execution_schema_parses_delegate_runtime_registry() {
         let yaml = "\
 execution:
-  thread_profile: directive_run
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   delegate:
     via: runtime_registry
 ";
@@ -2535,7 +2760,11 @@ execution:
     fn execution_schema_parses_delegate_with_serves_kind() {
         let yaml = "\
 execution:
-  thread_profile: graph_run
+  thread_profile:
+    name: graph_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   delegate:
     via: runtime_registry
     serves_kind: directive
@@ -2641,7 +2870,11 @@ execution:
     fn operations_parsed_from_schema() {
         let yaml = "\
 execution:
-  thread_profile: knowledge_run
+  thread_profile:
+    name: knowledge_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   default_operation: compose
   operations:
     - name: compose
@@ -2791,7 +3024,11 @@ execution:
         // is executable.
         let yaml = "\
 execution:
-  thread_profile: knowledge_run
+  thread_profile:
+    name: knowledge_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   default_operation: compose
   operations:
     - name: compose
@@ -3267,5 +3504,185 @@ metadata:
         );
         validate_metadata_anchoring(&parsed, &rules, "directives", ai_root, file)
             .expect("optional field absent is fine");
+    }
+
+    // ── Non-executable kinds (surface, client) ────────────────────
+
+    const SURFACE_SCHEMA: &str = "\
+location:
+  directory: surfaces
+formats:
+  - extensions: [\".yaml\", \".yml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/extends-chain
+resolution:
+  - step: resolve_extends_chain
+    field: extends
+    max_depth: 16
+composer_config:
+  extends_field: extends
+  fields:
+    - name: layout
+      strategy: replace_root_last
+      expect_value_type: mapping
+      required: true
+composed_value_contract:
+  root_type: mapping
+  required:
+    layout:
+      type: single
+      prim: mapping
+  optional:
+    extends:
+      type: union
+      prims: [string, \"null\"]
+    ambient:
+      type: single
+      prim: mapping
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: relative_dir
+      required: true
+";
+
+    const CLIENT_SCHEMA: &str = "\
+location:
+  directory: clients
+formats:
+  - extensions: [\".yaml\", \".yml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required:
+    launch:
+      type: single
+      prim: mapping
+    serves:
+      type: single
+      prim: mapping
+  optional:
+    version:
+      type: single
+      prim: string
+    description:
+      type: single
+      prim: string
+    capabilities:
+      type: single
+      prim: mapping
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: relative_dir
+      required: true
+";
+
+    fn write_surface_schema(dir: &Path, sk: &SigningKey) {
+        sign_and_write_schema(dir, "surface", SURFACE_SCHEMA, sk);
+    }
+
+    fn write_client_schema(dir: &Path, sk: &SigningKey) {
+        sign_and_write_schema(dir, "client", CLIENT_SCHEMA, sk);
+    }
+
+    #[test]
+    fn load_surface_kind_schema() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        write_surface_schema(&tmp, &sk);
+
+        let reg = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts)
+            .expect("load_base should succeed for surface schema");
+
+        let surf = reg
+            .get("surface")
+            .expect("surface kind should be registered");
+        assert_eq!(surf.directory, "surfaces");
+        assert!(surf.extension_strs().contains(&".yaml"));
+        assert!(surf.extension_strs().contains(&".yml"));
+
+        // Surface is non-executable — no runtime, no execution aliases
+        assert!(surf.runtime.is_none());
+        assert!(surf.execution.is_none());
+
+        // Surface uses the extends-chain composer
+        assert_eq!(surf.composer, "handler:ryeos/core/extends-chain");
+        assert_eq!(surf.resolution.len(), 1);
+    }
+
+    #[test]
+    fn load_client_kind_schema() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        write_client_schema(&tmp, &sk);
+
+        let reg = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts)
+            .expect("load_base should succeed for client schema");
+
+        let cli = reg.get("client").expect("client kind should be registered");
+        assert_eq!(cli.directory, "clients");
+        assert!(cli.extension_strs().contains(&".yaml"));
+        assert!(cli.extension_strs().contains(&".yml"));
+
+        // Client is non-executable — no runtime, no execution aliases
+        assert!(cli.runtime.is_none());
+        assert!(cli.execution.is_none());
+
+        // Client uses the identity composer (no extends-chain needed)
+        assert_eq!(cli.composer, "handler:ryeos/core/identity");
+        assert!(cli.resolution.is_empty());
+    }
+
+    #[test]
+    fn surface_and_client_load_together() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        write_surface_schema(&tmp, &sk);
+        write_client_schema(&tmp, &sk);
+
+        let reg = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts)
+            .expect("load_base should succeed with both schemas");
+
+        assert_eq!(reg.len(), 2);
+
+        let surf = reg.get("surface").expect("surface should be registered");
+        let cli = reg.get("client").expect("client should be registered");
+
+        // Each kind retains its own composer
+        assert_eq!(surf.composer, "handler:ryeos/core/extends-chain");
+        assert_eq!(cli.composer, "handler:ryeos/core/identity");
+
+        // Each kind retains its own directory
+        assert_eq!(surf.directory, "surfaces");
+        assert_eq!(cli.directory, "clients");
     }
 }

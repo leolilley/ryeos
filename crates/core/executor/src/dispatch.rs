@@ -728,6 +728,13 @@ pub(crate) async fn dispatch_op(
         )
     })?;
 
+    crate::execution::launch::enforce_effective_trust(
+        resolution_output.effective_trust_class,
+        &canonical_ref.to_string(),
+        kind,
+    )
+    .map_err(|e| DispatchError::InvalidRef(canonical_ref.to_string(), e.to_string()))?;
+
     // 4. Project the resolution output to a SingleRootPayload.
     let single_root = project_single_root(&resolution_output)?;
 
@@ -743,7 +750,13 @@ pub(crate) async fn dispatch_op(
     }
 
     // 6. Mint thread record + callback token.
-    let thread_profile_str = thread_profile.as_deref().unwrap_or("op_run");
+    let thread_profile_str =
+        thread_profile
+            .as_deref()
+            .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: kind.to_string(),
+                detail: "op dispatch requires execution.thread_profile".into(),
+            })?;
     let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     let chain_root_id = thread_id.clone(); // top-level, chain_root == self
 
@@ -2533,7 +2546,7 @@ metadata:
             references_edges: vec![],
             referenced_items: vec![],
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: EngineTrustClass::TrustedSystem,
+            effective_trust_class: EngineTrustClass::TrustedSystem,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -2563,7 +2576,7 @@ metadata:
             references_edges: vec![],
             referenced_items: vec![],
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedUser,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -2611,7 +2624,7 @@ metadata:
             }],
             referenced_items: vec![ref_item.clone()],
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedUser,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -2654,7 +2667,7 @@ metadata:
                 references_edges: vec![],
                 referenced_items: vec![],
                 step_outputs: std::collections::HashMap::new(),
-                executor_trust_class: EngineTrustClass::Unsigned,
+                effective_trust_class: EngineTrustClass::Unsigned,
                 composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
             };
             let payload = project_single_root(&output).unwrap();
@@ -2684,7 +2697,7 @@ metadata:
             }],
             referenced_items: vec![], // missing item NOT included
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedUser,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -2739,7 +2752,7 @@ metadata:
             ],
             referenced_items: vec![ref1.clone(), ref2.clone()],
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedUser,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -2776,7 +2789,7 @@ metadata:
             references_edges: vec![],
             referenced_items: vec![ref_dup], // same ref as root
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: EngineTrustClass::TrustedSystem,
+            effective_trust_class: EngineTrustClass::TrustedSystem,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 

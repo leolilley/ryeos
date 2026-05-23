@@ -525,17 +525,17 @@ pub struct NativeLaunchResult {
     pub result: Value,
 }
 
-/// Spawn-gate: refuse to spawn an executor whose composed trust class
+/// Spawn-gate: refuse to spawn an effective item whose composed trust class
 /// is `Unsigned`. Pulled out of `build_and_launch` so the policy is
 /// independently unit-testable.
-pub(crate) fn enforce_executor_trust(
+pub(crate) fn enforce_effective_trust(
     trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     kind: &str,
 ) -> Result<()> {
     if matches!(trust_class, ryeos_engine::resolution::TrustClass::Unsigned) {
         anyhow::bail!(
-            "refusing to spawn `{}` ({}): executor_trust_class is Unsigned — \
+            "refusing to spawn `{}` ({}): effective_trust_class is Unsigned — \
              root or one of its ancestors lacks a valid signature from a trusted signer",
             item_ref,
             kind
@@ -681,7 +681,7 @@ pub async fn build_and_launch(
         item_ref = %resolved.item_ref,
         ancestors = resolution.ancestors.len(),
         references_edges = resolution.references_edges.len(),
-        executor_trust_class = ?resolution.executor_trust_class,
+        effective_trust_class = ?resolution.effective_trust_class,
         "resolution pipeline complete"
     );
 
@@ -721,14 +721,14 @@ pub async fn build_and_launch(
     }
 
     // Active trust enforcement: hard-fail before spawn if the daemon
-    // resolved an `Unsigned` executor for ANY kind. The trust posture is
-    // the *weakest* of root + every ancestor (`execution_trust`) — a
+    // resolved an `Unsigned` effective item for ANY kind. The trust posture is
+    // the *weakest* of root + every ancestor (`effective_trust`) — a
     // single unsigned link in an extends chain taints the whole
     // executor. There is no per-kind opt-out; the launcher always
-    // refuses to spawn an unsigned executor.
-    let executor_trust_class = resolution.executor_trust_class;
+    // refuses to spawn an unsigned effective item.
+    let effective_trust_class = resolution.effective_trust_class;
     let kind = resolved.resolved_item.kind.as_str();
-    enforce_executor_trust(executor_trust_class, &resolved.item_ref, kind)?;
+    enforce_effective_trust(effective_trust_class, &resolved.item_ref, kind)?;
 
     // Composed effective caps are the daemon-side single source of
     // truth, exposed via `policy_facts` on the composed view. Kinds
@@ -784,7 +784,7 @@ pub async fn build_and_launch(
     tracing::info!(
         item_ref = %resolved.item_ref,
         kind = kind,
-        executor_trust_class = ?executor_trust_class,
+        effective_trust_class = ?effective_trust_class,
         effective_caps_count = effective_caps.len(),
         "launcher policy resolved from composed view"
     );
@@ -879,7 +879,7 @@ pub async fn build_and_launch(
     .build();
 
     // 8. Write thread.json (status = created, pre-execution audit).
-    //    `executor_trust_class` is recorded so the on-disk audit trail
+    //    `effective_trust_class` is recorded so the on-disk audit trail
     //    matches what the launcher used for spawn-gating.
     let meta = ThreadMeta {
         thread_id: thread_id.clone(),
@@ -892,7 +892,7 @@ pub async fn build_and_launch(
         completed_at: None,
         cost: None,
         outputs: None,
-        executor_trust_class: Some(executor_trust_class),
+        effective_trust_class: Some(effective_trust_class),
     };
     let identity = &state.identity;
     super::thread_meta::write_thread_meta(project_path, thread_id, &meta, identity)?;
@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn enforce_trust_blocks_unsigned() {
-        let err = enforce_executor_trust(TrustClass::Unsigned, "directive:my/agent", "directive")
+        let err = enforce_effective_trust(TrustClass::Unsigned, "directive:my/agent", "directive")
             .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("refusing to spawn"));
@@ -1182,7 +1182,7 @@ mod tests {
             TrustClass::TrustedUser,
             TrustClass::UntrustedUserSpace,
         ] {
-            enforce_executor_trust(cls, "directive:x", "directive")
+            enforce_effective_trust(cls, "directive:x", "directive")
                 .unwrap_or_else(|e| panic!("{cls:?} should pass, got: {e}"));
         }
     }

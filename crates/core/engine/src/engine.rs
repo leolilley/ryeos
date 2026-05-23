@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
@@ -16,6 +17,49 @@ use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
 use crate::AI_DIR;
+
+/// Request for an effective, composed item value.
+#[derive(Debug, Clone)]
+pub struct EffectiveItemRequest {
+    pub item_ref: CanonicalRef,
+    pub expected_kind: Option<String>,
+    pub project_root: Option<PathBuf>,
+}
+
+/// Source metadata for an effective item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveItemSource {
+    pub path: PathBuf,
+}
+
+/// Diagnostic emitted while producing an effective item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveItemDiagnostic {
+    pub level: String,
+    pub message: String,
+}
+
+/// Engine-owned effective item response. This is valid for executable
+/// and non-executable kinds; callers decide whether to execute,
+/// render, inspect, or otherwise consume the composed value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveItem {
+    pub requested_ref: String,
+    pub canonical_ref: String,
+    pub kind: String,
+    pub trusted: bool,
+    pub trust_class: crate::resolution::TrustClass,
+    pub root_trust_class: crate::resolution::TrustClass,
+    pub source: EffectiveItemSource,
+    pub provenance: crate::resolution::ResolutionProvenance,
+    pub composed_value: Value,
+    pub derived: std::collections::HashMap<String, Value>,
+    pub policy_facts: std::collections::HashMap<String, Value>,
+    pub diagnostics: Vec<EffectiveItemDiagnostic>,
+}
 
 /// Concrete native engine.
 ///
@@ -244,6 +288,71 @@ impl Engine {
         result
     }
 
+    /// Resolve, verify, compose, and return an effective item value.
+    ///
+    /// Unlike [`Engine::build_plan`], this is intentionally
+    /// non-executing and works for non-executable kinds such as
+    /// `surface` and `client`. It reuses the same resolution pipeline
+    /// and composer registry that launch paths use, so service/API/CLI
+    /// consumers do not grow parallel item semantics.
+    pub fn effective_item(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<EffectiveItem, EngineError> {
+        if let Some(expected) = &request.expected_kind {
+            if expected != &request.item_ref.kind {
+                return Err(EngineError::InvalidMetadata {
+                    canonical_ref: request.item_ref.to_string(),
+                    reason: format!(
+                        "expected kind `{expected}`, got `{}`",
+                        request.item_ref.kind
+                    ),
+                });
+            }
+        }
+
+        let roots = self.resolution_roots(request.project_root.clone());
+        let effective_parsers =
+            self.effective_parser_dispatcher(request.project_root.as_deref())?;
+        let output = crate::resolution::run_effective_item_pipeline(
+            &request.item_ref,
+            &self.kinds,
+            &effective_parsers,
+            &roots,
+            &self.trust_store,
+            &self.composers,
+        )
+        .map_err(|e| EngineError::InvalidMetadata {
+            canonical_ref: request.item_ref.to_string(),
+            reason: format!("effective item resolution failed: {e}"),
+        })?;
+
+        let trust_class = output.effective_trust_class;
+        let trusted = matches!(
+            trust_class,
+            crate::resolution::TrustClass::TrustedSystem
+                | crate::resolution::TrustClass::TrustedUser
+        );
+        let provenance = output.provenance();
+
+        Ok(EffectiveItem {
+            requested_ref: request.item_ref.to_string(),
+            canonical_ref: output.root.resolved_ref.clone(),
+            kind: request.item_ref.kind,
+            trusted,
+            trust_class,
+            root_trust_class: output.root.trust_class,
+            source: EffectiveItemSource {
+                path: output.root.source_path,
+            },
+            provenance,
+            composed_value: output.composed.composed,
+            derived: output.composed.derived,
+            policy_facts: output.composed.policy_facts,
+            diagnostics: Vec::new(),
+        })
+    }
+
     /// Build a normalized execution plan from a verified item.
     ///
     /// Checks execution scope on the principal before building.
@@ -469,6 +578,11 @@ mod tests {
                     format!("{with_contract}composer: handler:ryeos/core/identity\n")
                 }
             }
+        };
+        let yaml_owned = if yaml_owned.contains("effective_trust:") {
+            yaml_owned
+        } else {
+            format!("{yaml_owned}effective_trust:\n  include_references: false\n")
         };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }

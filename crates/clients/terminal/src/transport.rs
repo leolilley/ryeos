@@ -24,9 +24,13 @@ pub enum DaemonRequest {
         project_path: String,
         parameters: serde_json::Value,
     },
-    CancelThread { thread_id: ThreadId },
+    CancelThread {
+        thread_id: ThreadId,
+    },
     /// Resolve an effective surface by canonical ref.
-    GetEffectiveSurface { ref_str: String },
+    GetEffectiveSurface {
+        ref_str: String,
+    },
 }
 
 /// Transport-level response from the daemon.
@@ -65,7 +69,9 @@ pub trait DaemonTransport {
         &self,
         _ref_str: &str,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<serde_json::Value, TransportError>> + Send + '_>,
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, TransportError>> + Send + '_,
+        >,
     > {
         Box::pin(async { Err(TransportError::Transport("not implemented".into())) })
     }
@@ -101,9 +107,7 @@ impl DaemonTransport for MockTransport {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<DaemonResponse, TransportError>> + Send + '_>,
     > {
-        Box::pin(async {
-            Ok(DaemonResponse::Json(serde_json::json!({"status": "mock"})))
-        })
+        Box::pin(async { Ok(DaemonResponse::Json(serde_json::json!({"status": "mock"}))) })
     }
 
     fn poll_snapshot(
@@ -155,14 +159,20 @@ impl DaemonTransport for SignedHttpTransport {
                     Err(e) => Err(TransportError::Daemon(e.to_string())),
                 },
                 DaemonRequest::GetThreads => match self.client.get_threads().await {
-                    Ok(v) => Ok(DaemonResponse::Json(serde_json::to_value(v).unwrap_or_default())),
+                    Ok(v) => Ok(DaemonResponse::Json(
+                        serde_json::to_value(v).unwrap_or_default(),
+                    )),
                     Err(e) => Err(TransportError::Daemon(e.to_string())),
                 },
                 DaemonRequest::Execute {
                     item_ref,
                     project_path,
                     parameters,
-                } => match self.client.execute(&item_ref, &project_path, &parameters).await {
+                } => match self
+                    .client
+                    .execute(&item_ref, &project_path, &parameters)
+                    .await
+                {
                     Ok(v) => {
                         let thread_id = v
                             .get("thread_id")
@@ -179,17 +189,13 @@ impl DaemonTransport for SignedHttpTransport {
                 },
                 DaemonRequest::CancelThread { thread_id } => {
                     let path = format!("/threads/{}/cancel", thread_id.0);
-                    match self
-                        .client
-                        .signed_post(&path, &serde_json::json!({}))
-                        .await
-                    {
+                    match self.client.signed_post(&path, &serde_json::json!({})).await {
                         Ok(_) => Ok(DaemonResponse::Ok),
                         Err(e) => Err(TransportError::Daemon(e.to_string())),
                     }
                 }
                 DaemonRequest::GetEffectiveSurface { ref ref_str } => {
-                    match self.client.resolve_effective_item(ref_str, None).await {
+                    match self.client.resolve_effective_surface(ref_str, None).await {
                         Ok(v) => Ok(DaemonResponse::Json(v)),
                         Err(e) => Err(TransportError::Daemon(e.to_string())),
                     }

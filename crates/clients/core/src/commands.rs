@@ -1,6 +1,6 @@
 //! Affordance system — operator actions backed by UI verbs or Rye invocations.
 //!
-//! Surfaces declare affordances (palette entries, keybindings, contextual actions).
+//! Surfaces declare commands (palette entries, keybindings, contextual actions).
 //! Each affordance invokes either:
 //! - A **UI-local verb** for cockpit behavior (focus, split, quit, etc.)
 //! - A **Rye-native invocation** for daemon behavior (aliases, verbs, operations)
@@ -195,24 +195,24 @@ fn ui_switch(view: ViewKindSpec) -> InvocationSpec {
 }
 
 // ---------------------------------------------------------------------------
-// Merge — built-in + surface affordances
+// Merge — built-in affordances + surface commands
 // ---------------------------------------------------------------------------
 
-/// Merge built-in affordances with surface-declared affordances.
-/// Surface affordances override built-in affordances with the same id.
-/// Surface affordances with unknown invoke kinds are filtered out with warnings.
+/// Merge built-in affordances with surface-declared commands.
+/// Surface commands override built-in affordances with the same id.
+/// Surface commands with unknown invoke kinds are filtered out with warnings.
 pub fn merge_affordances(
-    surface_affordances: &[crate::surface::AffordanceSpec],
+    surface_commands: &[crate::surface::SurfaceCommandSpec],
 ) -> (Vec<Affordance>, Vec<String>) {
     let mut warnings = Vec::new();
     let mut registry: Vec<Affordance> = builtin_affordances();
 
-    for spec in surface_affordances {
+    for spec in surface_commands {
         let invoke = match spec_to_invocation(spec) {
             Some(inv) => inv,
             None => {
                 warnings.push(format!(
-                    "surface affordance '{}' has no invocable target, ignored",
+                    "surface command '{}' has no invocable target, ignored",
                     spec.id
                 ));
                 continue;
@@ -245,9 +245,9 @@ pub fn merge_affordances(
     (registry, warnings)
 }
 
-/// Convert a surface `AffordanceSpec` to an `InvocationSpec`.
-/// Returns None if the affordance has no invocable target.
-fn spec_to_invocation(spec: &crate::surface::AffordanceSpec) -> Option<InvocationSpec> {
+/// Convert a surface `SurfaceCommandSpec` to an `InvocationSpec`.
+/// Returns None if the command has no invocable target.
+fn spec_to_invocation(spec: &crate::surface::SurfaceCommandSpec) -> Option<InvocationSpec> {
     spec.invoke.clone()
 }
 
@@ -705,8 +705,8 @@ mod tests {
     }
 
     #[test]
-    fn merge_affordances_surface_overrides_builtin() {
-        let surface_affs = vec![crate::surface::AffordanceSpec {
+    fn merge_affordances_surface_command_overrides_builtin() {
+        let surface_commands = vec![crate::surface::SurfaceCommandSpec {
             id: "layout.reset".into(),
             label: "Revert".into(),
             category: "Ops".into(),
@@ -717,7 +717,7 @@ mod tests {
             })),
             requires_capabilities: vec!["ui.layout.reset".into()],
         }];
-        let (merged, _) = merge_affordances(&surface_affs);
+        let (merged, _) = merge_affordances(&surface_commands);
         let reset = merged.iter().find(|a| a.id == "layout.reset").unwrap();
         assert_eq!(reset.label, "Revert");
         assert_eq!(reset.category, "Ops");
@@ -725,8 +725,8 @@ mod tests {
     }
 
     #[test]
-    fn merge_affordances_new_from_surface() {
-        let surface_affs = vec![crate::surface::AffordanceSpec {
+    fn merge_affordances_new_surface_command() {
+        let surface_commands = vec![crate::surface::SurfaceCommandSpec {
             id: "thread.cancel".into(),
             label: "Cancel".into(),
             category: "Thread".into(),
@@ -741,7 +741,7 @@ mod tests {
             })),
             requires_capabilities: vec!["thread.cancel".into()],
         }];
-        let (merged, warnings) = merge_affordances(&surface_affs);
+        let (merged, warnings) = merge_affordances(&surface_commands);
         assert!(warnings.is_empty());
         let cancel = merged.iter().find(|a| a.id == "thread.cancel").unwrap();
         assert_eq!(cancel.label, "Cancel");
@@ -749,8 +749,8 @@ mod tests {
     }
 
     #[test]
-    fn merge_affordances_warns_on_no_invoke() {
-        let surface_affs = vec![crate::surface::AffordanceSpec {
+    fn merge_affordances_warns_on_surface_command_without_invoke() {
+        let surface_commands = vec![crate::surface::SurfaceCommandSpec {
             id: "ghost.action".into(),
             label: "Ghost".into(),
             category: "".into(),
@@ -758,7 +758,7 @@ mod tests {
             invoke: None,
             requires_capabilities: Vec::new(),
         }];
-        let (_, warnings) = merge_affordances(&surface_affs);
+        let (_, warnings) = merge_affordances(&surface_commands);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("ghost.action"));
     }
@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn affordance_spec_yaml_roundtrip() {
+    fn surface_command_spec_yaml_roundtrip() {
         let yaml = r#"
 id: thread.cancel
 label: Cancel Thread
@@ -826,7 +826,7 @@ invoke:
 requires_capabilities:
   - thread.cancel
 "#;
-        let spec: crate::surface::AffordanceSpec = serde_yaml::from_str(yaml).unwrap();
+        let spec: crate::surface::SurfaceCommandSpec = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(spec.id, "thread.cancel");
         assert_eq!(spec.label, "Cancel Thread");
         assert!(spec.invoke.is_some());

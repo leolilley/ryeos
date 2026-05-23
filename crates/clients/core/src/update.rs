@@ -461,7 +461,7 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
                 }
                 Key::Enter => {
                     // Execute the first matching affordance through the registry
-                    let affordances = crate::commands::builtin_affordances();
+                    let affordances = model.active_affordances();
                     let matches = crate::commands::filter_affordances(&affordances, query);
                     if let Some(aff) = matches.first() {
                         let (handled, effects) = crate::commands::dispatch_affordance(&aff.invoke, model);
@@ -693,7 +693,7 @@ fn reduce_daemon_event(model: &mut AppModel, event: &DaemonEvent) {
 
 /// Execute an affordance by ID through the affordance registry.
 fn dispatch_affordance_by_id(model: &mut AppModel, affordance_id: &str) -> Vec<Effect> {
-    let affordances = crate::commands::builtin_affordances();
+    let affordances = model.active_affordances();
     let aff = match affordances.iter().find(|a| a.id == affordance_id) {
         Some(a) => a,
         None => return Vec::new(),

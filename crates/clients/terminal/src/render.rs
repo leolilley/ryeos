@@ -12,7 +12,7 @@ use crate::render_text;
 use crossterm::{
     cursor::MoveTo,
     queue,
-    style::{Print, ResetColor, SetAttribute, Attribute},
+    style::{Attribute, Print, ResetColor, SetAttribute},
 };
 use ryeos_tui_core::frame::OverlayType;
 use ryeos_tui_core::text_surface::{Attr, Color as CoreColor};
@@ -64,12 +64,7 @@ impl FrameRenderer {
 
         // Layer 3: Paint tile text surfaces on top of the background
         for tile in &frame.tiles {
-            paint_text_surface(
-                stdout,
-                &tile.cells,
-                tile.rect.x,
-                tile.rect.y,
-            )?;
+            paint_text_surface(stdout, &tile.cells, tile.rect.x, tile.rect.y)?;
         }
 
         // Layer 4: Paint status bar
@@ -92,12 +87,7 @@ impl FrameRenderer {
         for overlay in &frame.overlays {
             // Draw a semi-transparent backdrop behind the overlay
             paint_overlay_backdrop(stdout, &overlay.rect, overlay.overlay_type.clone())?;
-            paint_text_surface(
-                stdout,
-                &overlay.cells,
-                overlay.rect.x,
-                overlay.rect.y,
-            )?;
+            paint_text_surface(stdout, &overlay.cells, overlay.rect.x, overlay.rect.y)?;
         }
 
         // Position cursor at input bar
@@ -117,7 +107,12 @@ fn paint_text_surface(
     use crossterm::style::{SetBackgroundColor, SetForegroundColor};
 
     for y in 0..surface.height {
-        queue!(stdout, MoveTo(offset_x, offset_y + y as u16), ResetColor, SetAttribute(Attribute::Reset))?;
+        queue!(
+            stdout,
+            MoveTo(offset_x, offset_y + y as u16),
+            ResetColor,
+            SetAttribute(Attribute::Reset)
+        )?;
 
         for x in 0..surface.width {
             let cell = surface.get(x, y);
@@ -135,12 +130,18 @@ fn paint_text_surface(
 
             // Set colors
             if cell.fg != CoreColor::Default {
-                queue!(stdout, SetForegroundColor(render_text::to_crossterm_color(cell.fg)))?;
+                queue!(
+                    stdout,
+                    SetForegroundColor(render_text::to_crossterm_color(cell.fg))
+                )?;
             } else {
                 queue!(stdout, ResetColor)?;
             }
             if cell.bg != CoreColor::Default {
-                queue!(stdout, SetBackgroundColor(render_text::to_crossterm_color(cell.bg)))?;
+                queue!(
+                    stdout,
+                    SetBackgroundColor(render_text::to_crossterm_color(cell.bg))
+                )?;
             }
 
             // Set attributes
@@ -173,8 +174,20 @@ fn paint_overlay_backdrop(
     use crossterm::style::{SetBackgroundColor, SetForegroundColor};
 
     // Dim the area behind the overlay with a dark background
-    let bg = crossterm::style::Color::Rgb { r: 0x1d, g: 0x20, b: 0x21 };
-    queue!(stdout, SetBackgroundColor(bg), SetForegroundColor(crossterm::style::Color::Rgb { r: 0x50, g: 0x49, b: 0x45 }))?;
+    let bg = crossterm::style::Color::Rgb {
+        r: 0x1d,
+        g: 0x20,
+        b: 0x21,
+    };
+    queue!(
+        stdout,
+        SetBackgroundColor(bg),
+        SetForegroundColor(crossterm::style::Color::Rgb {
+            r: 0x50,
+            g: 0x49,
+            b: 0x45
+        })
+    )?;
 
     for y in rect.y..rect.y + rect.h {
         queue!(stdout, MoveTo(rect.x, y))?;

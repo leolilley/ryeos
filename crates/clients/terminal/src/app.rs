@@ -153,9 +153,8 @@ async fn run_effects(
                     id: fake_thread_id,
                     item_ref: Some(item_ref.clone()),
                 };
-                let start_event = ryeos_tui_core::update::DaemonEvent::ThreadStarted {
-                    id: fake_thread_id,
-                };
+                let start_event =
+                    ryeos_tui_core::update::DaemonEvent::ThreadStarted { id: fake_thread_id };
                 let user_part = ryeos_tui_core::update::DaemonEvent::TextDelta {
                     thread_id: fake_thread_id,
                     text: format!("{}\n", prompt),
@@ -203,10 +202,15 @@ async fn run_effects(
                     }
                 }
             }
-            Effect::RefreshState => if let Ok(snapshot) = transport.poll_snapshot().await {
-                update::update(model, AppEvent::PollSnapshot(snapshot));
-            },
-            Effect::SendThreadCommand { thread_id, command: _ } => {
+            Effect::RefreshState => {
+                if let Ok(snapshot) = transport.poll_snapshot().await {
+                    update::update(model, AppEvent::PollSnapshot(snapshot));
+                }
+            }
+            Effect::SendThreadCommand {
+                thread_id,
+                command: _,
+            } => {
                 let req = crate::transport::DaemonRequest::CancelThread {
                     thread_id: *thread_id,
                 };

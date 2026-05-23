@@ -1,8 +1,12 @@
-# ryeos:signed:2026-05-22T19:55:07Z:10e864a50d1b6ff3e902adeb2d1fb24e57de37ca1afb29915be2e4540d0a65ba:5z99aUeMA0x2izJczKJyDpeTC/4IVhuR0FHQyWEZt6QvSwXJMfGkrKlx0H7kn3nPS82LH1t8EpvzK26/Q6ayDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T10:47:35Z:05e70e58f40cba1ca85c944b6bcd08c20917e4dd9d8b6b72b2f8ac87a245925b:p32j8n6Y4iEbtZ3u1seE2Mh3/fgiGrEWKkZy03APvqP9HGXQ3dSShKHdLyw9Y3jrSPo6TXjNFKSXsNkzeiP3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
   directory: knowledge
+resolution:
+  - step: resolve_references
+effective_trust:
+  include_references: false
 execution:
   # Op-dispatch execution model. The daemon resolves the requested op
   # (default: `compose`) against the declared operations, validates
@@ -43,8 +47,6 @@ execution:
     root_executable: true
     supports_interrupt: false
     supports_continuation: false
-  resolution:
-    - step: resolve_references
 formats:
   - extensions: [".md"]
     parser: parser:ryeos/core/markdown/frontmatter

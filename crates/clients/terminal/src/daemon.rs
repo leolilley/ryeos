@@ -103,12 +103,12 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let headers = self.sign("GET", path, b"")?;
 
-        let uri: hyper::Uri = url
-            .parse()
-            .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
-                bind: url.clone(),
-                detail: format!("invalid URL: {e}"),
-            })?;
+        let uri: hyper::Uri =
+            url.parse()
+                .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
+                    bind: url.clone(),
+                    detail: format!("invalid URL: {e}"),
+                })?;
 
         let host = uri.host().unwrap_or("127.0.0.1");
         let port = uri.port_u16().unwrap_or(80);
@@ -129,12 +129,12 @@ impl DaemonClient {
                 detail: format!("failed to build request: {e}"),
             })?;
 
-        let stream = tokio::net::TcpStream::connect(&bind)
-            .await
-            .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
+        let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+            ryeos_cli::error::CliTransportError::Unreachable {
                 bind: bind.clone(),
                 detail: e.to_string(),
-            })?;
+            }
+        })?;
 
         let io = hyper_util::rt::TokioIo::new(stream);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
@@ -150,13 +150,12 @@ impl DaemonClient {
             }
         });
 
-        let resp = sender
-            .send_request(req)
-            .await
-            .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
+        let resp = sender.send_request(req).await.map_err(|e| {
+            ryeos_cli::error::CliTransportError::Unreachable {
                 bind: bind.clone(),
                 detail: format!("request send: {e}"),
-            })?;
+            }
+        })?;
 
         let status = resp.status();
         let body_bytes = collect_body(resp.into_body()).await?;
@@ -219,18 +218,13 @@ impl DaemonClient {
             "parameters": parameters,
             "stream": true,
         });
-        let url = format!(
-            "{}/execute",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/execute", self.base_url.trim_end_matches('/'));
         let body_bytes = serde_json::to_vec(&body)?;
         let headers = self.sign("POST", "/execute", &body_bytes)?;
 
-        let uri: hyper::Uri = url
-            .parse()
-            .map_err(|e| ClientError::DaemonDown {
-                url: format!("invalid URL: {e}"),
-            })?;
+        let uri: hyper::Uri = url.parse().map_err(|e| ClientError::DaemonDown {
+            url: format!("invalid URL: {e}"),
+        })?;
         let host = uri.host().unwrap_or("127.0.0.1");
         let port = uri.port_u16().unwrap_or(80);
         let bind = format!("{host}:{port}");
@@ -250,27 +244,26 @@ impl DaemonClient {
                 url: format!("build request: {e}"),
             })?;
 
-        let stream = tokio::net::TcpStream::connect(&bind).await
-            .map_err(|e| ClientError::Dispatch(
-                ryeos_cli::error::CliDispatchError::Transport(
-                    ryeos_cli::error::CliTransportError::Unreachable {
-                        bind: bind.clone(),
-                        detail: e.to_string(),
-                    },
-                ),
-            ))?;
+        let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+            ClientError::Dispatch(ryeos_cli::error::CliDispatchError::Transport(
+                ryeos_cli::error::CliTransportError::Unreachable {
+                    bind: bind.clone(),
+                    detail: e.to_string(),
+                },
+            ))
+        })?;
 
         let io = hyper_util::rt::TokioIo::new(stream);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
-            .map_err(|e| ClientError::Dispatch(
-                ryeos_cli::error::CliDispatchError::Transport(
+            .map_err(|e| {
+                ClientError::Dispatch(ryeos_cli::error::CliDispatchError::Transport(
                     ryeos_cli::error::CliTransportError::Unreachable {
                         bind: bind.clone(),
                         detail: format!("HTTP handshake: {e}"),
                     },
-                ),
-            ))?;
+                ))
+            })?;
 
         tokio::spawn(async move {
             if let Err(e) = conn.await {
@@ -278,16 +271,14 @@ impl DaemonClient {
             }
         });
 
-        let resp = sender.send_request(req)
-            .await
-            .map_err(|e| ClientError::Dispatch(
-                ryeos_cli::error::CliDispatchError::Transport(
-                    ryeos_cli::error::CliTransportError::Unreachable {
-                        bind,
-                        detail: format!("send request: {e}"),
-                    },
-                ),
-            ))?;
+        let resp = sender.send_request(req).await.map_err(|e| {
+            ClientError::Dispatch(ryeos_cli::error::CliDispatchError::Transport(
+                ryeos_cli::error::CliTransportError::Unreachable {
+                    bind,
+                    detail: format!("send request: {e}"),
+                },
+            ))
+        })?;
 
         Ok(SseStream::new(resp.into_body()))
     }
@@ -316,23 +307,27 @@ impl DaemonClient {
         endpoint: &str,
         params: &serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
-        self.signed_post(
-            &format!("/services/{}", endpoint),
-            params,
-        )
-        .await
+        self.signed_post(&format!("/services/{}", endpoint), params)
+            .await
     }
 
-    /// Resolve an effective item via the daemon's items.effective service.
-    pub async fn resolve_effective_item(
+    /// Resolve an effective surface via the daemon's items.effective service.
+    pub async fn resolve_effective_surface(
         &self,
         canonical_ref: &str,
         project_path: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
         let params = if let Some(pp) = project_path {
-            serde_json::json!({ "canonical_ref": canonical_ref, "project_path": pp })
+            serde_json::json!({
+                "canonical_ref": canonical_ref,
+                "expected_kind": "surface",
+                "project_path": pp,
+            })
         } else {
-            serde_json::json!({ "canonical_ref": canonical_ref })
+            serde_json::json!({
+                "canonical_ref": canonical_ref,
+                "expected_kind": "surface",
+            })
         };
         self.call_service("items.effective", &params).await
     }
@@ -445,9 +440,7 @@ fn parse_thread_summaries(value: &serde_json::Value) -> Vec<ThreadSummary> {
         .iter()
         .filter_map(|t| {
             Some(ThreadSummary {
-                id: ryeos_tui_core::ids::ThreadId::new(
-                    t.get("id")?.as_str()?.parse().ok()?,
-                ),
+                id: ryeos_tui_core::ids::ThreadId::new(t.get("id")?.as_str()?.parse().ok()?),
                 status: t
                     .get("status")
                     .and_then(|v| v.as_str())

@@ -67,6 +67,9 @@ impl From<LaunchAugmentationError> for DispatchError {
             LaunchAugmentationError::ResolutionFailed { .. } => {
                 DispatchError::InvalidRef("launch_augmentation".to_string(), e.to_string())
             }
+            LaunchAugmentationError::EffectiveTrustRejected(_) => {
+                DispatchError::InvalidRef("launch_augmentation".to_string(), e.to_string())
+            }
             LaunchAugmentationError::ChildBootstrap { .. }
             | LaunchAugmentationError::ChildFailed { .. }
             | LaunchAugmentationError::RuntimeRegistry(_) => DispatchError::SubprocessRunFailed {
@@ -95,6 +98,9 @@ pub enum LaunchAugmentationError {
         #[source]
         source: ryeos_engine::resolution::ResolutionError,
     },
+
+    #[error("effective trust rejected: {0}")]
+    EffectiveTrustRejected(String),
 
     #[error("parse canonical ref: {0}")]
     ParseRef(String),

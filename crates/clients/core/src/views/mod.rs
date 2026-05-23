@@ -244,7 +244,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             );
 
             // Filter and display affordances
-            let all_affordances = crate::commands::builtin_affordances();
+            let all_affordances = model.active_affordances();
             let matches = crate::commands::filter_affordances(&all_affordances, query);
 
             for (i, aff) in matches.iter().take(h.saturating_sub(5)).enumerate() {

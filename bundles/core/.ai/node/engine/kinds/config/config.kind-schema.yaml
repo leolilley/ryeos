@@ -1,8 +1,11 @@
-# ryeos:signed:2026-05-22T19:55:01Z:2d549d41efb7f38e5fd6d8133c81027ea04c5b45d080176225645beacbc26882:7zYhAdi6T8WHnwIspScnowifDRgmmpdToKp8ZnydEakkvx1v6Hecn2NukqC8Nc0HOkoY0cpPMSrbinpCMdX0BQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T11:10:57Z:d73c1cfe214d8c63babf71e4b8efa765be0dd4151bd19f23dfe28af8f3c2b73c:0nUd0zkm3W+CajwTJdgANwx3u0HlTxRCpAkMl3hSVjnRYhRJMNfZk36tExgyZL8GSFOtWkEnjp5ReK4chbczCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/config"
 version: "1.0.0"
 location:
   directory: config
+effective_trust:
+  include_references: false
+resolution: []
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

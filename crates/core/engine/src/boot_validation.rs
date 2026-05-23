@@ -692,6 +692,49 @@ composed_value_contract:
     }
 
     #[test]
+    fn executable_kind_rejects_execution_resolution() {
+        let root = tempdir();
+        let sk = signing_key();
+        let ts = trust_store(&sk);
+        let yaml = "\
+location:
+  directory: directives
+resolution:
+  - step: resolve_extends_chain
+    field: extends
+effective_trust:
+  include_references: false
+execution:
+  delegate:
+    via: runtime_registry
+  resolution:
+    - step: resolve_references
+      field: references
+formats:
+  - extensions: [\".md\"]
+    parser: parser:ryeos/core/markdown/directive
+    signature:
+      prefix: \"<!--\"
+      suffix: \"-->\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+        let dir = root.join("directive");
+        fs::create_dir_all(&dir).unwrap();
+        let signed = lillux::signature::sign_content(yaml, &sk, "#", None);
+        fs::write(dir.join("directive.kind-schema.yaml"), signed).unwrap();
+
+        let err = KindRegistry::load_base(&[root], &ts).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("execution.resolution") && msg.contains("top-level `resolution:`"),
+            "expected execution.resolution rejection, got: {msg}"
+        );
+    }
+
+    #[test]
     fn validate_boot_parser_ref_resolves_and_handler_checked() {
         let parser_ref = "parser:ryeos/core/markdown/frontmatter";
         let kinds = kinds_with_directive(parser_ref);
