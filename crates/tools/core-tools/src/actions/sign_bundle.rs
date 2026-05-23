@@ -32,6 +32,9 @@ use ryeos_engine::AI_DIR;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignBundleReport {
+    /// Items already valid and left untouched.
+    pub validated: Vec<ItemOutcome>,
+    /// Items (re-)signed because unsigned, invalid, wrong signer, or content changed.
     pub signed: Vec<ItemOutcome>,
     pub failed: Vec<ItemOutcome>,
 }
@@ -41,8 +44,8 @@ impl SignBundleReport {
         self.failed.is_empty()
     }
 
-    pub fn total(&self) -> usize {
-        self.signed.len() + self.failed.len()
+    pub fn total(self) -> usize {
+        self.validated.len() + self.signed.len() + self.failed.len()
     }
 }
 
@@ -126,6 +129,7 @@ pub fn sign_bundle_items(
     }
 
     let mut report = SignBundleReport {
+        validated: Vec::new(),
         signed: Vec::new(),
         failed: Vec::new(),
     };
@@ -160,7 +164,11 @@ pub fn sign_bundle_items(
                 &parser_dispatcher,
                 signing_key,
             ) {
-                Ok(()) => report.signed.push(ItemOutcome {
+                Ok(SignResult::Unchanged) => report.validated.push(ItemOutcome {
+                    item_ref: display_ref,
+                    error: None,
+                }),
+                Ok(SignResult::Signed) => report.signed.push(ItemOutcome {
                     item_ref: display_ref,
                     error: None,
                 }),
@@ -175,13 +183,21 @@ pub fn sign_bundle_items(
     Ok(report)
 }
 
+/// Outcome of signing a single item.
+enum SignResult {
+    /// Already valid, left untouched.
+    Unchanged,
+    /// (Re-)signed in place.
+    Signed,
+}
+
 fn sign_one_item(
     file_path: &Path,
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
     ai_root: &Path,
     parsers: &ParserDispatcher,
     signing_key: &lillux::crypto::SigningKey,
-) -> Result<()> {
+) -> Result<SignResult> {
     let content =
         fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
 
@@ -223,8 +239,24 @@ fn sign_one_item(
         )
     })?;
 
+    // Strip existing signature to get the canonical body
+    let envelope = ryeos_engine::contracts::SignatureEnvelope {
+        prefix: source_format.signature.prefix.clone(),
+        suffix: source_format.signature.suffix.clone(),
+        after_shebang: source_format.signature.after_shebang,
+    };
+    let stripped = lillux::signature::strip_signature_lines_with_envelope(
+        &content,
+        &envelope.prefix,
+        envelope.suffix.as_deref(),
+    );
+
+    // Check if the existing signature is already valid for this body and signer.
+    if is_already_validly_signed(&content, &stripped, signing_key, &envelope) {
+        return Ok(SignResult::Unchanged);
+    }
+
     // Sign in place (atomic)
-    let stripped = lillux::signature::strip_signature_lines(&content);
     let signed = lillux::signature::sign_content(
         &stripped,
         signing_key,
@@ -237,7 +269,44 @@ fn sign_one_item(
     fs::rename(&tmp, file_path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), file_path.display()))?;
 
-    Ok(())
+    Ok(SignResult::Signed)
+}
+
+/// Check whether `existing` (the full file content) already carries a
+/// valid signature for `body` (the stripped content) signed by `signing_key`.
+///
+/// Returns true only when all three conditions hold:
+///   1. the parsed header's content hash matches the body,
+///   2. the signer fingerprint matches the current key, and
+///   3. the signature verifies against the hash.
+fn is_already_validly_signed(
+    existing: &str,
+    body: &str,
+    signing_key: &lillux::crypto::SigningKey,
+    envelope: &ryeos_engine::contracts::SignatureEnvelope,
+) -> bool {
+    let Some(header) =
+        ryeos_engine::item_resolution::parse_signature_header(existing, envelope)
+    else {
+        return false;
+    };
+
+    let expected_hash = lillux::signature::content_hash(body);
+    if header.content_hash != expected_hash {
+        return false;
+    }
+
+    let verifying_key = signing_key.verifying_key();
+    let expected_fp = lillux::signature::compute_fingerprint(&verifying_key);
+    if header.signer_fingerprint != expected_fp {
+        return false;
+    }
+
+    lillux::signature::verify_signature(
+        &header.content_hash,
+        &header.signature_b64,
+        &verifying_key,
+    )
 }
 
 /// Derive a bare-id from a file path relative to its kind directory,
