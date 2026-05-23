@@ -7,6 +7,7 @@ members = [
     "crates/core/node",
     "crates/bin/cli",
     "crates/bin/daemon",
+    "crates/bin/web-launcher",
     "crates/clients/core",
     "crates/clients/terminal",
     "crates/clients/web",

@@ -82,6 +82,8 @@ echo "[populate-bundles] building all release binaries (workspace)…"
   -p ryeos-cli \
   -p ryeos-tools \
   -p ryeos-tui-terminal
+cargo build --release \
+  -p ryeos-web-launcher
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 
@@ -100,6 +102,7 @@ install -m 0755 \
   "$TARGET/release/ryeos-graph-runtime" \
   "$TARGET/release/ryeos-knowledge-runtime" \
   "$TARGET/release/ryeos-tui" \
+  "$TARGET/release/ryeos-web-launcher" \
   "$TARGET/release/rye-composer-extends-chain" \
   "$TARGET/release/rye-composer-graph-permissions" \
   "$STD_BIN/"

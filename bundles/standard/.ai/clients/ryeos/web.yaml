@@ -1,0 +1,22 @@
+# ryeos:signed:2026-05-23T14:30:39Z:85f7982bd514c585d811d0c1e18d9ccefc2fdcb2a7c99d2e747bd2214a338713:0n6qjG0IsT4X56vw9uighagkoUbu/jCQznxisf5QXcBdxJGczUVBwidR6Et4RrmLBhkAC3b/v7BIcCD1LdshBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: client
+name: web
+version: "1.0.0"
+description: Browser surface renderer for RyeOS
+
+serves:
+  kind: surface
+  renderer: browser
+
+launch:
+  mode: cli_exec
+  binary_ref: bin/{triple}/ryeos-web-launcher
+  args:
+    surface: "--surface"
+    read_only: "--read-only"
+    project: "--project"
+
+capabilities:
+  requires_daemon: true
+  owns_tty: false
+  interactive: true
