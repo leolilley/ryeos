@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-23T07:06:19Z:d40de9ecf014f3c9fa5d55a756792eb699ec244e8fda9ed3807814d3f913f362:msEaYAwAPee2H3tR0YThk/6LttDeo9SzkBuv+vqdE7moRW0Nnub8fyRrqSDGqixuUSFoB9yfso8fImoyFBBaDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: sign
+availability: offline
+required_caps: ["ryeos.execute.service.sign"]
+schema:
+  item_ref: string
+  project: string?
+  source: string?
+description: "Cryptographically sign an item by canonical ref (offline)"

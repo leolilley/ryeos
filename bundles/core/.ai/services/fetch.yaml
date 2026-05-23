@@ -1,9 +1,11 @@
-# ryeos:signed:2026-05-22T19:55:00Z:b9a30130fe900f60f6d3f9aa71ed2d01a755cdf570f6f57cf9f495c28dde0015:xVA8/4axcu6dP9ZHzrQv6Y2n8xKOZ5dm5oNjYyWo8od2iyRgnKhh0QlIkUVumsJ6NX44aybMY+JaYSB4x93xAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T07:06:33Z:02e4a115b62bbd2ae7e1640108c793763bcd162996328b02c2ec4974e93c84fe:FkjEWwFcFszfNCpgp1bwMluKMNqYLZHoHm8FWYxhcwXbIDdLWpt0Va4ZMRg0Du9Fpw4NVIIPHe+McZakEv4sBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: service
 endpoint: fetch
+availability: offline
 required_caps: ["ryeos.execute.service.fetch"]
 schema:
   item_ref: string
   with_content: boolean?
   verify: boolean?
+  project: string?
 description: "Resolve, optionally verify, and read an item via the engine"

@@ -118,7 +118,17 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // 6. Token dispatch — send tokens to daemon, it resolves via alias
+    // 6. Descriptor-driven offline dispatch.
+    //    For commands whose service descriptor declares availability: offline,
+    //    run the in-process handler. Returns None to fall through to daemon.
+    if let Some(result) =
+        crate::offline_dispatch::try_offline_dispatch(&cli.rest, &system_space_dir, &body_project_path)?
+    {
+        print_result(result);
+        return Ok(());
+    }
+
+    // 7. Token dispatch — send tokens to daemon, it resolves via alias
     //    registry and binds tail parameters server-side.
     //
     //    For remote verbs that take a project root, CLI-side rewrite injects a canonical

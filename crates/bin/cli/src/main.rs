@@ -6,6 +6,7 @@ mod error;
 mod exit;
 mod help;
 mod local_verbs;
+mod offline_dispatch;
 mod project_resolve;
 #[cfg(test)]
 mod test_env;

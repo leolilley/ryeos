@@ -1,7 +1,7 @@
-//! CLI help — static + dynamic alias discovery.
+//! CLI help — static lifecycle section + dynamic alias discovery.
 //!
-//! `ryeos help` prints a static overview of built-in verbs and, if the
-//! system space is accessible, appends a summary of installed aliases.
+//! `ryeos help` prints lifecycle verbs (always available) and discovers
+//! the rest from installed bundle descriptors on disk. No daemon required.
 //! `ryeos help <verb>` queries the daemon for alias info via the same
 //! token dispatch path with `validate_only: true`.
 
@@ -75,29 +75,13 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
                 .push((tokens_str.clone(), description.clone()));
         }
 
-        writeln!(out, "INSTALLED COMMANDS (from bundles):")?;
+        writeln!(out, "COMMANDS (from bundles):")?;
         for (prefix, aliases) in &groups {
             writeln!(out, "  [{}]", prefix)?;
             for (tokens_str, description) in aliases {
                 writeln!(out, "    {:<28} {}", tokens_str, description)?;
             }
         }
-        writeln!(out)?;
-    } else {
-        // Fallback: static list when no bundles are discovered
-        writeln!(out, "DAEMON COMMANDS (require running daemon):")?;
-        writeln!(
-            out,
-            "  {:<30} {}",
-            "identity public-key", "Show node public identity"
-        )?;
-        writeln!(out, "  {:<30} {}", "sign", "Sign a bundle item")?;
-        writeln!(out, "  {:<30} {}", "verify", "Verify a bundle item")?;
-        writeln!(out, "  {:<30} {}", "fetch", "Fetch an item")?;
-        writeln!(out, "  {:<30} {}", "rebuild", "Rebuild the bundle manifest")?;
-        writeln!(out, "  {:<30} {}", "bundle install", "Install a bundle")?;
-        writeln!(out, "  {:<30} {}", "bundle list", "List installed bundles")?;
-        writeln!(out, "  {:<30} {}", "bundle remove", "Remove a bundle")?;
         writeln!(out)?;
     }
 
@@ -133,7 +117,7 @@ fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String
         if !aliases_dir.is_dir() {
             continue;
         }
-        let Ok(alias_files) = std::fs::read_dir(&aliases_dir) else {
+        let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
             continue;
         };
 
@@ -531,6 +515,21 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(
                 out,
                 "  --key value      Heuristic flag binding (hyphens normalised to underscores)"
+            )?;
+        }
+        Some("sign") => {
+            writeln!(out, "ryeos sign — Sign a RyeOS item by canonical ref")?;
+            writeln!(out)?;
+            writeln!(out, "USAGE: ryeos sign <item_ref> [OPTIONS]")?;
+            writeln!(out)?;
+            writeln!(out, "OPTIONS:")?;
+            writeln!(
+                out,
+                "  --project <DIR>       Project root (parent of .ai/); default: cwd"
+            )?;
+            writeln!(
+                out,
+                "  --source <SOURCE>     Where to look: project (default) or user"
             )?;
         }
         Some(other) => {
