@@ -13,6 +13,7 @@ use ryeos_scheduler::ReloadSignal;
 
 use crate::browser_session::BrowserSessionStore;
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
+use crate::session_bus::SessionBus;
 use crate::command_service::CommandService;
 use crate::config::Config;
 use crate::engine_cache::EngineCache;
@@ -59,6 +60,9 @@ pub struct AppState {
     /// Sessions are created via launch tokens and validated by the
     /// `browser_session` auth invoker.
     pub browser_sessions: Arc<BrowserSessionStore>,
+    /// Per-session event bus for `/ui/events/session/{id}` SSE streams.
+    /// Producers publish domain events; the session_events route subscribes.
+    pub session_bus: Arc<SessionBus>,
     pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,

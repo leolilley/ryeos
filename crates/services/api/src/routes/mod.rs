@@ -10,6 +10,7 @@ pub mod matcher;
 pub mod parsed_ref;
 pub mod reload;
 pub mod response_modes;
+pub mod stream_envelope;
 pub mod webhook_dedupe;
 use std::collections::HashMap;
 use std::sync::Arc;

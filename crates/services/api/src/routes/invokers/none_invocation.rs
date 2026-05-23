@@ -141,6 +141,7 @@ mod tests {
             callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
             browser_sessions: Arc::new(ryeos_app::browser_session::BrowserSessionStore::new()),
+            session_bus: Arc::new(ryeos_app::session_bus::SessionBus::new()),
             write_barrier: Arc::new(write_barrier),
             started_at: std::time::Instant::now(),
             started_at_iso: String::new(),
