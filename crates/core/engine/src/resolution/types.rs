@@ -199,7 +199,7 @@ impl KindComposedView {
 /// `root` is the resolved item itself; runtimes consume `root.raw_content`
 /// as their own item body. `ancestors` is the bottom-up extends chain
 /// (root excluded), each ancestor inlining its verified bytes —
-/// no separate payload map. `executor_trust_class` is the daemon-computed
+/// no separate payload map. `effective_trust_class` is the daemon-computed
 /// weakest-link fold over root + ancestors. `composed` carries the
 /// daemon-side composed view (Phase 2) when a composer is registered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,13 +222,108 @@ pub struct ResolutionOutput {
     pub referenced_items: Vec<ResolvedAncestor>,
     /// Per-step metadata (what each step computed).
     pub step_outputs: HashMap<String, serde_json::Value>,
-    /// Daemon-computed executor trust posture: weakest of
+    /// Daemon-computed effective trust posture: weakest of
     /// `root.trust_class` and every `ancestors[i].trust_class`.
     /// Runtimes consume this directly; never recompute.
-    pub executor_trust_class: TrustClass,
+    pub effective_trust_class: TrustClass,
     /// Daemon-side composed view; `None` when no composer is registered
     /// for the kind. Phase 2 fills the `Directive` variant.
     pub composed: KindComposedView,
+}
+
+impl ResolutionOutput {
+    /// Structured provenance graph for effective-item consumers and
+    /// execution policy. It deliberately excludes `raw_content`; this is
+    /// audit/provenance metadata, not another payload channel.
+    pub fn provenance(&self) -> ResolutionProvenance {
+        ResolutionProvenance {
+            root: ResolutionProvenanceNode::from(&self.root),
+            ancestors: self
+                .ancestors
+                .iter()
+                .map(ResolutionProvenanceNode::from)
+                .collect(),
+            references: self
+                .references_edges
+                .iter()
+                .map(ResolutionProvenanceEdge::from)
+                .collect(),
+            referenced_items: self
+                .referenced_items
+                .iter()
+                .map(ResolutionProvenanceNode::from)
+                .collect(),
+        }
+    }
+}
+
+/// Payload-free provenance for a resolved effective item.
+///
+/// The root and ancestor list form the effective inheritance chain;
+/// `references` and `referenced_items` carry lateral graph provenance
+/// for kinds that declare `resolve_references`. Trust folding is a
+/// policy decision: `ResolutionOutput.effective_trust_class` folds root
+/// + ancestors; reference consumers inspect reference node/edge trust
+/// explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolutionProvenance {
+    pub root: ResolutionProvenanceNode,
+    pub ancestors: Vec<ResolutionProvenanceNode>,
+    pub references: Vec<ResolutionProvenanceEdge>,
+    pub referenced_items: Vec<ResolutionProvenanceNode>,
+}
+
+/// One provenance node in a resolved effective item graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolutionProvenanceNode {
+    pub requested_id: String,
+    pub resolved_ref: String,
+    pub source_path: PathBuf,
+    pub trust_class: TrustClass,
+    pub alias_resolution: Option<AliasHop>,
+    pub added_by: ResolutionStepName,
+    pub raw_content_digest: String,
+}
+
+impl From<&ResolvedAncestor> for ResolutionProvenanceNode {
+    fn from(item: &ResolvedAncestor) -> Self {
+        Self {
+            requested_id: item.requested_id.clone(),
+            resolved_ref: item.resolved_ref.clone(),
+            source_path: item.source_path.clone(),
+            trust_class: item.trust_class,
+            alias_resolution: item.alias_resolution.clone(),
+            added_by: item.added_by,
+            raw_content_digest: item.raw_content_digest.clone(),
+        }
+    }
+}
+
+/// One lateral reference edge in the provenance graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolutionProvenanceEdge {
+    pub from_ref: String,
+    pub from_source_path: PathBuf,
+    pub to_ref: String,
+    pub to_source_path: PathBuf,
+    pub trust_class: TrustClass,
+    pub added_by: ResolutionStepName,
+}
+
+impl From<&ResolutionEdge> for ResolutionProvenanceEdge {
+    fn from(edge: &ResolutionEdge) -> Self {
+        Self {
+            from_ref: edge.from_ref.clone(),
+            from_source_path: edge.from_source_path.clone(),
+            to_ref: edge.to_ref.clone(),
+            to_source_path: edge.to_source_path.clone(),
+            trust_class: edge.trust_class,
+            added_by: edge.added_by,
+        }
+    }
 }
 
 /// Error type for resolution pipeline.
@@ -338,8 +433,8 @@ impl std::fmt::Display for ResolutionError {
 impl std::error::Error for ResolutionError {}
 
 impl TrustClass {
-    /// Strict ranking, strongest → weakest. Used by `execution_trust`
-    /// to fold an extends chain into a single executor scalar.
+    /// Strict ranking, strongest → weakest. Used by `effective_trust`
+    /// to fold an extends chain into a single effective scalar.
     pub fn strength(self) -> u8 {
         match self {
             TrustClass::TrustedSystem => 3,
@@ -358,9 +453,9 @@ impl TrustClass {
     }
 }
 
-/// Reduce the executor's trust posture across the extends chain.
+/// Reduce the effective item's trust posture across the extends chain.
 ///
-/// Execution trust is the **weakest** trust class observed across the
+/// Effective trust is the **weakest** trust class observed across the
 /// root item and every ancestor in `chain`. The intuition: when a child
 /// inherits behaviour from a parent, the child can be no more trusted
 /// than the least-trusted link it depends on for its definition.
@@ -368,11 +463,11 @@ impl TrustClass {
 /// Reference edges intentionally retain their per-edge `trust_class` and
 /// are NOT folded in here — references are lateral and the subject
 /// enforces sandbox per-reference at use time, not by collapsing them
-/// into the executor scalar.
+/// into the effective scalar.
 ///
 /// Order (strongest → weakest):
 /// `TrustedSystem` > `TrustedUser` > `UntrustedUserSpace` > `Unsigned`.
-pub fn execution_trust(root: TrustClass, chain: &[ResolvedAncestor]) -> TrustClass {
+pub fn effective_trust(root: TrustClass, chain: &[ResolvedAncestor]) -> TrustClass {
     let mut weakest = root;
     for hop in chain {
         if hop.trust_class.strength() < weakest.strength() {
@@ -401,37 +496,37 @@ mod tests {
     }
 
     #[test]
-    fn execution_trust_picks_weakest_in_chain() {
+    fn effective_trust_picks_weakest_in_chain() {
         let chain = vec![
             ancestor(TrustClass::TrustedSystem),
             ancestor(TrustClass::Unsigned),
             ancestor(TrustClass::TrustedUser),
         ];
         assert_eq!(
-            execution_trust(TrustClass::TrustedSystem, &chain),
+            effective_trust(TrustClass::TrustedSystem, &chain),
             TrustClass::Unsigned
         );
     }
 
     #[test]
-    fn execution_trust_returns_root_when_chain_empty() {
+    fn effective_trust_returns_root_when_chain_empty() {
         assert_eq!(
-            execution_trust(TrustClass::TrustedUser, &[]),
+            effective_trust(TrustClass::TrustedUser, &[]),
             TrustClass::TrustedUser
         );
     }
 
     #[test]
-    fn execution_trust_root_can_be_weakest() {
+    fn effective_trust_root_can_be_weakest() {
         let chain = vec![ancestor(TrustClass::TrustedSystem)];
         assert_eq!(
-            execution_trust(TrustClass::Unsigned, &chain),
+            effective_trust(TrustClass::Unsigned, &chain),
             TrustClass::Unsigned
         );
     }
 
     #[test]
-    fn execution_trust_ranking_order() {
+    fn effective_trust_ranking_order() {
         // TrustedSystem > TrustedUser > UntrustedUserSpace > Unsigned
         let cases = [
             (
@@ -451,7 +546,7 @@ mod tests {
             ),
         ];
         for (a, b, expected) in cases {
-            assert_eq!(execution_trust(a, &[ancestor(b)]), expected);
+            assert_eq!(effective_trust(a, &[ancestor(b)]), expected);
         }
     }
 }

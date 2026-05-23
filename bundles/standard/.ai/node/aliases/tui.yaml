@@ -1,0 +1,7 @@
+category: "aliases"
+section: aliases
+tokens: ["tui"]
+verb: tui
+description: "Open the terminal RyeOS cockpit"
+positional_field: surface
+project_resolution: optional

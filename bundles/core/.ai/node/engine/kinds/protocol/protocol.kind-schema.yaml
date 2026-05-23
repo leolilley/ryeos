@@ -1,8 +1,11 @@
-# ryeos:signed:2026-05-23T09:45:28Z:20f3c4b91a536772896a734810621eaceffbd51136ac071de40c1ab2476d43f1:i8/4wGhRlOGK3CyCfuzPT54CjdBPbAJEMvHsVV36QjUiDWJqrWObcgFJlyPfB/yLHmTLLg/Ksn6Ps0xelsUeCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T11:10:57Z:74c88591ae38490c0a248f3783dba772a037a8f80925543fb757b45020093f9f:xG6001CijsVTD0ZJ8uTEp6Pbda8UAPURlXnVYHDz9coyed87NB/E2wBV6gXMIxWmf++A1hisGOOPsMVBWyPVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/protocol"
 version: "1.0.0"
 location:
   directory: protocols
+effective_trust:
+  include_references: false
+resolution: []
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

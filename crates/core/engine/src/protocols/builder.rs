@@ -427,7 +427,7 @@ mod tests {
                 ancestors: vec![],
                 references_edges: vec![],
                 step_outputs: HashMap::new(),
-                executor_trust_class: TrustClass::Unsigned,
+                effective_trust_class: TrustClass::Unsigned,
                 composed: crate::resolution::KindComposedView::identity(serde_json::json!({})),
                 referenced_items: vec![],
             },

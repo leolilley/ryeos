@@ -7,14 +7,17 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lillux::crypto::SigningKey;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
+use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::KindRegistry;
+use ryeos_engine::parsers::ParserRegistry;
 use ryeos_engine::parsers::{ParserDescriptor, ParserDispatcher};
-use ryeos_engine::resolution::run_resolution_pipeline;
+use ryeos_engine::resolution::{run_resolution_pipeline, ResolutionError};
 use ryeos_engine::test_support::load_live_handler_registry;
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 use ryeos_engine::{contracts::ItemSpace, item_resolution::ResolutionRoots};
@@ -98,6 +101,9 @@ fn sign_yaml(yaml: &str) -> String {
         if !yaml_owned.contains("composer:") {
             yaml_owned.push_str("composer: handler:ryeos/core/identity\n");
         }
+        if !yaml_owned.contains("effective_trust:") {
+            yaml_owned.push_str("effective_trust:\n  include_references: false\n");
+        }
     }
     lillux::signature::sign_content(&yaml_owned, &signing_key(), "#", None)
 }
@@ -109,22 +115,41 @@ fn write_signed_yaml(path: &Path, yaml: &str) {
     fs::write(path, sign_yaml(yaml)).unwrap();
 }
 
+fn forge_signature_bytes_but_keep_trusted_fingerprint(content: &str) -> String {
+    let mut lines = content.lines();
+    let sig_line = lines.next().expect("signed content has signature line");
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    let mut parts = sig_line.split(':').collect::<Vec<_>>();
+    assert!(
+        parts.len() >= 6,
+        "unexpected signature line shape: {sig_line}"
+    );
+    let sig_idx = parts.len() - 2;
+    parts[sig_idx] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+    format!("{}\n{}\n", parts.join(":"), rest)
+}
+
 const NODE_SCHEMA: &str = "\
 location:
   directory: nodes
+resolution:
+  - step: resolve_references
+    field: refs
+    max_depth: 3
 formats:
   - extensions: [\".yaml\"]
     parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: \"#\"
 execution:
-  thread_profile: node_run
+  thread_profile:
+    name: node_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   delegate:
     via: runtime_registry
-  resolution:
-    - step: resolve_references
-      field: refs
-      max_depth: 3
 ";
 
 fn write_node_schema(kinds_dir: &Path) {
@@ -198,9 +223,44 @@ fn references_bfs_does_not_drop_edges_on_long_path_first() {
     );
 }
 
+#[test]
+fn trusted_fingerprint_with_bogus_signature_is_rejected() {
+    let project_dir = tempdir();
+    let kinds_dir = tempdir();
+    write_node_schema(&kinds_dir);
+
+    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store()).unwrap();
+
+    let nodes_dir = project_dir.join(".ai").join("nodes");
+    fs::create_dir_all(&nodes_dir).unwrap();
+    let valid = sign_yaml("refs: []\n");
+    fs::write(
+        nodes_dir.join("root.yaml"),
+        forge_signature_bytes_but_keep_trusted_fingerprint(&valid),
+    )
+    .unwrap();
+
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let parsers = ParserDispatcher::new(
+        ParserRegistry::from_entries(vec![]),
+        Arc::new(HandlerRegistry::empty()),
+    );
+    let trust = trust_store();
+    let item = CanonicalRef::parse("node:root").unwrap();
+    let composers = ComposerRegistry::new();
+
+    let err = run_resolution_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
+        .expect_err("bogus signature for trusted fingerprint must fail resolution");
+    assert!(
+        matches!(err, ResolutionError::IntegrityFailure { .. }),
+        "expected integrity failure, got {err:?}"
+    );
+}
+
 const DIRECTIVE_SCHEMA: &str = "\
 location:
   directory: directives
+resolution: []
 formats:
   - extensions: [\".md\"]
     parser: parser:ryeos/core/markdown/directive
@@ -208,10 +268,13 @@ formats:
       prefix: \"<!--\"
       suffix: \"-->\"
 execution:
-  thread_profile: directive_run
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   delegate:
     via: runtime_registry
-  resolution: []
 ";
 
 /// Regression: the bytes the parser sees and the bytes the envelope

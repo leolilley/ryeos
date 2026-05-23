@@ -163,7 +163,7 @@ mod tests {
             references_edges: ref_edges,
             referenced_items: vec![],
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedUser,
             composed: KindComposedView::identity(json!({})),
         }
     }

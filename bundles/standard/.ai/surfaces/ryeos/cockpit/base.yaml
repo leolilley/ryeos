@@ -1,0 +1,64 @@
+name: cockpit-base
+version: "1.0.0"
+description: Default RyeOS cockpit — three-pane mission control
+
+layout:
+  root: main
+  nodes:
+    main:
+      type: split
+      axis: horizontal
+      ratio: 0.25
+      first: thread_list
+      second: right
+    thread_list:
+      type: pane
+      view: thread_list
+    right:
+      type: split
+      axis: vertical
+      ratio: 0.85
+      first: thread
+      second: status
+    thread:
+      type: pane
+      view: thread
+    status:
+      type: pane
+      view: remotes
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+commands:
+  - id: view.thread_list
+    label: Threads
+    category: View
+  - id: view.remotes
+    label: Remotes
+    category: View
+  - id: view.trust
+    label: Trust
+    category: View
+  - id: view.graph
+    label: Graph
+    category: View
+  - id: layout.reset
+    label: Reset Layout
+    category: Layout
+
+instruments:
+  - id: thread_budget
+    kind: facet_gauge
+    source: focused.thread
+    facets:
+      - cost.spend
+      - cost.input_tokens
+      - cost.output_tokens
+  - id: graph_progress
+    kind: facet_status
+    source: focused.thread
+    facets:
+      - graph.current_node
+      - graph.progress

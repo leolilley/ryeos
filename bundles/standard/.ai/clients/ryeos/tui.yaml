@@ -1,0 +1,22 @@
+kind: client
+name: tui
+version: "1.0.0"
+description: Terminal surface renderer for RyeOS
+
+serves:
+  kind: surface
+  renderer: terminal
+
+launch:
+  mode: cli_exec
+  binary_ref: bin/{triple}/ryeos-tui
+  args:
+    surface: "--surface"
+    surface_file: "--surface-file"
+    mock: "--mock"
+    read_only: "--read-only"
+
+capabilities:
+  requires_daemon: true
+  owns_tty: true
+  interactive: true

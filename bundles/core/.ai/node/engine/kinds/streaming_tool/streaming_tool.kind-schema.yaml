@@ -1,8 +1,11 @@
-# ryeos:signed:2026-05-23T09:45:28Z:26f76ff6c58080c53b11323fde9fa1da782cafe72e27bb649361de7c2fa97203:eO7TvzSXZzmsiwQANsdjos3Akov0P4qkR0oXmR1Y7oxOcuCyAXHjAwvf2x2MJ2KjTSPjAKGuXpxcxwnTDqhTAg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T11:10:57Z:d12d8d687e9eca9fab7695e51bfbc5a0ff23fae9607c554bf35e363f9da8bf8b:S2CMlb6Zssax7nrnGnC9490OcX42/D8byXoJD3aCZEZbG/P9sHPGM6LBUS0/8kmVFEIQ8zccQ8ibMLExk4N/AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/streaming_tool"
 version: "1.0.0"
 location:
   directory: tools
+effective_trust:
+  include_references: false
+resolution: []
 execution:
   terminator:
     kind: subprocess
@@ -14,7 +17,6 @@ execution:
     supports_continuation: false
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
-  resolution: []
 formats:
   - extensions: [".py"]
     parser: parser:ryeos/core/python/ast

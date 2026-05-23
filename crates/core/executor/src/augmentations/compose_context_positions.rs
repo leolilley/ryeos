@@ -100,6 +100,12 @@ pub async fn run(
             ref_: r.to_string(),
             source: e,
         })?;
+        crate::execution::launch::enforce_effective_trust(
+            resolution_output.effective_trust_class,
+            r,
+            target_kind,
+        )
+        .map_err(|e| LaunchAugmentationError::EffectiveTrustRejected(e.to_string()))?;
         per_root.insert(r.to_string(), resolution_output);
     }
 
@@ -132,7 +138,11 @@ pub async fn run(
         .and_then(|schema| schema.execution())
         .and_then(|exec| exec.thread_profile.as_ref())
         .map(|tp| tp.name.as_str())
-        .unwrap_or("system_task");
+        .ok_or_else(|| {
+            LaunchAugmentationError::RuntimeRegistry(format!(
+                "target kind '{target_kind}' must declare execution.thread_profile"
+            ))
+        })?;
     state
         .threads
         .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {

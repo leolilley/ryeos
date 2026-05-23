@@ -23,6 +23,7 @@ pub mod events_replay;
 pub mod health_status;
 pub mod identity_public_key;
 pub mod ingest_ignore;
+pub mod items_effective;
 pub mod maintenance_gc;
 pub mod node_sign;
 pub mod objects_get;
@@ -127,4 +128,5 @@ pub const ALL: &[ServiceDescriptor] = &[
     vault_set::DESCRIPTOR,
     vault_list::DESCRIPTOR,
     vault_delete::DESCRIPTOR,
+    items_effective::DESCRIPTOR,
 ];

@@ -1,8 +1,11 @@
-# ryeos:signed:2026-05-23T09:45:28Z:d6b3f31c0fa2b521c09197275c2dbecae98e0fcf7b229f500081195922991fb2:p9GL/SHXhhPk2z4p0wL7CC0fXDlkZ8X2JKAFpob7m5xAEJMdCqZhy073hvf1tuy6G4CBw4jxNxkzU7JhmebLAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T11:10:57Z:a30ea67024734b560895c19d71662e70878e4749e885e1b3a86a518cdef4cf1a:D2r2+Lq/Ss+LYW0yz1P5i+AC3ik/x5Hbg/nt3dYNO1rI6OuuoWWLfnwNvl1YX+6CW+N4Sbgz6dn8UaZavtYPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
   directory: tools
+effective_trust:
+  include_references: false
+resolution: []
 execution:
   terminator:
     kind: subprocess
@@ -14,7 +17,6 @@ execution:
     supports_continuation: false
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
-  resolution: []
 formats:
   - extensions: [".py"]
     parser: parser:ryeos/core/python/ast

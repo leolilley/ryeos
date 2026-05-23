@@ -1,0 +1,14 @@
+kind: service
+endpoint: client.open
+availability: offline
+required_caps:
+  - ryeos.execute.service.client_open
+schema:
+  client_ref: string?
+  renderer: string?
+  surface: string?
+  surface_file: string?
+  mock: boolean?
+  read_only: boolean?
+  project: string?
+description: "Launch a first-party Rye client/renderer from the CLI"

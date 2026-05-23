@@ -1,8 +1,12 @@
-# ryeos:signed:2026-05-23T09:45:37Z:524171b367f7b73dea86cf0f257fe08da131c1848ff2ffee44f21ae832943287:zuiZk3XxL/DMHBEIHHQqeXRTVi30d2BybJi8LEKMQaa6Ojt0Y/9M48ELTj2TWSj8AVi0uIUDgDE1KOMu+FT0BA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T10:47:35Z:ca7339183becf5afaddb605106811f3eda9631e2afbb1b76c483c1e038314290:AYyvB4NzkPpc2WRT1zvCK5UEMDYG8oE8ByMi1U9The0IhxVjMfG+p7pxKWytpinAbTgqmBKyqrtPkUZIh5s0DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
   directory: directives
+resolution:
+  - step: resolve_extends_chain
+effective_trust:
+  include_references: false
 execution:
   # Explicit delegation to the runtime registry. The dispatcher will
   # call `RuntimeRegistry::lookup_for("directive")` to find the
@@ -16,8 +20,6 @@ execution:
     root_executable: true
     supports_interrupt: true
     supports_continuation: true
-  resolution:
-    - step: resolve_extends_chain
   # Launch augmentation: before the directive runtime is spawned, the
   # daemon pre-resolves knowledge refs declared in the directive's
   # `context:` block, dispatches a child knowledge-runtime compose

@@ -1,8 +1,11 @@
-# ryeos:signed:2026-05-23T09:45:28Z:9c25a04f8de42d68b7d92c2b1bb8f9632aff92eb7e2d1e5999d5dd5f14c00bac:fDc41U2/7RsfNaxRDNM++Y7AVm6xkJJ2BHeUDj4qxs79cWozIvP8+ilXUGmEulgvV8S8/WoxAKFBrbFQPuvnBg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T11:10:57Z:63493d2ecc775810d2a26ef12951df78b0b885b47f6f74036a3ff4da22b1d2b7:PFLKvWyO4jWMhGeFvknzq6MBAlQ2fGW7v5oSh2N55vQziHtAPd30aHUskdfqOv8QdMYwNRz52qkBbwHukF5NBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/parser"
 version: "1.0.0"
 location:
   directory: parsers
+effective_trust:
+  include_references: false
+resolution: []
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml

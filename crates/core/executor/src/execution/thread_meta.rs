@@ -27,11 +27,11 @@ pub struct ThreadMeta {
     pub cost: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outputs: Option<Value>,
-    /// Daemon-computed executor trust posture (weakest of root +
+    /// Daemon-computed effective trust posture (weakest of root +
     /// extends chain). Written here so the thread.json audit trail
     /// shows what trust class spawned the runtime.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub executor_trust_class: Option<TrustClass>,
+    pub effective_trust_class: Option<TrustClass>,
 }
 
 pub fn write_thread_meta(
@@ -75,18 +75,21 @@ mod tests {
             completed_at: None,
             cost: None,
             outputs: None,
-            executor_trust_class: Some(TrustClass::TrustedSystem),
+            effective_trust_class: Some(TrustClass::TrustedSystem),
         };
 
         let json = serde_json::to_string(&meta).unwrap();
         // Enum serializes to lowercase snake_case (no `format!("{:?}")` hack).
         assert!(
-            json.contains("\"executor_trust_class\":\"trusted_system\""),
+            json.contains("\"effective_trust_class\":\"trusted_system\""),
             "expected snake_case enum serialization, got: {json}"
         );
         let parsed: ThreadMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.thread_id, "T-test");
         assert_eq!(parsed.status, "running");
-        assert_eq!(parsed.executor_trust_class, Some(TrustClass::TrustedSystem));
+        assert_eq!(
+            parsed.effective_trust_class,
+            Some(TrustClass::TrustedSystem)
+        );
     }
 }

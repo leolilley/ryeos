@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
-use crate::contracts::ItemSpace;
+use crate::contracts::{ItemSpace, TrustClass as ContractTrustClass};
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
@@ -22,7 +22,7 @@ use crate::trust::TrustStore;
 use super::alias::AliasResolver;
 use super::decl::ResolutionStepDecl;
 use super::types::{
-    execution_trust, ResolutionEdge, ResolutionError, ResolutionOutput, ResolutionStepName,
+    effective_trust, ResolutionEdge, ResolutionError, ResolutionOutput, ResolutionStepName,
     ResolvedAncestor, TrustClass,
 };
 
@@ -179,8 +179,15 @@ impl<'a> ResolutionContext<'a> {
         self,
         composers: &crate::composers::ComposerRegistry,
         kind: &str,
+        include_references_in_trust: bool,
     ) -> Result<ResolutionOutput, ResolutionError> {
-        let executor_trust_class = execution_trust(self.root_ancestor.trust_class, &self.ancestors);
+        let mut effective_trust_class =
+            effective_trust(self.root_ancestor.trust_class, &self.ancestors);
+        if include_references_in_trust {
+            for item in &self.referenced_items {
+                effective_trust_class = effective_trust_class.min(item.trust_class);
+            }
+        }
 
         let composed = composers.compose(
             kind,
@@ -196,7 +203,7 @@ impl<'a> ResolutionContext<'a> {
             references_edges: self.references_edges,
             referenced_items: self.referenced_items,
             step_outputs: self.step_outputs,
-            executor_trust_class,
+            effective_trust_class,
             composed,
         })
     }
@@ -286,35 +293,34 @@ pub(crate) fn load_item_at(
             reason: format!("no source format for ext {}", result.matched_ext),
         })?;
 
-    // Verify integrity / trust class.
+    // Verify integrity / trust class. This must use the same
+    // cryptographic primitive as `Engine::verify`: a trusted signer
+    // classification is only possible after Ed25519 verification, not
+    // from signature-header presence or fingerprint membership alone.
     let sig_header =
         crate::item_resolution::parse_signature_header(&content, &source_format.signature);
-    let signed_trusted = match &sig_header {
+    let trust_class = match &sig_header {
         Some(header) => {
-            if let Some(actual_hash) =
-                crate::trust::content_hash_after_signature(&content, &source_format.signature)
-            {
-                if actual_hash != header.content_hash {
-                    return Err(ResolutionError::IntegrityFailure {
-                        item_ref: ref_.to_string(),
-                        reason: format!(
-                            "content hash mismatch (expected {}, got {actual_hash})",
-                            header.content_hash
-                        ),
-                    });
-                }
-            }
-            Some(trust_store.is_trusted(&header.signer_fingerprint))
-        }
-        None => None,
-    };
+            let (contract_trust, _) = crate::trust::verify_item_signature(
+                &content,
+                header,
+                &source_format.signature,
+                trust_store,
+            )
+            .map_err(|e| ResolutionError::IntegrityFailure {
+                item_ref: ref_.to_string(),
+                reason: e.to_string(),
+            })?;
 
-    let trust_class = match (signed_trusted, result.winner_space) {
-        (None, _) => TrustClass::Unsigned,
-        (Some(false), _) => TrustClass::UntrustedUserSpace,
-        (Some(true), ItemSpace::System) => TrustClass::TrustedSystem,
-        (Some(true), ItemSpace::User) => TrustClass::TrustedUser,
-        (Some(true), ItemSpace::Project) => TrustClass::UntrustedUserSpace,
+            match (contract_trust, result.winner_space) {
+                (ContractTrustClass::Trusted, ItemSpace::System) => TrustClass::TrustedSystem,
+                (ContractTrustClass::Trusted, ItemSpace::User) => TrustClass::TrustedUser,
+                (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::UntrustedUserSpace,
+                (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedUserSpace,
+                (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
+            }
+        }
+        None => TrustClass::Unsigned,
     };
 
     let parsed = parsers

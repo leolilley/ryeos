@@ -347,7 +347,7 @@ mod tests {
                 ancestors: vec![],
                 references_edges: vec![],
                 step_outputs: std::collections::HashMap::new(),
-                executor_trust_class: crate::resolution::TrustClass::Unsigned,
+                effective_trust_class: crate::resolution::TrustClass::Unsigned,
                 composed: crate::resolution::KindComposedView::identity(serde_json::json!({})),
                 referenced_items: vec![],
             },
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(parsed.thread_id, "T-test");
         assert!(parsed.resolution.ancestors.is_empty());
         assert_eq!(
-            parsed.resolution.executor_trust_class,
+            parsed.resolution.effective_trust_class,
             crate::resolution::TrustClass::Unsigned
         );
         assert!(parsed.resolution.composed.derived.is_empty());
@@ -410,7 +410,7 @@ mod tests {
             ancestors: vec![],
             references_edges: vec![],
             step_outputs: std::collections::HashMap::new(),
-            executor_trust_class: crate::resolution::TrustClass::Unsigned,
+            effective_trust_class: crate::resolution::TrustClass::Unsigned,
             composed: crate::resolution::KindComposedView::identity(serde_json::json!({})),
             referenced_items: vec![],
         };

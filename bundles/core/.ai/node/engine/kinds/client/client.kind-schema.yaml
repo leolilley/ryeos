@@ -1,0 +1,52 @@
+# ryeos:signed:2026-05-23T11:10:57Z:53a494c89712bbf6188a0754e06db28d7020d59577ee244f4ded1824f79dad48:jGD6C/t8seZNaEfYFT4WcEL6AlWTY20YumidF8fwOleU3kasj4x+gPqa/F68uZavy0iONoxyJNiIZQKfeMTeCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/client"
+version: "1.0.0"
+location:
+  directory: clients
+
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+
+composer: handler:ryeos/core/identity
+
+composed_value_contract:
+  root_type: mapping
+  required:
+    launch:
+      type: single
+      prim: mapping
+    serves:
+      type: single
+      prim: mapping
+  optional:
+    version:
+      type: single
+      prim: string
+    description:
+      type: single
+      prim: string
+    capabilities:
+      type: single
+      prim: mapping
+
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: relative_dir
+      required: true
