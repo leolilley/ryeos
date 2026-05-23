@@ -1,91 +1,94 @@
 //! Descriptor-driven offline command dispatch.
 //!
 //! Commands that declare `availability: offline` in their service descriptor
-//! can run in-process without a daemon. This module:
+//! can run in-process without a daemon. The trust boundary is intentionally
+//! the same one the daemon uses for installed bundles: offline descriptors are
+//! discovered only through verified installed bundle registrations, and every
+//! alias/verb/service/tool descriptor is signature-verified before parsing.
 //!
-//! 1. Resolves alias tokens → verb → service descriptor from disk YAMLs
-//! 2. Checks the service descriptor's `availability` field
-//! 3. Resolves the descriptor-declared offline tool implementation
-//! 4. Executes that tool descriptor locally and returns the result
-//!
-//! Service descriptors are the source of truth for both whether a command
-//! may run offline and which tool implements the offline path. The CLI does
-//! not keep an endpoint → handler table; adding an offline service means
-//! adding/updating descriptors that point at a local tool.
-//!
-//! Dispatch requires:
-//!   - service.availability == offline|both
-//!   - service.offline_execute or verb.execute resolves to tool:<id>
-//!   - that tool descriptor declares a subprocess implementation
-//!
-//! If descriptor says offline but has no local tool implementation → clear error.
-//! If descriptor does not say offline → returns None (fall through to daemon).
+//! Service descriptors are the source of truth for both whether a command may
+//! run offline and which tool implements the offline path. The CLI does not
+//! keep an endpoint → handler table; adding an offline service means
+//! adding/updating descriptors that point at a trusted local `bin:` tool.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use ryeos_engine::contracts::{SignatureEnvelope, TrustClass as ItemTrustClass};
+use ryeos_runtime::alias_registry::{AliasDef, PositionalForm, ProjectResolution};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::CliError;
 
-// ── Service descriptor (subset of fields we need) ──────────────────
+#[derive(Debug)]
+struct OfflineCatalog {
+    system_space_dir: PathBuf,
+    bundle_roots: Vec<PathBuf>,
+    trust_store: ryeos_engine::trust::TrustStore,
+}
+
+#[derive(Debug)]
+struct Loaded<T> {
+    path: PathBuf,
+    value: T,
+}
+
+#[derive(Debug)]
+struct LoadedAlias {
+    path: PathBuf,
+    def: AliasDef,
+}
+
+#[derive(Debug, Deserialize)]
+struct AliasYaml {
+    tokens: Vec<String>,
+    verb: String,
+    #[serde(default)]
+    deprecated: Option<bool>,
+    #[serde(default)]
+    replacement_tokens: Option<Vec<String>>,
+    #[serde(default)]
+    removed_in: Option<String>,
+    #[serde(default)]
+    positional_field: Option<String>,
+    #[serde(default)]
+    positional_forms: Vec<PositionalForm>,
+    #[serde(default)]
+    project_resolution: ProjectResolution,
+}
 
 /// Parsed subset of a service YAML descriptor.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ServiceDescriptor {
-    /// Service endpoint name (e.g. "verify", "fetch", "sign").
-    #[allow(dead_code)]
-    endpoint: String,
     /// Whether this service may run offline: "offline", "daemon", or "both".
     #[serde(default)]
     availability: Option<String>,
     /// Descriptor-declared local implementation for offline dispatch.
-    ///
-    /// Shape: `tool:<id>`, e.g. `tool:ryeos/core/bundle/publish`.
-    /// If absent, a verb that already executes a `tool:<id>` can be used
-    /// directly. Service-backed offline commands should always declare this.
     #[serde(default)]
     offline_execute: Option<String>,
-    /// Input schema (field name → type string).
+    /// Input schema (field name → type string). Used only for the legacy
+    /// `project` → `project_path` compatibility transform after shared binding.
     #[serde(default)]
     schema: HashMap<String, String>,
 }
 
-// ── Alias descriptor (subset) ──────────────────────────────────────
-
-#[derive(Debug, serde::Deserialize)]
-struct AliasDescriptor {
-    tokens: Vec<String>,
-    verb: String,
-    /// Field to bind from the first positional arg.
-    #[serde(default)]
-    positional_field: Option<String>,
-    #[allow(dead_code)]
-    /// How --project is resolved.
-    #[serde(default)]
-    project_resolution: String,
-}
-
-// ── Verb descriptor (subset) ───────────────────────────────────────
-
 /// Parsed subset of a verb YAML descriptor.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 struct VerbDescriptor {
     /// Execution target ref: `service:...` or `tool:...`.
     execute: String,
 }
 
-// ── Tool descriptor (subset of fields we need) ─────────────────────
-
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ToolDescriptor {
     #[serde(default)]
     executor_id: Option<String>,
     config: ToolConfig,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ToolConfig {
     command: String,
     #[serde(default)]
@@ -100,79 +103,92 @@ struct ToolConfig {
     env: HashMap<String, String>,
 }
 
-// ── Main entry point ───────────────────────────────────────────────
-
 /// Try to dispatch a command through the offline descriptor path.
 ///
 /// Returns `Ok(Some(result))` if the command was handled offline.
-/// Returns `Ok(None)` if the command is not offline-capable (caller
-/// should fall through to daemon dispatch).
-/// Returns `Err` if the command is offline-capable but something went wrong.
+/// Returns `Ok(None)` if the command is not offline-capable (caller should fall
+/// through to daemon dispatch). Returns `Err` if the command is offline-capable
+/// but something went wrong.
 pub fn try_offline_dispatch(
     argv: &[String],
     system_space_dir: &Path,
     project_path: &str,
 ) -> Result<Option<Value>, CliError> {
-    // 1. Match alias from disk
-    let aliases = load_aliases(system_space_dir);
-    let Some((alias, consumed)) = match_alias(argv, &aliases) else {
+    let catalog = build_catalog(system_space_dir, project_path).map_err(local_err)?;
+    if catalog.bundle_roots.is_empty() {
+        return Ok(None);
+    }
+
+    let aliases = load_aliases(&catalog).map_err(local_err)?;
+    let Some((alias, consumed)) = match_alias(argv, &aliases).map_err(local_err)? else {
         return Ok(None);
     };
 
-    // 2. Look up verb — confirm the verb descriptor exists
-    let Some(verb) = load_verb(system_space_dir, &alias.verb) else {
+    let Some(verb) = load_verb(&catalog, &alias.def.verb).map_err(local_err)? else {
         return Ok(None);
     };
 
-    // 3. Resolve service descriptor — prefer verb's execute ref, fall back
-    //    to verb-name-as-service lookup.
-    //    Verb names use dashes ("bundle-verify") but service paths use
-    //    slashes ("bundle/verify.yaml"), so the execute ref is authoritative.
-    let service_path = resolve_service_path(system_space_dir, &alias.verb, &verb);
-    let Some(service_path) = service_path else {
-        // No service descriptor for this verb — not our concern
-        return Ok(None);
-    };
-    let Some(service) = read_yaml::<ServiceDescriptor>(&service_path) else {
+    let Some(service) =
+        resolve_service(&catalog, &alias.def.verb, &verb.value).map_err(local_err)?
+    else {
         return Ok(None);
     };
 
-    // 4. Check availability — only proceed if descriptor declares offline
     let is_offline = service
+        .value
         .availability
         .as_deref()
-        .map(|a| a == "offline" || a == "both")
-        .unwrap_or(false);
-
+        .is_some_and(|a| a == "offline" || a == "both");
     if !is_offline {
         return Ok(None);
     }
 
-    // 5. Resolve the descriptor-declared local implementation.
-    let Some(offline_execute) = resolve_offline_execute(&service, &verb) else {
+    let Some(offline_execute) = resolve_offline_execute(&service.value, &verb.value) else {
         return Err(CliError::Local {
             detail: format!(
                 "service `{}` is declared offline-capable, but its descriptor \
                  does not declare a local tool implementation (`offline_execute: tool:<id>`)",
-                alias.verb
+                alias.def.verb
             ),
         });
     };
 
-    // 6. Bind parameters from tail args
     let tail = &argv[consumed..];
     let params =
-        bind_params(tail, &alias, &service, project_path).map_err(|e| CliError::Local {
-            detail: format!("{e:#}"),
-        })?;
+        bind_params_shared(tail, &alias.def, &service.value, project_path).map_err(local_err)?;
 
-    // 7. Run the descriptor-declared tool.
-    let result = execute_offline_tool(&offline_execute, params, system_space_dir, project_path)
-        .map_err(|e| CliError::Local {
-            detail: format!("{e:#}"),
-        })?;
+    let result = execute_offline_tool(&catalog, &offline_execute, params, project_path)
+        .map_err(local_err)?;
 
     Ok(Some(result))
+}
+
+fn local_err(error: anyhow::Error) -> CliError {
+    CliError::Local {
+        detail: format!("{error:#}"),
+    }
+}
+
+fn build_catalog(system_space_dir: &Path, project_path: &str) -> Result<OfflineCatalog> {
+    let user_root = ryeos_engine::roots::user_root().ok();
+    let records = ryeos_bundle::installed::load_installed_bundle_records(
+        system_space_dir,
+        user_root.as_deref(),
+    )
+    .context("offline dispatch: load verified installed bundle registrations")?;
+    let bundle_roots: Vec<PathBuf> = records.into_iter().map(|r| r.bundle_root).collect();
+    let trust_store = ryeos_engine::trust::TrustStore::load_three_tier(
+        Some(Path::new(project_path)),
+        user_root.as_deref(),
+        &bundle_roots,
+    )
+    .context("offline dispatch: load operator trust store")?;
+
+    Ok(OfflineCatalog {
+        system_space_dir: system_space_dir.to_path_buf(),
+        bundle_roots,
+        trust_store,
+    })
 }
 
 fn resolve_offline_execute(service: &ServiceDescriptor, verb: &VerbDescriptor) -> Option<String> {
@@ -183,18 +199,150 @@ fn resolve_offline_execute(service: &ServiceDescriptor, verb: &VerbDescriptor) -
     })
 }
 
-fn execute_offline_tool(
-    tool_ref: &str,
-    params: Value,
-    system_space_dir: &Path,
+fn bind_params_shared(
+    tail: &[String],
+    alias: &AliasDef,
+    service: &ServiceDescriptor,
     project_path: &str,
 ) -> Result<Value> {
-    let tool_path = find_tool_path(system_space_dir, tool_ref)
-        .with_context(|| format!("resolve offline tool descriptor `{tool_ref}`"))?;
-    let tool: ToolDescriptor = read_yaml(&tool_path)
-        .with_context(|| format!("parse offline tool descriptor `{}`", tool_path.display()))?;
+    if let Some(input) = crate::arg_bind::parse_input_arg(tail)? {
+        return Ok(normalize_project_param(input, service, project_path));
+    }
 
-    match tool.executor_id.as_deref() {
+    let normalized = normalize_bare_key_value_args(tail);
+    let mut params = ryeos_runtime::arg_binder::bind_argv_with_alias(&normalized, Some(alias))
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    if alias.project_resolution != ProjectResolution::None {
+        let mut canonical_tail = params_to_tail(&params);
+        let default_project = (project_path != ".").then(|| Path::new(project_path));
+        match alias.project_resolution {
+            ProjectResolution::None => {}
+            ProjectResolution::Optional => {
+                canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
+                    &canonical_tail,
+                    default_project,
+                )?;
+            }
+            ProjectResolution::Required => {
+                if canonical_tail.iter().any(|t| t == "--no-project") {
+                    bail!("this command requires a project; do not pass --no-project");
+                }
+                canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
+                    &canonical_tail,
+                    default_project,
+                )?;
+                if canonical_tail.iter().any(|t| t == "--no-project") {
+                    bail!(
+                        "this command requires a project; run it from a directory containing \
+                         {} or pass --project <path>",
+                        ryeos_engine::AI_DIR
+                    );
+                }
+            }
+        }
+        params = ryeos_runtime::bind_argv(&canonical_tail);
+    }
+
+    Ok(normalize_project_param(params, service, project_path))
+}
+
+fn normalize_project_param(
+    mut params: Value,
+    service: &ServiceDescriptor,
+    default_project_path: &str,
+) -> Value {
+    let Some(obj) = params.as_object_mut() else {
+        return params;
+    };
+
+    if service.schema.contains_key("project_path") && !service.schema.contains_key("project") {
+        if let Some(project) = obj.remove("project") {
+            obj.entry("project_path".to_string()).or_insert(project);
+        }
+    }
+
+    if !obj.contains_key("project")
+        && !obj.contains_key("project_path")
+        && !obj.contains_key("no_project")
+    {
+        if service.schema.contains_key("project_path") {
+            obj.insert(
+                "project_path".to_string(),
+                Value::String(default_project_path.to_string()),
+            );
+        } else if service.schema.contains_key("project") {
+            obj.insert(
+                "project".to_string(),
+                Value::String(default_project_path.to_string()),
+            );
+        }
+    }
+
+    params
+}
+
+fn normalize_bare_key_value_args(rest: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(rest.len());
+    for token in rest {
+        if token.starts_with('-') {
+            out.push(token.clone());
+            continue;
+        }
+        if let Some((key, value)) = token.split_once('=') {
+            if !key.is_empty() && !value.is_empty() {
+                out.push(format!("--{key}"));
+                out.push(value.to_string());
+                continue;
+            }
+        }
+        out.push(token.clone());
+    }
+    out
+}
+
+fn params_to_tail(params: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(obj) = params.as_object() else {
+        return out;
+    };
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.sort();
+    for key in keys {
+        emit_param(&mut out, key, &obj[key]);
+    }
+    out
+}
+
+fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
+    match value {
+        Value::Bool(true) => out.push(format!("--{}", key.replace('_', "-"))),
+        Value::Bool(false) | Value::Null => {}
+        Value::Array(values) => {
+            for v in values {
+                emit_param(out, key, v);
+            }
+        }
+        other => {
+            out.push(format!("--{}", key.replace('_', "-")));
+            out.push(match other {
+                Value::String(s) => s.clone(),
+                _ => other.to_string(),
+            });
+        }
+    }
+}
+
+fn execute_offline_tool(
+    catalog: &OfflineCatalog,
+    tool_ref: &str,
+    params: Value,
+    project_path: &str,
+) -> Result<Value> {
+    let tool = find_tool(catalog, tool_ref)
+        .with_context(|| format!("resolve offline tool descriptor `{tool_ref}`"))?;
+
+    match tool.value.executor_id.as_deref() {
         Some("@subprocess") | Some("tool:ryeos/core/subprocess/execute") => {}
         other => bail!(
             "offline tool `{tool_ref}` must use @subprocess executor, got {:?}",
@@ -203,25 +351,28 @@ fn execute_offline_tool(
     }
 
     let params_json = serde_json::to_string(&params).context("serialize offline params")?;
-    let cmd_template = expand_template(&tool.config.command, &params_json, project_path)?;
-    let cmd = resolve_command(&cmd_template, &tool_path, system_space_dir, project_path)?;
+    let cmd_template = expand_template(&tool.value.config.command, &params_json, project_path)?;
+    let cmd = resolve_trusted_bin_command(catalog, &cmd_template, &tool.path)?;
     let args = tool
+        .value
         .config
         .args
         .iter()
         .map(|arg| expand_template(arg, &params_json, project_path))
         .collect::<Result<Vec<_>>>()?;
     let stdin_data = tool
+        .value
         .config
         .input_data
         .as_deref()
         .map(|input| expand_template(input, &params_json, project_path))
         .transpose()?;
-    let cwd = match tool.config.cwd.as_deref() {
+    let cwd = match tool.value.config.cwd.as_deref() {
         Some(cwd) => Some(expand_template(cwd, &params_json, project_path)?),
         None => Some(std::env::current_dir()?.to_string_lossy().into_owned()),
     };
     let mut envs: Vec<(String, String)> = tool
+        .value
         .config
         .env
         .iter()
@@ -229,7 +380,7 @@ fn execute_offline_tool(
         .collect::<Result<Vec<_>>>()?;
     envs.push((
         "RYEOS_SYSTEM_SPACE_DIR".to_string(),
-        system_space_dir.to_string_lossy().into_owned(),
+        catalog.system_space_dir.to_string_lossy().into_owned(),
     ));
 
     let result = lillux::run(lillux::SubprocessRequest {
@@ -238,7 +389,7 @@ fn execute_offline_tool(
         cwd,
         envs,
         stdin_data,
-        timeout: tool.config.timeout_secs.unwrap_or(60) as f64,
+        timeout: tool.value.config.timeout_secs.unwrap_or(60) as f64,
     });
 
     if !result.success {
@@ -272,394 +423,456 @@ fn expand_template(template: &str, params_json: &str, project_path: &str) -> Res
     Ok(out)
 }
 
-fn resolve_command(
+fn resolve_trusted_bin_command(
+    catalog: &OfflineCatalog,
     command: &str,
     tool_path: &Path,
-    system_space_dir: &Path,
-    project_path: &str,
 ) -> Result<PathBuf> {
     if !command.starts_with("bin:") {
-        return Ok(PathBuf::from(command));
+        bail!("offline subprocess tools may only execute trusted `bin:` commands, got `{command}`");
     }
 
-    let bundle_root = find_bundle_root(tool_path).with_context(|| {
+    let bundle_root = bundle_root_for_path(catalog, tool_path).with_context(|| {
         format!(
-            "resolve bundle root for offline tool descriptor {}",
+            "resolve installed bundle root for offline tool descriptor {}",
             tool_path.display()
         )
     })?;
-    let user_root = ryeos_engine::roots::user_root().ok();
-    let system_roots = installed_bundle_roots(system_space_dir);
-    let trust_store = ryeos_engine::trust::TrustStore::load_three_tier(
-        Some(Path::new(project_path)),
-        user_root.as_deref(),
-        &system_roots,
-    )
-    .context("load trust store for offline binary dispatch")?;
+
     let resolved = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
         command,
-        &bundle_root,
-        |fp| trust_store.is_trusted(fp),
+        bundle_root,
+        |fp| catalog.trust_store.is_trusted(fp),
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .with_context(|| format!("resolve offline binary `{command}`"))?;
     Ok(resolved.absolute_path)
 }
 
-fn find_bundle_root(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .find(|p| p.join(ryeos_engine::AI_DIR).is_dir())
-        .map(Path::to_path_buf)
+fn bundle_root_for_path<'a>(catalog: &'a OfflineCatalog, path: &Path) -> Option<&'a PathBuf> {
+    catalog
+        .bundle_roots
+        .iter()
+        .find(|root| path.starts_with(root))
 }
 
-fn installed_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
-    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
-    let mut roots = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(bundles_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                roots.push(path);
-            }
-        }
-    }
-    ryeos_engine::roots::system_roots(&roots)
-}
-
-// ── Parameter binding ──────────────────────────────────────────────
-
-/// Bind the tail argv into a JSON object based on alias + service schema.
-fn bind_params(
-    tail: &[String],
-    alias: &AliasDescriptor,
-    service: &ServiceDescriptor,
-    project_path: &str,
-) -> Result<Value> {
-    let mut obj = serde_json::Map::new();
-
-    // Bind positional arg (e.g. `ryeos sign knowledge:foo` → item_ref)
-    if let Some(pos_field) = &alias.positional_field {
-        if !tail.is_empty() {
-            obj.insert(pos_field.clone(), Value::String(tail[0].clone()));
-        }
-    }
-
-    // Parse --flag value pairs from the tail
-    let mut i = 0;
-    while i < tail.len() {
-        let tok = &tail[i];
-        if let Some(key) = tok.strip_prefix("--") {
-            let mut key = key.replace('-', "_");
-            if key == "project"
-                && service.schema.contains_key("project_path")
-                && !service.schema.contains_key("project")
-            {
-                key = "project_path".to_string();
-            }
-            if i + 1 < tail.len() && !tail[i + 1].starts_with('-') {
-                let val = &tail[i + 1];
-                obj.insert(key, Value::String(val.clone()));
-                i += 2;
-            } else {
-                // Boolean flag
-                obj.insert(key, Value::Bool(true));
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    // Inject project_path from --project flag or CLI default
-    if !obj.contains_key("project") && !obj.contains_key("project_path") {
-        // Use the service schema to determine the field name
-        let project_key = if service.schema.contains_key("project_path") {
-            "project_path"
-        } else if service.schema.contains_key("project") {
-            "project"
-        } else {
-            // Don't inject if the schema doesn't declare it
-            project_path
-        };
-        if service.schema.contains_key(project_key) {
-            obj.insert(
-                project_key.to_string(),
-                Value::String(project_path.to_string()),
-            );
-        }
-    }
-
-    Ok(Value::Object(obj))
-}
-
-// ── Disk descriptor loading ────────────────────────────────────────
-
-fn load_aliases(system_space_dir: &Path) -> Vec<AliasDescriptor> {
+fn load_aliases(catalog: &OfflineCatalog) -> Result<Vec<LoadedAlias>> {
     let mut out = Vec::new();
-    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
-    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
-        return out;
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
-            continue;
-        }
-        let aliases_dir = entry
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("node")
-            .join("aliases");
-        let Ok(files) = std::fs::read_dir(aliases_dir) else {
+    for root in &catalog.bundle_roots {
+        let aliases_dir = root.join(ryeos_engine::AI_DIR).join("node").join("aliases");
+        let Ok(files) = std::fs::read_dir(&aliases_dir) else {
             continue;
         };
-        for f in files.flatten() {
-            let path = f.path();
-            if !matches!(
-                path.extension().and_then(|s| s.to_str()),
-                Some("yaml") | Some("yml")
-            ) {
+        for file in files {
+            let path = file?.path();
+            if !is_yaml_file(&path) {
                 continue;
             }
-            if let Some(alias) = read_yaml::<AliasDescriptor>(&path) {
-                out.push(alias);
-            }
+            let alias: AliasYaml = load_trusted_yaml(catalog, &path)
+                .with_context(|| format!("load trusted alias descriptor {}", path.display()))?;
+            out.push(LoadedAlias {
+                path,
+                def: AliasDef {
+                    tokens: alias.tokens,
+                    verb: alias.verb,
+                    deprecated: alias.deprecated.unwrap_or(false),
+                    replacement_tokens: alias.replacement_tokens,
+                    removed_in: alias.removed_in,
+                    positional_field: alias.positional_field,
+                    positional_forms: alias.positional_forms,
+                    project_resolution: alias.project_resolution,
+                },
+            });
         }
     }
-    out
+    Ok(out)
 }
 
-fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor> {
-    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
-    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
-        return None;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("node")
-            .join("verbs")
-            .join(format!("{verb_name}.yaml"));
-        if let Some(verb) = read_yaml::<VerbDescriptor>(&path) {
-            return Some(verb);
-        }
-    }
-    None
+fn load_verb(catalog: &OfflineCatalog, verb_name: &str) -> Result<Option<Loaded<VerbDescriptor>>> {
+    let rel = Path::new(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("verbs")
+        .join(format!("{verb_name}.yaml"));
+    find_unique_descriptor(catalog, &rel, "verb")
 }
 
-/// Resolve the service descriptor path for a verb.
-///
-/// Strategy:
-///  1. If the verb's `execute` field starts with `service:`, use that ref
-///     (e.g. `service:bundle/verify` → `services/bundle/verify.yaml`).
-///  2. Otherwise, try the verb name directly (e.g. `sign` → `services/sign.yaml`),
-///     and also try converting dashes to slashes (e.g. `bundle-verify` →
-///     `services/bundle/verify.yaml`).
-fn resolve_service_path(
-    system_space_dir: &Path,
+fn resolve_service(
+    catalog: &OfflineCatalog,
     verb_name: &str,
     verb: &VerbDescriptor,
-) -> Option<std::path::PathBuf> {
+) -> Result<Option<Loaded<ServiceDescriptor>>> {
     if let Some(service_ref) = verb.execute.strip_prefix("service:") {
-        // Authoritative path via execute ref
-        find_service_path(system_space_dir, service_ref)
+        find_service(catalog, service_ref)
     } else {
-        // Fallback: try verb name as-is, then with dash→slash
-        find_service_path(system_space_dir, verb_name).or_else(|| {
-            let service_rel = verb_name.replace('-', "/");
-            find_service_path(system_space_dir, &service_rel)
-        })
+        let direct = find_service(catalog, verb_name)?;
+        if direct.is_some() {
+            return Ok(direct);
+        }
+        find_service(catalog, &verb_name.replace('-', "/"))
     }
 }
 
-/// Find a service descriptor file by relative service name.
-/// Looks for `.ai/services/{name}.yaml` in each installed bundle.
-/// Appends `.yaml` if the name doesn't already end with it.
-fn find_service_path(system_space_dir: &Path, service_rel: &str) -> Option<std::path::PathBuf> {
-    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
-    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
-        return None;
-    };
-
-    let file_name = if service_rel.ends_with(".yaml") || service_rel.ends_with(".yml") {
-        service_rel.to_string()
-    } else {
-        format!("{}.yaml", service_rel)
-    };
-
-    for entry in entries.flatten() {
-        let path = entry
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("services")
-            .join(&file_name);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    None
+fn find_service(
+    catalog: &OfflineCatalog,
+    service_rel: &str,
+) -> Result<Option<Loaded<ServiceDescriptor>>> {
+    let rel = descriptor_rel_path("services", service_rel)?;
+    find_unique_descriptor(catalog, &rel, "service")
 }
 
-fn find_tool_path(system_space_dir: &Path, tool_ref: &str) -> Option<PathBuf> {
-    let rel = tool_ref.strip_prefix("tool:")?;
-    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
-    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
-        return None;
-    };
+fn find_tool(catalog: &OfflineCatalog, tool_ref: &str) -> Result<Loaded<ToolDescriptor>> {
+    let rel = tool_ref.strip_prefix("tool:").ok_or_else(|| {
+        anyhow::anyhow!("offline_execute must be a tool:<id> ref, got `{tool_ref}`")
+    })?;
+    let rel = descriptor_rel_path("tools", rel)?;
+    find_unique_descriptor(catalog, &rel, "tool")?
+        .ok_or_else(|| anyhow::anyhow!("offline tool descriptor `{tool_ref}` not found"))
+}
 
-    let file_name = if rel.ends_with(".yaml") || rel.ends_with(".yml") {
-        rel.to_string()
+fn descriptor_rel_path(section: &str, item_rel: &str) -> Result<PathBuf> {
+    if item_rel.contains("..") {
+        bail!("descriptor ref `{item_rel}` must not contain path traversal");
+    }
+    let file = if item_rel.ends_with(".yaml") || item_rel.ends_with(".yml") {
+        item_rel.to_string()
     } else {
-        format!("{}.yaml", rel)
+        format!("{item_rel}.yaml")
     };
+    Ok(Path::new(ryeos_engine::AI_DIR).join(section).join(file))
+}
 
-    for entry in entries.flatten() {
-        let path = entry
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("tools")
-            .join(&file_name);
-        if path.is_file() {
-            return Some(path);
+fn find_unique_descriptor<T: serde::de::DeserializeOwned>(
+    catalog: &OfflineCatalog,
+    rel: &Path,
+    label: &str,
+) -> Result<Option<Loaded<T>>> {
+    let mut matches = Vec::new();
+    for root in &catalog.bundle_roots {
+        let path = root.join(rel);
+        if path.exists() {
+            matches.push(path);
         }
     }
-    None
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => {
+            let path = matches.pop().unwrap();
+            let value = load_trusted_yaml(catalog, &path)
+                .with_context(|| format!("load trusted {label} descriptor {}", path.display()))?;
+            Ok(Some(Loaded { path, value }))
+        }
+        _ => {
+            let paths = matches
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "duplicate {label} descriptor matches for {}: {paths}",
+                rel.display()
+            )
+        }
+    }
 }
 
 fn match_alias<'a>(
     argv: &[String],
-    aliases: &'a [AliasDescriptor],
-) -> Option<(&'a AliasDescriptor, usize)> {
+    aliases: &'a [LoadedAlias],
+) -> Result<Option<(&'a LoadedAlias, usize)>> {
     for len in (1..=argv.len()).rev() {
-        let prefix: Vec<&str> = argv[..len].iter().map(|s| s.as_str()).collect();
-        if let Some(alias) = aliases.iter().find(|a| {
-            a.tokens.len() == prefix.len()
-                && a.tokens.iter().zip(prefix.iter()).all(|(t, p)| t == p)
-        }) {
-            return Some((alias, len));
+        let prefix = &argv[..len];
+        let matches: Vec<&LoadedAlias> = aliases
+            .iter()
+            .filter(|alias| alias.def.tokens == prefix)
+            .collect();
+        match matches.len() {
+            0 => {}
+            1 => return Ok(Some((matches[0], len))),
+            _ => {
+                let paths = matches
+                    .iter()
+                    .map(|alias| alias.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!("duplicate alias descriptor matches for tokens {prefix:?}: {paths}");
+            }
         }
     }
-    None
+    Ok(None)
 }
 
-fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_yaml::from_str(&content).ok()
+fn load_trusted_yaml<T: serde::de::DeserializeOwned>(
+    catalog: &OfflineCatalog,
+    path: &Path,
+) -> Result<T> {
+    let file_type = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat descriptor {}", path.display()))?
+        .file_type();
+    if file_type.is_symlink() || !file_type.is_file() {
+        bail!(
+            "descriptor {} is not a regular file (symlinks rejected)",
+            path.display()
+        );
+    }
+
+    if bundle_root_for_path(catalog, path).is_none() {
+        bail!(
+            "descriptor {} is not under a verified installed bundle root",
+            path.display()
+        );
+    }
+
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read descriptor {}", path.display()))?;
+    verify_trusted_yaml_signature(&raw, path, &catalog.trust_store)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    serde_yaml::from_str(&body).with_context(|| format!("parse descriptor YAML {}", path.display()))
+}
+
+fn verify_trusted_yaml_signature(
+    raw: &str,
+    path: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<()> {
+    let envelope = yaml_signature_envelope();
+    let header = ryeos_engine::item_resolution::parse_signature_header(raw, &envelope)
+        .with_context(|| format!("{} has no valid signature line", path.display()))?;
+    let (trust_class, _) =
+        ryeos_engine::trust::verify_item_signature(raw, &header, &envelope, trust_store)
+            .with_context(|| format!("signature verification failed for {}", path.display()))?;
+    if trust_class != ItemTrustClass::Trusted {
+        bail!(
+            "{} is not trusted (trust_class: {:?}); offline descriptors must be signed by a trusted publisher",
+            path.display(),
+            trust_class
+        );
+    }
+    Ok(())
+}
+
+fn yaml_signature_envelope() -> SignatureEnvelope {
+    SignatureEnvelope {
+        prefix: "#".into(),
+        suffix: None,
+        after_shebang: false,
+    }
+}
+
+fn is_yaml_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("yaml") | Some("yml")
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lillux::crypto::SigningKey;
+    use rand::rngs::OsRng;
 
-    fn write(path: &Path, body: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, body).unwrap();
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        _env_guard: std::sync::MutexGuard<'static, ()>,
+        system: PathBuf,
+        project: PathBuf,
+        bundle: PathBuf,
+        key: SigningKey,
     }
 
-    fn fixture() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("bundles")
-            .join("test");
+    impl Fixture {
+        fn new() -> Self {
+            let env_guard = crate::test_env::lock();
+            let tmp = tempfile::tempdir().unwrap();
+            let system = tmp.path().join("system");
+            let user = tmp.path().join("user");
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(project.join(ryeos_engine::AI_DIR)).unwrap();
+            let trust_dir = user
+                .join(ryeos_engine::AI_DIR)
+                .join("config")
+                .join("keys")
+                .join("trusted");
+            std::fs::create_dir_all(&trust_dir).unwrap();
+            let key = SigningKey::generate(&mut OsRng);
+            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            std::env::set_var("USER_SPACE", &user);
 
-        write(
-            &root
+            let bundle = system
+                .join(ryeos_engine::AI_DIR)
+                .join("bundles")
+                .join("test");
+            std::fs::create_dir_all(bundle.join(ryeos_engine::AI_DIR)).unwrap();
+
+            let this = Self {
+                _tmp: tmp,
+                _env_guard: env_guard,
+                system,
+                project,
+                bundle,
+                key,
+            };
+            this.write_manifest();
+            this.write_registration();
+            this.write_echo_bin();
+            this.write_standard_descriptors(Some("offline_execute: tool:custom/echo\n"));
+            this
+        }
+
+        fn write_standard_descriptors(&self, offline_execute_line: Option<&str>) {
+            self.write_signed(
+                &self
+                    .bundle
+                    .join(ryeos_engine::AI_DIR)
+                    .join("node")
+                    .join("aliases")
+                    .join("custom.yaml"),
+                "tokens: [\"custom\"]\nverb: custom\npositional_field: name\n",
+            );
+            self.write_signed(
+                &self
+                    .bundle
+                    .join(ryeos_engine::AI_DIR)
+                    .join("node")
+                    .join("verbs")
+                    .join("custom.yaml"),
+                "name: custom\nexecute: service:custom\n",
+            );
+            let offline_execute_line = offline_execute_line.unwrap_or("");
+            self.write_signed(
+                &self
+                    .bundle
+                    .join(ryeos_engine::AI_DIR)
+                    .join("services")
+                    .join("custom.yaml"),
+                &format!(
+                    "kind: service\nendpoint: custom\navailability: offline\n{offline_execute_line}schema:\n  name: string?\n  project_path: string?\n"
+                ),
+            );
+            self.write_signed(
+                &self
+                    .bundle
+                    .join(ryeos_engine::AI_DIR)
+                    .join("tools")
+                    .join("custom")
+                    .join("echo.yaml"),
+                "executor_id: \"@subprocess\"\nconfig:\n  command: \"bin:echo-json\"\n  input_data: \"{params_json}\"\n",
+            );
+        }
+
+        fn write_manifest(&self) {
+            self.write_signed(
+                &self.bundle.join(ryeos_engine::AI_DIR).join("manifest.yaml"),
+                "name: test\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+            );
+        }
+
+        fn write_registration(&self) {
+            let path = self
+                .system
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
-                .join("aliases")
-                .join("custom.yaml"),
-            r#"
-tokens: ["custom"]
-verb: custom
-description: test custom offline command
-"#,
-        );
-        write(
-            &root
-                .join(ryeos_engine::AI_DIR)
-                .join("node")
-                .join("verbs")
-                .join("custom.yaml"),
-            r#"
-name: custom
-execute: service:custom
-"#,
-        );
-        write(
-            &root
-                .join(ryeos_engine::AI_DIR)
-                .join("services")
-                .join("custom.yaml"),
-            r#"
-kind: service
-endpoint: custom
-availability: offline
-offline_execute: tool:custom/echo
-schema:
-  name: string?
-"#,
-        );
-        write(
-            &root
-                .join(ryeos_engine::AI_DIR)
-                .join("tools")
-                .join("custom")
-                .join("echo.yaml"),
-            r#"
-executor_id: "@subprocess"
-config:
-  command: "cat"
-  input_data: "{params_json}"
-"#,
-        );
+                .join("bundles")
+                .join("test.yaml");
+            self.write_signed(
+                &path,
+                &format!(
+                    "kind: node\nsection: bundles\nid: test\npath: {}\n",
+                    self.bundle.display()
+                ),
+            );
+        }
 
-        tmp
+        fn write_echo_bin(&self) {
+            let triple = host_triple();
+            let ai_dir = self.bundle.join(ryeos_engine::AI_DIR);
+            let bin_path = ai_dir.join("bin").join(triple).join("echo-json");
+            std::fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
+            let script = b"#!/bin/sh\ncat\n";
+            std::fs::write(&bin_path, script).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+
+            let cas = lillux::CasStore::new(ai_dir.join("objects"));
+            let content_blob_hash = lillux::sha256_hex(script);
+            let item_source = serde_json::json!({
+                "content_blob_hash": content_blob_hash,
+                "signature_info": {
+                    "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
+                }
+            });
+            let item_source_hash = cas.store_object(&item_source).unwrap();
+            let manifest = serde_json::json!({
+                "item_source_hashes": {
+                    format!("bin/{triple}/echo-json"): item_source_hash
+                }
+            });
+            let manifest_hash = cas.store_object(&manifest).unwrap();
+            let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
+            std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+            std::fs::write(ref_path, manifest_hash).unwrap();
+        }
+
+        fn write_signed(&self, path: &Path, body: &str) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let signed = lillux::signature::sign_content(body, &self.key, "#", None);
+            std::fs::write(path, signed).unwrap();
+        }
+
+        fn project_str(&self) -> String {
+            self.project.to_string_lossy().into_owned()
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+    fn host_triple() -> &'static str {
+        "x86_64-unknown-linux-gnu"
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))]
+    fn host_triple() -> &'static str {
+        "x86_64-unknown-linux-musl"
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"))]
+    fn host_triple() -> &'static str {
+        "aarch64-unknown-linux-gnu"
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    fn host_triple() -> &'static str {
+        "aarch64-apple-darwin"
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    fn host_triple() -> &'static str {
+        "x86_64-apple-darwin"
     }
 
     #[test]
     fn offline_dispatch_executes_descriptor_declared_tool() {
-        let tmp = fixture();
-        let argv = vec![
-            "custom".to_string(),
-            "--name".to_string(),
-            "leo".to_string(),
-        ];
+        let fixture = Fixture::new();
+        let argv = vec!["custom".to_string(), "leo".to_string()];
 
-        let result = try_offline_dispatch(&argv, tmp.path(), ".")
+        let result = try_offline_dispatch(&argv, &fixture.system, &fixture.project_str())
             .unwrap()
             .expect("handled offline");
 
         assert_eq!(result["name"], "leo");
+        assert_eq!(result["project_path"], fixture.project_str());
     }
 
     #[test]
     fn offline_service_without_tool_impl_errors_loudly() {
-        let tmp = fixture();
-        let service_path = tmp
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("bundles")
-            .join("test")
-            .join(ryeos_engine::AI_DIR)
-            .join("services")
-            .join("custom.yaml");
-        write(
-            &service_path,
-            r#"
-kind: service
-endpoint: custom
-availability: offline
-schema: {}
-"#,
-        );
+        let fixture = Fixture::new();
+        fixture.write_standard_descriptors(None);
 
-        let err = try_offline_dispatch(&["custom".to_string()], tmp.path(), ".").unwrap_err();
+        let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
 
         match err {
             CliError::Local { detail } => {
@@ -671,26 +884,7 @@ schema: {}
 
     #[test]
     fn offline_dispatch_maps_project_flag_to_project_path_schema() {
-        let tmp = fixture();
-        let service_path = tmp
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("bundles")
-            .join("test")
-            .join(ryeos_engine::AI_DIR)
-            .join("services")
-            .join("custom.yaml");
-        write(
-            &service_path,
-            r#"
-kind: service
-endpoint: custom
-availability: offline
-offline_execute: tool:custom/echo
-schema:
-  project_path: string?
-"#,
-        );
+        let fixture = Fixture::new();
 
         let result = try_offline_dispatch(
             &[
@@ -698,7 +892,7 @@ schema:
                 "--project".to_string(),
                 "/tmp/project".to_string(),
             ],
-            tmp.path(),
+            &fixture.system,
             ".",
         )
         .unwrap()
@@ -706,5 +900,73 @@ schema:
 
         assert_eq!(result["project_path"], "/tmp/project");
         assert!(result.get("project").is_none());
+    }
+
+    #[test]
+    fn duplicate_alias_matches_error_loudly() {
+        let fixture = Fixture::new();
+        let second_bundle = fixture
+            .system
+            .join(ryeos_engine::AI_DIR)
+            .join("bundles")
+            .join("second");
+        std::fs::create_dir_all(second_bundle.join(ryeos_engine::AI_DIR)).unwrap();
+        fixture.write_signed(
+            &second_bundle.join(ryeos_engine::AI_DIR).join("manifest.yaml"),
+            "name: second\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        fixture.write_signed(
+            &fixture
+                .system
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("bundles")
+                .join("second.yaml"),
+            &format!(
+                "kind: node\nsection: bundles\nid: second\npath: {}\n",
+                second_bundle.display()
+            ),
+        );
+        fixture.write_signed(
+            &second_bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("aliases")
+                .join("custom.yaml"),
+            "tokens: [\"custom\"]\nverb: other\n",
+        );
+
+        let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
+        match err {
+            CliError::Local { detail } => {
+                assert!(
+                    detail.contains("duplicate alias descriptor matches"),
+                    "{detail}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offline_tool_rejects_non_bin_command() {
+        let fixture = Fixture::new();
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("tools")
+                .join("custom")
+                .join("echo.yaml"),
+            "executor_id: \"@subprocess\"\nconfig:\n  command: \"cat\"\n  input_data: \"{params_json}\"\n",
+        );
+
+        let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
+        match err {
+            CliError::Local { detail } => {
+                assert!(detail.contains("trusted `bin:` commands"), "{detail}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
