@@ -152,7 +152,7 @@ The key fingerprint is the SHA-256 hash of the raw 32-byte public key,
 hex-encoded (64 characters). It appears in:
 - Signature headers (last field after the colon)
 - Trust store filenames (`<fingerprint>.toml`)
-- `ryeos identity public-key` output
+- `ryeos identity` output
 
 ## Vault (Sealed Secrets)
 

@@ -24,7 +24,7 @@ A remote command can require authority in two places:
    the caller node key for the remote routes touched by the operation.
 
 Remote HTTP requests are signed with the caller **node key**, not the
-operator user key. Share `ryeos identity public-key` output with the
+operator user key. Share `ryeos identity` output with the
 remote operator when requesting access.
 
 ## Authority Matrix

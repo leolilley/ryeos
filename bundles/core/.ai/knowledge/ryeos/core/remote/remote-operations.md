@@ -49,7 +49,7 @@ the user CLI key. This means:
 - To display your node's public key for sharing with a remote operator:
 
   ```bash
-  ryeos identity public-key
+ryeos identity
   ```
 
 - The remote operator authorizes the caller's **node key fingerprint**,
@@ -68,7 +68,7 @@ the user CLI key. This means:
    with:
 
    ```bash
-   ryeos identity public-key
+  ryeos identity
    ```
 
    The remote operator can then grant explicit scopes locally:
@@ -117,7 +117,7 @@ the user CLI key. This means:
 # ── On the CALLER node ──
 
 # 1. Display your node public key (share this with the remote operator)
-ryeos identity public-key
+ryeos identity
 
 # 2. Configure the remote
 ryeos remote configure --remote prod --url https://ryeos.example.com

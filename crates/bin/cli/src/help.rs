@@ -532,6 +532,11 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
                 "  --source <SOURCE>     Where to look: project (default) or user"
             )?;
         }
+        Some("identity") => {
+            writeln!(out, "ryeos identity — Print the local node public identity")?;
+            writeln!(out)?;
+            writeln!(out, "USAGE: ryeos identity [--system-space-dir <DIR>]")?;
+        }
         Some(other) => {
             writeln!(out, "no local help available for '{}'", other)?;
             writeln!(out, "run `ryeos init` if Rye OS has not been initialized")?;

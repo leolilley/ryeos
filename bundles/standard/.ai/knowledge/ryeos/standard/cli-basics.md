@@ -59,7 +59,7 @@ node key fingerprint, vault fingerprint, and installed bundle names.
 ## 2. Start, stop, and inspect the local daemon
 
 Lifecycle verbs (`init`, `start`, `stop`, `status`) and
-`identity public-key` are the only hardcoded CLI commands. Everything
+`identity` are the only hardcoded CLI commands. Everything
 else is descriptor-driven from installed bundles.
 
 Start the daemon after `init`:
@@ -81,7 +81,7 @@ Useful rules for agents:
 
 - If a command says it cannot contact the daemon, run `ryeos status`.
 - If aliases seem stale after installing bundles, restart the daemon.
-- `ryeos identity public-key` and `ryeos init` are useful before the
+- `ryeos identity` and `ryeos init` are useful before the
   daemon is running.
 - `ryeos sign`, `ryeos verify`, and `ryeos fetch` work offline without a
   daemon (see Section 6).
@@ -278,7 +278,7 @@ with signed HTTP requests. They use the caller's **node key**.
 Show the local node identity to a remote operator:
 
 ```bash
-ryeos identity public-key
+ryeos identity
 ```
 
 Configure a named remote:
@@ -370,7 +370,7 @@ CLI output is incomplete or a runtime fails on the remote node.
 Start here when something fails:
 
 1. `ryeos status --json` — is the local daemon running?
-2. `ryeos identity public-key` — does local identity exist?
+2. `ryeos identity` — does local identity exist?
 3. `ryeos -p /project fetch <ref> --with-content` — does the item resolve?
 4. `ryeos -p /project verify <ref>` — is it signed and trusted?
 5. `ryeos -p /project execute <ref> --input params.json` — can it run locally?

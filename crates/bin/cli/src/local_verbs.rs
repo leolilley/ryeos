@@ -8,7 +8,7 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos status` — show local node lifecycle status
 //!
-//! `ryeos identity public-key` is local as a bootstrap affordance: remote
+//! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
 //!
 //! All other commands — including `sign`, `verify`, `fetch` — are
@@ -33,8 +33,8 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
         return Ok(false);
     }
     match argv[0].as_str() {
-        "identity" if argv.get(1).map(|s| s.as_str()) == Some("public-key") => {
-            run_identity_public_key_verb(&argv[2..]).map_err(map_local_err)?;
+        "identity" => {
+            run_identity_verb(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
         "init" => {
@@ -63,22 +63,22 @@ fn map_local_err(e: anyhow::Error) -> CliError {
     }
 }
 
-// ── ryeos identity public-key ─────────────────────────────────────
+// ── ryeos identity ────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos identity public-key",
+    name = "ryeos identity",
     about = "Print the local node public identity without contacting the daemon",
     no_binary_name = true
 )]
-struct IdentityPublicKeyArgs {
+struct IdentityArgs {
     /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
     system_space_dir: Option<PathBuf>,
 }
 
-fn run_identity_public_key_verb(argv: &[String]) -> Result<()> {
-    let args = parse_or_handle_help::<IdentityPublicKeyArgs>(argv)?;
+fn run_identity_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<IdentityArgs>(argv)?;
     let report = ryeos_tools::actions::inspect::identity::run_identity(
         ryeos_tools::actions::inspect::identity::IdentityParams {
             system_space_dir: args
@@ -86,7 +86,7 @@ fn run_identity_public_key_verb(argv: &[String]) -> Result<()> {
                 .map(|p| p.to_string_lossy().into_owned()),
         },
     )
-    .context("ryeos identity public-key failed")?;
+    .context("ryeos identity failed")?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
