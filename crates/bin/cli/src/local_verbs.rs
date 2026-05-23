@@ -8,8 +8,8 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos status` — show local node lifecycle status
 //!
-//! Everything else is dispatched to the daemon via the alias/verb table,
-//! or handled by the `ryeos execute` universal escape hatch.
+//! `ryeos sign` is also local so authoring-time signing never depends on
+//! a running daemon or verb-table dispatch.
 
 use std::path::PathBuf;
 
@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv, StopOptions};
+use ryeos_tools::actions::sign::{run_sign, SignSource};
 
 use crate::error::CliError;
 
@@ -43,6 +44,10 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
         }
         "stop" => {
             run_stop_verb(&argv[1..]).await.map_err(map_local_err)?;
+            Ok(true)
+        }
+        "sign" => {
+            run_sign_verb(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -158,6 +163,49 @@ async fn run_start_verb(argv: &[String]) -> Result<()> {
         println!("started");
     }
     print_lifecycle_status(&report.status);
+    Ok(())
+}
+
+// ── ryeos sign ──────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos sign",
+    about = "Sign a RyeOS item by canonical ref after path-anchoring validation",
+    no_binary_name = true
+)]
+struct SignArgs {
+    /// Canonical ref of the item to sign, e.g. `directive:hello`,
+    /// `tool:ryeos/core/sign`, `config:cli/sign`.
+    item_ref: String,
+
+    /// Project root (parent of `.ai/`). Defaults to the current directory.
+    #[arg(long)]
+    project: Option<PathBuf>,
+
+    /// Where to look for the item. `system` is rejected — bundle items are
+    /// signed by their author key during bundle authoring.
+    #[arg(long, default_value = "project")]
+    source: String,
+}
+
+fn run_sign_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<SignArgs>(argv)?;
+    let source = SignSource::parse(&args.source)?;
+    let project = match args.project {
+        Some(p) => p,
+        None => std::env::current_dir().context("read current directory")?,
+    };
+    let report =
+        run_sign(&args.item_ref, Some(project.as_path()), source).context("ryeos sign failed")?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !report.is_total_success() {
+        anyhow::bail!(
+            "{}/{} items failed validation or signing",
+            report.failed.len(),
+            report.total()
+        );
+    }
     Ok(())
 }
 

@@ -73,6 +73,16 @@ async fn main() -> Result<()> {
     // The daemon start path is fail-closed on unsigned trust-sensitive items.
     // Use `ryeos init` to install bundle registrations before daemon startup.
 
+    // Acquire operator state lock before touching daemon-owned runtime files.
+    // In particular, never unlink the UDS socket until we know this process is
+    // the sole operator for the state dir: a failed second daemon start must
+    // not orphan the live daemon's callback socket.
+    let state_lock_path = state_lock::default_lock_path(&config.system_space_dir);
+    let _state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
+        "failed to acquire state lock — is another ryeosd instance or standalone service running?",
+    )?;
+    tracing::info!("State lock acquired");
+
     process::remove_stale_socket(&config.uds_path)?;
     ensure_runtime_paths(&config)?;
 
@@ -203,9 +213,9 @@ async fn main() -> Result<()> {
     tracing::info!(routes = route_table.load().all.len(), "route table built");
 
     // Build thread-kind profiles from the loaded kind schemas.
-    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(
-        Some(&engine.kinds),
-    ));
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
     let state_root = config.system_space_dir.join(".ai").join("state");
@@ -231,10 +241,6 @@ async fn main() -> Result<()> {
             .context("SchedulerDb initialization failed")?,
     );
     tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
-
-    // State lock already held since the start of main (acquired before
-    // socket unlink); see the early `_state_lock` binding.
-    tracing::info!("State lock acquired");
 
     let events = Arc::new(EventStoreService::new(state_store.clone()));
     let threads = Arc::new(ThreadLifecycleService::new(
@@ -712,9 +718,9 @@ async fn run_service_standalone(
     // Two-phase node-config bootstrap (same as daemon-start path)
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
 
-    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(
-        Some(&engine.kinds),
-    ));
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
     let services = Arc::new(service_registry::build_service_registry());

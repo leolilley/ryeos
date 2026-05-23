@@ -80,8 +80,9 @@ impl SignSource {
 ///   * `directive:agent/**/*`        — every directive under `agent/`
 ///
 /// `project_path` is required when `source = Project`; ignored
-/// otherwise. The user signing key is loaded from
-/// `~/.ryeos/.ai/config/keys/signing/private_key.pem`.
+/// otherwise. The user signing key is loaded from `RYE_SIGNING_KEY`
+/// env, `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the
+/// legacy `~/.ai/config/keys/signing/private_key.pem` fallback.
 ///
 /// Returns a `BatchReport` always — single-item refs produce a one-
 /// element vec. Per-item failures are collected; a failed validator
@@ -439,7 +440,9 @@ fn build_parser_dispatcher(
 }
 
 /// Sign a file in place using the kind's signature envelope. Loads
-/// the user signing key from `~/.ryeos/.ai/config/keys/signing/private_key.pem`.
+/// the user signing key from `RYE_SIGNING_KEY` env,
+/// `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the legacy
+/// `~/.ai/config/keys/signing/private_key.pem` fallback.
 fn sign_in_place(input: &Path, envelope: &SignatureEnvelope) -> Result<SignatureReport> {
     let body = fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?;
 
@@ -480,15 +483,26 @@ pub struct SignatureReport {
 }
 
 fn load_user_signing_key() -> Result<SigningKey> {
-    let user_root = roots::user_root()
-        .ok()
-        .context("cannot resolve user root (set USER_SPACE or ensure $HOME is discoverable)")?;
-    let path = user_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
+    let path: PathBuf = match std::env::var("RYE_SIGNING_KEY") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => {
+            let user_root = roots::user_root().ok().context(
+                "cannot resolve user root (set USER_SPACE or ensure $HOME is discoverable)",
+            )?;
+            let canonical_path = user_root
+                .join(ryeos_engine::AI_DIR)
+                .join("config")
+                .join("keys")
+                .join("signing")
+                .join("private_key.pem");
+            if canonical_path.is_file() {
+                canonical_path
+            } else {
+                let home = std::env::var("HOME").context("HOME not set")?;
+                Path::new(&home).join(".ai/config/keys/signing/private_key.pem")
+            }
+        }
+    };
 
     let pem = fs::read_to_string(&path)
         .with_context(|| format!("read signing key from {}", path.display()))?;
