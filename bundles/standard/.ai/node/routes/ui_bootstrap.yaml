@@ -1,0 +1,18 @@
+# ryeos:signed:2026-05-23T14:17:34Z:b6b69dd12f69b8e9cd02f354818947efa490ad01c270bf7e2b7ac72711e28778:zxf7/9rXZy2tD19aIeT1ZZWTfCF8XoAPSIaIWWemxMqbLJAyhNWGMtHuBFF3J6TwYaBnz+UgXKS/7BpL6RHjCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: ui/api/bootstrap
+path: /ui/api/bootstrap
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/bootstrap"
+  source_config:
+    surface_ref: "surface:ryeos/cockpit/base"
+    renderer: "browser"

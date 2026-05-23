@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-23T14:17:35Z:43b51d0009e9f4edef8b45ffe1f9251da31a9c233c53a7153ff1e870b810af0e:5S566scvNIRa07RYj9meW6MMuAsOpqy8Hf5Sxw6dTDP0jo5wzb4aGJEqUkLBegzfpKdWs207DXED8TeiaMezBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: launch
+version: "1.0.0"
+description: Consumes a launch token, establishes a browser session, sets a session cookie.
+endpoint: ui.launch
+availability: both

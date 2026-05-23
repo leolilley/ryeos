@@ -3,6 +3,7 @@
 // Phase B: extraction in progress. Modules are added as files are moved
 // out of ryeosd. Each move keeps the workspace compiling.
 
+pub mod browser_session;
 pub mod callback_token;
 pub mod command_service;
 pub mod config;

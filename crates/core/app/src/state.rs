@@ -11,6 +11,7 @@ use ryeos_runtime::verb_registry::VerbRegistry;
 use ryeos_scheduler::db::SchedulerDb;
 use ryeos_scheduler::ReloadSignal;
 
+use crate::browser_session::BrowserSessionStore;
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
 use crate::config::Config;
@@ -54,6 +55,10 @@ pub struct AppState {
     pub commands: Arc<CommandService>,
     pub callback_tokens: Arc<CallbackCapabilityStore>,
     pub thread_auth: Arc<ThreadAuthStore>,
+    /// In-memory browser session store for `/ui` routes.
+    /// Sessions are created via launch tokens and validated by the
+    /// `browser_session` auth invoker.
+    pub browser_sessions: Arc<BrowserSessionStore>,
     pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,

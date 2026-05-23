@@ -1342,6 +1342,7 @@ mod tests {
                 ryeos_app::callback_token::CallbackCapabilityStore::new(),
             ),
             thread_auth: std::sync::Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
+            browser_sessions: std::sync::Arc::new(ryeos_app::browser_session::BrowserSessionStore::new()),
             write_barrier: std::sync::Arc::new(write_barrier),
             started_at: std::time::Instant::now(),
             started_at_iso: String::new(),

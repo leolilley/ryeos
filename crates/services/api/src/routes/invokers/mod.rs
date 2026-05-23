@@ -6,6 +6,7 @@
 //! - Streaming sources → `CompiledGatewayLaunch`, `CompiledThreadsEventsStream`
 //! - Launch mode → `CompiledLaunchInvocation`
 
+pub mod browser_session_invocation;
 pub mod dispatch_invocation;
 pub mod gateway_stream_invocation;
 pub mod hmac_invocation;
@@ -37,6 +38,9 @@ pub fn compile_auth_invoker(
         "none" => Ok(Arc::new(none_invocation::CompiledNoneVerifier)),
         "ryeos_signed" => Ok(Arc::new(
             ryeos_signed_invocation::CompiledRyeosSignedVerifier,
+        )),
+        "browser_session" => Ok(Arc::new(
+            browser_session_invocation::CompiledBrowserSessionVerifier,
         )),
         "hmac" => {
             let config = auth_config.ok_or_else(|| RouteConfigError::InvalidSourceConfig {

@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-23T14:17:34Z:3801e85c3e1bb45ae840f1724f3820c28df41f7cd119b486586cfd060f4ee395:GFfFQJHM6anKisLQ5kQvSfSBIJY8t3dNNS0iqGRR3jLZGI9LJImK1MFerFvBJus/C19muJXfeK6IMNf/5+snBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: ui/api/actions/invoke
+path: /ui/api/actions/invoke
+methods:
+  - POST
+auth: browser_session
+limits:
+  body_bytes_max: 65536
+  timeout_ms: 30000
+  concurrent_max: 64
+request:
+  body: json
+response:
+  mode: json
+  source: "service:ui/actions/invoke"
