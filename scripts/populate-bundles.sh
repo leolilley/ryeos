@@ -104,18 +104,26 @@ install -m 0755 \
 
 # ── Publish ──────────────────────────────────────────────────────────
 
+# Bundle publishing is an offline authoring operation. Use the maintainer
+# binary directly rather than `ryeos publish`, because `publish` is no longer
+# a lifecycle-local CLI verb on `next` and would otherwise route through a
+# daemon/initialized-node dispatch path during Docker builds.
+SIGN_USER_SPACE="$(mktemp -d)"
+trap 'rm -rf "$SIGN_USER_SPACE"' EXIT
+mkdir -p "$SIGN_USER_SPACE/.ai/config/keys/signing"
+cp "$KEY" "$SIGN_USER_SPACE/.ai/config/keys/signing/private_key.pem"
+chmod 0600 "$SIGN_USER_SPACE/.ai/config/keys/signing/private_key.pem"
+
 echo "[populate-bundles] publishing core bundle…"
-"$TARGET/release/ryeos" publish "$CORE" \
+USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
-  --key "$KEY" \
   --owner "$OWNER" >/dev/null
 
 echo "[populate-bundles] publishing standard bundle…"
 # Standard contains its own kind schemas (directive, graph, knowledge) now.
 # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
-"$TARGET/release/ryeos" publish "$STD" \
+USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$STD" \
   --registry-root "$CORE" \
-  --key "$KEY" \
   --owner "$OWNER" >/dev/null
 
 echo "[populate-bundles] done"
