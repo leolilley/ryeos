@@ -36,7 +36,19 @@ pub enum ResolvedProjectSpec {
 /// Returns an error if both `--no-project` and `--project` are present,
 /// if the explicit project path cannot be canonicalized, or if user-space
 /// execution is selected but the RyeOS user space is unavailable.
-pub fn rewrite_project_tail(tail: &[String]) -> Result<Vec<String>, CliError> {
+#[cfg(test)]
+fn rewrite_project_tail(tail: &[String]) -> Result<Vec<String>, CliError> {
+    rewrite_project_tail_with_default(tail, None)
+}
+
+/// Rewrite a project-bearing tail, using `default_project` when the tail
+/// does not contain either `--project` or `--no-project`. This is how
+/// the CLI preserves global `-p/--project` support while still accepting
+/// service-field `--project` after the verb.
+pub fn rewrite_project_tail_with_default(
+    tail: &[String],
+    default_project: Option<&std::path::Path>,
+) -> Result<Vec<String>, CliError> {
     let mut out: Vec<String> = Vec::with_capacity(tail.len() + 2);
     let mut explicit_path: Option<PathBuf> = None;
     let mut no_project = false;
@@ -75,6 +87,9 @@ pub fn rewrite_project_tail(tail: &[String]) -> Result<Vec<String>, CliError> {
 
     let cwd =
         std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
+    if explicit_path.is_none() && !no_project {
+        explicit_path = default_project.map(PathBuf::from);
+    }
     let resolved = resolve_spec_from_cwd(no_project, explicit_path, &cwd)?;
     match resolved {
         ResolvedProjectSpec::NoProject => out.push("--no-project".into()),
@@ -210,6 +225,30 @@ mod tests {
         let tail = vec![format!("--project={}", tmp.path().display())];
         let out = rewrite_project_tail(&tail).unwrap();
         assert_eq!(out[0], "--project");
+    }
+
+    #[test]
+    fn rewrite_uses_default_project_when_tail_has_no_project_choice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tail = vec!["--remote".into(), "prod".into()];
+        let out = rewrite_project_tail_with_default(&tail, Some(tmp.path())).unwrap();
+        assert_eq!(out[0..2], ["--remote", "prod"]);
+        assert!(out.windows(2).any(|w| {
+            w[0] == "--project" && w[1] == tmp.path().canonicalize().unwrap().to_string_lossy()
+        }));
+    }
+
+    #[test]
+    fn explicit_tail_project_overrides_default_project() {
+        let default = tempfile::tempdir().unwrap();
+        let explicit = tempfile::tempdir().unwrap();
+        let tail = vec!["--project".into(), explicit.path().to_string_lossy().into()];
+        let out = rewrite_project_tail_with_default(&tail, Some(default.path())).unwrap();
+        assert_eq!(out[0], "--project");
+        assert_eq!(
+            PathBuf::from(&out[1]),
+            explicit.path().canonicalize().unwrap()
+        );
     }
 
     #[test]

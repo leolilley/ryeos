@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-23T04:53:02Z:afce39dd7bcbe39498e9be0cfc53839394c641b067411ac88c16f1ab089c0250:zcok8SQ+E9sV5eAEsLGdRwhRHmgMLl4yBW4D8ZqkPEGuZI0dG83swKn02sUsU1aVHzzXD7MZ5esZzi98wumpAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core
@@ -90,6 +91,7 @@ for the full matrix.
 | `remote/configure` | `remote.configure` | `ryeos.execute.service.remote.configure` |
 | `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
 | `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
+| `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |

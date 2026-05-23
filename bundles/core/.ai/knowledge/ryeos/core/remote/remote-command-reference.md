@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T04:42:05Z:0e08786a6b53a7b18a4d82d3e64a3d178ab59e75f3873f405fa4fd15b8621e2e:O3KAeobKydj7Bat1oasspnfNTu0aLrj/shgQOPI071zqpJ1kgNZ4r2cvha24wXZJwZdYckFQ4OaqFDRvPmazCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-23T04:53:02Z:761af3d3d8a0d1c92ff3197a4dd523b21ebdeca30db502392ab183357b7ea81f:stnppxE8sW7kEUvA7wKzNtrP4/3KDQD9SXSftbyA3GAA6LhF9vuM/Wu/d/x3qOxl1PvO5bd59RlhSYbhHlQnDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -34,6 +34,7 @@ remote operator when requesting access.
 | `ryeos remote configure` | `ryeos.execute.service.remote.configure` | none | `GET /public-key`, `GET /ingest-ignore` |
 | `ryeos remote list` | `ryeos.execute.service.remote.list` | none | none |
 | `ryeos remote status` | `ryeos.execute.service.remote.status` | none | `GET /health`, `GET /public-key` |
+| `ryeos remote doctor` | `ryeos.execute.service.remote.doctor` | signed auth probe; project status if `--project` is supplied | `GET /health`, `GET /public-key`, `GET /threads?limit=1`, optionally `POST /project/status` |
 | `ryeos remote authorize` | `ryeos.execute.service.remote.admin` | `ryeos.execute.service.authorize.key` | `POST /authorize-key` |
 | `ryeos remote push` | `ryeos.execute.service.remote.push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push.head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote pull` | `ryeos.execute.service.objects.get` | `ryeos.execute.service.objects.get` | `POST /objects/get` |
@@ -201,6 +202,28 @@ and executes against the bound remote project path using the remote
 daemon's live filesystem project. It is the preferred path for
 `ai_only` bindings where the operator wants to run the deployed project,
 not perform a full push/execute/pull cycle.
+
+Project-aware remote commands accept `--project` either globally before
+the verb or as the command's service field after the verb:
+
+```bash
+ryeos -p /absolute/path remote run prod tool:my/task
+ryeos remote run prod tool:my/task --project /absolute/path
+```
+
+## `ryeos remote doctor`
+
+Diagnose the remote operator setup path in one command.
+
+```bash
+ryeos remote doctor --remote prod
+ryeos remote doctor prod --project /absolute/path/to/project
+```
+
+The report includes local node identity, remote configuration, remote
+health/identity discovery, a signed authorization probe, project binding
+status when `--project` is supplied, and next-step commands for bootstrap
+authorization, binding, `sync-project-ai`, and `remote run`.
 
 ## `ryeos remote threads`
 

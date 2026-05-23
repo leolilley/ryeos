@@ -89,9 +89,4 @@ pub enum CliError {
     /// provided path could not be canonicalized.
     #[error("project resolution: {0}")]
     ProjectResolution(String),
-
-    /// The user passed a flag in the wrong position (e.g. `--project`
-    /// after the verb instead of as a global flag before it).
-    #[error("{message}")]
-    Usage { message: String },
 }

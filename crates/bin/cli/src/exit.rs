@@ -15,7 +15,6 @@ impl CliError {
             CliError::Io(_) => EX_SOFTWARE,
             CliError::Local { .. } => 1,
             CliError::ProjectResolution(_) => EX_USAGE,
-            CliError::Usage { .. } => EX_USAGE,
         }
     }
 }

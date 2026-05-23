@@ -5,6 +5,7 @@
 //! `ryeos help <verb>` queries the daemon for alias info via the same
 //! token dispatch path with `validate_only: true`.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use crate::error::CliError;
@@ -219,7 +220,9 @@ pub async fn print_verb_help(
             eprintln!("note: daemon not reachable, showing limited help");
             eprintln!("  detail: {e:#}");
             eprintln!();
-            print_local_verb_help(verb_tokens)?;
+            if !print_installed_verb_help(verb_tokens, system_space_dir)? {
+                print_local_verb_help(verb_tokens)?;
+            }
             return Ok(());
         }
     };
@@ -230,7 +233,9 @@ pub async fn print_verb_help(
             eprintln!("note: cannot sign help request (user key not found)");
             eprintln!("  detail: {e:#}");
             eprintln!();
-            print_local_verb_help(verb_tokens)?;
+            if !print_installed_verb_help(verb_tokens, system_space_dir)? {
+                print_local_verb_help(verb_tokens)?;
+            }
             return Ok(());
         }
     };
@@ -255,6 +260,221 @@ pub async fn print_verb_help(
     println!("{pretty}");
 
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AliasHelpRecord {
+    tokens: Vec<String>,
+    verb: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    positional_field: Option<String>,
+    #[serde(default)]
+    positional_forms: Vec<ryeos_runtime::PositionalForm>,
+    #[serde(default)]
+    project_resolution: ryeos_runtime::ProjectResolution,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VerbHelpRecord {
+    #[serde(default)]
+    description: String,
+    execute: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ServiceHelpRecord {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    required_caps: Vec<String>,
+    #[serde(default)]
+    schema: BTreeMap<String, String>,
+}
+
+fn print_installed_verb_help(
+    verb_tokens: &[String],
+    system_space_dir: &std::path::Path,
+) -> std::io::Result<bool> {
+    let Some(alias) = find_alias_help(verb_tokens, system_space_dir) else {
+        return Ok(false);
+    };
+    let verb = read_verb_help(system_space_dir, &alias.verb);
+    let service = verb
+        .as_ref()
+        .and_then(|v| service_ref_to_path(system_space_dir, &v.execute))
+        .and_then(|path| read_yaml::<ServiceHelpRecord>(&path));
+
+    let mut out = std::io::stdout();
+    let command = alias.tokens.join(" ");
+    let description = service
+        .as_ref()
+        .map(|s| s.description.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            verb.as_ref()
+                .map(|v| v.description.as_str())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or(&alias.description);
+
+    writeln!(out, "ryeos {command} — {description}")?;
+    writeln!(out)?;
+    writeln!(out, "USAGE:")?;
+    writeln!(
+        out,
+        "  ryeos {command}{}",
+        usage_tail(&alias, service.as_ref())
+    )?;
+
+    if alias.project_resolution != ryeos_runtime::ProjectResolution::None {
+        writeln!(out)?;
+        writeln!(out, "PROJECT:")?;
+        writeln!(
+            out,
+            "  --project <DIR>       Project root; accepted before or after the verb"
+        )?;
+        if alias.project_resolution == ryeos_runtime::ProjectResolution::Optional {
+            writeln!(
+                out,
+                "  --no-project          Resolve against user/system space only"
+            )?;
+        }
+    }
+
+    if let Some(service) = &service {
+        if !service.schema.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "FIELDS:")?;
+            for (field, ty) in &service.schema {
+                let flag = field.replace('_', "-");
+                writeln!(out, "  --{:<20} {}", flag, ty)?;
+            }
+        }
+        if !service.required_caps.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "REQUIRED CAPABILITIES:")?;
+            for cap in &service.required_caps {
+                writeln!(out, "  {cap}")?;
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn usage_tail(alias: &AliasHelpRecord, service: Option<&ServiceHelpRecord>) -> String {
+    let mut parts = Vec::new();
+    if !alias.positional_forms.is_empty() {
+        for form in &alias.positional_forms {
+            let shape = form
+                .slots
+                .iter()
+                .map(|slot| format!("<{}>", slot.field.replace('_', "-")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !shape.is_empty() {
+                parts.push(shape);
+            }
+        }
+    } else if let Some(field) = &alias.positional_field {
+        parts.push(format!("<{}>", field.replace('_', "-")));
+    }
+
+    if let Some(service) = service {
+        for (field, ty) in &service.schema {
+            let required = !ty.ends_with('?');
+            if field == "project" || parts.iter().any(|p| p.contains(&field.replace('_', "-"))) {
+                continue;
+            }
+            let flag = format!(
+                "--{} <{}>",
+                field.replace('_', "-"),
+                field.replace('_', "-")
+            );
+            if required {
+                parts.push(flag);
+            } else {
+                parts.push(format!("[{flag}]"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" "))
+    }
+}
+
+fn find_alias_help(
+    verb_tokens: &[String],
+    system_space_dir: &std::path::Path,
+) -> Option<AliasHelpRecord> {
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundle_entries = std::fs::read_dir(&bundles_dir).ok()?;
+    for bundle_entry in bundle_entries.flatten() {
+        let aliases_dir = bundle_entry.path().join(".ai/node/aliases");
+        let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
+            continue;
+        };
+        for alias_file in alias_files.flatten() {
+            let path = alias_file.path();
+            if !matches!(
+                path.extension().and_then(|s| s.to_str()),
+                Some("yaml") | Some("yml")
+            ) {
+                continue;
+            }
+            let Some(alias) = read_yaml::<AliasHelpRecord>(&path) else {
+                continue;
+            };
+            if alias.tokens == verb_tokens {
+                return Some(alias);
+            }
+        }
+    }
+    None
+}
+
+fn read_verb_help(system_space_dir: &std::path::Path, verb: &str) -> Option<VerbHelpRecord> {
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundle_entries = std::fs::read_dir(&bundles_dir).ok()?;
+    for bundle_entry in bundle_entries.flatten() {
+        let path = bundle_entry
+            .path()
+            .join(".ai/node/verbs")
+            .join(format!("{verb}.yaml"));
+        if let Some(record) = read_yaml::<VerbHelpRecord>(&path) {
+            return Some(record);
+        }
+    }
+    None
+}
+
+fn service_ref_to_path(
+    system_space_dir: &std::path::Path,
+    service_ref: &str,
+) -> Option<std::path::PathBuf> {
+    let rel = service_ref.strip_prefix("service:")?;
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundle_entries = std::fs::read_dir(&bundles_dir).ok()?;
+    for bundle_entry in bundle_entries.flatten() {
+        let path = bundle_entry
+            .path()
+            .join(".ai/services")
+            .join(format!("{rel}.yaml"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn read_yaml<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_yaml::from_str(&content).ok()
 }
 
 /// Print help for local verbs when the daemon is unavailable.
@@ -329,4 +549,71 @@ fn discover_system_space_dir() -> std::path::PathBuf {
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installed_help_reads_alias_verb_and_service_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join(".ai/bundles/core/.ai");
+        std::fs::create_dir_all(bundle.join("node/aliases")).unwrap();
+        std::fs::create_dir_all(bundle.join("node/verbs")).unwrap();
+        std::fs::create_dir_all(bundle.join("services/remote")).unwrap();
+        std::fs::write(
+            bundle.join("node/aliases/remote-doctor.yaml"),
+            r#"
+category: aliases
+section: aliases
+tokens: ["remote", "doctor"]
+verb: remote-doctor
+description: Diagnose remote setup
+project_resolution: optional
+positional_forms:
+  - slots:
+      - field: remote
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            bundle.join("node/verbs/remote-doctor.yaml"),
+            r#"
+category: verbs
+section: verbs
+name: remote-doctor
+description: Diagnose remote setup
+execute: service:remote/doctor
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            bundle.join("services/remote/doctor.yaml"),
+            r#"
+kind: service
+endpoint: remote.doctor
+required_caps: ["ryeos.execute.service.remote.doctor"]
+schema:
+  remote: string?
+  project: string?
+description: Diagnose remote node authorization and project setup
+"#,
+        )
+        .unwrap();
+
+        let tokens = vec!["remote".to_string(), "doctor".to_string()];
+        let alias = find_alias_help(&tokens, tmp.path()).unwrap();
+        assert_eq!(alias.verb, "remote-doctor");
+        assert_eq!(
+            alias.project_resolution,
+            ryeos_runtime::ProjectResolution::Optional
+        );
+        let verb = read_verb_help(tmp.path(), &alias.verb).unwrap();
+        assert_eq!(verb.execute, "service:remote/doctor");
+        let service_path = service_ref_to_path(tmp.path(), &verb.execute).unwrap();
+        let service: ServiceHelpRecord = read_yaml(&service_path).unwrap();
+        assert_eq!(service.schema.get("project").unwrap(), "string?");
+        assert_eq!(usage_tail(&alias, Some(&service)), " <remote>");
+    }
 }

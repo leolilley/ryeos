@@ -10,6 +10,8 @@
 //!
 //! `ryeos sign` is also local so authoring-time signing never depends on
 //! a running daemon or verb-table dispatch.
+//! `ryeos identity public-key` is local as a bootstrap affordance: remote
+//! operators need to copy their node public key before the daemon is running.
 
 use std::path::PathBuf;
 
@@ -30,6 +32,10 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
         return Ok(false);
     }
     match argv[0].as_str() {
+        "identity" if argv.get(1).map(|s| s.as_str()) == Some("public-key") => {
+            run_identity_public_key_verb(&argv[2..]).map_err(map_local_err)?;
+            Ok(true)
+        }
         "init" => {
             run_init_verb(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
@@ -58,6 +64,34 @@ fn map_local_err(e: anyhow::Error) -> CliError {
     CliError::Local {
         detail: format!("{e:#}"),
     }
+}
+
+// ── ryeos identity public-key ─────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos identity public-key",
+    about = "Print the local node public identity without contacting the daemon",
+    no_binary_name = true
+)]
+struct IdentityPublicKeyArgs {
+    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    system_space_dir: Option<PathBuf>,
+}
+
+fn run_identity_public_key_verb(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<IdentityPublicKeyArgs>(argv)?;
+    let report = ryeos_tools::actions::inspect::identity::run_identity(
+        ryeos_tools::actions::inspect::identity::IdentityParams {
+            system_space_dir: args
+                .system_space_dir
+                .map(|p| p.to_string_lossy().into_owned()),
+        },
+    )
+    .context("ryeos identity public-key failed")?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 // ── ryeos init ──────────────────────────────────────────────────────
