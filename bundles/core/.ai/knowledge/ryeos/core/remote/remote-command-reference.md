@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-23T04:42:05Z:0e08786a6b53a7b18a4d82d3e64a3d178ab59e75f3873f405fa4fd15b8621e2e:O3KAeobKydj7Bat1oasspnfNTu0aLrj/shgQOPI071zqpJ1kgNZ4r2cvha24wXZJwZdYckFQ4OaqFDRvPmazCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -37,6 +38,7 @@ remote operator when requesting access.
 | `ryeos remote push` | `ryeos.execute.service.remote.push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push.head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote pull` | `ryeos.execute.service.objects.get` | `ryeos.execute.service.objects.get` | `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote.admin` | push scopes + `ryeos.execute.service.objects.get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
+| `ryeos remote run` | `ryeos.execute.service.remote.admin` | caps required by the executed item | `POST /execute` |
 | `ryeos remote threads` | `ryeos.execute.service.remote.admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
 | `ryeos remote thread-status` | `ryeos.execute.service.remote.admin` | signed auth; no extra thread service cap in v1 | `GET /threads/{thread_id}` |
 | `ryeos remote bundle-install` | `ryeos.execute.service.bundle.install` | `ryeos.execute.service.bundle.export`, `ryeos.execute.service.objects.get` | `POST /bundle/export`, `POST /objects/get` |
@@ -91,9 +93,10 @@ Check a remote's public identity and health.
 ryeos remote status --remote prod
 ```
 
-Uses unauthenticated discovery routes and is safe before authorization.
-It is useful for confirming URL reachability and key material before
-asking the remote operator to authorize your node key.
+Uses unauthenticated discovery routes and a non-fatal signed probe. It
+is useful for confirming URL reachability, key material, local node
+identity, current authorization status, project bindings, and the
+bootstrap `authorize-client` command to run on the remote host.
 
 ## `ryeos remote authorize`
 
@@ -180,6 +183,24 @@ Execution phases:
 
 Clean-base guard: if local tracked files changed since the push, the
 pull-back apply aborts without partial writes.
+
+## `ryeos remote run`
+
+Execute an item against a configured remote project without pushing or
+pulling project state.
+
+```bash
+ryeos -p /absolute/path/to/project remote run \
+  --remote prod \
+  --item-ref directive:my/deployed-chat
+```
+
+Use this after `remote bind-project` and, for AI-managed deployments,
+`remote sync-project-ai`. The command resolves the local project binding
+and executes against the bound remote project path using the remote
+daemon's live filesystem project. It is the preferred path for
+`ai_only` bindings where the operator wants to run the deployed project,
+not perform a full push/execute/pull cycle.
 
 ## `ryeos remote threads`
 
