@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T04:53:02Z:21cbcb73b8a9c6632b98fb7900770f50fa0ddd4a74f4a5064224ac1eca315db3:Jpu3e0X3nDYY/a2anyEFVKb8NynKOWNutW7B0AobnsgRjuKhLFOCBiXsz1cWwTCIyucly2YvFpGYlcxRbcEUAQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T09:45:36Z:21cbcb73b8a9c6632b98fb7900770f50fa0ddd4a74f4a5064224ac1eca315db3:Jpu3e0X3nDYY/a2anyEFVKb8NynKOWNutW7B0AobnsgRjuKhLFOCBiXsz1cWwTCIyucly2YvFpGYlcxRbcEUAQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: service
 endpoint: remote.doctor
 required_caps: ["ryeos.execute.service.remote.doctor"]

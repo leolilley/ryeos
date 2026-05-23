@@ -285,8 +285,7 @@ fn is_already_validly_signed(
     signing_key: &lillux::crypto::SigningKey,
     envelope: &ryeos_engine::contracts::SignatureEnvelope,
 ) -> bool {
-    let Some(header) =
-        ryeos_engine::item_resolution::parse_signature_header(existing, envelope)
+    let Some(header) = ryeos_engine::item_resolution::parse_signature_header(existing, envelope)
     else {
         return false;
     };
@@ -302,11 +301,7 @@ fn is_already_validly_signed(
         return false;
     }
 
-    lillux::signature::verify_signature(
-        &header.content_hash,
-        &header.signature_b64,
-        &verifying_key,
-    )
+    lillux::signature::verify_signature(&header.content_hash, &header.signature_b64, &verifying_key)
 }
 
 /// Derive a bare-id from a file path relative to its kind directory,

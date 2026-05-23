@@ -5,24 +5,26 @@
 //!
 //! 1. Resolves alias tokens → verb → service descriptor from disk YAMLs
 //! 2. Checks the service descriptor's `availability` field
-//! 3. Looks up an in-process handler in the offline endpoint registry
-//! 4. Runs the handler and returns the result
+//! 3. Resolves the descriptor-declared offline tool implementation
+//! 4. Executes that tool descriptor locally and returns the result
 //!
-//! The service descriptor is the source of truth for whether a command
-//! may run offline. The offline endpoint registry only answers whether
-//! this CLI binary has an implementation for that endpoint.
+//! Service descriptors are the source of truth for both whether a command
+//! may run offline and which tool implements the offline path. The CLI does
+//! not keep an endpoint → handler table; adding an offline service means
+//! adding/updating descriptors that point at a local tool.
 //!
-//! Dispatch requires both:
-//!   - service.availability == offline (descriptor declares it)
-//!   - offline_endpoints.contains(endpoint) (CLI has an implementation)
+//! Dispatch requires:
+//!   - service.availability == offline|both
+//!   - service.offline_execute or verb.execute resolves to tool:<id>
+//!   - that tool descriptor declares a subprocess implementation
 //!
-//! If descriptor says offline but binary lacks handler → clear error.
+//! If descriptor says offline but has no local tool implementation → clear error.
 //! If descriptor does not say offline → returns None (fall through to daemon).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use crate::error::CliError;
@@ -33,10 +35,18 @@ use crate::error::CliError;
 #[derive(Debug, serde::Deserialize)]
 struct ServiceDescriptor {
     /// Service endpoint name (e.g. "verify", "fetch", "sign").
+    #[allow(dead_code)]
     endpoint: String,
     /// Whether this service may run offline: "offline", "daemon", or "both".
     #[serde(default)]
     availability: Option<String>,
+    /// Descriptor-declared local implementation for offline dispatch.
+    ///
+    /// Shape: `tool:<id>`, e.g. `tool:ryeos/core/bundle/publish`.
+    /// If absent, a verb that already executes a `tool:<id>` can be used
+    /// directly. Service-backed offline commands should always declare this.
+    #[serde(default)]
+    offline_execute: Option<String>,
     /// Input schema (field name → type string).
     #[serde(default)]
     schema: HashMap<String, String>,
@@ -66,220 +76,28 @@ struct VerbDescriptor {
     execute: String,
 }
 
-// ── Offline endpoint registry ──────────────────────────────────────
+// ── Tool descriptor (subset of fields we need) ─────────────────────
 
-/// In-process handler for an offline-capable endpoint.
-///
-/// Receives validated parameters as a JSON Value, returns a JSON Value result.
-/// This is the implementation table — NOT the source of truth for which
-/// commands may run offline (that's the service descriptor's job).
-type OfflineHandler = fn(Value) -> Result<Value>;
-
-struct OfflineEndpoint {
-    handler: OfflineHandler,
+#[derive(Debug, serde::Deserialize)]
+struct ToolDescriptor {
+    #[serde(default)]
+    executor_id: Option<String>,
+    config: ToolConfig,
 }
 
-/// Returns the CLI's offline endpoint registry.
-///
-/// Key = endpoint name from the service descriptor (e.g. "verify", "fetch", "sign",
-/// "bundle.verify", "bundle.publish").
-fn offline_endpoints() -> HashMap<&'static str, OfflineEndpoint> {
-    let mut m = HashMap::new();
-    m.insert(
-        "verify",
-        OfflineEndpoint {
-            handler: offline_verify,
-        },
-    );
-    m.insert(
-        "fetch",
-        OfflineEndpoint {
-            handler: offline_fetch,
-        },
-    );
-    m.insert(
-        "sign",
-        OfflineEndpoint {
-            handler: offline_sign,
-        },
-    );
-    m.insert(
-        "bundle.verify",
-        OfflineEndpoint {
-            handler: offline_bundle_verify,
-        },
-    );
-    m.insert(
-        "bundle.publish",
-        OfflineEndpoint {
-            handler: offline_bundle_publish,
-        },
-    );
-    m
-}
-
-// ── In-process handlers ────────────────────────────────────────────
-
-fn offline_verify(params: Value) -> Result<Value> {
-    let p: ryeos_tools::actions::inspect::verify::VerifyParams =
-        serde_json::from_value(params).context("invalid verify params")?;
-    let engine = ryeos_tools::actions::inspect::boot(
-        p.project_path.as_deref().map(Path::new),
-    )
-    .context("boot offline engine for verify")?;
-    ryeos_tools::actions::inspect::verify::run_verify(p, &engine)
-        .context("offline verify failed")
-}
-
-fn offline_fetch(params: Value) -> Result<Value> {
-    let p: ryeos_tools::actions::inspect::fetch::FetchParams =
-        serde_json::from_value(params).context("invalid fetch params")?;
-    let engine = ryeos_tools::actions::inspect::boot(
-        p.project_path.as_deref().map(Path::new),
-    )
-    .context("boot offline engine for fetch")?;
-    ryeos_tools::actions::inspect::fetch::run_fetch(p, &engine)
-        .context("offline fetch failed")
-}
-
-fn offline_sign(params: Value) -> Result<Value> {
-    let item_ref = params
-        .get("item_ref")
-        .and_then(|v| v.as_str())
-        .context("item_ref required")?
-        .to_string();
-    let source = params
-        .get("source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("project");
-    let project = params
-        .get("project")
-        .and_then(|v| v.as_str())
-        .map(|s| std::path::PathBuf::from(s))
-        .or_else(|| std::env::current_dir().ok())
-        .context("resolve project directory")?;
-
-    let source =
-        ryeos_tools::actions::sign::SignSource::parse(source).context("invalid source")?;
-    let report = ryeos_tools::actions::sign::run_sign(&item_ref, Some(&project), source)
-        .context("offline sign failed")?;
-    serde_json::to_value(report).context("serialize sign result")
-}
-
-fn offline_bundle_verify(params: Value) -> Result<Value> {
-    let source = params
-        .get("source")
-        .and_then(|v| v.as_str())
-        .context("--source <bundle-path> required")?;
-    let source_path = std::fs::canonicalize(Path::new(source))
-        .context("resolve --source path")?;
-
-    if !source_path.is_dir() {
-        anyhow::bail!("--source is not a directory: {}", source_path.display());
-    }
-
-    let system_space_dir = ryeos_engine::roots::system_roots(&[])
-        .into_iter()
-        .next()
-        .context("resolve system space dir")?;
-
-    // When verifying a source tree, use installed bundles as dependency
-    // roots but exclude any installed bundle with the same directory name
-    // as the source (avoids duplicate handler/parser refs between the
-    // installed copy and the source copy).
-    let source_name = source_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    let user_root = ryeos_engine::roots::user_root().ok();
-    let installed_roots: Vec<std::path::PathBuf> =
-        ryeos_bundle::installed::load_installed_bundle_records(&system_space_dir, user_root.as_deref())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| {
-                r.bundle_root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|name| name != source_name)
-                    .unwrap_or(true)
-            })
-            .map(|r| r.bundle_root)
-            .collect();
-
-    ryeos_bundle::preflight::preflight_verify_bundle_in_context(
-        &source_path,
-        &installed_roots,
-        user_root.as_deref(),
-    )
-    .context("bundle verify failed")?;
-
-    Ok(serde_json::json!({
-        "source": source,
-        "status": "verified",
-        "detail": "all items pass signature and metadata validation"
-    }))
-}
-
-fn offline_bundle_publish(params: Value) -> Result<Value> {
-    use ryeos_tools::actions::publish::{run_publish, PublishOptions};
-
-    let source = params
-        .get("source")
-        .and_then(|v| v.as_str())
-        .context("--source <bundle-path> required")?;
-    let bundle_source = Path::new(source).to_path_buf();
-
-    if !bundle_source.is_dir() {
-        anyhow::bail!("--source is not a directory: {}", source);
-    }
-
-    let registry_root = params
-        .get("registry_root")
-        .and_then(|v| v.as_str())
-        .map(|s| Path::new(s).to_path_buf())
-        .unwrap_or_else(|| bundle_source.clone());
-
-    let owner = params
-        .get("owner")
-        .and_then(|v| v.as_str())
-        .unwrap_or("local-dev")
-        .to_string();
-
-    let no_trust_doc = params
-        .get("no_trust_doc")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    // Load signing key from user root (same path as ryeos-core-tools build)
-    let user_root = ryeos_engine::roots::user_root()
-        .context("resolve user root — run `ryeos init` first")?;
-    let key_path = user_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
-
-    if !key_path.exists() {
-        anyhow::bail!(
-            "user signing key not found at {} — run `ryeos init` first",
-            key_path.display()
-        );
-    }
-
-    let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
-        .context(format!("load signing key from {}", key_path.display()))?;
-
-    let report = run_publish(&PublishOptions {
-        bundle_source,
-        registry_root,
-        signing_key,
-        owner,
-        emit_trust_doc: !no_trust_doc,
-    })
-    .context("bundle publish failed")?;
-
-    serde_json::to_value(report).context("serialize publish report")
+#[derive(Debug, serde::Deserialize)]
+struct ToolConfig {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    input_data: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
 }
 
 // ── Main entry point ───────────────────────────────────────────────
@@ -310,7 +128,7 @@ pub fn try_offline_dispatch(
     //    to verb-name-as-service lookup.
     //    Verb names use dashes ("bundle-verify") but service paths use
     //    slashes ("bundle/verify.yaml"), so the execute ref is authoritative.
-    let service_path = resolve_service_path(system_space_dir, &verb);
+    let service_path = resolve_service_path(system_space_dir, &alias.verb, &verb);
     let Some(service_path) = service_path else {
         // No service descriptor for this verb — not our concern
         return Ok(None);
@@ -330,30 +148,182 @@ pub fn try_offline_dispatch(
         return Ok(None);
     }
 
-    // 5. Check handler exists in this binary
-    let endpoints = offline_endpoints();
-    let Some(endpoint) = endpoints.get(service.endpoint.as_str()) else {
+    // 5. Resolve the descriptor-declared local implementation.
+    let Some(offline_execute) = resolve_offline_execute(&service, &verb) else {
         return Err(CliError::Local {
             detail: format!(
-                "service `{}` is declared offline-capable, but this ryeos binary \
-                 has no offline handler for endpoint `{}`",
-                alias.verb, service.endpoint
+                "service `{}` is declared offline-capable, but its descriptor \
+                 does not declare a local tool implementation (`offline_execute: tool:<id>`)",
+                alias.verb
             ),
         });
     };
 
     // 6. Bind parameters from tail args
     let tail = &argv[consumed..];
-    let params = bind_params(tail, &alias, &service, project_path).map_err(|e| CliError::Local {
-        detail: format!("{e:#}"),
-    })?;
+    let params =
+        bind_params(tail, &alias, &service, project_path).map_err(|e| CliError::Local {
+            detail: format!("{e:#}"),
+        })?;
 
-    // 7. Run the handler
-    let result = (endpoint.handler)(params).map_err(|e| CliError::Local {
-        detail: format!("{e:#}"),
-    })?;
+    // 7. Run the descriptor-declared tool.
+    let result = execute_offline_tool(&offline_execute, params, system_space_dir, project_path)
+        .map_err(|e| CliError::Local {
+            detail: format!("{e:#}"),
+        })?;
 
     Ok(Some(result))
+}
+
+fn resolve_offline_execute(service: &ServiceDescriptor, verb: &VerbDescriptor) -> Option<String> {
+    service.offline_execute.clone().or_else(|| {
+        verb.execute
+            .starts_with("tool:")
+            .then(|| verb.execute.clone())
+    })
+}
+
+fn execute_offline_tool(
+    tool_ref: &str,
+    params: Value,
+    system_space_dir: &Path,
+    project_path: &str,
+) -> Result<Value> {
+    let tool_path = find_tool_path(system_space_dir, tool_ref)
+        .with_context(|| format!("resolve offline tool descriptor `{tool_ref}`"))?;
+    let tool: ToolDescriptor = read_yaml(&tool_path)
+        .with_context(|| format!("parse offline tool descriptor `{}`", tool_path.display()))?;
+
+    match tool.executor_id.as_deref() {
+        Some("@subprocess") | Some("tool:ryeos/core/subprocess/execute") => {}
+        other => bail!(
+            "offline tool `{tool_ref}` must use @subprocess executor, got {:?}",
+            other
+        ),
+    }
+
+    let params_json = serde_json::to_string(&params).context("serialize offline params")?;
+    let cmd_template = expand_template(&tool.config.command, &params_json, project_path)?;
+    let cmd = resolve_command(&cmd_template, &tool_path, system_space_dir, project_path)?;
+    let args = tool
+        .config
+        .args
+        .iter()
+        .map(|arg| expand_template(arg, &params_json, project_path))
+        .collect::<Result<Vec<_>>>()?;
+    let stdin_data = tool
+        .config
+        .input_data
+        .as_deref()
+        .map(|input| expand_template(input, &params_json, project_path))
+        .transpose()?;
+    let cwd = match tool.config.cwd.as_deref() {
+        Some(cwd) => Some(expand_template(cwd, &params_json, project_path)?),
+        None => Some(std::env::current_dir()?.to_string_lossy().into_owned()),
+    };
+    let mut envs: Vec<(String, String)> = tool
+        .config
+        .env
+        .iter()
+        .map(|(k, v)| expand_template(v, &params_json, project_path).map(|v| (k.clone(), v)))
+        .collect::<Result<Vec<_>>>()?;
+    envs.push((
+        "RYEOS_SYSTEM_SPACE_DIR".to_string(),
+        system_space_dir.to_string_lossy().into_owned(),
+    ));
+
+    let result = lillux::run(lillux::SubprocessRequest {
+        cmd: cmd.to_string_lossy().into_owned(),
+        args,
+        cwd,
+        envs,
+        stdin_data,
+        timeout: tool.config.timeout_secs.unwrap_or(60) as f64,
+    });
+
+    if !result.success {
+        bail!(
+            "offline tool `{tool_ref}` failed with exit {:?}\nstdout:\n{}\nstderr:\n{}",
+            result.exit_code,
+            result.stdout,
+            result.stderr
+        );
+    }
+
+    serde_json::from_str(&result.stdout).or_else(|_| Ok(Value::String(result.stdout)))
+}
+
+fn expand_template(template: &str, params_json: &str, project_path: &str) -> Result<String> {
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        if let Some(end) = rest[start + 1..].find('}') {
+            let token = &rest[start + 1..start + 1 + end];
+            if token != "params_json" && token != "project_path" {
+                bail!("offline tool template references unsupported token {{{token}}}");
+            }
+            rest = &rest[start + 1 + end + 1..];
+        } else {
+            bail!("offline tool template contains an unterminated token");
+        }
+    }
+
+    let mut out = template.replace("{params_json}", params_json);
+    out = out.replace("{project_path}", project_path);
+    Ok(out)
+}
+
+fn resolve_command(
+    command: &str,
+    tool_path: &Path,
+    system_space_dir: &Path,
+    project_path: &str,
+) -> Result<PathBuf> {
+    if !command.starts_with("bin:") {
+        return Ok(PathBuf::from(command));
+    }
+
+    let bundle_root = find_bundle_root(tool_path).with_context(|| {
+        format!(
+            "resolve bundle root for offline tool descriptor {}",
+            tool_path.display()
+        )
+    })?;
+    let user_root = ryeos_engine::roots::user_root().ok();
+    let system_roots = installed_bundle_roots(system_space_dir);
+    let trust_store = ryeos_engine::trust::TrustStore::load_three_tier(
+        Some(Path::new(project_path)),
+        user_root.as_deref(),
+        &system_roots,
+    )
+    .context("load trust store for offline binary dispatch")?;
+    let resolved = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
+        command,
+        &bundle_root,
+        |fp| trust_store.is_trusted(fp),
+        ryeos_engine::resolution::TrustClass::TrustedSystem,
+    )
+    .with_context(|| format!("resolve offline binary `{command}`"))?;
+    Ok(resolved.absolute_path)
+}
+
+fn find_bundle_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|p| p.join(ryeos_engine::AI_DIR).is_dir())
+        .map(Path::to_path_buf)
+}
+
+fn installed_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
+    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
+    let mut roots = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(bundles_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                roots.push(path);
+            }
+        }
+    }
+    ryeos_engine::roots::system_roots(&roots)
 }
 
 // ── Parameter binding ──────────────────────────────────────────────
@@ -379,7 +349,13 @@ fn bind_params(
     while i < tail.len() {
         let tok = &tail[i];
         if let Some(key) = tok.strip_prefix("--") {
-            let key = key.replace('-', "_");
+            let mut key = key.replace('-', "_");
+            if key == "project"
+                && service.schema.contains_key("project_path")
+                && !service.schema.contains_key("project")
+            {
+                key = "project_path".to_string();
+            }
             if i + 1 < tail.len() && !tail[i + 1].starts_with('-') {
                 let val = &tail[i + 1];
                 obj.insert(key, Value::String(val.clone()));
@@ -420,7 +396,7 @@ fn bind_params(
 
 fn load_aliases(system_space_dir: &Path) -> Vec<AliasDescriptor> {
     let mut out = Vec::new();
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
         return out;
     };
@@ -431,13 +407,20 @@ fn load_aliases(system_space_dir: &Path) -> Vec<AliasDescriptor> {
         if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
             continue;
         }
-        let aliases_dir = entry.path().join(".ai").join("node").join("aliases");
+        let aliases_dir = entry
+            .path()
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("aliases");
         let Ok(files) = std::fs::read_dir(aliases_dir) else {
             continue;
         };
         for f in files.flatten() {
             let path = f.path();
-            if !matches!(path.extension().and_then(|s| s.to_str()), Some("yaml") | Some("yml")) {
+            if !matches!(
+                path.extension().and_then(|s| s.to_str()),
+                Some("yaml") | Some("yml")
+            ) {
                 continue;
             }
             if let Some(alias) = read_yaml::<AliasDescriptor>(&path) {
@@ -449,7 +432,7 @@ fn load_aliases(system_space_dir: &Path) -> Vec<AliasDescriptor> {
 }
 
 fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
         return None;
     };
@@ -457,7 +440,7 @@ fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor>
     for entry in entries.flatten() {
         let path = entry
             .path()
-            .join(".ai")
+            .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("verbs")
             .join(format!("{verb_name}.yaml"));
@@ -478,6 +461,7 @@ fn load_verb(system_space_dir: &Path, verb_name: &str) -> Option<VerbDescriptor>
 ///     `services/bundle/verify.yaml`).
 fn resolve_service_path(
     system_space_dir: &Path,
+    verb_name: &str,
     verb: &VerbDescriptor,
 ) -> Option<std::path::PathBuf> {
     if let Some(service_ref) = verb.execute.strip_prefix("service:") {
@@ -485,7 +469,10 @@ fn resolve_service_path(
         find_service_path(system_space_dir, service_ref)
     } else {
         // Fallback: try verb name as-is, then with dash→slash
-        None.or_else(|| find_service_path(system_space_dir, &verb.execute))
+        find_service_path(system_space_dir, verb_name).or_else(|| {
+            let service_rel = verb_name.replace('-', "/");
+            find_service_path(system_space_dir, &service_rel)
+        })
     }
 }
 
@@ -493,7 +480,7 @@ fn resolve_service_path(
 /// Looks for `.ai/services/{name}.yaml` in each installed bundle.
 /// Appends `.yaml` if the name doesn't already end with it.
 fn find_service_path(system_space_dir: &Path, service_rel: &str) -> Option<std::path::PathBuf> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
         return None;
     };
@@ -507,8 +494,34 @@ fn find_service_path(system_space_dir: &Path, service_rel: &str) -> Option<std::
     for entry in entries.flatten() {
         let path = entry
             .path()
-            .join(".ai")
+            .join(ryeos_engine::AI_DIR)
             .join("services")
+            .join(&file_name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn find_tool_path(system_space_dir: &Path, tool_ref: &str) -> Option<PathBuf> {
+    let rel = tool_ref.strip_prefix("tool:")?;
+    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
+    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
+        return None;
+    };
+
+    let file_name = if rel.ends_with(".yaml") || rel.ends_with(".yml") {
+        rel.to_string()
+    } else {
+        format!("{}.yaml", rel)
+    };
+
+    for entry in entries.flatten() {
+        let path = entry
+            .path()
+            .join(ryeos_engine::AI_DIR)
+            .join("tools")
             .join(&file_name);
         if path.is_file() {
             return Some(path);
@@ -524,7 +537,8 @@ fn match_alias<'a>(
     for len in (1..=argv.len()).rev() {
         let prefix: Vec<&str> = argv[..len].iter().map(|s| s.as_str()).collect();
         if let Some(alias) = aliases.iter().find(|a| {
-            a.tokens.len() == prefix.len() && a.tokens.iter().zip(prefix.iter()).all(|(t, p)| t == p)
+            a.tokens.len() == prefix.len()
+                && a.tokens.iter().zip(prefix.iter()).all(|(t, p)| t == p)
         }) {
             return Some((alias, len));
         }
@@ -535,4 +549,162 @@ fn match_alias<'a>(
 fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_yaml::from_str(&content).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp
+            .path()
+            .join(ryeos_engine::AI_DIR)
+            .join("bundles")
+            .join("test");
+
+        write(
+            &root
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("aliases")
+                .join("custom.yaml"),
+            r#"
+tokens: ["custom"]
+verb: custom
+description: test custom offline command
+"#,
+        );
+        write(
+            &root
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("verbs")
+                .join("custom.yaml"),
+            r#"
+name: custom
+execute: service:custom
+"#,
+        );
+        write(
+            &root
+                .join(ryeos_engine::AI_DIR)
+                .join("services")
+                .join("custom.yaml"),
+            r#"
+kind: service
+endpoint: custom
+availability: offline
+offline_execute: tool:custom/echo
+schema:
+  name: string?
+"#,
+        );
+        write(
+            &root
+                .join(ryeos_engine::AI_DIR)
+                .join("tools")
+                .join("custom")
+                .join("echo.yaml"),
+            r#"
+executor_id: "@subprocess"
+config:
+  command: "cat"
+  input_data: "{params_json}"
+"#,
+        );
+
+        tmp
+    }
+
+    #[test]
+    fn offline_dispatch_executes_descriptor_declared_tool() {
+        let tmp = fixture();
+        let argv = vec![
+            "custom".to_string(),
+            "--name".to_string(),
+            "leo".to_string(),
+        ];
+
+        let result = try_offline_dispatch(&argv, tmp.path(), ".")
+            .unwrap()
+            .expect("handled offline");
+
+        assert_eq!(result["name"], "leo");
+    }
+
+    #[test]
+    fn offline_service_without_tool_impl_errors_loudly() {
+        let tmp = fixture();
+        let service_path = tmp
+            .path()
+            .join(ryeos_engine::AI_DIR)
+            .join("bundles")
+            .join("test")
+            .join(ryeos_engine::AI_DIR)
+            .join("services")
+            .join("custom.yaml");
+        write(
+            &service_path,
+            r#"
+kind: service
+endpoint: custom
+availability: offline
+schema: {}
+"#,
+        );
+
+        let err = try_offline_dispatch(&["custom".to_string()], tmp.path(), ".").unwrap_err();
+
+        match err {
+            CliError::Local { detail } => {
+                assert!(detail.contains("offline_execute: tool:<id>"), "{detail}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offline_dispatch_maps_project_flag_to_project_path_schema() {
+        let tmp = fixture();
+        let service_path = tmp
+            .path()
+            .join(ryeos_engine::AI_DIR)
+            .join("bundles")
+            .join("test")
+            .join(ryeos_engine::AI_DIR)
+            .join("services")
+            .join("custom.yaml");
+        write(
+            &service_path,
+            r#"
+kind: service
+endpoint: custom
+availability: offline
+offline_execute: tool:custom/echo
+schema:
+  project_path: string?
+"#,
+        );
+
+        let result = try_offline_dispatch(
+            &[
+                "custom".to_string(),
+                "--project".to_string(),
+                "/tmp/project".to_string(),
+            ],
+            tmp.path(),
+            ".",
+        )
+        .unwrap()
+        .expect("handled offline");
+
+        assert_eq!(result["project_path"], "/tmp/project");
+        assert!(result.get("project").is_none());
+    }
 }

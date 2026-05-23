@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-05-23T07:36:39Z:a86adddc65a571a62b205e5a2aeb1c5984964addbe9799fa0de4132d0a447c72:hhXK9JGQrUQH6I+cTlJkGwZO3sOVOxOb+9vyDC2k7pUNfvjV5ua0zpQ+WB+l8/S/hhZQP+BMRvZNX/CoxLK3DA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-23T09:47:25Z:c41e8e8cde0945022e68abea938d73f0d79a0e1d1836eeaa24d5ca2852862ec9:NrhWIHsqtKx7wH9U+AOymudNZLk0gIs9n1Snyy1Va5CKxAOfHMwjRNXnVZAx3yPXc+52SMgNtP3EuKIUXChLDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   LLM-facing quickstart for using the ryeos CLI from initialization through
   local execution, project execution, thread inspection, and remote execution.
@@ -92,7 +92,8 @@ Commands come from signed bundle descriptors. Each service descriptor
 declares an `availability` field:
 
 - **`availability: offline`** — runs in the CLI process, no daemon required.
-  These are source-tree authoring operations: `sign`, `verify`, `fetch`.
+  Source-tree authoring operations: `sign`, `verify`, `fetch`,
+  `bundle verify`, `bundle publish`.
 - **No `availability` field** (or `availability: daemon`) — requires a
   running daemon. Most runtime commands fall here: `execute`, `thread`,
   `remote`, `events`, `scheduler`.
@@ -184,7 +185,47 @@ ryeos sign "tool:ryeos/core/*" --project /abs/project
 These commands are safe to use during bundle authoring. A full bundle
 publish is not needed for doc-only edits.
 
-## 7. Run tools, directives, and graphs locally (daemon-backed)
+## 7. Bundle verify and publish (offline)
+
+Bundle release commands are also offline and do not require a running daemon.
+
+### Verify a bundle before publishing
+
+Validate all bundle items, signatures, metadata anchoring, and manifest:
+
+```bash
+ryeos bundle verify --source bundles/standard
+```
+
+This is read-only — it never rewrites any files. Run it before
+publishing to catch issues early.
+
+### Publish a bundle (release pipeline)
+
+Full release pipeline: bootstrap-sign, rebuild CAS, sign items, generate
+manifest, emit trust doc:
+
+```bash
+ryeos bundle publish --source bundles/core
+ryeos bundle publish --source bundles/standard --registry-root bundles/core --owner myname
+ryeos bundle publish --source bundles/standard --no-trust-doc
+```
+
+Publish is **incremental and idempotent**. On a no-op run (no source
+content changes), the second run produces no git diff. Only files that
+actually changed are re-signed.
+
+A doc-only edit does NOT require `bundle publish`. Just sign the
+edited doc:
+
+```bash
+$EDITOR bundles/standard/.ai/knowledge/ryeos/standard/cli-basics.md
+ryeos sign knowledge:ryeos/standard/cli-basics --project bundles/standard
+git diff
+git commit
+```
+
+## 8. Run tools, directives, and graphs locally (daemon-backed)
 
 Execute by canonical ref. This requires a running daemon:
 
@@ -223,7 +264,7 @@ echo '{"name":"Alice","count":3}' | \
   ryeos -p /path/to/project execute tool:apps/demo/echo --input -
 ```
 
-## 8. Understand execution output and threads
+## 9. Understand execution output and threads
 
 Executions normally return JSON containing thread metadata and result
 data. Important fields:
@@ -245,7 +286,7 @@ ryeos events replay --thread-id T-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 If a command returns a thread id and then fails later, inspect the thread
 rather than rerunning blindly.
 
-## 9. Vault and secrets
+## 10. Vault and secrets
 
 Do not pass secrets in normal parameters unless the item specifically
 requires it. Put secrets in the node vault and let config reference them.
@@ -270,7 +311,7 @@ ryeos remote vault-set prod --name API_KEY --value "$API_KEY"
 ryeos remote vault-list prod
 ```
 
-## 10. Remote setup and diagnostics
+## 11. Remote setup and diagnostics
 
 Remote commands are local daemon services that call another Rye daemon
 with signed HTTP requests. They use the caller's **node key**.
@@ -303,7 +344,7 @@ project is supplied. It also prints next-step commands.
 If authorization fails, the remote operator must authorize your node key
 on the remote host with scopes for the requested operation.
 
-## 11. Remote project workflows
+## 12. Remote project workflows
 
 There are two common remote execution modes.
 
@@ -353,7 +394,7 @@ cat <<'JSON' | ryeos execute service:remote/run --input -
 JSON
 ```
 
-## 12. Remote thread inspection
+## 13. Remote thread inspection
 
 After remote execution, inspect remote threads directly:
 
@@ -365,7 +406,7 @@ ryeos remote thread-status prod --thread-id T-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxx
 These commands are useful when a remote run starts a thread but the local
 CLI output is incomplete or a runtime fails on the remote node.
 
-## 13. Troubleshooting checklist
+## 14. Troubleshooting checklist
 
 Start here when something fails:
 
@@ -388,7 +429,7 @@ Common fixes:
 - Ask the remote operator to grant the exact missing capability shown in
   a `403 Forbidden` error.
 
-## 14. Command patterns to copy
+## 15. Command patterns to copy
 
 Local project execution:
 

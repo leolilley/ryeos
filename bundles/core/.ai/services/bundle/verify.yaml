@@ -1,7 +1,8 @@
-# ryeos:signed:2026-05-23T07:57:48Z:01d89694edc92b97b1e6055c6f39e5cebe26e8ddc055be8d0cafa7d6c53518ba:l1qqe39PLUiyDXW3Ftzew6XmV69PDWFH8eIHBau5EG8awuYFc9ozo5bl56AE9werOTNIbzlkQS49BD7Uwk1iDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T09:45:36Z:a0173548e55a4ca41f859705d82a8cabc10bf978f3ef98604b79d42d0d9f1d73:uuHgtkObYy3yoK0/EU+jr1dNtse7zt0tjdfB4IgiNgGaG0AGPz8vJjn/mnuSV/JnySy207uWC0Q9pFF0pdunDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: service
 endpoint: bundle.verify
 availability: offline
+offline_execute: tool:ryeos/core/bundle/verify
 required_caps: []
 schema:
   source: string

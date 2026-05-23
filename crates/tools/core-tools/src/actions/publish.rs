@@ -122,11 +122,8 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
 
     // ── Phase 5: emit publisher trust doc (idempotent) ──
     let (publisher_trust_doc, publisher_trust_doc_changed) = if opts.emit_trust_doc {
-        let result = write_publisher_trust_doc(
-            &opts.bundle_source,
-            &opts.signing_key,
-            &opts.owner,
-        )?;
+        let result =
+            write_publisher_trust_doc(&opts.bundle_source, &opts.signing_key, &opts.owner)?;
         (Some(result.0), result.1)
     } else {
         (None, false)
@@ -216,13 +213,8 @@ fn sign_raw_in_place(
     prefix: &str,
     suffix: Option<&str>,
 ) -> Result<bool> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let stripped = lillux::signature::strip_signature_lines_with_envelope(
-        &content,
-        prefix,
-        suffix,
-    );
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let stripped = lillux::signature::strip_signature_lines_with_envelope(&content, prefix, suffix);
 
     // Check if the file already has a valid signature for this body and key.
     if already_signed_for_body(&content, &stripped, signing_key, prefix, suffix) {
@@ -254,8 +246,7 @@ fn already_signed_for_body(
     let Some(first_line) = existing.lines().next() else {
         return false;
     };
-    let Some(header) = lillux::signature::parse_signature_line(first_line, prefix, suffix)
-    else {
+    let Some(header) = lillux::signature::parse_signature_line(first_line, prefix, suffix) else {
         return false;
     };
 
@@ -480,8 +471,7 @@ fn write_publisher_trust_doc(
     }
 
     let tmp = target.with_extension("tmp");
-    fs::write(&tmp, body.as_bytes())
-        .with_context(|| format!("write {}", tmp.display()))?;
+    fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &target)
         .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
     Ok((target, true))

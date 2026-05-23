@@ -57,7 +57,7 @@ enum Cmd {
     /// auto-resolved from the user root — no `--key` flag needed.
     Build {
         /// Bundle source root (directory containing `.ai/`).
-        bundle_source: PathBuf,
+        bundle_source: Option<PathBuf>,
 
         /// Registry root supplying kind schemas + parsers.
         /// Defaults to `bundle_source` (suitable when building `core` itself).
@@ -71,6 +71,16 @@ enum Cmd {
         /// Suppress emitting `<bundle_source>/PUBLISHER_TRUST.toml`.
         #[arg(long)]
         no_trust_doc: bool,
+    },
+
+    /// Verify a bundle source tree without rewriting files.
+    BundleVerify {
+        /// Bundle source root (directory containing `.ai/`).
+        source: Option<PathBuf>,
+
+        /// Registry/dependency root to include while validating.
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
     },
 
     /// Resolve, optionally verify, and read an item.
@@ -214,7 +224,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             registry_root,
             owner,
             no_trust_doc,
-        } => run_build(bundle_source, registry_root, owner, no_trust_doc),
+        } => run_build(
+            bundle_source,
+            registry_root,
+            owner,
+            no_trust_doc,
+            cli.stdin_json,
+        ),
+        Cmd::BundleVerify {
+            source,
+            registry_root,
+        } => run_bundle_verify(source, registry_root, cli.stdin_json),
         Cmd::Fetch {
             item_ref,
             with_content,
@@ -300,13 +320,31 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 }
 
 fn run_build(
-    bundle_source: PathBuf,
+    bundle_source: Option<PathBuf>,
     registry_root: Option<PathBuf>,
     owner: String,
     no_trust_doc: bool,
+    stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
+
+    let (bundle_source, registry_root, owner, no_trust_doc) = if stdin_json {
+        if bundle_source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
+        }
+        let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
+        (
+            params.source,
+            params.registry_root,
+            params.owner.unwrap_or_else(|| "local-dev".to_string()),
+            params.no_trust_doc,
+        )
+    } else {
+        let source = bundle_source
+            .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
+        (source, registry_root, owner, no_trust_doc)
+    };
 
     let user_root = roots::user_root().map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
     let key_path = user_root
@@ -338,6 +376,103 @@ fn run_build(
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct BundlePublishParams {
+    source: PathBuf,
+    #[serde(default)]
+    registry_root: Option<PathBuf>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    no_trust_doc: bool,
+}
+
+fn run_bundle_verify(
+    source: Option<PathBuf>,
+    registry_root: Option<PathBuf>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    let (source, registry_root) = if stdin_json {
+        if source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional SOURCE");
+        }
+        let params: BundleVerifyParams = serde_json::from_value(read_stdin_json()?)?;
+        (params.source, params.registry_root)
+    } else {
+        let source =
+            source.ok_or_else(|| anyhow::anyhow!("SOURCE required (or pass --stdin-json)"))?;
+        (source, registry_root)
+    };
+
+    let source_path = std::fs::canonicalize(&source)
+        .with_context(|| format!("resolve bundle source path {}", source.display()))?;
+    if !source_path.is_dir() {
+        anyhow::bail!("--source is not a directory: {}", source_path.display());
+    }
+
+    let system_space_dir = std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .map(|d| d.join("ryeos"))
+                .expect("could not determine XDG data directory")
+        });
+    let user_root = ryeos_engine::roots::user_root().ok();
+    let source_name = source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    let mut dependency_roots: Vec<PathBuf> = Vec::new();
+    if let Some(root) = registry_root {
+        let root = std::fs::canonicalize(&root)
+            .with_context(|| format!("resolve registry root {}", root.display()))?;
+        if root != source_path {
+            dependency_roots.push(root);
+        }
+    } else {
+        let installed_roots = ryeos_bundle::installed::load_installed_bundle_records(
+            &system_space_dir,
+            user_root.as_deref(),
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| {
+            r.bundle_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| name != source_name)
+                .unwrap_or(true)
+        })
+        .map(|r| r.bundle_root);
+        dependency_roots.extend(installed_roots);
+    }
+
+    ryeos_bundle::preflight::preflight_verify_bundle_in_context(
+        &source_path,
+        &dependency_roots,
+        user_root.as_deref(),
+    )
+    .context("bundle verify failed")?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "source": source_path,
+            "status": "verified",
+            "detail": "all items pass signature and metadata validation"
+        }))?
+    );
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct BundleVerifyParams {
+    source: PathBuf,
+    #[serde(default)]
+    registry_root: Option<PathBuf>,
 }
 
 fn run_sign(

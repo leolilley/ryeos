@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T19:55:06Z:bd9cd21a5cfd252bdd94178f48538c05f4c99be33e973f89745882a1c2a1676e:TpnM6KSyczDYaLT03JwTTbaqLfQeCN2KgwsENKKMzG+IfZaHMw+7GRbs/oHqiZqu23b3HDyWDKhRCrlFsSQQCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-23T09:45:40Z:bd9cd21a5cfd252bdd94178f48538c05f4c99be33e973f89745882a1c2a1676e:TpnM6KSyczDYaLT03JwTTbaqLfQeCN2KgwsENKKMzG+IfZaHMw+7GRbs/oHqiZqu23b3HDyWDKhRCrlFsSQQCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, dag, workflow]
