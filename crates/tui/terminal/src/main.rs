@@ -53,8 +53,8 @@ fn main() {
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --mock                  Use mock data (no daemon required)");
-                eprintln!("  --surface-file <PATH>   Load surface spec from a local file");
-                eprintln!("  --surface <NAME>        Load surface by name (surface:<NAME>)");
+                eprintln!("  --surface-file <PATH>   Load surface spec from a local file (untrusted)");
+                eprintln!("  --surface <REF>         Load surface by canonical ref via daemon");
                 eprintln!("  --help                  Show this help");
                 std::process::exit(0);
             }
@@ -69,72 +69,67 @@ fn main() {
         i += 1;
     }
 
-    // Load surface
-    let surface_opts = ryeos_tui_core::surface::SurfaceLoadOptions {
-        explicit_file: surface_file.map(std::path::PathBuf::from),
-        surface_name: None,
-    };
-
-    // If --surface was given, resolve through daemon (when available)
-    // --surface always means daemon resolution, not local preview
-    let loaded = if surface_name.is_some() && !mock {
-        // Try daemon resolution first
-        match tokio::runtime::Runtime::new() {
-            Ok(rt) => {
-                let result = rt.block_on(async {
-                    match daemon::DaemonClient::try_connect().await {
-                        Ok(client) => {
-                            let ref_str = surface_name.as_deref().unwrap();
-                            eprintln!("info: resolving {} via daemon...", ref_str);
-                            match client.resolve_effective_item(ref_str, Some(&project_path)).await {
-                                Ok(value) => {
-                                    ryeos_tui_core::surface::LoadedSurface::from_daemon(
-                                        ref_str,
-                                        value,
-                                    )
-                                }
-                                Err(e) => {
-                                    eprintln!("warn: daemon resolution failed for {}: {}, falling back to builtin", ref_str, e);
-                                    eprintln!("info: use --surface-file for local preview");
-                                    ryeos_tui_core::surface::load_surface(&surface_opts)
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            eprintln!("warn: daemon not available, falling back to builtin");
-                            ryeos_tui_core::surface::load_surface(&surface_opts)
-                        }
-                    }
-                });
-                result
-            }
-            Err(e) => {
-                eprintln!("warn: failed to create tokio runtime: {}, falling back to builtin", e);
-                ryeos_tui_core::surface::load_surface(&surface_opts)
-            }
-        }
-    } else {
-        ryeos_tui_core::surface::load_surface(&surface_opts)
-    };
-
-    // Surface diagnostics
-    for diag in loaded.all_diagnostics() {
-        match diag {
-            ryeos_tui_core::surface::SurfaceDiagnostic::ValidationError { message } => {
-                eprintln!("error: {}", message);
-            }
-            ryeos_tui_core::surface::SurfaceDiagnostic::UnsupportedField { field, message } => {
-                eprintln!("warn: unsupported field '{}': {}", field, message);
-            }
-            ryeos_tui_core::surface::SurfaceDiagnostic::Info { message } => {
-                eprintln!("info: {}", message);
-            }
-        }
-    }
-
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
 
     rt.block_on(async {
+        // Load surface
+        let surface_opts = ryeos_tui_core::surface::SurfaceLoadOptions {
+            explicit_file: surface_file.map(std::path::PathBuf::from),
+            surface_name: None,
+        };
+
+        // If --surface was given, resolve through daemon.
+        // --surface always means daemon resolution, not local preview.
+        let loaded: ryeos_tui_core::surface::LoadedSurface =
+            if surface_name.is_some() && !mock {
+                match daemon::DaemonClient::try_connect().await {
+                    Ok(client) => {
+                        let ref_str = surface_name.as_deref().unwrap();
+                        eprintln!("info: resolving {} via daemon...", ref_str);
+                        match client
+                            .resolve_effective_item(ref_str, Some(&project_path))
+                            .await
+                        {
+                            Ok(value) => {
+                                ryeos_tui_core::surface::LoadedSurface::from_daemon(ref_str, value)
+                            }
+                            Err(e) => {
+                                // Explicit surface request that fails — fail closed.
+                                eprintln!("error: failed to resolve surface '{}': {}", ref_str, e);
+                                eprintln!("hint: use --surface-file <path> for local preview");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Daemon not available — degraded mode, fall back to builtin.
+                        eprintln!("warn: daemon not available, falling back to builtin surface");
+                        eprintln!("hint: start ryeosd to enable --surface resolution");
+                        ryeos_tui_core::surface::load_surface(&surface_opts)
+                    }
+                }
+            } else {
+                ryeos_tui_core::surface::load_surface(&surface_opts)
+            };
+
+        // Surface diagnostics
+        for diag in loaded.all_diagnostics() {
+            match diag {
+                ryeos_tui_core::surface::SurfaceDiagnostic::ValidationError { message } => {
+                    eprintln!("error: {}", message);
+                }
+                ryeos_tui_core::surface::SurfaceDiagnostic::UnsupportedField {
+                    field,
+                    message,
+                } => {
+                    eprintln!("warn: unsupported field '{}': {}", field, message);
+                }
+                ryeos_tui_core::surface::SurfaceDiagnostic::Info { message } => {
+                    eprintln!("info: {}", message);
+                }
+            }
+        }
+
         if let Err(e) = app::run(&project_path, mock, loaded).await {
             eprintln!("ryeos-tui error: {}", e);
             std::process::exit(1);
