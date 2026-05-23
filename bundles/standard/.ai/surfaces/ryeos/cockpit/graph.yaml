@@ -1,3 +1,4 @@
+# ryeos:signed:2026-05-23T12:11:51Z:05f67aafd5043a8132374f55e2f7d5b4c89aa8ebac296e3021b26252117d51c6:FwlpnSB0vM2WClMki4CneK8PD2QY9jnE8gobbfS+xkPmbDEBUeuadaGR9fy4jzA+oXsvNQu0ZoUM9sYYV6m1DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 extends: surface:ryeos/cockpit/base
 name: graph-operator
 version: "1.0.0"

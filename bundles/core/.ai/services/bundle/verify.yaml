@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T09:45:36Z:a0173548e55a4ca41f859705d82a8cabc10bf978f3ef98604b79d42d0d9f1d73:uuHgtkObYy3yoK0/EU+jr1dNtse7zt0tjdfB4IgiNgGaG0AGPz8vJjn/mnuSV/JnySy207uWC0Q9pFF0pdunDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-23T12:06:25Z:a0173548e55a4ca41f859705d82a8cabc10bf978f3ef98604b79d42d0d9f1d73:DSEaonmosYJHMeRbLQocwhyd7jifBT1xVFmyd51aKi55+7jk/qF/IXi/4bQz/fP7Tr6DCHl3rCA2jnZf4dyYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.verify
 availability: offline

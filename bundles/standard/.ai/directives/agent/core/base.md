@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T09:45:41Z:f5e07f86bfe777332125407affdbb6899bfc31bf54afabaeed7a06b682d8eb38:IA8U3oM2mU5cP6u0XXg124q31j1d6/GxuzqISUKv41W3L78pV1/qIpS7e7CyscojQ++kHM+eU/h7j0jKO6C5Dg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-23T12:11:51Z:f5e07f86bfe777332125407affdbb6899bfc31bf54afabaeed7a06b682d8eb38:1/SO5ik8l5GbZ1z42EotYGxZ2tLYLoZmdp4h0TZtVZWZy4U7+FdGpQNNmmubSFMaoB4b7uFj9XlSTLIzYR3mAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "General agent base — behavior context, no identity (agents provide their own)"
 version: "1.1.0"

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T09:45:40Z:2015ec4eab57b1cd3159eb037a5ee0a966aadfe413c76305608505ba94c5496c:enVSTuARkVJqxFPd5aoAHtUfmUOx0ftYFm2NtN9xMG0WhMfLXpk8ecfyy7h7LnBW3fRpoHLw7nDigMqGnyv5Aw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-23T12:11:51Z:2015ec4eab57b1cd3159eb037a5ee0a966aadfe413c76305608505ba94c5496c:8ba6U0FUXAGL8aZborFkffAnFLYrk8cSfIeYu5i31KtxdpGzD/VxX66268MgHnbSIVjM61iHxpgF8zhHnGQTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/config/providers
 tags: [provider, anthropic, models]

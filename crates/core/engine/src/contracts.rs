@@ -85,6 +85,7 @@ impl<'de> Deserialize<'de> for ValueShape {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ShapeType {
     Mapping,
+    #[serde(alias = "array")]
     Sequence,
     Scalar,
     Any,
@@ -106,6 +107,7 @@ pub enum PrimType {
     Integer,
     Boolean,
     Mapping,
+    #[serde(alias = "array")]
     Sequence,
     Null,
     Any,

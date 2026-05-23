@@ -17,6 +17,28 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
         if rule.name.is_empty() {
             return Err("extends_chain: field rule name must not be empty".into());
         }
+        if rule.strategy == ComposerStrategy::KeyedSeqMergeRootLast {
+            match rule.key.as_deref() {
+                Some(key) if !key.is_empty() => {}
+                Some(_) => {
+                    return Err(format!(
+                        "extends_chain: field `{}` has empty key for keyed_seq_merge_root_last",
+                        rule.name
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "extends_chain: field `{}` uses keyed_seq_merge_root_last but has no key",
+                        rule.name
+                    ));
+                }
+            }
+        } else if rule.key.is_some() {
+            return Err(format!(
+                "extends_chain: field `{}` sets `key` but strategy is not `keyed_seq_merge_root_last`",
+                rule.name
+            ));
+        }
         if !seen.insert(rule.name.as_str()) {
             return Err(format!(
                 "extends_chain: duplicate field rule for `{}`",
@@ -217,6 +239,38 @@ fn validate_field_shape(
             }
         }
     }
+    if rule.strategy == ComposerStrategy::KeyedSeqMergeRootLast {
+        let key = rule.key.as_deref().unwrap_or("id");
+        let arr = value.as_array().ok_or_else(|| {
+            (
+                ResolutionStepNameWire::PipelineInit,
+                format!(
+                    "{ref_label}: `{}` must be an array for keyed_seq_merge_root_last",
+                    rule.name
+                ),
+            )
+        })?;
+        for (i, item) in arr.iter().enumerate() {
+            let obj = item.as_object().ok_or_else(|| {
+                (
+                    ResolutionStepNameWire::PipelineInit,
+                    format!("{ref_label}: `{}[{i}]` must be an object", rule.name),
+                )
+            })?;
+            match obj.get(key).and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => {}
+                _ => {
+                    return Err((
+                        ResolutionStepNameWire::PipelineInit,
+                        format!(
+                            "{ref_label}: `{}[{i}].{key}` must be a non-empty string",
+                            rule.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -294,6 +348,17 @@ fn apply_strategy(
             merge_string_seq_dict(&mut merged, root_parsed.get(&rule.name));
             if let Value::Object(obj) = composed {
                 obj.insert(rule.name.clone(), Value::Object(merged));
+            }
+        }
+        ComposerStrategy::KeyedSeqMergeRootLast => {
+            let merged = merge_keyed_seq_root_last(
+                ancestor_parsed,
+                root_parsed.get(&rule.name),
+                &rule.name,
+                rule.key.as_deref().unwrap_or("id"),
+            );
+            if let Value::Object(obj) = composed {
+                obj.insert(rule.name.clone(), Value::Array(merged));
             }
         }
         ComposerStrategy::NarrowAgainstParentEffective => {
@@ -386,6 +451,45 @@ fn apply_strategy(
     Ok(())
 }
 
+fn merge_keyed_seq_root_last(
+    ancestor_parsed: &[&Value],
+    root_value: Option<&Value>,
+    field: &str,
+    key: &str,
+) -> Vec<Value> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_key: HashMap<String, Value> = HashMap::new();
+
+    for source in ancestor_parsed
+        .iter()
+        .filter_map(|parent| parent.get(field))
+        .chain(root_value)
+    {
+        let Some(arr) = source.as_array() else {
+            continue;
+        };
+        for item in arr {
+            let Some(item_key) = item
+                .as_object()
+                .and_then(|obj| obj.get(key))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            if !by_key.contains_key(item_key) {
+                order.push(item_key.to_string());
+            }
+            by_key.insert(item_key.to_string(), item.clone());
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|item_key| by_key.remove(&item_key))
+        .collect()
+}
+
 fn merge_string_seq_dict(into: &mut Map<String, Value>, source: Option<&Value>) {
     let Some(Value::Object(obj)) = source else {
         return;
@@ -463,6 +567,8 @@ struct ComposerFieldRule {
     name: String,
     strategy: ComposerStrategy,
     #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
     required: bool,
     #[serde(default)]
     expect_value_type: Option<ValueType>,
@@ -478,6 +584,7 @@ enum ComposerStrategy {
     RootVerbatim,
     InheritFromTopmost,
     DictMergeStringSeqRootLast,
+    KeyedSeqMergeRootLast,
     NarrowAgainstParentEffective,
 }
 
@@ -486,6 +593,7 @@ enum ComposerStrategy {
 enum ValueType {
     String,
     Mapping,
+    #[serde(alias = "array")]
     Sequence,
     Boolean,
     Number,
@@ -891,6 +999,55 @@ mod tests {
         let map = derived_string_seq_map(&view, "ctx");
         let v = map.get("k").unwrap();
         assert_eq!(v, &vec!["p1".to_string(), "c1".to_string()]);
+    }
+
+    #[test]
+    fn keyed_seq_merge_root_last_replaces_by_key_and_preserves_order() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                {
+                    "name": "commands",
+                    "strategy": "keyed_seq_merge_root_last",
+                    "key": "id",
+                    "expect_value_type": "array"
+                }
+            ]
+        });
+        let r = json!({
+            "ext": "p",
+            "commands": [
+                { "id": "view.graph", "label": "Graph Override" },
+                { "id": "view.events", "label": "Events" }
+            ]
+        });
+        let p = json!({
+            "commands": [
+                { "id": "view.graph", "label": "Graph" },
+                { "id": "view.trust", "label": "Trust" }
+            ]
+        });
+        let view = run(cfg, r, vec![ancestor_input("p", p)]).unwrap();
+        assert_eq!(
+            view.composed.get("commands").unwrap(),
+            &json!([
+                { "id": "view.graph", "label": "Graph Override" },
+                { "id": "view.trust", "label": "Trust" },
+                { "id": "view.events", "label": "Events" }
+            ])
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_keyed_seq_without_key() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                { "name": "commands", "strategy": "keyed_seq_merge_root_last" }
+            ]
+        });
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(err.contains("has no key"), "got: {err}");
     }
 
     #[test]

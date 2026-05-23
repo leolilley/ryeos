@@ -1,8 +1,8 @@
----
+```yaml
 category: "ryeos/development"
 name: "signing"
 description: "How signing works in this project, what to sign, what key to use, common pitfalls"
----
+```
 
 # Signing in This Project
 
@@ -16,7 +16,7 @@ description: "How signing works in this project, what to sign, what key to use, 
   --owner ryeos-dev
 ```
 
-This signs every signable item in both bundles, rebuilds CAS manifests, and emits `PUBLISHER_TRUST.toml` files.
+This builds release binaries, stages them into the bundle `.ai/bin/<triple>/` directories, signs every signable item in both bundles, rebuilds CAS manifests, and emits `PUBLISHER_TRUST.toml` files.
 
 ## When you must re-sign
 
@@ -68,13 +68,38 @@ Then rebuild with `--key .dev-keys/PUBLISHER_DEV.pem`.
 
 ### Trying to sign individual files
 
-No `--file` or `--single` flag exists. Use `populate-bundles.sh` or `ryeos publish` at bundle granularity.
+No `--file` or `--single` flag exists. Use `populate-bundles.sh` (or `ryeos-core-tools build` after binaries are already staged) at bundle granularity.
 
-### Stale manifest after cargo build
+### Stale bundle binaries or manifests after a merge/build
 
-The dev tree symlinks `bundles/core/.ai/bin/<triple>/ryeos-core-tools` to `target/debug/ryeos-core-tools`. Any rebuild changes the binary hash. Fix:
+Bundle publishing packages the binaries already present under `bundles/{core,standard}/.ai/bin/<triple>/`. The publish step does **not** compile Rust or magically refresh those binaries. After source merges or Rust changes, stale bundle binaries can show up as hash mismatches or as parser/schema errors such as `unknown variant ... expected ...` when a new descriptor term landed with the merge.
+
+Fix with the canonical rebuild + republish path:
 ```bash
-./scripts/gate.sh --no-tests
+./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
+```
+
+Then reinstall the refreshed bundle tree into the system space you use:
+
+```bash
+target/release/ryeos init \
+  --source bundles \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+
+# Or for the repo-local dev system space:
+target/release/ryeos init \
+  --system-space-dir .local/ryeos \
+  --source bundles \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+```
+
+Do not manually copy `target/release/ryeos-core-tools` or any other single binary into a bundle as the fix. That leaves manifests, CAS sidecars, and signatures out of sync.
+
+When verifying the source tree during recovery, make dependency roots explicit:
+
+```bash
+target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core
+target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core
 ```
 
 ## Signing project-level items

@@ -1,8 +1,8 @@
----
+```yaml
 category: "ryeos/operations"
 name: "editing-bundle-items"
 description: "How to edit, sign, and deploy items that live inside bundles"
----
+```
 
 # Editing Bundle Items
 
@@ -21,14 +21,25 @@ Those are copies; your changes will be overwritten on the next `ryeos init`.
 ## 2. Build the bundle
 
 ```bash
-target/debug/ryeos-core-tools build bundles/<name>
+./scripts/populate-bundles.sh \
+  --key .dev-keys/PUBLISHER_DEV.pem \
+  --owner ryeos-dev
 ```
 
-This runs the full publish pipeline:
+This is the normal dev-tree path. It compiles release binaries, stages them into `bundles/{core,standard}/.ai/bin/<triple>/`, then publishes both bundles in dependency order. Use it after editing bundle YAML, knowledge, schemas, parsers/composers, or Rust code that changes bundled binaries.
+
+For advanced publisher-only debugging, after binaries are already staged, the underlying command is:
+
+```bash
+target/release/ryeos-core-tools build bundles/core --registry-root bundles/core --owner ryeos-dev
+target/release/ryeos-core-tools build bundles/standard --registry-root bundles/core --owner ryeos-dev
+```
+
+The publish pipeline does this:
 
 | Phase | What it does |
 |-------|-------------|
-| 0 — Clean | Strips all signatures, removes derived CAS artifacts |
+| 0 — Clean | Removes derived CAS artifacts and binary sidecars |
 | 1 — Bootstrap | Signs kind schemas, parsers, handlers, protocols, runtimes |
 | 2 — CAS rebuild | Hashes binaries under `.ai/bin/`, writes manifest sidecars |
 | 3 — Sign items | **The engine walks every registered kind's directory and signs every file** |
@@ -41,6 +52,8 @@ a matching extension gets parsed, validated (metadata anchoring), and
 signed. This means verbs, aliases, routes, bundle registrations, services,
 tools, knowledge, config — **everything** — goes through the same engine
 path. There are no special cases.
+
+Do not manually copy a single binary from `target/release/` into a bundle. Publishing signs and manifests whatever is already staged, so manual binary surgery can leave CAS objects, manifests, sidecars, and signatures inconsistent.
 
 ## 3. Deploy to the system source dir
 
@@ -67,7 +80,7 @@ and auto-pins trust docs from each bundle root.
 1. Create `bundles/core/.ai/node/verbs/<name>.yaml` (or `aliases/`)
 2. Add the `category`, `section`, `name`/`tokens`, `description`, and
    `execute` fields
-3. Build: `ryeos-core-tools build bundles/core`
+3. Build: `./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev`
 4. Deploy + init + restart
 
 ### Changing where a verb points
