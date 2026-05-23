@@ -264,20 +264,20 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // `ryeos.execute.<kind>.<subject>` scopes and wildcards like
         // `ryeos.execute.*` or `ryeos.execute.directive.*`.
         {
-            let (kind, subject) = item_ref
-                .split_once(':')
-                .ok_or_else(|| RouteDispatchError::BadRequest(
-                    format!("invalid item_ref: {}", item_ref)
-                ))?;
+            let (kind, subject) = item_ref.split_once(':').ok_or_else(|| {
+                RouteDispatchError::BadRequest(format!("invalid item_ref: {}", item_ref))
+            })?;
             let required_cap = ryeos_runtime::authorizer::canonical_cap(kind, subject, "execute");
             let policy = AuthorizationPolicy::require(&required_cap);
             state
                 .authorizer
                 .authorize(&caller_scopes, &policy)
-                .map_err(|_| RouteDispatchError::Forbidden(format!(
-                    "missing required capability: {}",
-                    required_cap
-                )))?;
+                .map_err(|_| {
+                    RouteDispatchError::Forbidden(format!(
+                        "missing required capability: {}",
+                        required_cap
+                    ))
+                })?;
         }
 
         let site_id = state.threads.site_id();

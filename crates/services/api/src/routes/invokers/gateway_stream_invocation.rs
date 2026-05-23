@@ -74,23 +74,23 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 .principal
                 .as_ref()
                 .ok_or(RouteDispatchError::Unauthorized)?;
-            let subject = req.item_ref
+            let subject = req
+                .item_ref
                 .split_once(':')
                 .map(|(_, s)| s)
                 .unwrap_or(&req.item_ref);
-            let required_cap = ryeos_runtime::authorizer::canonical_cap(
-                item_ref.kind(),
-                subject,
-                "execute",
-            );
+            let required_cap =
+                ryeos_runtime::authorizer::canonical_cap(item_ref.kind(), subject, "execute");
             let policy = AuthorizationPolicy::require(&required_cap);
             ctx.state
                 .authorizer
                 .authorize(&principal.scopes, &policy)
-                .map_err(|_| RouteDispatchError::Forbidden(format!(
-                    "missing required capability: {}",
-                    required_cap
-                )))?;
+                .map_err(|_| {
+                    RouteDispatchError::Forbidden(format!(
+                        "missing required capability: {}",
+                        required_cap
+                    ))
+                })?;
         }
 
         let project_path =

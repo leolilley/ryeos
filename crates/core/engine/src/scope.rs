@@ -39,11 +39,9 @@ pub fn check_execution_scope(principal: &EffectivePrincipal) -> Result<(), Engin
         EffectivePrincipal::Delegated(d) => &d.delegated_scopes,
     };
 
-    let has_permission = scopes.iter().any(|s| {
-        s == WILDCARD_SCOPE
-            || s == EXECUTE_SCOPE
-            || s.starts_with(RYEOS_EXECUTE_PREFIX)
-    });
+    let has_permission = scopes
+        .iter()
+        .any(|s| s == WILDCARD_SCOPE || s == EXECUTE_SCOPE || s.starts_with(RYEOS_EXECUTE_PREFIX));
 
     if has_permission {
         Ok(())

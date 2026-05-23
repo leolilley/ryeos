@@ -451,10 +451,7 @@ pub fn compile_with_handlers(
     // is NOT used by the subprocess — it's only for the config_schema
     // validation hint). This ensures subprocess tools can locate project
     // items without a separate --project CLI arg.
-    if let (Some(ref pp), Some(obj)) = (
-        project_root,
-        ctx.params.as_object_mut(),
-    ) {
+    if let (Some(ref pp), Some(obj)) = (project_root, ctx.params.as_object_mut()) {
         obj.entry("project_path")
             .or_insert_with(|| Value::String(pp.to_string_lossy().into_owned()));
     }

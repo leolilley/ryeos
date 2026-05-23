@@ -308,8 +308,7 @@ fn run_build(
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 
-    let user_root = roots::user_root()
-        .map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
+    let user_root = roots::user_root().map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
     let key_path = user_root
         .join(ryeos_engine::AI_DIR)
         .join("config")

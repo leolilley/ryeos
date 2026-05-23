@@ -311,9 +311,7 @@ pub fn build_engine_for_roots(
 /// `tool_env_passthrough` list. The `Config::load` step already
 /// handled the `RYEOS_TOOL_ENV_PASSTHROUGH` env-var override, so
 /// this function just receives the final merged list.
-fn load_host_env_passthrough_allowlist(
-    names: &[String],
-) -> Result<HostEnvBindings> {
+fn load_host_env_passthrough_allowlist(names: &[String]) -> Result<HostEnvBindings> {
     let bindings = HostEnvBindings::from_allowlist(names.iter().cloned())
         .map_err(|e| anyhow::anyhow!("invalid tool_env_passthrough configuration: {e}"))?;
     let allowed_names: Vec<&str> = bindings.allowed.iter().map(String::as_str).collect();

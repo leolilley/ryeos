@@ -503,10 +503,6 @@ fn truncate_for_error(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_owned()
     } else {
-        format!(
-            "{}… (truncated, {} bytes total)",
-            &s[..max_len],
-            s.len()
-        )
+        format!("{}… (truncated, {} bytes total)", &s[..max_len], s.len())
     }
 }

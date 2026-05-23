@@ -131,7 +131,11 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // passing it to the daemon where the tool ignores it.
     if let Some(idx) = cli.rest.iter().position(|t| t == "--project" || t == "-p") {
         let verb = cli.rest.first().map(|s| s.as_str()).unwrap_or("<verb>");
-        let project_val = cli.rest.get(idx + 1).map(|s| s.as_str()).unwrap_or("<path>");
+        let project_val = cli
+            .rest
+            .get(idx + 1)
+            .map(|s| s.as_str())
+            .unwrap_or("<path>");
         return Err(CliError::Usage {
             message: format!(
                 "`--project` after the verb is not a valid flag.\n\
