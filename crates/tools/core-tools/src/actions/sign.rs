@@ -182,9 +182,22 @@ pub fn run_sign(
         let display_ref = format!("{}:{}", canonical.kind, bare_id);
 
         match sign_one(&file_path, kind_schema, &ai_root, &parsers) {
-            Ok(sig) => report.signed.push(ItemOutcome {
+            Ok(SignOutcome::Signed(sig)) => report.signed.push(ItemOutcome {
                 item_ref: display_ref,
                 signature: Some(sig),
+                error: None,
+            }),
+            Ok(SignOutcome::Unchanged {
+                file,
+                signer_fingerprint,
+            }) => report.validated.push(ItemOutcome {
+                item_ref: display_ref,
+                signature: Some(SignatureReport {
+                    file,
+                    signer_fingerprint,
+                    signature_line: "unchanged — already validly signed".to_string(),
+                    updated_at: String::new(),
+                }),
                 error: None,
             }),
             Err(e) => report.failed.push(ItemOutcome {
@@ -199,12 +212,13 @@ pub fn run_sign(
 }
 
 /// Sign a single resolved file: parse, validate, then sign in place.
+/// Returns `SignOutcome::Unchanged` if the file was already validly signed.
 fn sign_one(
     file_path: &Path,
     kind_schema: &KindSchema,
     ai_root: &Path,
     parsers: &ParserDispatcher,
-) -> Result<SignatureReport> {
+) -> Result<SignOutcome> {
     let content =
         fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
     let matched_ext = file_path
@@ -351,12 +365,14 @@ fn source_ai_root(
 /// Result of a batch sign call. Always populated, even for
 /// single-item refs (vec of length 1).
 ///
-/// `signed` and `failed` are partitioned outcomes; the binary
-/// exits non-zero iff `!failed.is_empty()`. Determinism: both
-/// vectors are ordered by the on-disk path, so reports are stable
-/// across runs.
+/// `validated` contains items that were already validly signed and left
+/// untouched. `signed` contains items that were (re-)signed. `failed`
+/// collects per-item errors. The vectors are ordered by on-disk path.
 #[derive(Debug, Default, serde::Serialize)]
 pub struct BatchReport {
+    /// Items already validly signed, left untouched.
+    pub validated: Vec<ItemOutcome>,
+    /// Items (re-)signed because unsigned, invalid, wrong signer, or content changed.
     pub signed: Vec<ItemOutcome>,
     pub failed: Vec<ItemOutcome>,
 }
@@ -367,7 +383,7 @@ impl BatchReport {
     }
 
     pub fn total(&self) -> usize {
-        self.signed.len() + self.failed.len()
+        self.validated.len() + self.signed.len() + self.failed.len()
     }
 }
 
@@ -439,17 +455,43 @@ fn build_parser_dispatcher(
     Ok(ParserDispatcher::new(parser_tools, Arc::new(handlers)))
 }
 
-/// Sign a file in place using the kind's signature envelope. Loads
-/// the user signing key from `RYE_SIGNING_KEY` env,
+/// Sign a file in place using the kind's signature envelope.
+///
+/// Idempotent: if the file already carries a valid signature (matching body
+/// hash, signer fingerprint, and cryptographic verification) for the current
+/// user key, the file is left untouched and `SignOutcome::Unchanged` is
+/// returned. Otherwise the file is (re-)signed atomically.
+///
+/// Loads the user signing key from `RYE_SIGNING_KEY` env,
 /// `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the legacy
 /// `~/.ai/config/keys/signing/private_key.pem` fallback.
-fn sign_in_place(input: &Path, envelope: &SignatureEnvelope) -> Result<SignatureReport> {
+fn sign_in_place(input: &Path, envelope: &SignatureEnvelope) -> Result<SignOutcome> {
     let body = fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?;
 
     let signing_key = load_user_signing_key()?;
-    let fingerprint = lillux::sha256_hex(signing_key.verifying_key().as_bytes());
+    let verifying_key = signing_key.verifying_key();
+    let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
 
-    let stripped = lillux::signature::strip_signature_lines(&body);
+    let stripped = lillux::signature::strip_signature_lines_with_envelope(
+        &body,
+        &envelope.prefix,
+        envelope.suffix.as_deref(),
+    );
+
+    // Check if already validly signed: hash + fingerprint + sig verification
+    if is_already_validly_signed_operator(
+        &body,
+        &stripped,
+        &verifying_key,
+        &fingerprint,
+        envelope,
+    ) {
+        return Ok(SignOutcome::Unchanged {
+            file: input.display().to_string(),
+            signer_fingerprint: fingerprint,
+        });
+    }
+
     let signed = lillux::signature::sign_content(
         &stripped,
         &signing_key,
@@ -466,12 +508,59 @@ fn sign_in_place(input: &Path, envelope: &SignatureEnvelope) -> Result<Signature
     let signature_line = extract_signature_line(&signed, &envelope.prefix)
         .unwrap_or_else(|| "signature applied".to_string());
 
-    Ok(SignatureReport {
+    Ok(SignOutcome::Signed(SignatureReport {
         file: input.display().to_string(),
         signer_fingerprint: fingerprint,
         signature_line,
         updated_at: lillux::time::iso8601_now(),
-    })
+    }))
+}
+
+/// Check whether `existing` (full file content) already carries a valid
+/// signature for `body` (stripped content) signed by `signing_key`.
+///
+/// Returns true only when all three conditions hold:
+///   1. the parsed header's content hash matches the body,
+///   2. the signer fingerprint matches the current key, and
+///   3. the signature verifies against the hash.
+fn is_already_validly_signed_operator(
+    existing: &str,
+    body: &str,
+    verifying_key: &lillux::crypto::VerifyingKey,
+    fingerprint: &str,
+    envelope: &SignatureEnvelope,
+) -> bool {
+    let Some(header) =
+        ryeos_engine::item_resolution::parse_signature_header(existing, envelope)
+    else {
+        return false;
+    };
+
+    let expected_hash = lillux::signature::content_hash(body);
+    if header.content_hash != expected_hash {
+        return false;
+    }
+
+    if header.signer_fingerprint != fingerprint {
+        return false;
+    }
+
+    lillux::signature::verify_signature(
+        &header.content_hash,
+        &header.signature_b64,
+        verifying_key,
+    )
+}
+
+/// Outcome of signing a single item via `sign_in_place`.
+enum SignOutcome {
+    /// Already valid, left untouched.
+    Unchanged {
+        file: String,
+        signer_fingerprint: String,
+    },
+    /// (Re-)signed in place.
+    Signed(SignatureReport),
 }
 
 #[derive(Debug, serde::Serialize)]
