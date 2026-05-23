@@ -298,44 +298,46 @@ impl LoadedSurface {
     /// Create a RyeResolved surface from daemon response.
     ///
     /// The `value` is the JSON returned by `items.effective`:
-    /// `{ "canonical_ref", "kind", "resolved_path", "signed", "composed", ... }`
+    /// `{ "canonical_ref", "kind", "resolved_path", "signed", "composed", "shadowed", ... }`
     pub fn from_daemon(requested_ref: &str, value: serde_json::Value) -> Self {
         let composed = value.get("composed").cloned().unwrap_or(serde_json::Value::Null);
         let trusted = value.get("signed").and_then(|v| v.as_bool()).unwrap_or(false);
-        let provenance = value
-            .get("provenance")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
 
-        let composed = value.get("composed").cloned().unwrap_or(serde_json::Value::Null);
+        // Build provenance from canonical_ref + any shadowed items
+        let mut provenance = Vec::new();
+        if let Some(canonical) = value.get("canonical_ref").and_then(|v| v.as_str()) {
+            provenance.push(canonical.to_string());
+        }
+        // Shadowed items represent items that were overridden — include their refs in provenance
+        if let Some(shadowed) = value.get("shadowed").and_then(|v| v.as_array()) {
+            for item in shadowed {
+                // shadowed items have { "space": "...", "path": "..." }
+                // Not canonical refs, but useful for diagnostics
+                if let Some(path) = item.get("path").and_then(|v| v.as_str()) {
+                    provenance.push(path.to_string());
+                }
+            }
+        }
+
+        let mut item_diagnostics = Vec::new();
+        let mut tui_diagnostics = Vec::new();
+
+        if !trusted {
+            item_diagnostics.push(SurfaceDiagnostic::ValidationError {
+                message: "surface is not signed".into(),
+            });
+        }
 
         // Parse composed value as SurfaceSpec
         let spec = match serde_json::from_value::<SurfaceSpec>(composed) {
             Ok(s) => s,
             Err(e) => {
-                let mut diags = Vec::new();
-                diags.push(SurfaceDiagnostic::ValidationError {
+                tui_diagnostics.push(SurfaceDiagnostic::ValidationError {
                     message: format!("daemon returned invalid surface: {}", e),
                 });
                 builtin_default()
             }
         };
-
-        let mut item_diagnostics = Vec::new();
-        let mut tui_diagnostics = Vec::new();
-
-        if trusted && !value.get("signed").and_then(|v| v.as_bool()).unwrap_or(false) {
-            // Signed surfaces from daemon are trusted
-        } else if !trusted {
-            item_diagnostics.push(SurfaceDiagnostic::ValidationError {
-                message: "surface is not signed".into(),
-            });
-        }
 
         LoadedSurface::RyeResolved {
             requested_ref: requested_ref.to_string(),
@@ -377,6 +379,14 @@ impl LoadedSurface {
                     "untrusted"
                 }
             }
+        }
+    }
+
+    /// The requested ref (for daemon-resolved surfaces) or None.
+    pub fn requested_ref(&self) -> Option<&str> {
+        match self {
+            LoadedSurface::RyeResolved { requested_ref, .. } => Some(requested_ref),
+            _ => None,
         }
     }
 }
@@ -1163,5 +1173,153 @@ id = "test"
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_daemon_signed_surface() {
+        let response = serde_json::json!({
+            "canonical_ref": "surface:ryeos/cockpit/base",
+            "kind": "surface",
+            "bare_id": "ryeos/cockpit/base",
+            "resolved_space": "System",
+            "resolved_path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/base.yaml",
+            "signed": true,
+            "composed": {
+                "name": "base",
+                "layout": {
+                    "root": "sidebar",
+                    "nodes": {
+                        "sidebar": { "type": "pane", "view": "thread" }
+                    }
+                },
+                "affordances": []
+            },
+            "shadowed_count": 0,
+            "shadowed": []
+        });
+
+        let loaded = LoadedSurface::from_daemon("surface:ryeos/cockpit/base", response);
+
+        match &loaded {
+            LoadedSurface::RyeResolved {
+                requested_ref,
+                spec,
+                trusted,
+                provenance,
+                item_diagnostics,
+                tui_diagnostics,
+            } => {
+                assert_eq!(requested_ref, "surface:ryeos/cockpit/base");
+                assert_eq!(spec.name, "base");
+                assert!(*trusted, "signed surface should be trusted");
+                assert_eq!(provenance.len(), 1, "should have canonical_ref in provenance");
+                assert_eq!(provenance[0], "surface:ryeos/cockpit/base");
+                assert!(item_diagnostics.is_empty(), "signed surface should have no item diagnostics");
+                assert!(tui_diagnostics.is_empty());
+            }
+            other => panic!("expected RyeResolved, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn from_daemon_unsigned_surface_warns() {
+        let response = serde_json::json!({
+            "canonical_ref": "surface:ryeos/cockpit/graph",
+            "kind": "surface",
+            "signed": false,
+            "composed": {
+                "name": "graph",
+                "layout": {
+                    "root": "main",
+                    "nodes": {
+                        "main": { "type": "pane", "view": "graph" }
+                    }
+                },
+                "affordances": []
+            },
+            "shadowed_count": 0,
+            "shadowed": []
+        });
+
+        let loaded = LoadedSurface::from_daemon("surface:ryeos/cockpit/graph", response);
+
+        match &loaded {
+            LoadedSurface::RyeResolved { trusted, item_diagnostics, .. } => {
+                assert!(!trusted, "unsigned surface should not be trusted");
+                assert_eq!(item_diagnostics.len(), 1, "should warn about unsigned surface");
+                match &item_diagnostics[0] {
+                    SurfaceDiagnostic::ValidationError { message } => {
+                        assert!(message.contains("not signed"));
+                    }
+                    other => panic!("expected ValidationError, got {:?}", other),
+                }
+            }
+            other => panic!("expected RyeResolved, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn from_daemon_invalid_composed_falls_back_to_builtin() {
+        let response = serde_json::json!({
+            "canonical_ref": "surface:ryeos/cockpit/bad",
+            "kind": "surface",
+            "signed": true,
+            "composed": { "garbage": true },
+            "shadowed_count": 0,
+            "shadowed": []
+        });
+
+        let loaded = LoadedSurface::from_daemon("surface:ryeos/cockpit/bad", response);
+
+        match &loaded {
+            LoadedSurface::RyeResolved { spec, tui_diagnostics, .. } => {
+                // Should fall back to builtin default (has name "default")
+                assert_eq!(tui_diagnostics.len(), 1, "should report parse error");
+                match &tui_diagnostics[0] {
+                    SurfaceDiagnostic::ValidationError { message } => {
+                        assert!(message.contains("daemon returned invalid surface"));
+                    }
+                    other => panic!("expected ValidationError, got {:?}", other),
+                }
+            }
+            other => panic!("expected RyeResolved, got {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn from_daemon_includes_shadowed_in_provenance() {
+        let response = serde_json::json!({
+            "canonical_ref": "surface:my/custom",
+            "kind": "surface",
+            "signed": true,
+            "composed": {
+                "name": "custom",
+                "layout": {
+                    "root": "main",
+                    "nodes": {
+                        "main": { "type": "pane", "view": "thread" }
+                    }
+                },
+                "affordances": []
+            },
+            "shadowed_count": 2,
+            "shadowed": [
+                { "space": "System", "path": "/usr/lib/ryeos/.ai/surfaces/my/custom.yaml" },
+                { "space": "User", "path": "/home/user/.ai/surfaces/my/custom.yaml" }
+            ]
+        });
+
+        let loaded = LoadedSurface::from_daemon("surface:my/custom", response);
+
+        match &loaded {
+            LoadedSurface::RyeResolved { provenance, .. } => {
+                // 1 (canonical_ref) + 2 (shadowed) = 3
+                assert_eq!(provenance.len(), 3, "provenance should include canonical + shadowed");
+                assert_eq!(provenance[0], "surface:my/custom");
+                assert!(provenance[1].contains(".ai/surfaces/"));
+                assert!(provenance[2].contains(".ai/surfaces/"));
+            }
+            other => panic!("expected RyeResolved, got {:?}", std::mem::discriminant(other)),
+        }
     }
 }

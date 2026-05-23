@@ -30,6 +30,9 @@ pub struct LoadedSurfaceSerde {
     pub source_label: String,
     pub is_trusted: bool,
     pub is_local_preview: bool,
+    /// Canonical ref or path the surface was resolved from.
+    #[serde(default)]
+    pub requested_ref: Option<String>,
 }
 
 impl LoadedSurfaceSerde {
@@ -40,6 +43,7 @@ impl LoadedSurfaceSerde {
             source_label: loaded.source_label().to_string(),
             is_trusted: loaded.is_trusted(),
             is_local_preview: loaded.is_local_preview(),
+            requested_ref: loaded.requested_ref().map(String::from),
         }
     }
 
@@ -62,6 +66,7 @@ impl AppModel {
                 source_label: "builtin".into(),
                 is_trusted: false,
                 is_local_preview: false,
+                requested_ref: None,
             },
             overlay: None,
             runtime: RuntimeStatus {

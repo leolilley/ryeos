@@ -193,6 +193,9 @@ fn build_status_bar(model: &AppModel, rect: Rect) -> StatusBarSurface {
 
     // Right section: surface source + identity / trust status
     let mut right_parts: Vec<String> = Vec::new();
+    if let Some(ref_str) = &model.surface.requested_ref {
+        right_parts.push(ref_str.clone());
+    }
     right_parts.push(model.surface.source_label.to_string());
     if let Some(id) = &model.store.identity {
         if id.has_signing_key {
