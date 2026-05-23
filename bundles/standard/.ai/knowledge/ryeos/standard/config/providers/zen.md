@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T07:21:27Z:85ea696117e99eae3daec07a90d269479edebfb54176d7193a5893256541615e:Y15xvmZeQLLEg6O9f8VEQrwou+m7Xk4or9f25CTTi4UVqemI/mIOp1jhlFk3u6YzhhYZinr92f+pHumgMqbMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T19:55:06Z:85ea696117e99eae3daec07a90d269479edebfb54176d7193a5893256541615e:KJOVyb4yymCBhyawsjR1yM00E9Zk+AO6nqhbCCtKrHAGpcS7Tm1kcK9meHxmcVmAAHL7OjGRBIlPicyI799cDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/standard/config/providers
 tags: [provider, zen, gateway, models]

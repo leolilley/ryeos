@@ -1,6 +1,6 @@
-# ryeos:signed:2026-05-22T07:21:25Z:3846467057c9f107bc07cd0e9faa9e4c1cd2b886104bdaa668327f628e8c2080:LRvbrWeOnyyry5+iCkA1VCCErGvX3MK6GV4+wfyfgPj0FjrgMXyUTiab482LwZ4h0gHk13ve0ARUg7a6pg+uCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T19:55:00Z:7bf804474903641a36f3109bee998ddccffff35ee5cf3a8f9b6a723745505683:mqdYyM+L4pM3hG8IQe+TTwY11bzyuLU9uUJ9KeF2QPiP/Yp/bHjKjwjOmE156xOKMmB6iwLyiUAHuwp8bnjOAQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "verbs"
 section: verbs
 name: fetch
 description: "Fetch/resolve an item (read-only)"
-execute: service:fetch
+execute: tool:ryeos/core/fetch

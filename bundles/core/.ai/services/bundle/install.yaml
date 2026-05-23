@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T07:21:26Z:5aaa9e616b705e38fcb6ff8f2a3fc83edc6b33dc3854eedf3942df5590772e61:bAUWlMV5K4IhRQW+UuP3+AEfG0SIduycsJAGNepJy5rQOObUE2TxmSdPIfCGStbMLkM696jUp0efDKAOq7tcDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T19:55:00Z:5aaa9e616b705e38fcb6ff8f2a3fc83edc6b33dc3854eedf3942df5590772e61:u030qwKrvgGf5PorwE8GzjNF5Neb03Lg5MjYNqKh3feJ5SiBDpj+weExy+K/xYX2f2fEo0Jp/VEe6x9N2FCyBg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: service
 endpoint: bundle.install
 required_caps: ["ryeos.execute.service.bundle.install"]

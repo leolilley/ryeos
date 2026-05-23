@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-05-22T07:21:23Z:7a2fbacadfb6f5f278ee32de43ca1ed74391d12b12c063e171825976a847d24d:j9J+mH7hHm5UpUU9G+8qryCoaUa2AMGkO+HRY34S0/VF7dUtxZQgUynBU7i5Y22cJEmU99J6H95GmPnNOAACDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -50,7 +49,7 @@ the user CLI key. This means:
 - To display your node's public key for sharing with a remote operator:
 
   ```bash
-  ryeos identity public-key
+ryeos identity
   ```
 
 - The remote operator authorizes the caller's **node key fingerprint**,
@@ -69,7 +68,7 @@ the user CLI key. This means:
    with:
 
    ```bash
-   ryeos identity public-key
+  ryeos identity
    ```
 
    The remote operator can then grant explicit scopes locally:
@@ -118,7 +117,7 @@ the user CLI key. This means:
 # ── On the CALLER node ──
 
 # 1. Display your node public key (share this with the remote operator)
-ryeos identity public-key
+ryeos identity
 
 # 2. Configure the remote
 ryeos remote configure --remote prod --url https://ryeos.example.com

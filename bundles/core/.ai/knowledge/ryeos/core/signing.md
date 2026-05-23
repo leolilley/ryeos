@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-05-22T07:21:23Z:c270fb4c42564456dda76ce071860ce03d134ba047be0811242c23990580a743:rAVaixbbdu6QIiTDTrGkzLxdgLuy4cH6yG/mlZpOdvncLd2ufUAa0L9LbLTzEQTR25uxRI1rpDvzBFYswSjnBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -153,7 +152,7 @@ The key fingerprint is the SHA-256 hash of the raw 32-byte public key,
 hex-encoded (64 characters). It appears in:
 - Signature headers (last field after the colon)
 - Trust store filenames (`<fingerprint>.toml`)
-- `ryeos identity public-key` output
+- `ryeos identity` output
 
 ## Vault (Sealed Secrets)
 

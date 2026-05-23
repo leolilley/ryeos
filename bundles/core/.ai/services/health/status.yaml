@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T07:21:27Z:42df334892658f3fa1033ab777de66d9955f74d12a15545f05d22ab4bf3dd83f:lYd7KqqCke0fj6laPfBKwfi0I+ci/QrucBmY4VSYLQm/r+vmdyRMI3pUz1R38Eqij0qakRnrylUJqZa6kaEdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T19:55:00Z:42df334892658f3fa1033ab777de66d9955f74d12a15545f05d22ab4bf3dd83f:4oHjpApIIGY9rXPLQXsyMfSIb6rsq8tIfpD/Af5bW15WVMLMD+WA3rO+UyAiUuaMOAsPtR7t2Q05hzfvSFCiBg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: service
 endpoint: health.status
 required_caps: []

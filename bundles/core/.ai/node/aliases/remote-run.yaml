@@ -1,0 +1,16 @@
+# ryeos:signed:2026-05-23T04:38:51Z:1c7ebee7f6b496af6ee3bf8e6a2a054ec8cd5aa747f6df0f0f5b35c3f8ead956:Bh8kokjwzby++hsOm5pbuA/cRbNFOAJugbcIed3MAzu9GTAR1U9b+3ZXN7puIeuMFS1QXcXkfva51Fr/9Pc6Cw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: "aliases"
+section: aliases
+tokens: ["remote", "run"]
+verb: remote-run
+description: "Execute an item against a configured remote project"
+positional_field: item_ref
+project_resolution: required
+positional_forms:
+  - slots:
+      - field: remote
+      - field: item_ref
+        matcher: canonical_ref
+  - slots:
+      - field: item_ref
+        matcher: canonical_ref

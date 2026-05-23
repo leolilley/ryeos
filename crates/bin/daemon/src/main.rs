@@ -51,10 +51,8 @@ async fn main() -> Result<()> {
     // standalone service) from racing in and removing the first
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
-    let _state_lock = state_lock::StateLock::acquire(&state_lock::default_lock_path(
-        &config.system_space_dir,
-    ))
-    .context(
+    let state_lock_path = state_lock::default_lock_path(&config.system_space_dir);
+    let _state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
 
@@ -72,6 +70,8 @@ async fn main() -> Result<()> {
     // Startup auto-signing is intentionally NOT called here.
     // The daemon start path is fail-closed on unsigned trust-sensitive items.
     // Use `ryeos init` to install bundle registrations before daemon startup.
+
+    tracing::info!("State lock acquired");
 
     process::remove_stale_socket(&config.uds_path)?;
     ensure_runtime_paths(&config)?;
@@ -202,10 +202,10 @@ async fn main() -> Result<()> {
     };
     tracing::info!(routes = route_table.load().all.len(), "route table built");
 
-    // These must be initialized after the self-check (which only needs engine + services).
-    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(
-        &config,
-    ));
+    // Build thread-kind profiles from the loaded kind schemas.
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
     let state_root = config.system_space_dir.join(".ai").join("state");
@@ -231,10 +231,6 @@ async fn main() -> Result<()> {
             .context("SchedulerDb initialization failed")?,
     );
     tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
-
-    // State lock already held since the start of main (acquired before
-    // socket unlink); see the early `_state_lock` binding.
-    tracing::info!("State lock acquired");
 
     let events = Arc::new(EventStoreService::new(state_store.clone()));
     let threads = Arc::new(ThreadLifecycleService::new(
@@ -709,12 +705,13 @@ async fn run_service_standalone(
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.system_space_dir))
             .context("failed to acquire state lock — is the daemon running?")?;
 
-    // Minimal bootstrap (subset of daemon startup)
-    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::load_from_config(config));
-    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
     // Two-phase node-config bootstrap (same as daemon-start path)
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
+
+    let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
     let services = Arc::new(service_registry::build_service_registry());
 

@@ -12,7 +12,7 @@
 //! Dispatch time:
 //! 1. Principal comes from `ctx.principal` (set by the auth invoker).
 //! 2. Body parsed as `ExecuteRequest`.
-//! 3. Scope check (requires "execute").
+//! 3. Capability check via the unified Authorizer (derived from item_ref).
 //! 4. Full dispatch pipeline (token resolution, project source, engine dispatch).
 
 use std::sync::Arc;
@@ -28,6 +28,7 @@ use crate::routes::compile::{
 };
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 use ryeos_executor::execution::project_source::{self, ProjectSource};
+use ryeos_runtime::authorizer::AuthorizationPolicy;
 
 // ── Request shape ─────────────────────────────────────────────────────────
 
@@ -159,17 +160,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let caller_principal_id = principal.id.clone();
         let caller_scopes = principal.scopes.clone();
 
-        // Scope check.
-        if !caller_scopes.iter().any(|s| s == "*" || s == "execute") {
-            return Ok((
-                StatusCode::FORBIDDEN,
-                axum::Json(json!({
-                    "error": format!("insufficient scope: 'execute' required"),
-                })),
-            )
-                .into_response());
-        }
-
         // Parse body.
         let mut request: ExecuteRequest = serde_json::from_slice(&ctx.body_raw)
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
@@ -265,6 +255,30 @@ impl CompiledResponseMode for CompiledExecuteMode {
         }
 
         let item_ref = request.item_ref.as_ref().unwrap();
+
+        // Capability check: derive the required cap from the item_ref
+        // (e.g. "directive:apps/tv-tracker/ai_chat" →
+        //  "ryeos.execute.directive.apps/tv-tracker/ai_chat") and check
+        // via the unified Authorizer. This replaces the old ad-hoc
+        // `s == "*" || s == "execute"` check, supporting fine-grained
+        // `ryeos.execute.<kind>.<subject>` scopes and wildcards like
+        // `ryeos.execute.*` or `ryeos.execute.directive.*`.
+        {
+            let (kind, subject) = item_ref.split_once(':').ok_or_else(|| {
+                RouteDispatchError::BadRequest(format!("invalid item_ref: {}", item_ref))
+            })?;
+            let required_cap = ryeos_runtime::authorizer::canonical_cap(kind, subject, "execute");
+            let policy = AuthorizationPolicy::require(&required_cap);
+            state
+                .authorizer
+                .authorize(&caller_scopes, &policy)
+                .map_err(|_| {
+                    RouteDispatchError::Forbidden(format!(
+                        "missing required capability: {}",
+                        required_cap
+                    ))
+                })?;
+        }
 
         let site_id = state.threads.site_id();
         let project_source = request.project_source.clone().unwrap_or_default();

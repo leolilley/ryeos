@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-05-22T07:21:24Z:cea212f83d7cc6a7fe1aae903ea6d6c80bf427f5a27ebbbb4e9ca2131820ba06:T6TXy8/hLNk0wBBKbyrzBKvuB+hFEqRIj9ib0pLHu4Aoi1Gh9tOpngkGAYlkj3PUrg01z/w6q+G87+1A5wTQBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]

@@ -1,10 +1,15 @@
+//! Thread-kind profile registry — built from kind schema declarations.
+//!
+//! Each kind schema's `execution.thread_profile` declares the thread kind
+//! name AND its lifecycle flags (interrupt, continuation, root-executable).
+//! This registry is built by scanning those declarations at boot — no
+//! hardcoded Rust profile map.
+
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use ryeos_engine::kind_registry::ThreadProfileDecl;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -14,81 +19,66 @@ pub struct ThreadKindProfile {
     pub supports_continuation: bool,
 }
 
+impl From<&ThreadProfileDecl> for ThreadKindProfile {
+    fn from(tp: &ThreadProfileDecl) -> Self {
+        Self {
+            root_executable: tp.root_executable,
+            supports_interrupt: tp.supports_interrupt,
+            supports_continuation: tp.supports_continuation,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KindProfileRegistry {
     profiles: HashMap<String, ThreadKindProfile>,
 }
 
 impl KindProfileRegistry {
-    /// Load profiles from the daemon config file, falling back to defaults.
-    pub fn load_from_config(config: &Config) -> Self {
-        if let Some(config_path) = Self::find_config_path(config) {
-            if let Ok(contents) = fs::read_to_string(&config_path) {
-                if let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(&contents) {
-                    if let Some(profiles_val) = parsed.get("thread_kind_profiles") {
-                        if let Ok(profiles) = serde_yaml::from_value::<
-                            HashMap<String, ThreadKindProfile>,
-                        >(profiles_val.clone())
-                        {
-                            if !profiles.is_empty() {
-                                return Self { profiles };
-                            }
-                        }
-                    }
+    /// Build the profile registry from the loaded `KindRegistry`.
+    ///
+    /// Scans every kind schema for an `execution.thread_profile` declaration
+    /// and registers its lifecycle flags.
+    ///
+    /// If `kind_registry` is `None` (test fixtures, minimal boot), returns
+    /// an empty registry.
+    pub fn build(kind_registry: Option<&ryeos_engine::kind_registry::KindRegistry>) -> Self {
+        let mut profiles = HashMap::new();
+
+        // Scan kind schemas for thread_profile declarations.
+        if let Some(kinds) = kind_registry {
+            for kind_name in kinds.kinds() {
+                let Some(schema) = kinds.get(kind_name) else {
+                    continue;
+                };
+                let Some(exec) = schema.execution() else {
+                    continue;
+                };
+                if let Some(tp) = &exec.thread_profile {
+                    profiles.insert(tp.name.clone(), ThreadKindProfile::from(tp));
                 }
             }
         }
-        Self::load_defaults()
+
+        // Daemon-internal profile for child threads spawned by
+        // launch augmentations (e.g. compose_context_positions).
+        // These threads use the target kind's thread_profile when
+        // available, falling back to "system_task" otherwise.
+        Self::insert_internal_profiles(&mut profiles);
+
+        tracing::info!(
+            count = profiles.len(),
+            names = ?profiles.keys().collect::<Vec<_>>(),
+            "thread kind profiles loaded"
+        );
+
+        Self { profiles }
     }
 
-    fn find_config_path(config: &Config) -> Option<PathBuf> {
-        let path = config
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("config.yaml");
-        if path.exists() {
-            Some(path)
-        } else {
-            None
-        }
-    }
-
-    /// Load with default profiles.
-    pub fn load_defaults() -> Self {
-        let mut profiles = HashMap::new();
-        profiles.insert(
-            "directive_run".to_string(),
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: true,
-                supports_continuation: true,
-            },
-        );
-        profiles.insert(
-            "tool_run".to_string(),
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: false,
-                supports_continuation: false,
-            },
-        );
-        profiles.insert(
-            "graph_run".to_string(),
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: true,
-                supports_continuation: true,
-            },
-        );
-        profiles.insert(
-            "graph_step".to_string(),
-            ThreadKindProfile {
-                root_executable: false,
-                supports_interrupt: false,
-                supports_continuation: false,
-            },
-        );
+    fn insert_internal_profiles(profiles: &mut HashMap<String, ThreadKindProfile>) {
+        // system_task: non-root, non-interruptible, non-continuable.
+        // Used for daemon-internal maintenance threads (e.g. launch
+        // augmentation child threads when no target kind profile exists).
         profiles.insert(
             "system_task".to_string(),
             ThreadKindProfile {
@@ -97,57 +87,19 @@ impl KindProfileRegistry {
                 supports_continuation: false,
             },
         );
-        profiles.insert(
-            "service_run".to_string(),
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: false,
-                supports_continuation: false,
-            },
-        );
-        // V5.4 SSE seam: `runtime_run` is the schema-declared
-        // `thread_profile` for `kind: runtime` items. In V5.3 it
-        // mirrors `tool_run` exactly (same lifecycle — no interrupt,
-        // no continuation) because every shipped runtime spawns via
-        // the V5.2 native machinery. V5.4 streaming runtimes will
-        // diverge this profile (e.g. `supports_interrupt: true`)
-        // without touching the dispatch core.
-        profiles.insert(
-            "runtime_run".to_string(),
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: false,
-                supports_continuation: false,
-            },
-        );
-        // `streaming_tool_run` is the schema-declared thread_profile
-        // for `kind: streaming_tool` items. Streaming tools use the
-        // managed lifecycle (like runtimes) but are not runtimes —
-        // they write length-prefixed StreamingChunk frames to stdout
-        // instead of using UDS callbacks. The profile mirrors
-        // `tool_run` (no interrupt, no continuation).
-        profiles.insert(
-            "streaming_tool_run".to_string(),
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: false,
-                supports_continuation: false,
-            },
-        );
-        Self { profiles }
     }
 
-    /// Get profile for a kind. Returns None if kind is unknown.
+    /// Get profile for a thread kind. Returns None if unknown.
     pub fn get(&self, kind: &str) -> Option<&ThreadKindProfile> {
         self.profiles.get(kind)
     }
 
-    /// Check if a kind is registered.
+    /// Check if a thread kind is registered.
     pub fn is_valid(&self, kind: &str) -> bool {
         self.profiles.contains_key(kind)
     }
 
-    /// Check if a kind can be used as a root execution.
+    /// Check if a thread kind can be used as a root execution.
     pub fn is_root_executable(&self, kind: &str) -> bool {
         self.profiles.get(kind).is_some_and(|p| p.root_executable)
     }
@@ -186,52 +138,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_run_is_root_executable() {
-        let reg = KindProfileRegistry::load_defaults();
-        assert!(reg.is_root_executable("service_run"));
+    fn build_with_no_kind_registry_has_internal_profiles() {
+        let reg = KindProfileRegistry::build(None);
+        assert!(reg.is_valid("system_task"));
+        assert!(!reg.is_valid("tool_run")); // no kind registry → no schema-derived profiles
     }
 
     #[test]
-    fn service_run_no_interrupt_or_continuation() {
-        let reg = KindProfileRegistry::load_defaults();
-        let profile = reg.get("service_run").unwrap();
-        assert!(!profile.supports_interrupt);
-        assert!(!profile.supports_continuation);
+    fn system_task_not_root_executable() {
+        let reg = KindProfileRegistry::build(None);
+        assert!(!reg.is_root_executable("system_task"));
     }
 
     #[test]
-    fn kind_profile_default_runtime_run_exists() {
-        let reg = KindProfileRegistry::load_defaults();
-        let profile = reg
-            .get("runtime_run")
-            .expect("`runtime_run` must be a default profile (A3 SSE seam)");
-        assert!(profile.root_executable);
-        assert!(!profile.supports_interrupt);
-        assert!(!profile.supports_continuation);
-    }
-
-    #[test]
-    fn service_run_allowed_actions() {
-        let reg = KindProfileRegistry::load_defaults();
-        // Running: cancel + kill (has_process=true)
-        let actions = reg.allowed_actions("service_run", "running", true);
+    fn allowed_actions_running_with_process() {
+        let reg = KindProfileRegistry::build(None);
+        let actions = reg.allowed_actions("system_task", "running", true);
         assert_eq!(actions, vec!["cancel", "kill"]);
-        // Running: cancel only (no process)
-        let actions = reg.allowed_actions("service_run", "running", false);
-        assert_eq!(actions, vec!["cancel"]);
-        // Completed: no continuation
-        let actions = reg.allowed_actions("service_run", "completed", false);
+    }
+
+    #[test]
+    fn allowed_actions_completed_no_continuation() {
+        let reg = KindProfileRegistry::build(None);
+        let actions = reg.allowed_actions("system_task", "completed", false);
         assert!(actions.is_empty());
     }
 
     #[test]
-    fn kind_profile_default_streaming_tool_run_exists() {
-        let reg = KindProfileRegistry::load_defaults();
-        let profile = reg
-            .get("streaming_tool_run")
-            .expect("`streaming_tool_run` must be a default profile");
+    fn build_from_kind_registry() {
+        // Test that ThreadKindProfile::from(ThreadProfileDecl) works.
+        let decl = ThreadProfileDecl {
+            name: "test_kind_run".to_string(),
+            root_executable: true,
+            supports_interrupt: true,
+            supports_continuation: false,
+        };
+        let profile = ThreadKindProfile::from(&decl);
         assert!(profile.root_executable);
-        assert!(!profile.supports_interrupt);
+        assert!(profile.supports_interrupt);
         assert!(!profile.supports_continuation);
     }
 }

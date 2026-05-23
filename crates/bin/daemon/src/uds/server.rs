@@ -422,7 +422,7 @@ mod tests {
         let write_barrier = WriteBarrier::new();
         let state_store =
             Arc::new(StateStore::new(state_root, runtime_db_path, signer, write_barrier).unwrap());
-        let kind_profiles = Arc::new(KindProfileRegistry::load_defaults());
+        let kind_profiles = Arc::new(KindProfileRegistry::build(None));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let threads = Arc::new(
             ThreadLifecycleService::new(state_store.clone(), kind_profiles.clone(), events.clone())

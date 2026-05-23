@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T07:21:27Z:b38d7ebb70174ce820e8b64ea68228f84615f5d2a897b5835618d38d9cf4b912:+kAgYks/3LC+1UgBXmMFKz9wLBCcnZLeNxXiK2mnvCnO/N62xMTk6ns3XPPp/+SBGuqAXkOT2Vf0+DVh6+L3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T19:55:06Z:b38d7ebb70174ce820e8b64ea68228f84615f5d2a897b5835618d38d9cf4b912:d5k98G0M1qQ10yAeTC87Cv6ScjfbUe9OLnqevBEHsAMhT8AWvsKVFuZW2VRoighduHPxKIxAyuuVYw0MPpIvAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/standard/kinds
 tags: [kind, graph, workflow, dag]

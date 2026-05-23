@@ -13,6 +13,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context;
 use base64::Engine;
 use clap::{Parser, Subcommand};
 
@@ -46,6 +47,30 @@ enum Cmd {
         /// Where to look for the item: `project` or `user`.
         #[arg(long, default_value = "project")]
         source: String,
+    },
+
+    /// Build (re-publish) a bundle from source using the user signing key.
+    ///
+    /// Runs the full publish pipeline: clean derived artifacts, bootstrap-sign
+    /// kind schemas and parsers, rebuild the CAS manifest (binary hashes),
+    /// sign all items, and generate the bundle manifest. The signing key is
+    /// auto-resolved from the user root — no `--key` flag needed.
+    Build {
+        /// Bundle source root (directory containing `.ai/`).
+        bundle_source: PathBuf,
+
+        /// Registry root supplying kind schemas + parsers.
+        /// Defaults to `bundle_source` (suitable when building `core` itself).
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+
+        /// Owner label for the trust doc. Defaults to "local-dev".
+        #[arg(long, default_value = "local-dev")]
+        owner: String,
+
+        /// Suppress emitting `<bundle_source>/PUBLISHER_TRUST.toml`.
+        #[arg(long)]
+        no_trust_doc: bool,
     },
 
     /// Resolve, optionally verify, and read an item.
@@ -184,6 +209,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             project,
             source,
         } => run_sign(item_ref, project, source, cli.stdin_json),
+        Cmd::Build {
+            bundle_source,
+            registry_root,
+            owner,
+            no_trust_doc,
+        } => run_build(bundle_source, registry_root, owner, no_trust_doc),
         Cmd::Fetch {
             item_ref,
             with_content,
@@ -266,6 +297,47 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Cmd::Vault { cmd } => run_vault(cmd),
     }
+}
+
+fn run_build(
+    bundle_source: PathBuf,
+    registry_root: Option<PathBuf>,
+    owner: String,
+    no_trust_doc: bool,
+) -> anyhow::Result<()> {
+    use ryeos_engine::roots;
+    use ryeos_tools::actions::publish::{run_publish, PublishOptions};
+
+    let user_root = roots::user_root().map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
+    let key_path = user_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config")
+        .join("keys")
+        .join("signing")
+        .join("private_key.pem");
+
+    if !key_path.exists() {
+        anyhow::bail!(
+            "user signing key not found at {} — run `ryeos init` first",
+            key_path.display()
+        );
+    }
+
+    let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
+        .with_context(|| format!("load signing key from {}", key_path.display()))?;
+
+    let registry_root = registry_root.unwrap_or_else(|| bundle_source.clone());
+
+    let report = run_publish(&PublishOptions {
+        bundle_source,
+        registry_root,
+        signing_key,
+        owner,
+        emit_trust_doc: !no_trust_doc,
+    })?;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 fn run_sign(

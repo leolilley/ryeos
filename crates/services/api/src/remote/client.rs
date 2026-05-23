@@ -14,6 +14,8 @@ use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
 use ryeos_state::ignore::IgnoreConfig;
 
+const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
+
 /// Typed client for a remote ryEOS node.
 pub struct RemoteClient {
     /// Base URL (e.g. `https://ryeos.example.com`).
@@ -129,6 +131,20 @@ impl RemoteClient {
 
     /// POST /objects/has (authenticated).
     pub async fn objects_has(&self, hashes: &[String]) -> Result<ObjectsHasResponse> {
+        if hashes_request_body_size(hashes) > HASH_REQUEST_BODY_BUDGET_BYTES {
+            let mut found = Vec::new();
+            let mut missing = Vec::new();
+            for chunk in chunk_hashes_for_body_budget(hashes, HASH_REQUEST_BODY_BUDGET_BYTES) {
+                let resp = self.objects_has_once(&chunk).await?;
+                found.extend(resp.found);
+                missing.extend(resp.missing);
+            }
+            return Ok(ObjectsHasResponse { found, missing });
+        }
+        self.objects_has_once(hashes).await
+    }
+
+    async fn objects_has_once(&self, hashes: &[String]) -> Result<ObjectsHasResponse> {
         let body = serde_json::json!({ "hashes": hashes });
         let resp = self.signed_post("/objects/has", &body).await?;
         Ok(ObjectsHasResponse {
@@ -194,6 +210,17 @@ impl RemoteClient {
     ///
     /// Server returns `{ "entries": [{ "hash": "...", "kind": "blob"|"object"|"missing", ... }] }`.
     pub async fn objects_get(&self, hashes: &[String]) -> Result<ObjectsGetResponse> {
+        if hashes_request_body_size(hashes) > HASH_REQUEST_BODY_BUDGET_BYTES {
+            let mut entries = Vec::new();
+            for chunk in chunk_hashes_for_body_budget(hashes, HASH_REQUEST_BODY_BUDGET_BYTES) {
+                entries.extend(self.objects_get_once(&chunk).await?.entries);
+            }
+            return Ok(ObjectsGetResponse { entries });
+        }
+        self.objects_get_once(hashes).await
+    }
+
+    async fn objects_get_once(&self, hashes: &[String]) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({ "hashes": hashes });
         let resp = self.signed_post("/objects/get", &body).await?;
         let entries = resp
@@ -451,6 +478,37 @@ impl RemoteClient {
     }
 }
 
+fn hashes_request_body_size(hashes: &[String]) -> usize {
+    serde_json::json!({ "hashes": hashes }).to_string().len()
+}
+
+fn chunk_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) -> Vec<Vec<String>> {
+    if hashes.is_empty() {
+        return Vec::new();
+    }
+
+    let empty_body_size = hashes_request_body_size(&[]);
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_size = empty_body_size;
+
+    for hash in hashes {
+        let entry_size = hash.len() + 2 + usize::from(!current.is_empty()); // quotes + comma
+        if !current.is_empty() && current_size + entry_size > budget_bytes {
+            chunks.push(std::mem::take(&mut current));
+            current_size = empty_body_size;
+        }
+        current_size += hash.len() + 2 + usize::from(!current.is_empty());
+        current.push(hash.clone());
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
+}
+
 struct SignedHeaders {
     key_id: String,
     timestamp: String,
@@ -627,5 +685,17 @@ mod tests {
         let canonical = canonicalize_path(path_with_repeats);
         // Sorted by key, then value:
         assert_eq!(canonical, "/objects/get?hashes=abc&hashes=def&hashes=ghi");
+    }
+
+    #[test]
+    fn chunk_hashes_respects_body_budget() {
+        let hashes: Vec<String> = (0..100).map(|i| format!("{:064x}", i)).collect();
+        let chunks = chunk_hashes_for_body_budget(&hashes, 512);
+
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks.iter().map(Vec::len).sum::<usize>(), hashes.len());
+        for chunk in chunks {
+            assert!(hashes_request_body_size(&chunk) <= 512);
+        }
     }
 }

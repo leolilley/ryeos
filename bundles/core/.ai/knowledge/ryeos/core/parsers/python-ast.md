@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-05-22T07:21:24Z:0a9634e769ae790e26714eaec6582d3603fe736544ac363403c1554fc1805641:D5YKRvR2yYLUD2+tPj9pEVV/dN2ZzaeAvIKKwxxLQ6zr4v6iySYtmOtt68Lo+1JaG/hyO6s9mGV00CmO7VjkBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/parsers
 tags: [parser, python, metadata]

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-05-22T07:21:24Z:8bb396710100bf466f985bb7c902dd2e34a619862999c9bdd34080862f912ec4:Kf0yzASjeQp1jrmJ2xUUp56dP6ihYPGYjJMoy/j0M33/pCjCWkZxibFKdPbIAELQmYN5lIoMWJ+VObSsmp9WDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-23T07:18:21Z:0f6fcd0389d29758b9c33ffd0193cc1994eed059228e12636958a2b07d681079:RoYVXMS2Hk6PJI60+r5xgvLAv5ftHM5+V4zUmQpccYKfQ/ZaZxHTJVzD3UbARNHWYgzyMbQDvITEs1Y40JRBDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/services
-tags: [service, fetch, resolution]
-version: "1.0.0"
+tags: [service, fetch, resolution, offline]
+version: "1.1.0"
 description: Fetch service reference.
 ---
 
@@ -10,4 +10,13 @@ description: Fetch service reference.
 
 Invariant: `service:fetch` resolves an item through the engine and returns metadata/content without executing it.
 
-It is the daemon-side endpoint behind CLI/MCP fetch operations. It can be used with verification to inspect signed items safely.
+Availability: **offline**. The CLI runs `fetch` in-process using the engine's resolution chain. No daemon is required.
+
+```bash
+ryeos fetch --item-ref <canonical-ref> --project-path <dir>
+ryeos fetch --item-ref <canonical-ref> --project-path <dir> --with-content
+ryeos fetch --item-ref <canonical-ref> --project-path <dir> --verify
+```
+
+The `--with-content` flag includes the full file body in the response.
+The `--verify` flag also checks trust status and returns it alongside metadata.

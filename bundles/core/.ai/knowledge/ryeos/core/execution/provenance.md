@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-05-22T07:21:23Z:9213648b75a3f140e7f258c09ea67e9e36a147fd29ab726ab19aecc4a704a39f:AfmxPpbaCesFLhH9Me7D7Fu0VIBULBrfbQ+NW/682lI2Hljw3kxHQrbvHDf91S72hGTMnyNMNGhf0H5v4073AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, provenance, callbacks, pushed-head, typestate]

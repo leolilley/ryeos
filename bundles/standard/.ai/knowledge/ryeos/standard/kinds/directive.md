@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T07:21:27Z:98ea17bea94cb4b47cf209becb10f86657a47863506ee5b76f513b89b29514fc:SNF+mE3j8ibko8pPg4nq2Y11rhTHRhRRr8eA93Av02ZXs2XuryUNVGtO9sHu0uaHsOpnN18SjJ6mEJLx2KofDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-22T19:55:06Z:98ea17bea94cb4b47cf209becb10f86657a47863506ee5b76f513b89b29514fc:6MbDvICd7cK/3mrjE5PQB3rr1n7JrGzJq8TyqDwD4omeFpgcQecWqUlO8fl0x4jTpOH1HD3kzgxeYw08AZsTDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/standard/kinds
 tags: [kind, directive, llm, workflow]

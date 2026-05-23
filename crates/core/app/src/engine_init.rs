@@ -80,7 +80,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
 /// - boot validation runs the same way against both engine variants
 /// - changes only have to land in one place
 pub fn build_engine_for_roots(
-    _config: &Config,
+    config: &Config,
     bundle_roots: &[PathBuf],
     project_root: Option<&std::path::Path>,
     user_root: Option<&std::path::Path>,
@@ -300,25 +300,20 @@ pub fn build_engine_for_roots(
         .with_composers(composers)
         .with_protocols(protocol_registry)
         .with_runtimes(runtimes)
-        .with_host_env(load_host_env_passthrough_allowlist()?);
+        .with_host_env(load_host_env_passthrough_allowlist(
+            &config.tool_env_passthrough,
+        )?);
 
     Ok(engine)
 }
 
-/// Parse `RYEOS_TOOL_ENV_PASSTHROUGH` (a comma-separated list of
-/// allowed host-env var names) once at startup and build a
-/// `HostEnvBindings`. Empty or unset is fine — the common case
-/// produces an empty allowlist.
-fn load_host_env_passthrough_allowlist() -> Result<HostEnvBindings> {
-    let raw = std::env::var("RYEOS_TOOL_ENV_PASSTHROUGH").unwrap_or_default();
-    let names: Vec<String> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect();
-    let bindings = HostEnvBindings::from_allowlist(names)
-        .map_err(|e| anyhow::anyhow!("invalid RYEOS_TOOL_ENV_PASSTHROUGH configuration: {e}"))?;
+/// Build `HostEnvBindings` from the resolved daemon config's
+/// `tool_env_passthrough` list. The `Config::load` step already
+/// handled the `RYEOS_TOOL_ENV_PASSTHROUGH` env-var override, so
+/// this function just receives the final merged list.
+fn load_host_env_passthrough_allowlist(names: &[String]) -> Result<HostEnvBindings> {
+    let bindings = HostEnvBindings::from_allowlist(names.iter().cloned())
+        .map_err(|e| anyhow::anyhow!("invalid tool_env_passthrough configuration: {e}"))?;
     let allowed_names: Vec<&str> = bindings.allowed.iter().map(String::as_str).collect();
     tracing::info!(
         count = bindings.allowed.len(),

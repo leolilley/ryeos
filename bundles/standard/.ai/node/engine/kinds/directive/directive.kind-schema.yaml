@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T07:21:28Z:c0c1aeca53088c075aa4691708e5041d74f24d683e0272603738c4265fc102e4:Tn7TRyqhKmLH+TmP8SFgqr/sUzu+2en4RCx70Xtfy2FhOHMmP7cMVB+KGp6zpX5RPhb3VQ3yACTG7ibk5llbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T19:55:07Z:524171b367f7b73dea86cf0f257fe08da131c1848ff2ffee44f21ae832943287:zuiZk3XxL/DMHBEIHHQqeXRTVi30d2BybJi8LEKMQaa6Ojt0Y/9M48ELTj2TWSj8AVi0uIUDgDE1KOMu+FT0BA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -11,7 +11,11 @@ execution:
   # the registry — there is no implicit fallback.
   delegate:
     via: runtime_registry
-  thread_profile: directive_run
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: true
+    supports_continuation: true
   resolution:
     - step: resolve_extends_chain
   # Launch augmentation: before the directive runtime is spawned, the

@@ -8,8 +8,8 @@
 //! is automatically released when the file descriptor is closed (process exit,
 //! including panic).
 
-use std::fs::{self, File};
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -40,28 +40,31 @@ impl StateLock {
                 .with_context(|| format!("create state lock directory {}", parent.display()))?;
         }
 
-        // IMPORTANT: do NOT truncate before locking. `File::create` would
-        // wipe the holder PID before we even attempt the lock, destroying
-        // diagnostics for the losing process. Open without truncation so
-        // the existing PID remains readable when flock fails.
-        let file = fs::OpenOptions::new()
-            .create(true)
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
+            .create(true)
             .truncate(false)
             .open(lock_path)
             .with_context(|| format!("open state lock file {}", lock_path.display()))?;
 
-        // Non-blocking exclusive lock — try this first.
+        // Non-blocking exclusive lock
         match flock_exclusive_nb(&file) {
             Ok(()) => {
-                // We hold the lock now. Write our PID for diagnostics.
+                // Write our PID for diagnostics only after acquiring the lock.
+                // A contending process must not truncate the active daemon's
+                // holder PID before it discovers the flock is unavailable.
                 #[cfg(unix)]
                 {
-                    use std::io::{Seek, SeekFrom, Write};
-                    let _ = (&file).set_len(0);
-                    let _ = (&file).seek(SeekFrom::Start(0));
-                    let _ = writeln!(&file, "{}", std::process::id());
+                    file.set_len(0).with_context(|| {
+                        format!("truncate state lock file {}", lock_path.display())
+                    })?;
+                    file.rewind().with_context(|| {
+                        format!("rewind state lock file {}", lock_path.display())
+                    })?;
+                    writeln!(&mut file, "{}", std::process::id()).with_context(|| {
+                        format!("write state lock holder pid {}", lock_path.display())
+                    })?;
                 }
                 Ok(StateLock { _file: file })
             }
@@ -147,6 +150,21 @@ mod tests {
             err_msg.contains("state lock held"),
             "expected 'state lock held' in error, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn failed_acquire_preserves_holder_pid() {
+        let tmpdir = TempDir::new().unwrap();
+        let lock_path = tmpdir.path().join("test.lock");
+
+        let _lock1 = StateLock::acquire(&lock_path).unwrap();
+        let holder_pid = fs::read_to_string(&lock_path).unwrap();
+
+        let result = StateLock::acquire(&lock_path);
+        assert!(result.is_err());
+
+        let after_failed_acquire = fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(after_failed_acquire, holder_pid);
     }
 
     #[test]

@@ -1,5 +1,4 @@
-# ryeos:signed:2026-05-22T07:21:28Z:509d3c47bcecbee8d47aab5cc919324a99a2f1cb593c0b19a79de2cdf2628177:1Qp8RnxEKMpgMQl+6lj5nS7qTMOR3mlahcxIbLxsqGIxY3JlLq/x1Xn+CE0GtUaKUOGkPl2KB4eac6CgnBJRAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# rye:unsigned
+# ryeos:signed:2026-05-22T19:55:06Z:7c5f3a74be0ed67e4d56857b21ee481d841de047663fa8d002290bfda163e313:Wj9/Uf3vbQsYc1sJK9R+z3xBRy37SPcMJHVnlqZ7f6rcAChMapwCphMaF7TWkfwyuleuMvx1WfZHLszq/vW2Bg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: runtime
 serves: directive
 default: true

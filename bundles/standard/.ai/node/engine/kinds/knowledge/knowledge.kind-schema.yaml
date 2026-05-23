@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-22T13:40:35Z:5663de0096b882a5464a67540b61d354287c62edec2af3a900511d58ccc20eba:24sf5vyo6y0Uh6Ms/d0msVnM3jDb4sPIi1wro0Psy97yuxPH8vYpouFDPFB1LutZTBv9Jp4VuLZRt7v27rF9Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-22T19:55:07Z:10e864a50d1b6ff3e902adeb2d1fb24e57de37ca1afb29915be2e4540d0a65ba:5z99aUeMA0x2izJczKJyDpeTC/4IVhuR0FHQyWEZt6QvSwXJMfGkrKlx0H7kn3nPS82LH1t8EpvzK26/Q6ayDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -38,7 +38,11 @@ execution:
           required: false
           default: 2000
   default_operation: compose
-  thread_profile: knowledge_run
+  thread_profile:
+    name: knowledge_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
   resolution:
     - step: resolve_references
 formats:

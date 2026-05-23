@@ -118,14 +118,32 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // 6. Token dispatch — send tokens to daemon, it resolves via alias
+    // 6. Descriptor-driven offline dispatch.
+    //    For commands whose service descriptor declares availability: offline,
+    //    run the in-process handler. Returns None to fall through to daemon.
+    if let Some(result) =
+        crate::offline_dispatch::try_offline_dispatch(&cli.rest, &system_space_dir, &body_project_path)?
+    {
+        print_result(result);
+        return Ok(());
+    }
+
+    // 7. Token dispatch — send tokens to daemon, it resolves via alias
     //    registry and binds tail parameters server-side.
     //
     //    For remote verbs that take a project root, CLI-side rewrite injects a canonical
     //    `--project <abs>` or `--no-project` into the tail. The daemon
-    //    cannot do this — its cwd is irrelevant to the caller.
+    //    cannot do this — its cwd is irrelevant to the caller. Accepting
+    //    `--project` here is deliberate: project-aware aliases expose a
+    //    service-schema `project` field, while global `-p/--project` before
+    //    the verb remains supported by clap above.
+
     let normalized_kv = normalize_bare_key_value_args(&cli.rest);
-    let tokens = canonicalize_tokens_from_alias_metadata(&normalized_kv, &system_space_dir)?;
+    let tokens = canonicalize_tokens_from_alias_metadata(
+        &normalized_kv,
+        &system_space_dir,
+        cli.project.as_deref(),
+    )?;
 
     let body = serde_json::json!({
         "tokens": tokens,
@@ -162,14 +180,24 @@ fn normalize_bare_key_value_args(rest: &[String]) -> Vec<String> {
 fn canonicalize_tokens_from_alias_metadata(
     rest: &[String],
     system_space_dir: &std::path::Path,
+    default_project: Option<&std::path::Path>,
 ) -> Result<Vec<String>, CliError> {
     let aliases = load_aliases_from_disk(system_space_dir);
-    canonicalize_tokens_with_aliases(rest, &aliases)
+    canonicalize_tokens_with_aliases_and_project(rest, &aliases, default_project)
 }
 
+#[cfg(test)]
 fn canonicalize_tokens_with_aliases(
     rest: &[String],
     aliases: &[AliasDef],
+) -> Result<Vec<String>, CliError> {
+    canonicalize_tokens_with_aliases_and_project(rest, aliases, None)
+}
+
+fn canonicalize_tokens_with_aliases_and_project(
+    rest: &[String],
+    aliases: &[AliasDef],
+    default_project: Option<&std::path::Path>,
 ) -> Result<Vec<String>, CliError> {
     let Some((alias, consumed)) = match_alias(rest, aliases) else {
         return Ok(rest.to_vec());
@@ -190,7 +218,10 @@ fn canonicalize_tokens_with_aliases(
     match alias.project_resolution {
         ProjectResolution::None => {}
         ProjectResolution::Optional => {
-            canonical_tail = crate::project_resolve::rewrite_project_tail(&canonical_tail)?;
+            canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
+                &canonical_tail,
+                default_project,
+            )?;
         }
         ProjectResolution::Required => {
             if canonical_tail.iter().any(|t| t == "--no-project") {
@@ -198,7 +229,10 @@ fn canonicalize_tokens_with_aliases(
                     "this command requires a project; do not pass --no-project".into(),
                 ));
             }
-            canonical_tail = crate::project_resolve::rewrite_project_tail(&canonical_tail)?;
+            canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
+                &canonical_tail,
+                default_project,
+            )?;
             if canonical_tail.iter().any(|t| t == "--no-project") {
                 return Err(CliError::ProjectResolution(
                     "this command requires a project; run it from a directory containing .ai/ \
@@ -281,6 +315,15 @@ fn load_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<AliasDef> {
         return out;
     };
     for bundle_entry in bundle_entries.flatten() {
+        let name = bundle_entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip non-bundle artifacts: hidden dirs (e.g. .staging),
+        // backup dirs (e.g. core.backup.prev), and staging dirs.
+        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
+            continue;
+        }
+
         let aliases_dir = bundle_entry.path().join(".ai/node/aliases");
         let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
             continue;
@@ -483,6 +526,90 @@ mod tests {
                 "/tmp",
             ])
         );
+    }
+
+    #[test]
+    fn remote_bind_project_accepts_project_after_verb() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aliases = vec![alias(
+            &["remote", "bind-project"],
+            vec![vec![("remote", PositionalMatcher::Any)]],
+            ProjectResolution::Required,
+        )];
+        let out = canonicalize_tokens_with_aliases(
+            &s(&[
+                "remote",
+                "bind-project",
+                "prod",
+                "--project",
+                &tmp.path().to_string_lossy(),
+                "--remote-project",
+                "/data/app",
+                "--sync-scope",
+                "ai_only",
+            ]),
+            &aliases,
+        )
+        .unwrap();
+        assert_eq!(
+            out[0..4],
+            s(&["remote", "bind-project", "--remote", "prod"])
+        );
+        assert!(out
+            .windows(2)
+            .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn remote_doctor_accepts_optional_project_after_verb() {
+        with_user_space(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let aliases = vec![alias(
+                &["remote", "doctor"],
+                vec![vec![("remote", PositionalMatcher::Any)]],
+                ProjectResolution::Optional,
+            )];
+            let out = canonicalize_tokens_with_aliases(
+                &s(&[
+                    "remote",
+                    "doctor",
+                    "prod",
+                    "--project",
+                    &tmp.path().to_string_lossy(),
+                ]),
+                &aliases,
+            )
+            .unwrap();
+            assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
+            assert!(out
+                .windows(2)
+                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
+        });
+    }
+
+    #[test]
+    fn project_aware_alias_uses_global_project_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aliases = vec![alias(
+            &["remote", "bind-project"],
+            vec![vec![("remote", PositionalMatcher::Any)]],
+            ProjectResolution::Required,
+        )];
+        let out = canonicalize_tokens_with_aliases_and_project(
+            &s(&[
+                "remote",
+                "bind-project",
+                "prod",
+                "--remote-project",
+                "/data/app",
+            ]),
+            &aliases,
+            Some(tmp.path()),
+        )
+        .unwrap();
+        assert!(out.windows(2).any(|w| {
+            w[0] == "--project" && w[1] == tmp.path().canonicalize().unwrap().to_string_lossy()
+        }));
     }
 
     #[test]

@@ -266,6 +266,7 @@ fn collect_yaml_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Collect `.yaml`/`.yml` files from a directory (non-recursive, immediate children only).
 /// Remove derived artifacts from a prior publish run.
 ///
 /// Called as part of Phase 0 (before any signing or manifest generation)

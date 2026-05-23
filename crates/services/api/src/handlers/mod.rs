@@ -37,11 +37,13 @@ pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
 pub mod remote_configure;
+pub mod remote_doctor;
 pub mod remote_execute;
 pub mod remote_list;
 pub mod remote_project_status;
 pub mod remote_pull;
 pub mod remote_push;
+pub mod remote_run;
 pub mod remote_status;
 pub mod remote_sync_project_ai;
 pub mod remote_thread_status;
@@ -107,6 +109,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     scheduler_resume::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
     remote_bind_project::DESCRIPTOR,
+    remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,
     remote_status::DESCRIPTOR,
     remote_push::DESCRIPTOR,
@@ -114,6 +117,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_project_status::DESCRIPTOR,
     remote_pull::DESCRIPTOR,
     remote_execute::DESCRIPTOR,
+    remote_run::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
     remote_threads::DESCRIPTOR,
     remote_thread_status::DESCRIPTOR,

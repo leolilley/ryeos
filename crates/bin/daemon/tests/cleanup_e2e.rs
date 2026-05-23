@@ -387,30 +387,37 @@ async fn uds_namespace_rejects_service_methods() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn state_lock_prevents_concurrent_daemons() {
-    let (h1, _fixture) = DaemonHarness::start_fast()
-        .await
-        .expect("start first daemon");
-
-    let state_dir_outer = tempfile::tempdir().expect("state tempdir");
+    let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    common::populate_user_space(user_space.path());
-    let state_path = state_dir_outer.path().join("state");
+    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
+        .expect("populate initialized state");
+    common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
+        .expect("register core bundle");
+
+    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
+        &ryeos_app::state_lock::default_lock_path(&state_path),
+    )
+    .expect("hold first daemon state lock");
+
+    let uds_outer = tempfile::tempdir().expect("uds tempdir");
+    let uds_path = uds_outer.path().join("ryeosd.sock");
+    let _live_uds = std::os::unix::net::UnixListener::bind(&uds_path).expect("bind live UDS");
 
     // Test expects the second daemon to fail on state-lock contention;
     // any free port works — `:0` lets the kernel pick one.
     let bind: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let uds_path = state_path.join("ryeosd.sock");
 
-    // Point the second daemon at the SAME state dir as the first
+    // Point the second daemon at the SAME state dir and UDS socket as the
+    // first. It must fail on the state lock before touching the live daemon's
+    // socket path.
     let mut cmd = tokio::process::Command::new(common::ryeosd_binary());
     cmd.arg("--system-space-dir")
-        .arg(&h1.state_path)
+        .arg(&state_path)
         .arg("--bind")
         .arg(bind.to_string())
         .arg("--uds-path")
         .arg(&uds_path)
         .env("HOSTNAME", "testhost")
-        .env("RYEOS_SYSTEM_SPACE_DIR", common::workspace_core_dir())
         .env("USER_SPACE", user_space.path())
         .env("HOME", user_space.path())
         .stdout(std::process::Stdio::piped())
@@ -418,8 +425,8 @@ async fn state_lock_prevents_concurrent_daemons() {
 
     let output = cmd.output().await.expect("spawn second daemon");
 
-    // The second daemon should fail — either the state lock blocks it,
-    // or the UDS bind fails because the first daemon already owns it.
+    // The second daemon should fail on the state lock, not by deleting or
+    // rebinding the first daemon's UDS socket.
     assert!(
         !output.status.success(),
         "second daemon should fail when sharing state_dir with first daemon; \
@@ -428,6 +435,17 @@ async fn state_lock_prevents_concurrent_daemons() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("state lock held") || stderr.contains("failed to acquire state lock"),
+        "second daemon should fail on state lock before touching UDS; stderr={stderr}"
+    );
+    assert!(
+        uds_path.exists(),
+        "failed second daemon start must not unlink the live daemon UDS socket"
+    );
+    std::os::unix::net::UnixStream::connect(&uds_path)
+        .expect("live UDS listener should still accept connections");
 }
 
 // ── Test 11: Symlinked node config items are rejected (Gate 12 daemon-spawn) ──

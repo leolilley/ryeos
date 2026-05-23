@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-22T07:21:24Z:62e0d67ba5ab2118969765b49f5df0efe5382a95fc933da88c5d037a592f54e6:4clIsk3DxtXpX6UxZAwlhoZSj5VOiRguGt8xjIaBaaPxY5IceaQjDio1rJsS81fFa8F3klUDonRM2lDKdQmdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-23T04:53:02Z:44f5e8e5a7c83f65a1a8809004834e6483c3c1b8997420a160a462dc3b9e5b62:6QP5MW6s6yjKehvD2GL0oBK+CNas7oF6z4RiT0ZqDO0xFZbEDOTQN8ivTOrtpltfecgU9lzqNpRMViYVRmBjCw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -25,6 +25,7 @@ The authoritative matrix is in
 | `remote/configure` | `remote.configure` | `ryeos.execute.service.remote.configure` |
 | `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
 | `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
+| `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |
@@ -43,6 +44,8 @@ The authoritative matrix is in
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.
+- `remote doctor` is an operator diagnostic: it combines remote discovery,
+  signed authorization probing, project binding checks, and next-step commands.
 - `remote push` and `remote execute` use the target node's ingest-ignore
   rules, not local ignore rules, when building a pushed manifest.
 - `remote execute` is synchronous in v1: push, execute, pull, apply.

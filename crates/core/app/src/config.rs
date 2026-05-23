@@ -44,6 +44,12 @@ pub struct Config {
     pub user_signing_key_path: PathBuf,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
+    /// Comma-separated list of host-env var names that tool subprocesses
+    /// may reference via `${VAR}` in their `env_config.env` values.
+    /// Also set via `RYEOS_TOOL_ENV_PASSTHROUGH` env var (env var wins).
+    /// Empty by default — most deployments don't need passthrough.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_env_passthrough: Vec<String>,
 }
 
 /// Plain-data inputs for [`Config::load`]. Constructed by the daemon
@@ -72,6 +78,7 @@ struct PartialConfig {
     user_signing_key_path: Option<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
+    tool_env_passthrough: Option<Vec<String>>,
 }
 
 impl Config {
@@ -198,6 +205,22 @@ impl Config {
                         .join("auth")
                         .join("authorized_keys")
                 }),
+            // tool_env_passthrough: config file list is the base.
+            // RYEOS_TOOL_ENV_PASSTHROUGH env var (comma-separated)
+            // overrides if set — mirrors Docker usage where the env
+            // var is more convenient than editing config.yaml.
+            tool_env_passthrough: if let Ok(raw) = env::var("RYEOS_TOOL_ENV_PASSTHROUGH") {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            } else {
+                file_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.tool_env_passthrough.clone())
+                    .unwrap_or_default()
+            },
         };
 
         Ok(cfg)
@@ -249,6 +272,7 @@ impl Config {
                 .join("node")
                 .join("auth")
                 .join("authorized_keys"),
+            tool_env_passthrough: Vec::new(),
         })
     }
 }

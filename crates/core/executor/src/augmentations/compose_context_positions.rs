@@ -123,12 +123,22 @@ pub async fn run(
 
     // 6. Mint child thread record under parent.
     let child_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+    // Derive the child thread's kind from the target kind's schema-declared
+    // thread_profile. This keeps thread kinds in sync with kind schemas
+    // rather than hardcoding "system_task".
+    let child_thread_kind = engine
+        .kinds
+        .get(target_kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|exec| exec.thread_profile.as_ref())
+        .map(|tp| tp.name.as_str())
+        .unwrap_or("system_task");
     state
         .threads
         .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
             thread_id: child_thread_id.clone(),
             chain_root_id: parent_thread_id.to_string(),
-            kind: "system_task".to_string(),
+            kind: child_thread_kind.to_string(),
             item_ref: format!("{target_kind}://{target_op}"),
             executor_ref: executor_ref.clone(),
             launch_mode: "inline".to_string(),
