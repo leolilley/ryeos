@@ -259,7 +259,7 @@ fn sign_one(
         )
     })?;
 
-    sign_in_place(file_path, &source_format.signature)
+    sign_in_place(file_path, &content, &source_format.signature)
 }
 
 fn is_glob(s: &str) -> bool {
@@ -465,22 +465,24 @@ fn build_parser_dispatcher(
 /// Loads the user signing key from `RYE_SIGNING_KEY` env,
 /// `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the legacy
 /// `~/.ai/config/keys/signing/private_key.pem` fallback.
-fn sign_in_place(input: &Path, envelope: &SignatureEnvelope) -> Result<SignOutcome> {
-    let body = fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?;
-
+fn sign_in_place(
+    input: &Path,
+    validated_content: &str,
+    envelope: &SignatureEnvelope,
+) -> Result<SignOutcome> {
     let signing_key = load_user_signing_key()?;
     let verifying_key = signing_key.verifying_key();
     let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
 
     let stripped = lillux::signature::strip_signature_lines_with_envelope(
-        &body,
+        validated_content,
         &envelope.prefix,
         envelope.suffix.as_deref(),
     );
 
     // Check if already validly signed: hash + fingerprint + sig verification
     if is_already_validly_signed_operator(
-        &body,
+        validated_content,
         &stripped,
         &verifying_key,
         &fingerprint,
@@ -530,8 +532,7 @@ fn is_already_validly_signed_operator(
     fingerprint: &str,
     envelope: &SignatureEnvelope,
 ) -> bool {
-    let Some(header) =
-        ryeos_engine::item_resolution::parse_signature_header(existing, envelope)
+    let Some(header) = ryeos_engine::item_resolution::parse_signature_header(existing, envelope)
     else {
         return false;
     };
@@ -603,6 +604,15 @@ fn extract_signature_line(content: &str, prefix: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lillux::crypto::{EncodePrivateKey, SigningKey};
+    use rand::rngs::OsRng;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn sign_source_parses_project_and_user() {
@@ -637,5 +647,44 @@ mod tests {
             err.to_string().contains("malformed canonical ref"),
             "expected malformed-ref error, got: {err}"
         );
+    }
+
+    #[test]
+    fn sign_in_place_uses_validated_content_not_reread_bytes() {
+        let _guard = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let key_path = tmp.path().join("signing.pem");
+        let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+        std::fs::write(&key_path, pem.as_bytes()).unwrap();
+        let old_key = std::env::var_os("RYE_SIGNING_KEY");
+        std::env::set_var("RYE_SIGNING_KEY", &key_path);
+
+        let item_path = tmp.path().join("item.yaml");
+        std::fs::write(&item_path, "name: unvalidated\n").unwrap();
+        let envelope = SignatureEnvelope {
+            prefix: "#".to_string(),
+            suffix: None,
+            after_shebang: false,
+        };
+
+        let validated = "name: validated\n";
+        let outcome = sign_in_place(&item_path, validated, &envelope).unwrap();
+        assert!(matches!(outcome, SignOutcome::Signed(_)));
+
+        let written = std::fs::read_to_string(&item_path).unwrap();
+        let stripped = lillux::signature::strip_signature_lines_with_envelope(
+            &written,
+            &envelope.prefix,
+            envelope.suffix.as_deref(),
+        );
+        assert_eq!(stripped, validated);
+        assert!(!written.contains("unvalidated"));
+
+        if let Some(old_key) = old_key {
+            std::env::set_var("RYE_SIGNING_KEY", old_key);
+        } else {
+            std::env::remove_var("RYE_SIGNING_KEY");
+        }
     }
 }

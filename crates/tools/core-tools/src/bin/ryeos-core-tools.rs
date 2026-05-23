@@ -10,7 +10,7 @@
 //!  * `--stdin-json` — reads a JSON object from stdin (used by subprocess tools)
 
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
@@ -420,35 +420,12 @@ fn run_bundle_verify(
                 .expect("could not determine XDG data directory")
         });
     let user_root = ryeos_engine::roots::user_root().ok();
-    let source_name = source_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-
-    let mut dependency_roots: Vec<PathBuf> = Vec::new();
-    if let Some(root) = registry_root {
-        let root = std::fs::canonicalize(&root)
-            .with_context(|| format!("resolve registry root {}", root.display()))?;
-        if root != source_path {
-            dependency_roots.push(root);
-        }
-    } else {
-        let installed_roots = ryeos_bundle::installed::load_installed_bundle_records(
-            &system_space_dir,
-            user_root.as_deref(),
-        )
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| {
-            r.bundle_root
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|name| name != source_name)
-                .unwrap_or(true)
-        })
-        .map(|r| r.bundle_root);
-        dependency_roots.extend(installed_roots);
-    }
+    let dependency_roots = bundle_verify_dependency_roots(
+        &source_path,
+        registry_root,
+        &system_space_dir,
+        user_root.as_deref(),
+    )?;
 
     ryeos_bundle::preflight::preflight_verify_bundle_in_context(
         &source_path,
@@ -466,6 +443,31 @@ fn run_bundle_verify(
         }))?
     );
     Ok(())
+}
+
+fn bundle_verify_dependency_roots(
+    source_path: &Path,
+    registry_root: Option<PathBuf>,
+    system_space_dir: &Path,
+    user_root: Option<&Path>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut dependency_roots: Vec<PathBuf> = Vec::new();
+    if let Some(root) = registry_root {
+        let root = std::fs::canonicalize(&root)
+            .with_context(|| format!("resolve registry root {}", root.display()))?;
+        if root != source_path {
+            dependency_roots.push(root);
+        }
+    } else {
+        let installed_roots =
+            ryeos_bundle::installed::load_installed_bundle_records(system_space_dir, user_root)
+                .context("bundle verify: load installed bundle registrations")?
+                .into_iter()
+                .filter(|r| r.bundle_root != source_path)
+                .map(|r| r.bundle_root);
+        dependency_roots.extend(installed_roots);
+    }
+    Ok(dependency_roots)
 }
 
 #[derive(serde::Deserialize)]
@@ -691,4 +693,112 @@ fn read_stdin_json() -> anyhow::Result<serde_json::Value> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
     serde_json::from_str(&buf).map_err(|e| anyhow::anyhow!("parse stdin JSON: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::crypto::SigningKey;
+    use rand::rngs::OsRng;
+
+    struct InstalledFixture {
+        _tmp: tempfile::TempDir,
+        system: PathBuf,
+        user: PathBuf,
+        key: SigningKey,
+    }
+
+    impl InstalledFixture {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let system = tmp.path().join("system");
+            let user = tmp.path().join("user");
+            let trust_dir = user
+                .join(ryeos_engine::AI_DIR)
+                .join("config")
+                .join("keys")
+                .join("trusted");
+            std::fs::create_dir_all(&trust_dir).unwrap();
+            let key = SigningKey::generate(&mut OsRng);
+            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            Self {
+                _tmp: tmp,
+                system,
+                user,
+                key,
+            }
+        }
+
+        fn write_signed(&self, path: &Path, body: &str) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let signed = lillux::signature::sign_content(body, &self.key, "#", None);
+            std::fs::write(path, signed).unwrap();
+        }
+
+        fn write_broken_installed_registration(&self, name: &str) -> PathBuf {
+            let bundle = self
+                .system
+                .join(ryeos_engine::AI_DIR)
+                .join("bundles")
+                .join(name);
+            std::fs::create_dir_all(bundle.join(ryeos_engine::AI_DIR)).unwrap();
+            let registration = self
+                .system
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("bundles")
+                .join(format!("{name}.yaml"));
+            self.write_signed(
+                &registration,
+                &format!(
+                    "kind: node\nsection: bundles\nid: {name}\npath: {}\n",
+                    bundle.display()
+                ),
+            );
+            bundle
+        }
+    }
+
+    #[test]
+    fn bundle_verify_explicit_registry_root_does_not_load_installed_bundles() {
+        let fixture = InstalledFixture::new();
+        let source = fixture.system.join("source");
+        let registry = fixture.system.join("registry");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&registry).unwrap();
+        fixture.write_broken_installed_registration("broken");
+
+        let roots = bundle_verify_dependency_roots(
+            &source.canonicalize().unwrap(),
+            Some(registry.clone()),
+            &fixture.system,
+            Some(&fixture.user),
+        )
+        .unwrap();
+
+        assert_eq!(roots, vec![registry.canonicalize().unwrap()]);
+    }
+
+    #[test]
+    fn bundle_verify_without_registry_root_fails_on_broken_installed_bundle() {
+        let fixture = InstalledFixture::new();
+        let source = fixture.system.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        fixture.write_broken_installed_registration("broken");
+
+        let err = bundle_verify_dependency_roots(
+            &source.canonicalize().unwrap(),
+            None,
+            &fixture.system,
+            Some(&fixture.user),
+        )
+        .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bundle verify: load installed bundle registrations")
+                && msg.contains("manifest"),
+            "unexpected error: {msg}"
+        );
+    }
 }
