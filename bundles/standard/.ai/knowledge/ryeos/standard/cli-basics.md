@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T07:18:13Z:511866ec3cf3814dbe9a4cb31d3c32383478039bd675767f9c80436046b6ca03:Kpyh+sgaLBReM3STQpLOeRucnzLKjvBxHiZzqhIYprqN+YUALXoBVJF7Jw0Z1l0b2PbXR+JfVV1Q17thJrOZDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-23T07:36:39Z:a86adddc65a571a62b205e5a2aeb1c5984964addbe9799fa0de4132d0a447c72:hhXK9JGQrUQH6I+cTlJkGwZO3sOVOxOb+9vyDC2k7pUNfvjV5ua0zpQ+WB+l8/S/hhZQP+BMRvZNX/CoxLK3DA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]

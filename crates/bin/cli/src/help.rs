@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::Path;
 
 use crate::error::CliError;
 
@@ -58,40 +59,114 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     let discovered = discover_aliases_from_disk(&system_space_dir);
 
     if !discovered.is_empty() {
-        // Group by prefix
-        let mut groups: std::collections::BTreeMap<String, Vec<(String, String)>> =
-            std::collections::BTreeMap::new();
+        let mut offline_cmds: Vec<(&str, &str)> = Vec::new();
+        let mut daemon_cmds: Vec<(&str, &str)> = Vec::new();
 
-        for (tokens_str, description) in &discovered {
-            let tokens: Vec<&str> = tokens_str.split(' ').collect();
-            let prefix = if tokens.len() > 1 {
-                tokens[0].to_string()
+        for (tokens_str, description, is_offline) in &discovered {
+            if *is_offline {
+                offline_cmds.push((tokens_str, description));
             } else {
-                "(general)".to_string()
-            };
-            groups
-                .entry(prefix)
-                .or_default()
-                .push((tokens_str.clone(), description.clone()));
-        }
-
-        writeln!(out, "COMMANDS (from bundles):")?;
-        for (prefix, aliases) in &groups {
-            writeln!(out, "  [{}]", prefix)?;
-            for (tokens_str, description) in aliases {
-                writeln!(out, "    {:<28} {}", tokens_str, description)?;
+                daemon_cmds.push((tokens_str, description));
             }
         }
-        writeln!(out)?;
+
+        if !offline_cmds.is_empty() {
+            writeln!(out, "OFFLINE (no daemon required):")?;
+            offline_cmds.sort_by_key(|c| c.0);
+            for (tokens_str, description) in &offline_cmds {
+                writeln!(out, "    {:<28} {}", tokens_str, description)?;
+            }
+            writeln!(out)?;
+        }
+
+        if !daemon_cmds.is_empty() {
+            writeln!(out, "DAEMON (requires running daemon):")?;
+            daemon_cmds.sort_by_key(|c| c.0);
+            for (tokens_str, description) in &daemon_cmds {
+                writeln!(out, "    {:<28} {}", tokens_str, description)?;
+            }
+            writeln!(out)?;
+        }
     }
 
     writeln!(out, "Run `ryeos help <verb>` for verb-specific help.")?;
     Ok(())
 }
 
+/// Check whether the service descriptor backing an alias declares
+/// `availability: offline`. Tries: verb execute ref → service, then
+/// direct service lookup by verb name.
+fn check_service_offline(system_space_dir: &Path, alias_tokens: &[String]) -> bool {
+    let verb_name = alias_tokens.join("-");
+
+    // Try 1: verb → execute service ref → service descriptor
+    if let Some(offline) = check_via_verb_execute_ref(system_space_dir, &verb_name) {
+        return offline;
+    }
+
+    // Try 2: direct service descriptor by verb name (e.g. services/sign.yaml)
+    check_via_service_name(system_space_dir, &verb_name)
+}
+
+fn check_via_verb_execute_ref(system_space_dir: &Path, verb_name: &str) -> Option<bool> {
+    let verb = read_verb_help(system_space_dir, verb_name)?;
+    let service_rel = verb.execute.strip_prefix("service:")?;
+    let path = find_service_path(system_space_dir, service_rel)?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    Some(read_availability(&content))
+}
+
+fn check_via_service_name(system_space_dir: &Path, name: &str) -> bool {
+    let path = match find_service_path(system_space_dir, name) {
+        Some(p) => p,
+        None => return false,
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    read_availability(&content)
+}
+
+fn read_availability(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# ryeos:signed:") {
+            continue;
+        }
+        if let Some(val) = trimmed.strip_prefix("availability:") {
+            let val = val.trim();
+            return val == "offline" || val == "both";
+        }
+    }
+    false
+}
+
+/// Find a service descriptor file by relative path.
+/// Appends `.yaml` extension if not already present.
+fn find_service_path(system_space_dir: &Path, service_rel: &str) -> Option<std::path::PathBuf> {
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
+        return None;
+    };
+    // Service names may or may not include .yaml extension
+    let file_name = if service_rel.ends_with(".yaml") || service_rel.ends_with(".yml") {
+        service_rel.to_string()
+    } else {
+        format!("{}.yaml", service_rel)
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join(".ai").join("services").join(&file_name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Scan installed bundles on disk for alias definitions.
-/// Returns (token_string, description) pairs.
-fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String, String)> {
+/// Returns (token_string, description, is_offline) tuples.
+fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String, String, bool)> {
     let mut results = Vec::new();
     let bundles_dir = system_space_dir.join(".ai").join("bundles");
 
@@ -167,7 +242,10 @@ fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String
                 if tokens.len() == 1 && tokens[0].len() <= 1 {
                     continue;
                 }
-                results.push((tokens.join(" "), description));
+
+                // Check if the corresponding service declares offline availability
+                let is_offline = check_service_offline(system_space_dir, &tokens);
+                results.push((tokens.join(" "), description, is_offline));
             }
         }
     }
@@ -275,6 +353,8 @@ struct ServiceHelpRecord {
     required_caps: Vec<String>,
     #[serde(default)]
     schema: BTreeMap<String, String>,
+    #[serde(default)]
+    availability: Option<String>,
 }
 
 fn print_installed_verb_help(
@@ -305,6 +385,13 @@ fn print_installed_verb_help(
 
     writeln!(out, "ryeos {command} — {description}")?;
     writeln!(out)?;
+    if let Some(service) = &service {
+        let avail = service.availability.as_deref().unwrap_or("daemon");
+        if avail == "offline" || avail == "both" {
+            writeln!(out, "DISPATCH: offline (no daemon required)")?;
+            writeln!(out)?;
+        }
+    }
     writeln!(out, "USAGE:")?;
     writeln!(
         out,
