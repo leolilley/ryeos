@@ -25,7 +25,26 @@ formats:
 composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
-  required: {}
+  required:
+    kind: { type: single, prim: string, enum: [runtime] }
+    serves: { type: single, prim: string }
+    binary_ref: { type: single, prim: string }
+    abi_version: { type: single, prim: string }
+  optional:
+    default: { type: single, prim: boolean }
+    required_caps:
+      type: single
+      prim: sequence
+      elements: { type: single, prim: string }
+    description: { type: single, prim: string }
+    schema:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          envelope: { type: single, prim: string }
+          result: { type: single, prim: string }
 metadata:
   rules:
     version:
