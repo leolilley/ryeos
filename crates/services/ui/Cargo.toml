@@ -1,0 +1,26 @@
+[package]
+name = "ryeos-ui"
+version = "0.1.0"
+edition = "2021"
+description = "RyeOS UI/browser session handlers and session event substrate"
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+axum = "0.7"
+lillux = { path = "../../kernel/lillux" }
+rand = "0.8"
+ryeos-api = { path = "../api" }
+ryeos-app = { path = "../../core/app" }
+ryeos-executor = { path = "../../core/executor" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1.18"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+ryeos-engine = { path = "../../core/engine", features = ["test-support"] }
+ryeos-runtime = { path = "../../core/runtime" }
+ryeos-scheduler = { path = "../../core/scheduler" }

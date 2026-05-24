@@ -2233,6 +2233,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-client-base"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "toml",
+ "unicode-width",
+]
+
+[[package]]
 name = "ryeos-directive-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2489,19 +2502,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-tui-core"
-version = "0.1.0"
-dependencies = [
- "bitflags",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "toml",
- "unicode-width",
-]
-
-[[package]]
 name = "ryeos-tui-terminal"
 version = "0.1.0"
 dependencies = [
@@ -2515,7 +2515,7 @@ dependencies = [
  "hyper-util",
  "lillux",
  "ryeos-cli",
- "ryeos-tui-core",
+ "ryeos-client-base",
  "serde",
  "serde_json",
  "tempfile",
@@ -2528,14 +2528,46 @@ dependencies = [
 name = "ryeos-tui-web"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "dirs 5.0.1",
  "getrandom 0.2.17",
  "js-sys",
- "ryeos-tui-core",
+ "lillux",
+ "ryeos-client-base",
+ "ryeos-engine",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "ryeos-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "lillux",
+ "rand 0.8.5",
+ "ryeos-api",
+ "ryeos-app",
+ "ryeos-engine",
+ "ryeos-executor",
+ "ryeos-runtime",
+ "ryeos-scheduler",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "uuid",
 ]
 
 [[package]]
@@ -2548,23 +2580,6 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
-]
-
-[[package]]
-name = "ryeos-web-launcher"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs 5.0.1",
- "lillux",
- "ryeos-engine",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2606,6 +2621,7 @@ dependencies = [
  "ryeos-state",
  "ryeos-tools",
  "ryeos-tracing",
+ "ryeos-ui",
  "serde",
  "serde_json",
  "serde_yaml",

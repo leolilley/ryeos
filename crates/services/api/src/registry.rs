@@ -19,8 +19,12 @@ pub use ryeos_app::service_registry::{
 ///
 /// Called once at daemon startup. The registry is immutable after build.
 pub fn build_service_registry() -> ServiceRegistry {
+    build_service_registry_from(handlers::ALL)
+}
+
+pub fn build_service_registry_from(descriptors: &[ServiceDescriptor]) -> ServiceRegistry {
     let mut reg = ServiceRegistry::new();
-    for desc in handlers::ALL {
+    for desc in descriptors {
         reg.register_raw(desc.endpoint, desc.handler);
     }
     reg

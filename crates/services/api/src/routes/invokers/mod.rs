@@ -6,7 +6,6 @@
 //! - Streaming sources → `CompiledGatewayLaunch`, `CompiledThreadsEventsStream`
 //! - Launch mode → `CompiledLaunchInvocation`
 
-pub mod browser_session_invocation;
 pub mod dispatch_invocation;
 pub mod gateway_stream_invocation;
 pub mod hmac_invocation;
@@ -14,11 +13,16 @@ pub mod launch_invocation;
 pub mod none_invocation;
 pub mod ryeos_signed_invocation;
 pub mod service_invocation;
-pub mod session_events_invocation;
 pub mod stream_helpers;
 pub mod subscription_stream_invocation;
 
 use std::sync::Arc;
+
+#[derive(Default, Clone)]
+pub struct AuthInvokerRegistry {
+    pub browser_session: Option<Arc<dyn CompiledRouteInvocation>>,
+}
+
 
 use serde_json::Value;
 
@@ -35,14 +39,24 @@ pub fn compile_auth_invoker(
     auth_config: Option<&Value>,
     route_id: &str,
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+    compile_auth_invoker_with_registry(auth_key, auth_config, route_id, &AuthInvokerRegistry::default())
+}
+
+pub fn compile_auth_invoker_with_registry(
+    auth_key: &str,
+    auth_config: Option<&Value>,
+    route_id: &str,
+    registry: &AuthInvokerRegistry,
+) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
     match auth_key {
         "none" => Ok(Arc::new(none_invocation::CompiledNoneVerifier)),
         "ryeos_signed" => Ok(Arc::new(
             ryeos_signed_invocation::CompiledRyeosSignedVerifier,
         )),
-        "browser_session" => Ok(Arc::new(
-            browser_session_invocation::CompiledBrowserSessionVerifier,
-        )),
+        "browser_session" => registry.browser_session.clone().ok_or_else(|| RouteConfigError::UnknownVerifier {
+            id: route_id.into(),
+            name: "browser_session".into(),
+        }),
         "hmac" => {
             let config = auth_config.ok_or_else(|| RouteConfigError::InvalidSourceConfig {
                 id: route_id.into(),

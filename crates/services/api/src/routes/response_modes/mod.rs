@@ -38,10 +38,26 @@ impl ResponseModeRegistry {
             .map(|m| m.as_ref())
     }
 
+
+    pub fn with_builtins_and_session_events(
+        session_events_invoker: Arc<dyn crate::routes::invocation::CompiledRouteInvocation>,
+    ) -> Self {
+        let mut r = Self::new();
+        r.register(Arc::new(static_mode::StaticMode));
+        r.register(Arc::new(event_stream_mode::EventStreamMode::with_session_events(
+            session_events_invoker,
+        )));
+        r.register(Arc::new(launch_mode::LaunchMode::default()));
+        r.register(Arc::new(json_mode::JsonMode));
+        r.register(Arc::new(execute_mode::ExecuteMode));
+        r.register(Arc::new(launch_mode::LaunchMode::with_key("accepted")));
+        r
+    }
+
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(static_mode::StaticMode));
-        r.register(Arc::new(event_stream_mode::EventStreamMode));
+        r.register(Arc::new(event_stream_mode::EventStreamMode::default()));
         r.register(Arc::new(launch_mode::LaunchMode::default()));
         r.register(Arc::new(json_mode::JsonMode));
         r.register(Arc::new(execute_mode::ExecuteMode));

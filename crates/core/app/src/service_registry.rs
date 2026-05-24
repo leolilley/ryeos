@@ -55,6 +55,7 @@ pub type RawHandlerFn =
 ///
 /// Carries all metadata needed for registry build, availability check,
 /// self-check, and gate tests.
+#[derive(Clone, Copy)]
 pub struct ServiceDescriptor {
     /// Canonical item ref, e.g. "service:bundle/install".
     pub service_ref: &'static str,

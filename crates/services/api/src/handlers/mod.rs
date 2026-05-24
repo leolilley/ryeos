@@ -63,10 +63,6 @@ pub mod threads_chain;
 pub mod threads_children;
 pub mod threads_get;
 pub mod threads_list;
-pub mod ui_actions_invoke;
-pub mod ui_launch;
-pub mod ui_launch_mint;
-pub mod ui_session_current;
 pub mod vault_delete;
 pub mod vault_list;
 pub mod vault_set;
@@ -133,8 +129,4 @@ pub const ALL: &[ServiceDescriptor] = &[
     vault_list::DESCRIPTOR,
     vault_delete::DESCRIPTOR,
     items_effective::DESCRIPTOR,
-    ui_launch::DESCRIPTOR,
-    ui_launch_mint::DESCRIPTOR,
-    ui_session_current::DESCRIPTOR,
-    ui_actions_invoke::DESCRIPTOR,
 ];

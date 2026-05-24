@@ -9,6 +9,52 @@ use std::sync::Arc;
 
 use ryeos_app::state::AppState;
 
+#[derive(Default)]
+struct NoopBrowserSessions;
+
+impl ryeos_app::ui_session::BrowserSessionStoreApi for NoopBrowserSessions {
+    fn mint_token(&self, _ctx: ryeos_app::ui_session::LaunchContext) -> (String, String) {
+        (String::new(), String::new())
+    }
+
+    fn consume_launch_token(&self, _token: &str) -> Option<String> {
+        None
+    }
+
+    fn get_session(&self, _session_id: &str) -> Option<ryeos_app::ui_session::BrowserSession> {
+        None
+    }
+
+    fn evict_expired(&self) {}
+}
+
+#[derive(Default)]
+struct NoopSessionBus;
+
+impl ryeos_app::ui_session::SessionBusApi for NoopSessionBus {
+    fn subscribe(
+        &self,
+        _session_id: &str,
+    ) -> tokio::sync::broadcast::Receiver<ryeos_app::stream_envelope::RouteStreamEnvelope> {
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        rx
+    }
+
+    fn publish(&self, _session_id: &str, _event_type: &str, _payload: serde_json::Value) {}
+
+    fn replay_after(
+        &self,
+        _session_id: &str,
+        _last_id: &str,
+    ) -> Option<Vec<ryeos_app::stream_envelope::RouteStreamEnvelope>> {
+        None
+    }
+
+    fn snapshot_required_envelope(&self) -> ryeos_app::stream_envelope::RouteStreamEnvelope {
+        ryeos_app::ui_session::snapshot_required_envelope()
+    }
+}
+
 /// Build a minimal AppState with an empty engine.
 /// Suitable for testing error paths (not found, wrong kind, etc.).
 pub fn build_test_state() -> (tempfile::TempDir, AppState) {
@@ -111,8 +157,8 @@ fn build_app_state(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-        browser_sessions: Arc::new(ryeos_app::browser_session::BrowserSessionStore::new()),
-        session_bus: Arc::new(ryeos_app::session_bus::SessionBus::new()),
+        browser_sessions: Arc::new(NoopBrowserSessions),
+        session_bus: Arc::new(NoopSessionBus),
         write_barrier: Arc::new(write_barrier),
         started_at: std::time::Instant::now(),
         started_at_iso: String::new(),

@@ -21,7 +21,13 @@ use crate::route_error::RouteConfigError;
 use compile::CompiledRoute;
 use matcher::PathMatcher;
 use response_modes::ResponseModeRegistry;
+use invokers::AuthInvokerRegistry;
 use ryeos_app::route_raw::RawRouteSpec;
+
+#[derive(Default, Clone)]
+pub struct RouteExtensionRegistry {
+    pub auth: AuthInvokerRegistry,
+}
 
 pub struct RouteTable {
     matcher: PathMatcher,
@@ -55,6 +61,14 @@ impl RouteTable {
 pub fn build_route_table(
     raw_routes: &[RawRouteSpec],
     mode_registry: &ResponseModeRegistry,
+) -> Result<RouteTable, Vec<RouteConfigError>> {
+    build_route_table_with_extensions(raw_routes, mode_registry, &RouteExtensionRegistry::default())
+}
+
+pub fn build_route_table_with_extensions(
+    raw_routes: &[RawRouteSpec],
+    mode_registry: &ResponseModeRegistry,
+    extensions: &RouteExtensionRegistry,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mut errors: Vec<RouteConfigError> = Vec::new();
     let mut compiled: Vec<Arc<CompiledRoute>> = Vec::new();
@@ -106,7 +120,7 @@ pub fn build_route_table(
 
         // Compile auth invoker (no registry lookup).
         let auth_invoker =
-            match invokers::compile_auth_invoker(&raw.auth, raw.auth_config.as_ref(), &raw.id) {
+            match invokers::compile_auth_invoker_with_registry(&raw.auth, raw.auth_config.as_ref(), &raw.id, &extensions.auth) {
                 Ok(a) => a,
                 Err(e) => {
                     errors.push(e);
@@ -187,6 +201,14 @@ pub fn build_route_table_from_snapshot(
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mode_registry = ResponseModeRegistry::with_builtins();
     build_route_table(&snapshot.routes, &mode_registry)
+}
+
+pub fn build_route_table_from_snapshot_with_extensions(
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    mode_registry: &ResponseModeRegistry,
+    extensions: &RouteExtensionRegistry,
+) -> Result<RouteTable, Vec<RouteConfigError>> {
+    build_route_table_with_extensions(&snapshot.routes, mode_registry, extensions)
 }
 
 pub fn build_route_table_or_bail(

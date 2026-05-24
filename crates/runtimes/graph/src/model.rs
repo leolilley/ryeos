@@ -131,6 +131,7 @@ struct GraphFile {
     version: String,
     category: String,
     #[serde(default)]
+    #[allow(dead_code)]
     description: Option<String>,
     config: GraphConfig,
     #[serde(default)]

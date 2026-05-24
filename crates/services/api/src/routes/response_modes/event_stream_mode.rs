@@ -55,7 +55,16 @@ enum EventStreamStrategy {
     },
 }
 
-pub struct EventStreamMode;
+#[derive(Clone, Default)]
+pub struct EventStreamMode {
+    pub session_events_invoker: Option<Arc<dyn CompiledRouteInvocation>>,
+}
+
+impl EventStreamMode {
+    pub fn with_session_events(invoker: Arc<dyn CompiledRouteInvocation>) -> Self {
+        Self { session_events_invoker: Some(invoker) }
+    }
+}
 
 pub struct CompiledEventStreamMode {
     strategy: EventStreamStrategy,
@@ -87,7 +96,16 @@ impl ResponseMode for EventStreamMode {
         let strategy = match source {
             "dispatch_launch" => compile_gateway(raw)?,
             "thread_events" => compile_subscription(raw)?,
-            "session_events" => compile_session_events(raw)?,
+            "session_events" => {
+                let invoker = self.session_events_invoker.clone().ok_or_else(|| {
+                    RouteConfigError::InvalidSourceConfig {
+                        id: raw.id.clone(),
+                        src: "session_events".into(),
+                        reason: "session_events source is not registered".into(),
+                    }
+                })?;
+                compile_session_events(raw, invoker)?
+            },
             "" => {
                 return Err(RouteConfigError::InvalidResponseSpec {
                     id: raw.id.clone(),
@@ -237,7 +255,10 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
 
 const SESSION_EVENTS_REQUIRED_AUTH: &str = "browser_session";
 
-fn compile_session_events(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
+fn compile_session_events(
+    raw: &RawRouteSpec,
+    invoker: Arc<dyn CompiledRouteInvocation>,
+) -> Result<EventStreamStrategy, RouteConfigError> {
     if raw.auth != SESSION_EVENTS_REQUIRED_AUTH {
         return Err(RouteConfigError::SourceAuthRequirement {
             id: raw.id.clone(),
@@ -289,11 +310,7 @@ fn compile_session_events(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Rou
         });
     }
 
-    let invoker = Arc::new(
-        crate::routes::invokers::session_events_invocation::CompiledSessionEventsInvocation {
-            keep_alive_secs,
-        },
-    );
+    let _ = keep_alive_secs;
 
     Ok(EventStreamStrategy::SessionEvents {
         invoker,
@@ -532,7 +549,7 @@ mod tests {
 
     #[test]
     fn allows_zero_timeout() {
-        assert!(EventStreamMode.allows_zero_timeout());
+        assert!(EventStreamMode::default().allows_zero_timeout());
     }
 
     // ── Compile-time validation ────────────────
@@ -597,14 +614,14 @@ mod tests {
     #[test]
     fn compile_gateway_succeeds() {
         let raw = make_gateway_raw("r1", "/execute/stream");
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         assert!(result.is_ok(), "gateway compile should succeed");
     }
 
     #[test]
     fn compile_subscription_succeeds() {
         let raw = make_subscription_raw("r1", "/threads/{id}/stream");
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         assert!(result.is_ok(), "subscription compile should succeed");
     }
 
@@ -616,7 +633,7 @@ mod tests {
             item_ref: "tool:x/y".into(),
             params: serde_json::Value::Null,
         });
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -633,7 +650,7 @@ mod tests {
         let mut raw = make_gateway_raw("r1", "/test/{id}");
         raw.response.source = Some("nonexistent_source".into());
         raw.response.source_config = serde_json::Value::Null;
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -647,7 +664,7 @@ mod tests {
         let mut raw = make_gateway_raw("r1", "/test/{id}");
         raw.response.source = None;
         raw.response.source_config = serde_json::Value::Null;
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -662,7 +679,7 @@ mod tests {
     fn gateway_rejects_auth_none() {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.auth = "none".into();
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -675,7 +692,7 @@ mod tests {
     fn gateway_rejects_non_json_body() {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.request.body = RawRequestBody::Raw;
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -688,7 +705,7 @@ mod tests {
     fn gateway_rejects_keep_alive_zero() {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.response.source_config = serde_json::json!({"keep_alive_secs": 0});
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -704,7 +721,7 @@ mod tests {
             "keep_alive_secs": 15,
             "item_ref": "bogus",
         });
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -720,7 +737,7 @@ mod tests {
     fn gateway_rejects_missing_keep_alive_secs() {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.response.source_config = serde_json::json!({});
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -736,7 +753,7 @@ mod tests {
     fn gateway_rejects_non_object_source_config() {
         let mut raw = make_gateway_raw("r1", "/execute/stream");
         raw.response.source_config = serde_json::json!(123);
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -796,7 +813,7 @@ mod tests {
     fn subscription_rejects_auth_none() {
         let mut raw = make_subscription_raw("r1", "/threads/{id}/stream");
         raw.auth = "none".into();
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -812,7 +829,7 @@ mod tests {
             "thread_id": "${query.id}",
             "keep_alive_secs": 15,
         });
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -828,7 +845,7 @@ mod tests {
             "thread_id": "${path.wrong}",
             "keep_alive_secs": 15,
         });
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -844,7 +861,7 @@ mod tests {
             "thread_id": "${path.id}",
             "keep_alive_secs": 0,
         });
-        let result = EventStreamMode.compile(&raw);
+        let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),

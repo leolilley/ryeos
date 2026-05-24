@@ -6,7 +6,6 @@ use axum::serve;
 use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
 
-use ryeos_api::{registry as service_registry, routes};
 use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
@@ -20,6 +19,42 @@ use ryeos_executor::executor as service_executor;
 use ryeosd::config::{self, Cli, Config};
 use ryeosd::scheduler::db::SchedulerDb;
 use ryeosd::{bootstrap, reconcile, scheduler, uds};
+
+fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
+    static DESCRIPTORS: once_cell::sync::Lazy<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
+        once_cell::sync::Lazy::new(|| {
+            ryeos_api::handlers::ALL
+                .iter()
+                .chain(ryeos_ui::handlers::ALL.iter())
+                .copied()
+                .collect()
+        });
+    &DESCRIPTORS
+}
+
+fn build_service_registry() -> ryeos_app::service_registry::ServiceRegistry {
+    ryeos_api::registry::build_service_registry_from(service_descriptors())
+}
+
+fn build_route_table(
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+) -> anyhow::Result<ryeos_api::routes::RouteTable> {
+    let mode_registry = ryeos_ui::response_mode_registry();
+    let extensions = ryeos_ui::route_extensions();
+    ryeos_api::routes::build_route_table_from_snapshot_with_extensions(
+        snapshot,
+        &mode_registry,
+        &extensions,
+    )
+    .map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        anyhow::anyhow!(
+            "route table build failed at startup ({} error(s)): {}",
+            errors.len(),
+            msgs.join("; ")
+        )
+    })
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -80,13 +115,13 @@ async fn main() -> Result<()> {
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(&config)?;
 
     // Build the service registry early — self-check needs it.
-    let services = Arc::new(service_registry::build_service_registry());
+    let services = Arc::new(build_service_registry());
 
     // Self-check: verify every registered service resolves and is trusted.
     // Every service must resolve, verify, extract an endpoint, AND have a
     // registered handler. Any failure prevents daemon start (fail-closed).
     let catalog_health = {
-        let operational_services = ryeos_api::handlers::ALL;
+        let operational_services = service_descriptors();
 
         let plan_ctx = ryeos_engine::contracts::PlanContext {
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
@@ -196,7 +231,7 @@ async fn main() -> Result<()> {
 
     // Build the route table from the node-config snapshot.
     let route_table = {
-        let table = routes::build_route_table_or_bail(&node_config_snapshot)
+        let table = build_route_table(&node_config_snapshot)
             .context("route table build failed at startup — check route YAML files")?;
         Arc::new(arc_swap::ArcSwap::from_pointee(table))
     };
@@ -365,14 +400,14 @@ async fn main() -> Result<()> {
         commands,
         callback_tokens,
         thread_auth,
-        browser_sessions: Arc::new(ryeos_app::browser_session::BrowserSessionStore::new()),
-        session_bus: Arc::new(ryeos_app::session_bus::SessionBus::new()),
+        browser_sessions: Arc::new(ryeos_ui::BrowserSessionStore::new()),
+        session_bus: Arc::new(ryeos_ui::SessionBus::new()),
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
         catalog_health,
         services,
-        service_descriptors: ryeos_api::handlers::ALL,
+        service_descriptors: service_descriptors(),
         node_config: node_config_snapshot,
         vault,
         verb_registry,
@@ -715,7 +750,7 @@ async fn run_service_standalone(
     )));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
-    let services = Arc::new(service_registry::build_service_registry());
+    let services = Arc::new(build_service_registry());
 
     let state_root = config.system_space_dir.join(".ai").join("state");
     let runtime_db_path = config.db_path.clone();
@@ -833,8 +868,8 @@ async fn run_service_standalone(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-        browser_sessions: Arc::new(ryeos_app::browser_session::BrowserSessionStore::new()),
-        session_bus: Arc::new(ryeos_app::session_bus::SessionBus::new()),
+        browser_sessions: Arc::new(ryeos_ui::BrowserSessionStore::new()),
+        session_bus: Arc::new(ryeos_ui::SessionBus::new()),
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
@@ -843,7 +878,7 @@ async fn run_service_standalone(
             missing_services: vec![],
         },
         services,
-        service_descriptors: ryeos_api::handlers::ALL,
+        service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
         vault: Arc::new(
             ryeos_app::vault::SealedEnvelopeVault::load(&config.system_space_dir)
