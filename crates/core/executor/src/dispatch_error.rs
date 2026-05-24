@@ -21,6 +21,41 @@
 
 use axum::http::StatusCode;
 
+/// Per-field violation details carried by
+/// `DispatchError::ComposedValueContractViolation`. Structured so the
+/// wire envelope can include individual violation entries matching the
+/// `items.effective` `contract_violation` shape.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContractViolationDetails {
+    pub errors: Vec<ContractViolationEntry>,
+    pub warnings: Vec<ContractViolationEntry>,
+}
+
+/// A single field-level violation within a contract-violation report.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContractViolationEntry {
+    pub path: String,
+    pub code: String,
+    pub expected: String,
+    pub found: String,
+}
+
+impl ContractViolationDetails {
+    /// Build from a `ryeos_engine::contracts::InstanceValidationReport`.
+    pub fn from_report(report: &ryeos_engine::contracts::InstanceValidationReport) -> Self {
+        let to_entry = |v: &ryeos_engine::contracts::InstanceViolation| ContractViolationEntry {
+            path: v.path.clone(),
+            code: v.code.to_string(),
+            expected: v.expected.clone(),
+            found: v.found.clone(),
+        };
+        Self {
+            errors: report.errors.iter().map(to_entry).collect(),
+            warnings: report.warnings.iter().map(to_entry).collect(),
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum DispatchError {
     #[error("invalid item ref '{0}': {1}")]
@@ -163,6 +198,20 @@ pub enum DispatchError {
     /// authorised to know it exists. Maps to 404.
     #[error("not found")]
     NotFound,
+    /// Composed descriptor fails its `composed_value_contract`
+    /// instance validation. This is a local preflight gate: a malformed
+    /// descriptor must fail before any remote push, remote execute,
+    /// or remote stream begins. Maps to 400 with a structured
+    /// `details` envelope carrying per-field violations.
+    #[error(
+        "contract violation: `{canonical_ref}` ({error_count} errors, {warning_count} warnings)"
+    )]
+    ComposedValueContractViolation {
+        canonical_ref: String,
+        error_count: usize,
+        warning_count: usize,
+        details: ContractViolationDetails,
+    },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -202,7 +251,8 @@ impl DispatchError {
             Self::UnknownOp { .. }
             | Self::OpInvalidInput { .. }
             | Self::ProjectionInvariant { .. }
-            | Self::InvalidLaunchMode { .. } => StatusCode::BAD_REQUEST,
+            | Self::InvalidLaunchMode { .. }
+            | Self::ComposedValueContractViolation { .. } => StatusCode::BAD_REQUEST,
             Self::ProtocolNotRegistered(_) => StatusCode::BAD_GATEWAY,
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -240,7 +290,100 @@ impl DispatchError {
             Self::ProtocolNotRegistered(_) => "protocol_not_registered",
             Self::StreamingNotDetachable => "streaming_not_detachable",
             Self::InvalidLaunchMode { .. } => "invalid_launch_mode",
+            Self::ComposedValueContractViolation { .. } => "contract_violation",
             Self::Internal(_) => "internal",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    fn sample_details() -> ContractViolationDetails {
+        ContractViolationDetails {
+            errors: vec![ContractViolationEntry {
+                path: "launch.mode".to_string(),
+                code: "enum_mismatch".to_string(),
+                expected: "\"inline\" | \"detached\"".to_string(),
+                found: "\"bogus\"".to_string(),
+            }],
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn contract_violation_http_status_is_bad_request() {
+        let e = DispatchError::ComposedValueContractViolation {
+            canonical_ref: "directive:foo/bar".to_string(),
+            error_count: 1,
+            warning_count: 0,
+            details: sample_details(),
+        };
+        assert_eq!(e.http_status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn contract_violation_code_is_contract_violation() {
+        let e = DispatchError::ComposedValueContractViolation {
+            canonical_ref: "directive:foo/bar".to_string(),
+            error_count: 1,
+            warning_count: 0,
+            details: sample_details(),
+        };
+        assert_eq!(e.code(), "contract_violation");
+    }
+
+    #[test]
+    fn contract_violation_display_includes_ref_and_counts() {
+        let e = DispatchError::ComposedValueContractViolation {
+            canonical_ref: "directive:foo/bar".to_string(),
+            error_count: 2,
+            warning_count: 1,
+            details: sample_details(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("directive:foo/bar"),
+            "must include ref, got: {msg}"
+        );
+        assert!(
+            msg.contains("2 errors"),
+            "must include error count, got: {msg}"
+        );
+        assert!(
+            msg.contains("1 warning"),
+            "must include warning count, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn contract_violation_details_from_report() {
+        use ryeos_engine::contracts::{
+            InstanceValidationReport, InstanceViolation, InstanceViolationCode,
+        };
+
+        let report = InstanceValidationReport {
+            errors: vec![InstanceViolation {
+                path: "launch.mode".to_string(),
+                code: InstanceViolationCode::EnumMismatch,
+                expected: "\"inline\"".to_string(),
+                found: "\"detached\"".to_string(),
+            }],
+            warnings: vec![InstanceViolation {
+                path: "extra".to_string(),
+                code: InstanceViolationCode::UnexpectedField,
+                expected: "<none>".to_string(),
+                found: "value".to_string(),
+            }],
+        };
+
+        let details = ContractViolationDetails::from_report(&report);
+        assert_eq!(details.errors.len(), 1);
+        assert_eq!(details.warnings.len(), 1);
+        assert_eq!(details.errors[0].path, "launch.mode");
+        assert_eq!(details.errors[0].code, "enum_mismatch");
+        assert_eq!(details.warnings[0].code, "unexpected_field");
     }
 }

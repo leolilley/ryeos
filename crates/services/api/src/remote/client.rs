@@ -84,6 +84,10 @@ impl RemoteClient {
                 .as_str()
                 .context("missing vault_fingerprint in /public-key response")?
                 .to_string(),
+            site_id: body["site_id"]
+                .as_str()
+                .context("missing site_id in /public-key response; re-run remote configure against an updated remote daemon")?
+                .to_string(),
         })
     }
 
@@ -557,6 +561,9 @@ pub struct PublicKeyResponse {
     pub principal_id: String,
     pub fingerprint: String,
     pub vault_fingerprint: String,
+    /// Daemon site identity (e.g. `"site:my-hostname"`).
+    /// Discovered from the remote's `/public-key` response.
+    pub site_id: String,
 }
 
 #[derive(Debug, Clone)]

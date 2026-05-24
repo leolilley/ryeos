@@ -39,6 +39,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             name: req.remote.clone(),
             url: req.url.clone(),
             principal_id: pubkey.principal_id.clone(),
+            site_id: pubkey.site_id.clone(),
             vault_fingerprint: pubkey.vault_fingerprint,
             ingest_ignore,
             project_bindings: remotes
@@ -55,6 +56,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "principal_id": pubkey.principal_id,
         "fingerprint": pubkey.fingerprint,
         "vault_fingerprint": vault_fp,
+        "site_id": pubkey.site_id,
     }))
 }
 

@@ -416,6 +416,80 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         };
 
+        // ── Phase 0: preflight composition validation ───────────────
+        // Run the full resolution pipeline (including composition and
+        // instance validation) for the root item BEFORE entering
+        // dispatch. This ensures a malformed descriptor fails locally
+        // with a structured contract-violation error before any remote
+        // push, execute, or stream begins.
+        //
+        // The dispatch path's `resolve_dispatch_hop` only calls
+        // `engine.resolve()` + `engine.verify()` which does NOT run
+        // composition or contract validation. This preflight gate
+        // bridges the gap: if the composed value violates the kind
+        // schema's `composed_value_contract`, we return a typed
+        // `contract_violation` error (400) with per-field details
+        // matching the `items.effective` envelope shape.
+        {
+            use ryeos_engine::resolution::run_resolution_pipeline;
+
+            let engine_roots = project_ctx
+                .request_engine
+                .resolution_roots(Some(project_ctx.effective_path.clone()));
+            let effective_parsers = project_ctx
+                .request_engine
+                .effective_parser_dispatcher(Some(&project_ctx.effective_path))
+                .map_err(|e| {
+                    RouteDispatchError::Internal(format!(
+                        "preflight parser dispatcher: {e}"
+                    ))
+                })?;
+
+            match run_resolution_pipeline(
+                &root_canonical,
+                &project_ctx.request_engine.kinds,
+                &effective_parsers,
+                &engine_roots,
+                &project_ctx.request_engine.trust_store,
+                &project_ctx.request_engine.composers,
+            ) {
+                Ok(_resolution_output) => {
+                    // Composition validated — proceed to dispatch.
+                }
+                Err(
+                    ryeos_engine::resolution::ResolutionError::ComposedValueContractViolation {
+                        kind: _,
+                        item_ref,
+                        report,
+                    },
+                ) => {
+                    use ryeos_executor::dispatch_error::{ContractViolationDetails, DispatchError};
+                    let details = ContractViolationDetails::from_report(&report);
+                    let error_count = report.errors.len();
+                    let warning_count = report.warnings.len();
+                    let dispatch_err = DispatchError::ComposedValueContractViolation {
+                        canonical_ref: item_ref.clone(),
+                        error_count,
+                        warning_count,
+                        details,
+                    };
+                    return Ok(dispatch_error_response(dispatch_err));
+                }
+                Err(other) => {
+                    // Other resolution errors (item not found, trust
+                    // failure, cycle, etc.) are not surfacing here for
+                    // the first time — dispatch will catch them
+                    // independently with its own error mapping. The
+                    // preflight step only gates on contract violations.
+                    tracing::debug!(
+                        item_ref = %item_ref,
+                        error = %other,
+                        "preflight resolution error (non-contract); deferring to dispatch"
+                    );
+                }
+            }
+        }
+
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: request.launch_mode.as_str(),
             target_site_id: request.target_site_id.as_deref(),

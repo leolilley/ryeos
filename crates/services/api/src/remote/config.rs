@@ -34,6 +34,11 @@ pub struct RemoteConfig {
     pub url: String,
     /// Pinned principal_id of the remote node (from `/public-key`).
     pub principal_id: String,
+    /// Remote node's daemon site identity (e.g. `"site:gpu-node"`).
+    /// Discovered from the remote's `/public-key` response during
+    /// `remote configure`. Used by target-site forwarding to resolve
+    /// `target_site_id` to a remote connection.
+    pub site_id: String,
     /// Remote node's vault X25519 public key fingerprint.
     /// Required — populated during `remote configure`.
     pub vault_fingerprint: String,
@@ -179,6 +184,99 @@ pub fn validate_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Target-site forwarding lookup ────────────────────────────────────
+
+/// A remote resolved from a `target_site_id` lookup.
+#[derive(Debug, Clone)]
+pub struct ResolvedRemote {
+    /// The matching remote config.
+    pub remote: RemoteConfig,
+    /// The key (name) under which the remote is stored.
+    pub config_key: String,
+}
+
+/// Sentinel site_id value for partial remote configs written by push/execute
+/// helper paths. It is never a routable site identity.
+pub const MISSING_SITE_ID_SENTINEL: &str = "site:_missing_reconfigure";
+
+/// Errors from target-site resolution.
+#[derive(Debug, thiserror::Error)]
+pub enum TargetSiteError {
+    /// No configured remote has this site_id.
+    #[error("unknown target site '{target_site_id}'; configured sites: [{known_sites}]")]
+    UnknownSite {
+        target_site_id: String,
+        known_sites: String,
+    },
+    /// Multiple remotes share the same site_id — ambiguous.
+    #[error(
+        "ambiguous target site '{target_site_id}': remotes [{remotes}] share this site_id; \
+         reconfigure to use unique site IDs"
+    )]
+    AmbiguousSite {
+        target_site_id: String,
+        remotes: String,
+    },
+    /// A remote has the sentinel missing-site-id value.
+    #[error(
+        "remote '{remote_name}' has no site_id; run `ryeos remote configure --remote {remote_name}` \
+         to discover and persist the site identity"
+    )]
+    MissingSiteId { remote_name: String },
+}
+
+/// Resolve a configured remote by its `site_id`.
+///
+/// Looks up all configured remotes and finds the one whose `site_id`
+/// matches `target_site_id`. Returns an error if:
+/// - no remote has the target site_id
+/// - multiple remotes share the same site_id (ambiguous)
+/// - any remote has the sentinel missing-site-id value
+pub fn resolve_remote_by_site_id(
+    remotes: &HashMap<String, RemoteConfig>,
+    target_site_id: &str,
+) -> Result<ResolvedRemote, TargetSiteError> {
+    let mut matches: Vec<(&String, &RemoteConfig)> = Vec::new();
+    let mut all_site_ids: Vec<String> = Vec::new();
+
+    for (key, remote) in remotes {
+        all_site_ids.push(remote.site_id.clone());
+
+        if remote.site_id == MISSING_SITE_ID_SENTINEL {
+            return Err(TargetSiteError::MissingSiteId {
+                remote_name: remote.name.clone(),
+            });
+        }
+
+        if remote.site_id == target_site_id {
+            matches.push((key, remote));
+        }
+    }
+
+    if matches.is_empty() {
+        all_site_ids.sort();
+        all_site_ids.dedup();
+        return Err(TargetSiteError::UnknownSite {
+            target_site_id: target_site_id.to_string(),
+            known_sites: all_site_ids.join(", "),
+        });
+    }
+
+    if matches.len() > 1 {
+        let names: Vec<&str> = matches.iter().map(|(k, _)| k.as_str()).collect();
+        return Err(TargetSiteError::AmbiguousSite {
+            target_site_id: target_site_id.to_string(),
+            remotes: names.join(", "),
+        });
+    }
+
+    let (config_key, remote) = matches.into_iter().next().unwrap();
+    Ok(ResolvedRemote {
+        remote: remote.clone(),
+        config_key: config_key.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +307,7 @@ mod tests {
                 name: "default".into(),
                 url: "https://example.com".into(),
                 principal_id: "fp:abc123".into(),
+                site_id: "site:example".into(),
                 vault_fingerprint: "sha256:def456".into(),
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig {
                     patterns: vec![".git/".into(), "target/".into()],
@@ -220,34 +319,9 @@ mod tests {
         let loaded = load_remotes(tmpdir.path()).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded["default"].url, "https://example.com");
+        assert_eq!(loaded["default"].site_id, "site:example");
         assert_eq!(loaded["default"].vault_fingerprint, "sha256:def456");
         assert_eq!(loaded["default"].ingest_ignore.patterns.len(), 2);
-    }
-
-    #[test]
-    fn config_without_required_fields_fails_to_parse() {
-        // A remotes.yaml missing vault_fingerprint or ingest_ignore
-        // should fail to parse — no tolerance for incomplete configs.
-        let tmpdir = tempfile::tempdir().unwrap();
-        let path = tmpdir.path().join(".ai/config/remotes/remotes.yaml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            r#"
-remotes:
-  bare:
-    name: bare
-    url: https://example.com
-    principal_id: fp:abc
-"#,
-        )
-        .unwrap();
-        let result = load_remotes(tmpdir.path());
-        assert!(
-            result.is_err(),
-            "should fail on missing required fields, got {:?}",
-            result
-        );
     }
 
     #[test]
@@ -273,6 +347,7 @@ remotes:
                 name: "railway".into(),
                 url: "https://example.com".into(),
                 principal_id: "fp:abc123".into(),
+                site_id: "site:railway".into(),
                 vault_fingerprint: "sha256:def456".into(),
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig {
                     patterns: vec![".git/".into()],
@@ -286,5 +361,130 @@ remotes:
         let resolved = resolve_project_binding(&loaded["railway"], &local).unwrap();
         assert_eq!(resolved.remote_project_path, "/data/projects/example");
         assert_eq!(resolved.sync_scope, ProjectSyncScope::AiOnly);
+    }
+
+    // ── resolve_remote_by_site_id tests ─────────────────────────
+
+    fn make_remote(name: &str, site_id: &str) -> RemoteConfig {
+        RemoteConfig {
+            name: name.to_string(),
+            url: format!("https://{}.example.com", name),
+            principal_id: format!("fp:{}", name),
+            site_id: site_id.to_string(),
+            vault_fingerprint: "sha256:test".to_string(),
+            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            project_bindings: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn lookup_by_site_id_succeeds() {
+        let mut remotes = HashMap::new();
+        remotes.insert("gpu".into(), make_remote("gpu", "site:gpu-node"));
+        let result = resolve_remote_by_site_id(&remotes, "site:gpu-node").unwrap();
+        assert_eq!(result.config_key, "gpu");
+        assert_eq!(result.remote.site_id, "site:gpu-node");
+    }
+
+    #[test]
+    fn lookup_unknown_site_id_returns_error_with_known_sites() {
+        let mut remotes = HashMap::new();
+        remotes.insert("gpu".into(), make_remote("gpu", "site:gpu-node"));
+        let err = resolve_remote_by_site_id(&remotes, "site:unknown").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("site:unknown"),
+            "should name target, got: {msg}"
+        );
+        assert!(
+            msg.contains("site:gpu-node"),
+            "should list known sites, got: {msg}"
+        );
+        assert!(
+            matches!(err, TargetSiteError::UnknownSite { .. }),
+            "must be UnknownSite variant"
+        );
+    }
+
+    #[test]
+    fn lookup_ambiguous_site_id_returns_error() {
+        let mut remotes = HashMap::new();
+        remotes.insert("gpu1".into(), make_remote("gpu1", "site:gpu"));
+        remotes.insert("gpu2".into(), make_remote("gpu2", "site:gpu"));
+        let err = resolve_remote_by_site_id(&remotes, "site:gpu").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ambiguous"),
+            "should say ambiguous, got: {msg}"
+        );
+        assert!(msg.contains("gpu1"), "should name both remotes, got: {msg}");
+        assert!(msg.contains("gpu2"), "should name both remotes, got: {msg}");
+        assert!(
+            matches!(err, TargetSiteError::AmbiguousSite { .. }),
+            "must be AmbiguousSite variant"
+        );
+    }
+
+    #[test]
+    fn lookup_missing_site_id_returns_reconfigure_error() {
+        let mut remotes = HashMap::new();
+        remotes.insert(
+            "old".into(),
+            RemoteConfig {
+                name: "old".into(),
+                url: "https://example.com".into(),
+                principal_id: "fp:old".into(),
+                site_id: MISSING_SITE_ID_SENTINEL.to_string(),
+                vault_fingerprint: "sha256:old".into(),
+                ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+                project_bindings: HashMap::new(),
+            },
+        );
+        let err = resolve_remote_by_site_id(&remotes, "site:old").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, TargetSiteError::MissingSiteId { ref remote_name } if remote_name == "old"),
+            "must be MissingSiteId for 'old', got: {err:?}"
+        );
+        assert!(
+            msg.contains("remote configure"),
+            "should instruct reconfigure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn lookup_empty_remotes_returns_unknown() {
+        let remotes = HashMap::new();
+        let err = resolve_remote_by_site_id(&remotes, "site:anything").unwrap_err();
+        assert!(
+            matches!(err, TargetSiteError::UnknownSite { ref known_sites, .. } if known_sites.is_empty()),
+            "no remotes → empty known_sites, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn config_without_site_id_fails_to_parse() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join(".ai/config/remotes/remotes.yaml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+remotes:
+  legacy:
+    name: legacy
+    url: https://example.com
+    principal_id: fp:legacy
+    vault_fingerprint: sha256:legacy
+    ingest_ignore:
+      patterns: []
+"#,
+        )
+        .unwrap();
+        let result = load_remotes(tmpdir.path());
+        assert!(
+            result.is_err(),
+            "missing site_id must not be accepted as a compatibility mode: {result:?}"
+        );
     }
 }

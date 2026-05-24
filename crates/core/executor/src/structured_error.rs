@@ -35,6 +35,10 @@ pub struct StructuredErrorPayload {
     /// Cap-denial field (existing `MissingCap` surface).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_cap: Option<String>,
+    /// Contract-violation details: per-field errors and warnings.
+    /// Matches the `items.effective` `contract_violation` envelope shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl StructuredErrorPayload {
@@ -49,6 +53,7 @@ impl StructuredErrorPayload {
             source_name: None,
             remediation: None,
             required_cap: None,
+            details: None,
         }
     }
 
@@ -71,6 +76,7 @@ impl StructuredErrorPayload {
             source_name: Some(source_name.into()),
             remediation: Some(remediation.into()),
             required_cap: None,
+            details: None,
         }
     }
 
@@ -84,6 +90,27 @@ impl StructuredErrorPayload {
             source_name: None,
             remediation: None,
             required_cap: Some(required.into()),
+            details: None,
+        }
+    }
+
+    /// Build the `contract_violation` envelope. Matches the shape used by
+    /// `items.effective` for `ComposedValueContractViolation` errors.
+    pub fn contract_violation(
+        error_msg: impl Into<String>,
+        details: crate::dispatch_error::ContractViolationDetails,
+    ) -> Self {
+        Self {
+            code: "contract_violation".to_string(),
+            error: error_msg.into(),
+            env_var: None,
+            source_kind: None,
+            source_name: None,
+            remediation: None,
+            required_cap: None,
+            details: Some(
+                serde_json::to_value(details).expect("ContractViolationDetails always serializes"),
+            ),
         }
     }
 
@@ -112,7 +139,90 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 remediation,
             ),
             DispatchError::MissingCap { required } => Self::missing_cap(e.to_string(), required),
+            DispatchError::ComposedValueContractViolation { details, .. } => {
+                Self::contract_violation(e.to_string(), details.clone())
+            }
             _ => Self::generic(e.code(), e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_payload_has_no_details() {
+        let p = StructuredErrorPayload::generic("test_code", "test error");
+        let v = p.to_value();
+        assert_eq!(v["code"], "test_code");
+        assert_eq!(v["error"], "test error");
+        assert!(
+            v.get("details").is_none(),
+            "generic must not include details"
+        );
+    }
+
+    #[test]
+    fn contract_violation_payload_has_details() {
+        let details = crate::dispatch_error::ContractViolationDetails {
+            errors: vec![crate::dispatch_error::ContractViolationEntry {
+                path: "launch.mode".to_string(),
+                code: "enum_mismatch".to_string(),
+                expected: "\"inline\"".to_string(),
+                found: "\"bogus\"".to_string(),
+            }],
+            warnings: vec![],
+        };
+        let p = StructuredErrorPayload::contract_violation(
+            "contract violation: `directive:x` (1 error, 0 warnings)",
+            details,
+        );
+        let v = p.to_value();
+        assert_eq!(v["code"], "contract_violation");
+        let det = &v["details"];
+        assert_eq!(det["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(det["errors"][0]["path"], "launch.mode");
+        assert_eq!(det["errors"][0]["code"], "enum_mismatch");
+        assert_eq!(det["warnings"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn from_dispatch_error_contract_violation() {
+        let details = crate::dispatch_error::ContractViolationDetails {
+            errors: vec![crate::dispatch_error::ContractViolationEntry {
+                path: "launch.mode".to_string(),
+                code: "missing_required_field".to_string(),
+                expected: "a string".to_string(),
+                found: "<missing>".to_string(),
+            }],
+            warnings: vec![crate::dispatch_error::ContractViolationEntry {
+                path: "extra".to_string(),
+                code: "unexpected_field".to_string(),
+                expected: "<none>".to_string(),
+                found: "present".to_string(),
+            }],
+        };
+        let de = crate::dispatch_error::DispatchError::ComposedValueContractViolation {
+            canonical_ref: "directive:foo/bar".to_string(),
+            error_count: 1,
+            warning_count: 1,
+            details,
+        };
+        let p = StructuredErrorPayload::from(&de);
+        assert_eq!(p.code, "contract_violation");
+        let v = p.to_value();
+        assert!(v.get("details").is_some());
+        assert_eq!(v["details"]["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(v["details"]["warnings"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn from_dispatch_error_generic_has_no_details() {
+        let de =
+            crate::dispatch_error::DispatchError::InvalidRef("x".to_string(), "bad".to_string());
+        let p = StructuredErrorPayload::from(&de);
+        assert_eq!(p.code, "invalid_ref");
+        assert!(p.details.is_none());
     }
 }

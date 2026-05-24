@@ -20,9 +20,11 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let principal_id = state.identity.principal_id();
     let fingerprint = state.identity.fingerprint().to_string();
+    let site_id = state.threads.site_id().to_string();
     let mut resp = serde_json::json!({
         "principal_id": principal_id,
         "fingerprint": fingerprint,
+        "site_id": site_id,
     });
     if let Some(ref vfp) = state.vault_fingerprint {
         resp["vault_fingerprint"] = Value::String(vfp.clone());

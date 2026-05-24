@@ -98,6 +98,83 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path)
                 .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
+        // ── Phase 0: preflight composition validation ───────────────
+        // Run the resolution pipeline for the root item before spawning
+        // the background dispatch task. If composition validation fails,
+        // the error is caught here and emitted as a structured
+        // `stream_error` SSE event rather than crashing the background
+        // task with an unstructured internal error.
+        {
+            let engine = &ctx.state.engine;
+            let effective_parsers = engine
+                .effective_parser_dispatcher(Some(project_path.as_path()))
+                .map_err(|e| RouteDispatchError::BadRequest(format!("parser dispatcher: {e}")))?;
+            let engine_roots = engine.resolution_roots(Some(project_path.as_path().to_path_buf()));
+
+            let root_canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(req.item_ref.as_str())
+                .map_err(|e| RouteDispatchError::BadRequest(format!("invalid item_ref: {e}")))?;
+
+            if let Err(
+                ryeos_engine::resolution::ResolutionError::ComposedValueContractViolation {
+                    item_ref,
+                    report,
+                    ..
+                },
+            ) = ryeos_engine::resolution::run_resolution_pipeline(
+                &root_canonical,
+                &engine.kinds,
+                &effective_parsers,
+                &engine_roots,
+                &engine.trust_store,
+                &engine.composers,
+            ) {
+                // Return a "pre-spawn" stream error via the
+                // error_envelope helper. This is NOT a background task
+                // failure — it's a synchronous preflight rejection.
+                // The SSE stream will emit a single stream_error event.
+                use ryeos_executor::dispatch_error::ContractViolationDetails;
+                let details = ContractViolationDetails::from_report(&report);
+                let error_count = report.errors.len();
+                let warning_count = report.warnings.len();
+                let mut payload = serde_json::to_value(
+                    ryeos_executor::structured_error::StructuredErrorPayload::contract_violation(
+                        format!(
+                            "contract violation: `{item_ref}` ({error_count} error(s), {warning_count} warning(s))"
+                        ),
+                        details,
+                    ),
+                )
+                .expect("payload serializes");
+                // Remove code/error so error_envelope_with adds them.
+                if let Some(map) = payload.as_object_mut() {
+                    map.remove("code");
+                    map.remove("error");
+                }
+
+                let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+                let stream = async_stream::stream! {
+                    yield Ok(
+                        RouteStreamEnvelope::new(
+                            "stream_started",
+                            serde_json::json!({"thread_id": thread_id}),
+                        )
+                    );
+                    yield Ok(error_envelope_with(
+                        "contract_violation",
+                        &format!(
+                            "contract violation: `{item_ref}` ({error_count} error(s), {warning_count} warning(s))"
+                        ),
+                        Some(payload),
+                    ));
+                };
+
+                return Ok(RouteInvocationResult::Stream(RouteEventStream {
+                    events: Box::pin(stream),
+                    keep_alive_secs: self.keep_alive_secs,
+                }));
+            }
+        }
+
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 
         let principal_id = ctx
