@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:24Z:53a494c89712bbf6188a0754e06db28d7020d59577ee244f4ded1824f79dad48:jGD6C/t8seZNaEfYFT4WcEL6AlWTY20YumidF8fwOleU3kasj4x+gPqa/F68uZavy0iONoxyJNiIZQKfeMTeCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-24T11:43:17Z:85d41da19899653eba5393c36f6506b60f1deb2364c7d6c7806e05a9762bcfef:iHTsDbiKyEE1wN2e7l6EhGX5kN3rObqZHBXa2WsXcXDNuRZafvYlQMwN1/m3MYYqLnKEhX+rcF5fNIR9RxUxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/client"
 version: "1.0.0"
 location:
@@ -21,9 +21,22 @@ composed_value_contract:
     launch:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          mode: { type: single, prim: string, enum: [cli_exec, daemon_ui] }
+          binary_ref: { type: single, prim: string }
+        optional:
+          args: { type: single, prim: mapping }
     serves:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          kind: { type: single, prim: string }
+        optional:
+          renderer: { type: single, prim: string }
   optional:
     version:
       type: single

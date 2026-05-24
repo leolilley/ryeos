@@ -78,19 +78,80 @@ pub enum RouteDispatchError {
     BadRequest(String),
     #[error("internal: {0}")]
     Internal(String),
+    /// Structured error with a pre-built JSON body.
+    /// The stable code is carried through the route boundary for
+    /// dispatchers/observability; the body is emitted as-is and should
+    /// include the public `error_code` field. Status is derived from
+    /// context (currently always 400).
+    #[error("structured error: {code}")]
+    Structured { code: String, body: serde_json::Value },
 }
 
 impl axum::response::IntoResponse for RouteDispatchError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
-        let (status, message) = match &self {
-            Self::NotFound => (StatusCode::NOT_FOUND, "not found"),
-            Self::BadLastEventId => (StatusCode::BAD_REQUEST, "bad Last-Event-ID header"),
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.as_str()),
-            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.as_str()),
-            Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.as_str()),
-        };
-        (status, axum::Json(serde_json::json!({ "error": message }))).into_response()
+        match self {
+            Self::Structured { body, .. } => {
+                // The body is a pre-built JSON object (always an object,
+                // never a bare string). Emit it as 400 Bad Request.
+                (StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
+            }
+            Self::NotFound => {
+                (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": "not found" }))).into_response()
+            }
+            Self::BadLastEventId => {
+                (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "bad Last-Event-ID header" }))).into_response()
+            }
+            Self::Unauthorized => {
+                (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "unauthorized" }))).into_response()
+            }
+            Self::Forbidden(msg) => {
+                (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+            }
+            Self::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+            }
+            Self::Internal(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    use super::RouteDispatchError;
+
+    #[tokio::test]
+    async fn structured_error_response_emits_body_as_is() {
+        let body = json!({
+            "error": "contract_violation: `surface:test` (1 error, 0 warnings)",
+            "error_code": "contract_violation",
+            "details": {
+                "errors": [{
+                    "path": "launch.mode",
+                    "code": "enum_mismatch",
+                    "expected": "one of [\"cli_exec\", \"daemon_ui\"]",
+                    "found": "\"ladnch_browser\"",
+                }],
+                "warnings": [],
+            },
+        });
+
+        let response = RouteDispatchError::Structured {
+            code: "contract_violation".into(),
+            body: body.clone(),
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(actual, body);
     }
 }

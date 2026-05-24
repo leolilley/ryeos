@@ -2351,6 +2351,7 @@ dependencies = [
  "rand 0.8.5",
  "ryeos-engine",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "tracing",

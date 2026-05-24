@@ -442,19 +442,35 @@ fn run_bundle_verify(
         user_root.as_deref(),
     )?;
 
-    ryeos_bundle::preflight::preflight_verify_bundle_in_context(
+    let preflight_report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         &source_path,
         &dependency_roots,
         user_root.as_deref(),
     )
     .context("bundle verify failed")?;
 
+    let warnings: Vec<serde_json::Value> = preflight_report
+        .warnings
+        .iter()
+        .map(|warning| {
+            serde_json::json!({
+                "item_path": warning.item_path,
+                "severity": "warning",
+                "code": warning.code.to_string(),
+                "path": warning.path,
+                "expected": warning.expected,
+                "found": warning.found,
+            })
+        })
+        .collect();
+
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "source": source_path,
             "status": "verified",
-            "detail": "all items pass signature and metadata validation"
+            "detail": "all items pass signature, metadata, and applicable contract validation",
+            "warnings": warnings,
         }))?
     );
     Ok(())

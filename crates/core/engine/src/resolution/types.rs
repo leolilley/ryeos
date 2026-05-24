@@ -371,6 +371,16 @@ pub enum ResolutionError {
         step: ResolutionStepName,
         reason: String,
     },
+    /// The composed value violates the kind's `composed_value_contract`.
+    ///
+    /// Carries the full `InstanceValidationReport` so consumers can
+    /// render per-field diagnostics. Warnings are included but do
+    /// **not** block resolution — only errors cause this variant.
+    ComposedValueContractViolation {
+        kind: String,
+        item_ref: String,
+        report: crate::contracts::InstanceValidationReport,
+    },
 }
 
 impl std::fmt::Display for ResolutionError {
@@ -425,6 +435,19 @@ impl std::fmt::Display for ResolutionError {
             }
             ResolutionError::StepFailed { step, reason } => {
                 write!(f, "{} failed: {}", step, reason)
+            }
+            ResolutionError::ComposedValueContractViolation {
+                kind: _,
+                item_ref,
+                report,
+            } => {
+                write!(
+                    f,
+                    "composed value for {} violates contract ({} errors, {} warnings)",
+                    item_ref,
+                    report.errors.len(),
+                    report.warnings.len(),
+                )
             }
         }
     }

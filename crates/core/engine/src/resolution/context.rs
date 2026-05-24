@@ -197,6 +197,31 @@ impl<'a> ResolutionContext<'a> {
             &self.ancestor_parsed,
         )?;
 
+        // ── Post-composition instance validation ──────────────────
+        // Validate the composed value against the kind's
+        // `composed_value_contract`. Errors block resolution; warnings
+        // are carried on the error for callers that want them but do
+        // not themselves block.
+        //
+        // The kind schema must exist: the pipeline already resolved the
+        // kind to reach this point, and `compose()` used the same
+        // registry lookup. A missing schema here is an internal bug.
+        let kind_schema = self
+            .kinds
+            .get(kind)
+            .expect("kind schema must exist: pipeline already resolved this kind");
+        let report =
+            kind_schema
+                .composed_value_contract
+                .validate_instance(&composed.composed);
+        if !report.is_ok() {
+            return Err(ResolutionError::ComposedValueContractViolation {
+                kind: kind.to_string(),
+                item_ref: self.current_ref.to_string(),
+                report,
+            });
+        }
+
         Ok(ResolutionOutput {
             root: self.root_ancestor,
             ancestors: self.ancestors,

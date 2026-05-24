@@ -31,6 +31,18 @@ pub enum HandlerError {
     /// Internal server error. Maps to 500.
     #[error("internal: {0}")]
     Internal(String),
+
+    /// Structured error with a machine-readable JSON payload.
+    /// The `code` is a stable string clients can branch on;
+    /// `body` is the full response object (always an object).
+    /// Maps to the HTTP status encoded in `code` semantics
+    /// (typically 400 for validation errors).
+    ///
+    /// This variant exists so handlers can return richer error
+    /// payloads (e.g. per-field validation details) without
+    /// flattening everything into a plain string.
+    #[error("structured error: {code}")]
+    Structured { code: String, body: serde_json::Value },
 }
 
 /// Convenience alias for handler return types.

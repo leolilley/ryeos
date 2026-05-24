@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:24Z:ac661ea9d5d9ce0e469bb4d76e862d91347a5e9f6774752b18caa62a42a37ddc:gUOrlvl9BtDwMPYa9PrtES3r31yv0KojgncpEdhEWUpAen/hu2X4YL/c5K4PuIVXqzE502WEgOT/18NEhsCYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-24T11:43:14Z:f19de894352c1d4374d09d3aaf242aaedf0bfda074f5eafeb9af1f4cf5c3ec31:7zeFAksStMON11hPvVJWXZIGbhC8ErpVlgpG+wsqX01YB/QIUSSRL3Xu+UnPxOBxK43s9kWEc/ePowKlYmNgAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -24,7 +24,22 @@ formats:
 composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
-  required: {}
+  required:
+    endpoint: { type: single, prim: string }
+  optional:
+    name: { type: single, prim: string }
+    version: { type: single, prim: string }
+    availability:
+      type: single
+      prim: string
+      enum: [both, daemon_only, offline]
+    offline_execute: { type: single, prim: string }
+    required_caps:
+      type: single
+      prim: sequence
+      elements: { type: single, prim: string }
+    description: { type: single, prim: string }
+    schema: { type: single, prim: mapping }
 metadata:
   rules:
     name:

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use std::sync::Arc;
 
-use ryeos_engine::contracts::SignatureEnvelope;
+use ryeos_engine::contracts::{InstanceViolationCode, SignatureEnvelope};
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::KindRegistry;
@@ -12,6 +12,103 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use crate::manifest::{derive_provides_kinds, BundleManifest};
+
+const IDENTITY_COMPOSER: &str = "handler:ryeos/core/identity";
+
+/// Severity of a preflight validation issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightIssueSeverity {
+    /// Blocking — bundle verification fails.
+    Error,
+    /// Non-blocking — informational for authors.
+    Warning,
+}
+
+/// A single validation issue found during bundle preflight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightIssue {
+    /// Relative path of the item within the bundle (e.g. `tools/my_tool.py`).
+    pub item_path: String,
+    /// Whether this blocks verification.
+    pub severity: PreflightIssueSeverity,
+    /// Machine-readable violation code.
+    pub code: InstanceViolationCode,
+    /// Dot-separated path within the item value (e.g. `launch.mode`).
+    pub path: String,
+    /// Human-readable description of what was expected.
+    pub expected: String,
+    /// Human-readable description of what was found.
+    pub found: String,
+}
+
+/// Warnings collected during a successful preflight verification.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreflightReport {
+    /// Non-blocking issues (e.g. unknown fields with strict_fields: warn).
+    pub warnings: Vec<PreflightIssue>,
+}
+
+impl PreflightReport {
+    /// Returns true if there are no warnings.
+    pub fn is_clean(&self) -> bool {
+        self.warnings.is_empty()
+    }
+}
+
+/// Collect instance validation issues for identity-composed kinds.
+///
+/// Returns an empty vec for non-identity composers (extends-based kinds
+/// are validated post-composition in the resolution pipeline).
+fn collect_identity_contract_issues(
+    item_rel: &Path,
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    parsed: &serde_json::Value,
+) -> Vec<PreflightIssue> {
+    if kind_schema.composer != IDENTITY_COMPOSER {
+        return Vec::new();
+    }
+
+    let item_path = item_rel.to_string_lossy().to_string();
+
+    let report = kind_schema
+        .composed_value_contract
+        .validate_instance(parsed);
+
+    let mut issues = Vec::with_capacity(report.errors.len() + report.warnings.len());
+    for v in &report.errors {
+        issues.push(PreflightIssue {
+            item_path: item_path.clone(),
+            severity: PreflightIssueSeverity::Error,
+            code: v.code.clone(),
+            path: v.path.clone(),
+            expected: v.expected.clone(),
+            found: v.found.clone(),
+        });
+    }
+    for v in &report.warnings {
+        issues.push(PreflightIssue {
+            item_path: item_path.clone(),
+            severity: PreflightIssueSeverity::Warning,
+            code: v.code.clone(),
+            path: v.path.clone(),
+            expected: v.expected.clone(),
+            found: v.found.clone(),
+        });
+    }
+    issues
+}
+
+/// Format a preflight issue as a human-readable string.
+fn format_preflight_issue(issue: &PreflightIssue) -> String {
+    let label = match issue.severity {
+        PreflightIssueSeverity::Error => "contract violation",
+        PreflightIssueSeverity::Warning => "contract warning",
+    };
+    format!(
+        "{}: {} [{}] {}: expected {}, found {}",
+        issue.item_path, label, issue.code, issue.path, issue.expected, issue.found,
+    )
+}
 
 pub fn preflight_verify_bundle(
     source_path: &Path,
@@ -36,6 +133,40 @@ pub fn preflight_verify_bundle_in_context(
     dependency_bundle_roots: &[PathBuf],
     user_root: Option<&Path>,
 ) -> Result<()> {
+    let _report = preflight_verify_bundle_report_in_context(
+        source_path,
+        dependency_bundle_roots,
+        user_root,
+    )?;
+    Ok(())
+}
+
+/// Like [`preflight_verify_bundle_in_context`] but returns a
+/// [`PreflightReport`] containing non-blocking warnings on success.
+///
+/// CLI callers should use this to surface contract warnings to the user
+/// without failing verification.
+pub fn preflight_verify_bundle_report_in_context(
+    source_path: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    user_root: Option<&Path>,
+) -> Result<PreflightReport> {
+    // The core logic below populates `failures` (blocking) and
+    // `warnings` (non-blocking). We lift the loop into this function
+    // so both public APIs share a single implementation.
+    preflight_verify_bundle_in_context_inner(
+        source_path,
+        dependency_bundle_roots,
+        user_root,
+    )
+}
+
+/// Core preflight logic shared by both public entry points.
+fn preflight_verify_bundle_in_context_inner(
+    source_path: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    user_root: Option<&Path>,
+) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     if !ai_dir.is_dir() {
         bail!("preflight: source has no .ai/ at {}", source_path.display());
@@ -137,6 +268,7 @@ pub fn preflight_verify_bundle_in_context(
     let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
 
     let mut failures: Vec<String> = Vec::new();
+    let mut warnings: Vec<PreflightIssue> = Vec::new();
     for kind_name in kinds.kinds() {
         let kind_schema = match kinds.get(kind_name) {
             Some(s) => s,
@@ -238,6 +370,27 @@ pub fn preflight_verify_bundle_in_context(
                     continue;
                 }
             }
+
+            // ── Instance validation (identity-composed kinds only) ──
+            // For kinds using the identity composer, the parsed value IS
+            // the composed value, so we can validate it directly against
+            // the kind's `composed_value_contract`. Extends-based kinds
+            // are validated post-composition in the resolution pipeline
+            // (Slice 2), so we skip them here.
+            for issue in collect_identity_contract_issues(
+                rel,
+                kind_schema,
+                &parsed,
+            ) {
+                match issue.severity {
+                    PreflightIssueSeverity::Error => {
+                        failures.push(format_preflight_issue(&issue));
+                    }
+                    PreflightIssueSeverity::Warning => {
+                        warnings.push(issue);
+                    }
+                }
+            }
         }
     }
 
@@ -255,11 +408,19 @@ pub fn preflight_verify_bundle_in_context(
     verify_manifest_signature(&ai_dir, source_path, &trust_store)
         .context("preflight: bundle manifest verification")?;
 
-    tracing::info!(
-        source = %source_path.display(),
-        "preflight verification passed"
-    );
-    Ok(())
+    if !warnings.is_empty() {
+        tracing::info!(
+            source = %source_path.display(),
+            warnings_count = warnings.len(),
+            "preflight verification passed with warnings"
+        );
+    } else {
+        tracing::info!(
+            source = %source_path.display(),
+            "preflight verification passed"
+        );
+    }
+    Ok(PreflightReport { warnings })
 }
 
 pub fn verify_manifest_signature(
@@ -362,6 +523,7 @@ mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
+    use std::os::unix::fs::PermissionsExt;
 
     struct BundleLayout {
         _tmp: tempfile::TempDir,
@@ -435,6 +597,165 @@ mod tests {
             let tampered = signed.replace("version: '1.0'", "version: '9.9'");
             fs::write(self.ai_dir.join("manifest.yaml"), &tampered).unwrap();
         }
+
+        fn sign_and_write(&self, rel: &str, body: &str) {
+            let path = self.ai_dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let signed = lillux::signature::sign_content(body, &self.signing_key, "#", None);
+            fs::write(path, signed).unwrap();
+        }
+
+        fn add_signed_kind_schema(&self, kind_name: &str, body: &str) {
+            self.sign_and_write(
+                &format!("node/engine/kinds/{kind_name}/{kind_name}.kind-schema.yaml"),
+                body,
+            );
+        }
+
+        fn add_test_parser_kind_schema(&self) {
+            self.add_signed_kind_schema(
+                "parser",
+                &format!(r##"location:
+  directory: parsers
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:test/fixed/fixed
+    signature:
+      prefix: "#"
+effective_trust:
+  include_references: false
+resolution: []
+composer: {IDENTITY_COMPOSER}
+composed_value_contract:
+  root_type: mapping
+  required: {{}}
+"##),
+            );
+        }
+
+        fn add_test_item_kind_schema(&self, composer: &str, contract: &str) {
+            self.add_signed_kind_schema(
+                "mykind",
+                &format!(
+                    r##"location:
+  directory: items
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:test/fixed/fixed
+    signature:
+      prefix: "#"
+effective_trust:
+  include_references: false
+resolution: []
+composer: {composer}
+composed_value_contract:
+{contract}
+"##
+                ),
+            );
+        }
+
+        fn add_fixed_parser_descriptor(&self) {
+            self.sign_and_write(
+                "parsers/test/fixed/fixed.yaml",
+                r#"version: "1.0.0"
+description: "fixed parser for preflight tests"
+handler: "handler:test/fixed-parser"
+parser_api_version: 1
+parser_config: {}
+output_schema:
+  root_type: mapping
+  required: {}
+"#,
+            );
+        }
+
+        fn add_fixed_parser_handler(&self, value: serde_json::Value) {
+            let triple = host_triple();
+            let name = "fixed-parser";
+            let bin_rel = format!("bin/{triple}/{name}");
+            let bin_path = self.ai_dir.join(&bin_rel);
+            fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
+
+            let response = serde_json::json!({
+                "result": "parse_ok",
+                "value": value,
+            })
+            .to_string();
+            let script = format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{response}'\n");
+            fs::write(&bin_path, script.as_bytes()).unwrap();
+            let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&bin_path, perms).unwrap();
+
+            self.sign_and_write(
+                "handlers/test/fixed-parser.yaml",
+                &format!(
+                    r#"category: test
+name: fixed-parser
+kind: handler
+serves: parser
+binary_ref: {bin_rel}
+abi_version: "v1"
+required_caps: []
+description: "fixed parser handler for preflight tests"
+"#
+                ),
+            );
+            self.write_binary_manifest(&bin_rel, &bin_path);
+        }
+
+        fn write_binary_manifest(&self, item_ref: &str, bin_path: &Path) {
+            let cas = lillux::cas::CasStore::new(self.ai_dir.join("objects"));
+            let bytes = fs::read(bin_path).unwrap();
+            let blob_hash = cas.store_blob(&bytes).unwrap();
+            let fingerprint = ryeos_engine::trust::compute_fingerprint(
+                &self.signing_key.verifying_key(),
+            );
+            let item_source = serde_json::json!({
+                "item_ref": item_ref,
+                "content_blob_hash": blob_hash,
+                "integrity": format!("sha256:{blob_hash}"),
+                "signature_info": { "fingerprint": fingerprint },
+                "mode": 0o755,
+            });
+            let item_source_hash = cas.store_object(&item_source).unwrap();
+            let manifest = serde_json::json!({
+                "item_source_hashes": {
+                    item_ref: item_source_hash,
+                }
+            });
+            let manifest_hash = cas.store_object(&manifest).unwrap();
+            let manifest_ref = self.ai_dir.join("refs/bundles/manifest");
+            fs::create_dir_all(manifest_ref.parent().unwrap()).unwrap();
+            fs::write(manifest_ref, manifest_hash).unwrap();
+        }
+
+        fn write_signed_item(&self, rel: &str, body: &str) {
+            self.sign_and_write(rel, body);
+        }
+    }
+
+    fn host_triple() -> String {
+        let output = std::process::Command::new("rustc")
+            .args(["-vV"])
+            .output()
+            .expect("rustc -vV");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .lines()
+            .find(|l| l.starts_with("host:"))
+            .expect("host triple in rustc -vV")
+            .strip_prefix("host:")
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    fn indented_contract(body: &str) -> String {
+        body.lines()
+            .map(|line| format!("  {line}\n"))
+            .collect::<String>()
     }
 
     #[test]
@@ -547,4 +868,347 @@ mod tests {
             "no manifest should pass (optional)"
         );
     }
+
+    fn add_real_preflight_fixture(
+        layout: &BundleLayout,
+        composer: &str,
+        contract: &str,
+        parsed_value: serde_json::Value,
+    ) {
+        layout.add_test_parser_kind_schema();
+        layout.add_test_item_kind_schema(composer, &indented_contract(contract));
+        layout.add_fixed_parser_descriptor();
+        layout.add_fixed_parser_handler(parsed_value);
+        layout.write_signed_item("items/demo.yaml", "name: demo\n");
+    }
+
+    #[test]
+    fn preflight_report_real_wiring_rejects_identity_contract_error() {
+        let layout = BundleLayout::new("test-bundle");
+        add_real_preflight_fixture(
+            &layout,
+            IDENTITY_COMPOSER,
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+    enum:
+      - cli_exec
+      - daemon_ui
+optional: {}
+"#,
+            serde_json::json!({ "mode": "web_server" }),
+        );
+
+        let err = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            Some(&layout.user_root),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+
+        assert!(msg.contains("contract violation [enum_mismatch]"), "error: {msg}");
+        assert!(msg.contains("items/demo.yaml"), "item path: {msg}");
+        assert!(msg.contains("mode"), "field path: {msg}");
+    }
+
+    #[test]
+    fn preflight_report_real_wiring_skips_non_identity_contract_error() {
+        let layout = BundleLayout::new("test-bundle");
+        add_real_preflight_fixture(
+            &layout,
+            "handler:ryeos/core/extends-chain",
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+optional: {}
+"#,
+            serde_json::json!({ "other": "stuff" }),
+        );
+
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            Some(&layout.user_root),
+        )
+        .expect("non-identity composer should skip pre-composition contract validation");
+
+        assert!(report.is_clean(), "no warnings expected: {report:?}");
+    }
+
+    #[test]
+    fn preflight_report_real_wiring_returns_contract_warnings() {
+        let layout = BundleLayout::new("test-bundle");
+        add_real_preflight_fixture(
+            &layout,
+            IDENTITY_COMPOSER,
+            r#"root_type: mapping
+required:
+  body:
+    type: single
+    prim: string
+optional: {}
+strict_fields: warn
+"#,
+            serde_json::json!({ "body": "hello", "extra": "field" }),
+        );
+
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            Some(&layout.user_root),
+        )
+        .expect("warnings should not fail preflight");
+
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].severity, PreflightIssueSeverity::Warning);
+        assert_eq!(report.warnings[0].code, InstanceViolationCode::UnexpectedField);
+        assert_eq!(report.warnings[0].item_path, "items/demo.yaml");
+        assert_eq!(report.warnings[0].path, "extra");
+    }
+
+    // ── Slice 3 follow-up: Contract diagnostics wiring tests ──────
+
+    /// Helper: build a minimal `ValueShape` from YAML for tests.
+    fn shape_from_yaml(yaml: &str) -> ryeos_engine::contracts::ValueShape {
+        serde_yaml::from_str(yaml).expect("test contract YAML must parse")
+    }
+
+    /// Helper: build a minimal KindSchema for identity-composer tests.
+    fn identity_kind_schema(contract_yaml: &str) -> ryeos_engine::kind_registry::KindSchema {
+        ryeos_engine::kind_registry::KindSchema {
+            directory: "tools".to_string(),
+            extensions: vec![],
+            extraction_rules: std::collections::HashMap::new(),
+            resolution: vec![],
+            effective_trust: ryeos_engine::kind_registry::EffectiveTrustPolicy {
+                include_references: false,
+            },
+            execution: None,
+            composed_value_contract: shape_from_yaml(contract_yaml),
+            composer: IDENTITY_COMPOSER.to_string(),
+            composer_config: serde_json::Value::Null,
+            runtime: None,
+            inventory_kinds: vec![],
+            inventory_schema_keys: vec![],
+        }
+    }
+
+    /// Helper: build a minimal KindSchema for non-identity (extends) composer.
+    fn extends_kind_schema(contract_yaml: &str) -> ryeos_engine::kind_registry::KindSchema {
+        let mut schema = identity_kind_schema(contract_yaml);
+        schema.composer = "handler:ryeos/core/extends-chain".to_string();
+        schema
+    }
+
+    // ── Tests for collect_identity_contract_issues ────────────────
+
+    #[test]
+    fn collect_issues_returns_errors_for_invalid_enum() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+    enum:
+      - cli_exec
+      - daemon_ui
+optional: {}
+"#,
+        );
+        let value = serde_json::json!({ "mode": "web_server" });
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity, PreflightIssueSeverity::Error);
+        assert_eq!(issues[0].code, InstanceViolationCode::EnumMismatch);
+        assert_eq!(issues[0].path, "mode");
+        assert_eq!(issues[0].item_path, "tools/my_tool.py");
+        assert!(issues[0].found.contains("web_server"));
+    }
+
+    #[test]
+    fn collect_issues_returns_nested_dotted_path() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  launch:
+    type: single
+    prim: mapping
+    contract:
+      root_type: mapping
+      required:
+        mode:
+          type: single
+          prim: string
+          enum:
+            - cli_exec
+            - daemon_ui
+      optional: {}
+optional: {}
+"#,
+        );
+        let value = serde_json::json!({ "launch": {} });
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity, PreflightIssueSeverity::Error);
+        assert_eq!(issues[0].code, InstanceViolationCode::MissingRequiredField);
+        assert_eq!(issues[0].path, "launch.mode");
+    }
+
+    #[test]
+    fn collect_issues_skips_non_identity_composer() {
+        let kind_schema = extends_kind_schema(
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+optional: {}
+"#,
+        );
+        let value = serde_json::json!({ "other": "stuff" });
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("directives/my_directive.md"),
+            &kind_schema,
+            &value,
+        );
+
+        assert!(issues.is_empty(), "non-identity composer should produce no issues");
+    }
+
+    #[test]
+    fn collect_issues_returns_warnings_for_strict_fields() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  body:
+    type: single
+    prim: string
+optional: {}
+strict_fields: warn
+"#,
+        );
+        let value = serde_json::json!({ "body": "hello", "extra": "field" });
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity, PreflightIssueSeverity::Warning);
+        assert_eq!(issues[0].code, InstanceViolationCode::UnexpectedField);
+        assert_eq!(issues[0].path, "extra");
+    }
+
+    #[test]
+    fn collect_issues_returns_nothing_for_valid_descriptor() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+    enum:
+      - cli_exec
+      - daemon_ui
+optional:
+  timeout:
+    type: single
+    prim: integer
+strict_fields: warn
+"#,
+        );
+        let value = serde_json::json!({ "mode": "cli_exec", "timeout": 30 });
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
+
+        assert!(issues.is_empty(), "valid descriptor should produce no issues");
+    }
+
+    // ── Tests for format_preflight_issue ─────────────────────────────
+
+    #[test]
+    fn format_issue_includes_all_fields() {
+        let issue = PreflightIssue {
+            item_path: "tools/my_tool.py".to_string(),
+            severity: PreflightIssueSeverity::Error,
+            code: InstanceViolationCode::EnumMismatch,
+            path: "launch.mode".to_string(),
+            expected: "cli_exec, daemon_ui".to_string(),
+            found: "web_server".to_string(),
+        };
+        let formatted = format_preflight_issue(&issue);
+        assert!(formatted.contains("tools/my_tool.py"), "item_path: {formatted}");
+        assert!(formatted.contains("contract violation"), "label: {formatted}");
+        assert!(formatted.contains("enum_mismatch"), "code: {formatted}");
+        assert!(formatted.contains("launch.mode"), "path: {formatted}");
+        assert!(formatted.contains("cli_exec"), "expected: {formatted}");
+        assert!(formatted.contains("web_server"), "found: {formatted}");
+    }
+
+    #[test]
+    fn format_issue_uses_warning_label_for_warnings() {
+        let issue = PreflightIssue {
+            item_path: "tools/my_tool.py".to_string(),
+            severity: PreflightIssueSeverity::Warning,
+            code: InstanceViolationCode::UnexpectedField,
+            path: "extra".to_string(),
+            expected: "known field".to_string(),
+            found: "string".to_string(),
+        };
+        let formatted = format_preflight_issue(&issue);
+        assert!(formatted.contains("contract warning"), "should use warning label: {formatted}");
+        assert!(!formatted.contains("contract violation"), "should not use error label: {formatted}");
+    }
+
+    // ── Tests for PreflightReport ────────────────────────────────────
+
+    #[test]
+    fn preflight_report_is_clean_when_empty() {
+        let report = PreflightReport::default();
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn preflight_report_is_dirty_with_warnings() {
+        let report = PreflightReport {
+            warnings: vec![PreflightIssue {
+                item_path: "tools/x.py".to_string(),
+                severity: PreflightIssueSeverity::Warning,
+                code: InstanceViolationCode::UnexpectedField,
+                path: "extra".to_string(),
+                expected: "known field".to_string(),
+                found: "string".to_string(),
+            }],
+        };
+        assert!(!report.is_clean());
+        assert_eq!(report.warnings.len(), 1);
+    }
+
+    // NOTE: Real preflight wiring tests (calling
+    // `preflight_verify_bundle_in_context` directly with temp bundle
+    // fixtures) require parser binaries installed in the worktree.
+    // These will be validated in CI. The tests above exercise the
+    // production helper functions (`collect_identity_contract_issues`,
+    // `format_preflight_issue`) and public types (`PreflightIssue`,
+    // `PreflightReport`) that the real wiring calls.
 }
