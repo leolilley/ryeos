@@ -300,6 +300,35 @@ impl RemoteClient {
         self.signed_post("/execute", &body).await
     }
 
+    /// POST /execute with full request options (operation, inputs).
+    ///
+    /// This is the extended variant used by target-site forwarding
+    /// which needs to forward operation and inputs fields that the
+    /// basic `execute()` method does not support.
+    pub async fn execute_with_options(
+        &self,
+        item_ref: &str,
+        project_path: &str,
+        parameters: &Value,
+        project_source: &str,
+        operation: Option<&str>,
+        inputs: Option<&Value>,
+    ) -> Result<Value> {
+        let mut body = serde_json::json!({
+            "item_ref": item_ref,
+            "project_path": project_path,
+            "parameters": parameters,
+            "project_source": { "kind": project_source },
+        });
+        if let Some(op) = operation {
+            body["operation"] = Value::String(op.to_string());
+        }
+        if let Some(inputs) = inputs {
+            body["inputs"] = inputs.clone();
+        }
+        self.signed_post("/execute", &body).await
+    }
+
     /// POST /authorize-key (authenticated).
     ///
     /// Authorize a public key on the remote node with the given
