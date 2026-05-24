@@ -78,19 +78,40 @@ pub enum RouteDispatchError {
     BadRequest(String),
     #[error("internal: {0}")]
     Internal(String),
+    /// Structured error with a pre-built JSON body.
+    /// The body is emitted as-is; status is derived from context
+    /// (currently always 400).
+    #[error("structured error")]
+    Structured(serde_json::Value),
 }
 
 impl axum::response::IntoResponse for RouteDispatchError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
-        let (status, message) = match &self {
-            Self::NotFound => (StatusCode::NOT_FOUND, "not found"),
-            Self::BadLastEventId => (StatusCode::BAD_REQUEST, "bad Last-Event-ID header"),
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.as_str()),
-            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.as_str()),
-            Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.as_str()),
-        };
-        (status, axum::Json(serde_json::json!({ "error": message }))).into_response()
+        match self {
+            Self::Structured(body) => {
+                // The body is a pre-built JSON object (always an object,
+                // never a bare string). Emit it as 400 Bad Request.
+                (StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
+            }
+            Self::NotFound => {
+                (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": "not found" }))).into_response()
+            }
+            Self::BadLastEventId => {
+                (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": "bad Last-Event-ID header" }))).into_response()
+            }
+            Self::Unauthorized => {
+                (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "error": "unauthorized" }))).into_response()
+            }
+            Self::Forbidden(msg) => {
+                (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+            }
+            Self::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+            }
+            Self::Internal(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+            }
+        }
     }
 }

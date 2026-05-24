@@ -16,8 +16,31 @@
 //! | `untrusted:` | 403 | Signer not in trust store |
 //! | `composition_failed:` | 400 | Composer chain error |
 //! | `parse_failed:` | 400 | Parser produced invalid output |
+//! | `contract_violation:` | 400 | Structured envelope — see below |
 //! | (none) | 404 | Item not found in any space |
 //! | (none) | 500 | Unexpected internal error |
+//!
+//! ## Contract violation envelope
+//!
+//! When the composed value fails validation against the kind's contract,
+//! the response is a structured JSON object:
+//!
+//! ```text
+//! {
+//!   "error": "<summary message>",
+//!   "error_code": "contract_violation",
+//!   "details": {
+//!     "errors": [
+//!       { "path": "<field>", "code": "<code>", "expected": "<...>", "found": "<...>" },
+//!       ...
+//!     ],
+//!     "warnings": [
+//!       { "path": "<field>", "code": "<code>", "expected": "<...>", "found": "<...>" },
+//!       ...
+//!     ]
+//!   }
+//! }
+//! ```
 
 use std::sync::Arc;
 
@@ -90,6 +113,42 @@ fn map_engine_error(e: EngineError) -> HandlerError {
         EngineError::EffectiveItemParseFailed { reason, .. } => {
             HandlerError::BadRequest(format!("parse_failed: {reason}"))
         }
+        EngineError::ComposedValueContractViolation { canonical_ref, report } => {
+            let error_count = report.errors.len();
+            let warn_count = report.warnings.len();
+            let summary = format!(
+                "contract_violation: `{canonical_ref}` ({error_count} error{s}, {warn_count} warning{s})",
+                s = if error_count == 1 { "" } else { "s" },
+            );
+
+            let violations_to_json = |violations: &[ryeos_engine::contracts::InstanceViolation]| {
+                violations
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "path": v.path,
+                            "code": v.code.to_string(),
+                            "expected": v.expected,
+                            "found": v.found,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let body = serde_json::json!({
+                "error": summary,
+                "error_code": "contract_violation",
+                "details": {
+                    "errors": violations_to_json(&report.errors),
+                    "warnings": violations_to_json(&report.warnings),
+                }
+            });
+
+            HandlerError::Structured {
+                code: "contract_violation".into(),
+                body,
+            }
+        }
         _ => HandlerError::Internal(e.to_string()),
     }
 }
@@ -106,3 +165,116 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use ryeos_engine::contracts::{InstanceValidationReport, InstanceViolation, InstanceViolationCode};
+    use ryeos_engine::error::EngineError;
+
+    use super::map_engine_error;
+
+    fn violation(path: &str, code: InstanceViolationCode, expected: &str, found: &str) -> InstanceViolation {
+        InstanceViolation {
+            path: path.to_string(),
+            code,
+            expected: expected.to_string(),
+            found: found.to_string(),
+        }
+    }
+
+    #[test]
+    fn contract_violation_maps_to_structured_error() {
+        let report = InstanceValidationReport {
+            errors: vec![
+                violation("launch.mode", InstanceViolationCode::EnumMismatch, "one of [\"managed\", \"edge\"]", "\"local\""),
+                violation("name", InstanceViolationCode::TypeMismatch, "string", "null"),
+            ],
+            warnings: vec![
+                violation("affordances", InstanceViolationCode::UnexpectedField, "no field", "present"),
+            ],
+        };
+
+        let err = EngineError::ComposedValueContractViolation {
+            canonical_ref: "surface:ryeos/cockpit/base".into(),
+            report,
+        };
+
+        let he = map_engine_error(err);
+
+        match he {
+            crate::handler_error::HandlerError::Structured { code, body } => {
+                assert_eq!(code, "contract_violation");
+                assert_eq!(body["error_code"], "contract_violation");
+                assert!(body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("surface:ryeos/cockpit/base"));
+                assert!(body["error"].as_str().unwrap().contains("2 errors"));
+                assert!(body["error"].as_str().unwrap().contains("1 warning"));
+
+                let errors = body["details"]["errors"].as_array().unwrap();
+                assert_eq!(errors.len(), 2);
+                assert_eq!(errors[0]["path"], "launch.mode");
+                assert_eq!(errors[0]["code"], "enum_mismatch");
+                assert_eq!(errors[0]["expected"], "one of [\"managed\", \"edge\"]");
+                assert_eq!(errors[0]["found"], "\"local\"");
+                assert_eq!(errors[1]["path"], "name");
+                assert_eq!(errors[1]["code"], "type_mismatch");
+
+                let warnings = body["details"]["warnings"].as_array().unwrap();
+                assert_eq!(warnings.len(), 1);
+                assert_eq!(warnings[0]["path"], "affordances");
+                assert_eq!(warnings[0]["code"], "unexpected_field");
+            }
+            other => panic!("expected Structured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contract_violation_with_single_error_uses_singular() {
+        let report = InstanceValidationReport {
+            errors: vec![violation("name", InstanceViolationCode::TypeMismatch, "string", "null")],
+            warnings: vec![],
+        };
+
+        let err = EngineError::ComposedValueContractViolation {
+            canonical_ref: "tool:my/tool".into(),
+            report,
+        };
+
+        let he = map_engine_error(err);
+        match he {
+            crate::handler_error::HandlerError::Structured { body, .. } => {
+                let msg = body["error"].as_str().unwrap();
+                // Singular: "1 error", not "1 errors"
+                assert!(msg.contains("1 error"), "message should use singular: {msg}");
+                assert!(msg.contains("0 warnings"), "message should use plural for 0: {msg}");
+            }
+            other => panic!("expected Structured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contract_violation_empty_report() {
+        let report = InstanceValidationReport {
+            errors: vec![],
+            warnings: vec![],
+        };
+
+        let err = EngineError::ComposedValueContractViolation {
+            canonical_ref: "directive:test/x".into(),
+            report,
+        };
+
+        let he = map_engine_error(err);
+        match he {
+            crate::handler_error::HandlerError::Structured { body, .. } => {
+                let errors = body["details"]["errors"].as_array().unwrap();
+                let warnings = body["details"]["warnings"].as_array().unwrap();
+                assert!(errors.is_empty());
+                assert!(warnings.is_empty());
+            }
+            other => panic!("expected Structured, got {other:?}"),
+        }
+    }
+}
