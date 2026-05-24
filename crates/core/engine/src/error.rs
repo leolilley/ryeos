@@ -258,6 +258,12 @@ pub enum EngineError {
     #[error("kind `{kind}` is not executable (no execution block in kind schema)")]
     KindNotExecutable { kind: String },
 
+    #[error("effective item `{canonical_ref}` violates composed value contract: {report}")]
+    ComposedValueContractViolation {
+        canonical_ref: String,
+        report: crate::contracts::InstanceValidationReport,
+    },
+
     // ── Execution ────────────────────────────────────────────────────
     #[error("execution failed: {reason}")]
     ExecutionFailed { reason: String },

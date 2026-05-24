@@ -316,6 +316,20 @@ pub enum InstanceViolationCode {
     UnexpectedField,
 }
 
+impl std::fmt::Display for InstanceViolationCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RootTypeMismatch => write!(f, "root_type_mismatch"),
+            Self::MissingRequiredField => write!(f, "missing_required_field"),
+            Self::TypeMismatch => write!(f, "type_mismatch"),
+            Self::EnumMismatch => write!(f, "enum_mismatch"),
+            Self::SequenceElementMismatch => write!(f, "sequence_element_mismatch"),
+            Self::NestedViolation => write!(f, "nested_violation"),
+            Self::UnexpectedField => write!(f, "unexpected_field"),
+        }
+    }
+}
+
 /// A single violation found during instance validation. Carries a
 /// dotted path, a machine-readable code, and human-readable
 /// expected/found descriptions.
@@ -347,6 +361,24 @@ impl InstanceValidationReport {
     /// Returns true if there are no blocking errors.
     pub fn is_ok(&self) -> bool {
         self.errors.is_empty()
+    }
+}
+
+impl std::fmt::Display for InstanceValidationReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} error(s), {} warning(s)",
+            self.errors.len(),
+            self.warnings.len()
+        )?;
+        for v in &self.errors {
+            write!(f, "\n  [{}] {}: expected {}, found {}", v.code, v.path, v.expected, v.found)?;
+        }
+        for v in &self.warnings {
+            write!(f, "\n  [{}] {}: expected {}, found {}", v.code, v.path, v.expected, v.found)?;
+        }
+        Ok(())
     }
 }
 

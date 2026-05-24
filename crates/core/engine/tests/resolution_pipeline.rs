@@ -17,10 +17,13 @@ use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::ParserRegistry;
 use ryeos_engine::parsers::{ParserDescriptor, ParserDispatcher};
-use ryeos_engine::resolution::{run_resolution_pipeline, ResolutionError};
+use ryeos_engine::resolution::{
+    run_effective_item_pipeline, run_resolution_pipeline, ResolutionError,
+};
 use ryeos_engine::test_support::load_live_handler_registry;
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
-use ryeos_engine::{contracts::ItemSpace, item_resolution::ResolutionRoots};
+use ryeos_engine::contracts::{InstanceViolationCode, ItemSpace};
+use ryeos_engine::item_resolution::ResolutionRoots;
 
 fn dispatcher_for_yaml_and_markdown_directive() -> ParserDispatcher {
     use serde_json::json;
@@ -335,4 +338,201 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
     );
     assert!(output.root.raw_content.contains("pre-marker"));
     assert!(output.root.raw_content.contains("post-marker"));
+}
+
+// ── Slice 2: Post-composition instance validation ────────────────
+
+/// Helper: a "tool" kind schema whose composed_value_contract requires a
+/// `mode` field as a string enum and an optional `timeout` integer.
+const TOOL_SCHEMA_WITH_CONTRACT: &str = "\
+location:
+  directory: tools
+resolution: []
+formats:
+  - extensions: [\".py\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+effective_trust:
+  include_references: false
+composed_value_contract:
+  root_type: mapping
+  required:
+    mode: { type: single, prim: string, enum: [cli_exec, daemon_ui] }
+  optional:
+    timeout: { type: single, prim: integer }
+    extra: { type: single, prim: string }
+  strict_fields: warn
+";
+
+fn write_tool_schema(kinds_dir: &Path, schema: &str) {
+    let dir = kinds_dir.join("tool");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("tool.kind-schema.yaml"), sign_yaml(schema)).unwrap();
+}
+
+fn write_tool_item(tools_dir: &Path, name: &str, body: &str) {
+    fs::create_dir_all(tools_dir).unwrap();
+    fs::write(tools_dir.join(format!("{name}.py")), sign_yaml(body)).unwrap();
+}
+
+#[test]
+fn composition_violation_returns_typed_resolution_error() {
+    let project_dir = tempdir();
+    let kinds_dir = tempdir();
+    write_tool_schema(&kinds_dir, TOOL_SCHEMA_WITH_CONTRACT);
+
+    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store()).unwrap();
+
+    // Item is missing the required `mode` field.
+    let tools_dir = project_dir.join(".ai").join("tools");
+    write_tool_item(&tools_dir, "my_tool", "name: my_tool\nbody: hello\n");
+
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let parsers = dispatcher_for_yaml_and_markdown_directive();
+    let trust = trust_store();
+    let handlers = load_live_handler_registry();
+    let composers =
+        ComposerRegistry::from_kinds(&kinds, &handlers).expect("from_kinds must bind tool kind");
+    let item = CanonicalRef::parse("tool:my_tool").unwrap();
+
+    let err = run_effective_item_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
+        .expect_err("pipeline should fail on contract violation");
+
+    match &err {
+        ResolutionError::ComposedValueContractViolation { kind, report, .. } => {
+            assert_eq!(kind, "tool");
+            assert_eq!(report.errors.len(), 1);
+            assert_eq!(report.errors[0].code, InstanceViolationCode::MissingRequiredField);
+            assert!(report.errors[0].path.contains("mode"));
+        }
+        other => panic!("expected ComposedValueContractViolation, got: {other}"),
+    }
+}
+
+#[test]
+fn nested_violation_reports_dotted_path() {
+    let project_dir = tempdir();
+    let kinds_dir = tempdir();
+
+    // Schema with nested mapping requirement on `launch.mode`.
+    let schema = "\
+location:
+  directory: tools
+resolution: []
+formats:
+  - extensions: [\".py\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+effective_trust:
+  include_references: false
+composed_value_contract:
+  root_type: mapping
+  required:
+    launch:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          mode: { type: single, prim: string, enum: [cli_exec, daemon_ui] }
+        optional: {}
+  optional: {}
+";
+    write_tool_schema(&kinds_dir, schema);
+
+    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store()).unwrap();
+
+    // Item has `launch.mode` as an invalid enum value.
+    let tools_dir = project_dir.join(".ai").join("tools");
+    write_tool_item(
+        &tools_dir,
+        "my_tool",
+        "name: my_tool\nlaunch:\n  mode: web_server\n",
+    );
+
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let parsers = dispatcher_for_yaml_and_markdown_directive();
+    let trust = trust_store();
+    let handlers = load_live_handler_registry();
+    let composers =
+        ComposerRegistry::from_kinds(&kinds, &handlers).expect("from_kinds must bind tool kind");
+    let item = CanonicalRef::parse("tool:my_tool").unwrap();
+
+    let err = run_effective_item_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
+        .expect_err("pipeline should fail on enum mismatch");
+
+    match &err {
+        ResolutionError::ComposedValueContractViolation { report, .. } => {
+            assert_eq!(report.errors.len(), 1);
+            assert_eq!(report.errors[0].code, InstanceViolationCode::EnumMismatch);
+            assert_eq!(report.errors[0].path, "launch.mode");
+        }
+        other => panic!("expected ComposedValueContractViolation, got: {other}"),
+    }
+}
+
+#[test]
+fn valid_composition_passes_through() {
+    let project_dir = tempdir();
+    let kinds_dir = tempdir();
+    write_tool_schema(&kinds_dir, TOOL_SCHEMA_WITH_CONTRACT);
+
+    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store()).unwrap();
+
+    // Item has all required fields with valid values.
+    let tools_dir = project_dir.join(".ai").join("tools");
+    write_tool_item(&tools_dir, "ok_tool", "name: ok_tool\nmode: cli_exec\ntimeout: 30\n");
+
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let parsers = dispatcher_for_yaml_and_markdown_directive();
+    let trust = trust_store();
+    let handlers = load_live_handler_registry();
+    let composers =
+        ComposerRegistry::from_kinds(&kinds, &handlers).expect("from_kinds must bind tool kind");
+    let item = CanonicalRef::parse("tool:ok_tool").unwrap();
+
+    let output = run_effective_item_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
+        .expect("pipeline should succeed for valid composition");
+
+    // Verify the composed value is accessible.
+    assert!(output.composed.composed.is_object());
+    assert_eq!(output.composed.composed["mode"], "cli_exec");
+}
+
+#[test]
+fn warnings_do_not_block_effective_item() {
+    let project_dir = tempdir();
+    let kinds_dir = tempdir();
+    write_tool_schema(&kinds_dir, TOOL_SCHEMA_WITH_CONTRACT);
+
+    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store()).unwrap();
+
+    // Item has `strict_fields: warn` on the contract, so an unknown
+    // field should produce warnings but NOT errors.
+    let tools_dir = project_dir.join(".ai").join("tools");
+    write_tool_item(
+        &tools_dir,
+        "warn_tool",
+        "name: warn_tool\nmode: cli_exec\nunknown_field: surprise\n",
+    );
+
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let parsers = dispatcher_for_yaml_and_markdown_directive();
+    let trust = trust_store();
+    let handlers = load_live_handler_registry();
+    let composers =
+        ComposerRegistry::from_kinds(&kinds, &handlers).expect("from_kinds must bind tool kind");
+    let item = CanonicalRef::parse("tool:warn_tool").unwrap();
+
+    // Pipeline should succeed because the unknown field is a warning,
+    // not an error. (We can't inspect warnings from the pipeline
+    // output — they don't block — so we just assert success.)
+    let output = run_effective_item_pipeline(&item, &kinds, &parsers, &roots, &trust, &composers)
+        .expect("pipeline should succeed: unknown field is a warning");
+
+    assert_eq!(output.composed.composed["mode"], "cli_exec");
 }

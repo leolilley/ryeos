@@ -370,6 +370,16 @@ impl Engine {
                         canonical_ref: item_ref.clone(),
                     }
                 }
+                ResolutionError::ComposedValueContractViolation {
+                    item_ref,
+                    report,
+                    ..
+                } => {
+                    EngineError::ComposedValueContractViolation {
+                        canonical_ref: item_ref.clone(),
+                        report: report.clone(),
+                    }
+                }
                 _ => EngineError::EffectiveItemCompositionFailed {
                     canonical_ref: ref_str.clone(),
                     reason: e.to_string(),
