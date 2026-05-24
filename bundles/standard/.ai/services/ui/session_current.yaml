@@ -1,0 +1,6 @@
+kind: service
+name: session-current
+version: "1.0.0"
+description: Returns the authenticated browser session's context fields.
+endpoint: ui.session.current
+availability: daemon_only

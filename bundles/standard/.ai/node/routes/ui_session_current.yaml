@@ -1,0 +1,14 @@
+category: routes
+section: routes
+id: ui/api/session/current
+path: /ui/api/session/current
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 256
+response:
+  mode: json
+  source: "service:ui/session/current"
