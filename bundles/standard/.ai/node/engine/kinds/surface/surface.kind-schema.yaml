@@ -48,6 +48,12 @@ composed_value_contract:
     layout:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          root: { type: single, prim: string }
+        optional:
+          nodes: { type: single, prim: mapping }
   optional:
     extends:
       type: union
@@ -60,10 +66,22 @@ composed_value_contract:
       prim: mapping
     affordances:
       type: single
-      prim: array
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+          optional:
+            label: { type: single, prim: string }
+            category: { type: single, prim: string }
+            icon: { type: single, prim: string }
+            caps: { type: single, prim: sequence, elements: { type: single, prim: string } }
     instruments:
       type: single
-      prim: array
+      prim: sequence
     capabilities:
       type: single
       prim: mapping

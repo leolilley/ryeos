@@ -21,9 +21,22 @@ composed_value_contract:
     launch:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          mode: { type: single, prim: string, enum: [cli_exec, daemon_ui] }
+          binary_ref: { type: single, prim: string }
+        optional:
+          args: { type: single, prim: mapping }
     serves:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          kind: { type: single, prim: string }
+        optional:
+          renderer: { type: single, prim: string }
   optional:
     version:
       type: single
