@@ -23,7 +23,6 @@ use crate::node_config::NodeConfigSnapshot;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
 use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadLifecycleService;
-use crate::ui_session::{BrowserSessionStoreApi, SessionBusApi};
 use crate::vault::NodeVault;
 use crate::write_barrier::WriteBarrier;
 
@@ -55,13 +54,10 @@ pub struct AppState {
     pub commands: Arc<CommandService>,
     pub callback_tokens: Arc<CallbackCapabilityStore>,
     pub thread_auth: Arc<ThreadAuthStore>,
-    /// In-memory browser session store for `/ui` routes.
-    /// Sessions are created via launch tokens and validated by the
-    /// `browser_session` auth invoker.
-    pub browser_sessions: Arc<dyn BrowserSessionStoreApi>,
-    /// Per-session event bus for `/ui/events/session/{id}` SSE streams.
-    /// Producers publish domain events; the session_events route subscribes.
-    pub session_bus: Arc<dyn SessionBusApi>,
+    /// Generic service extension slot for composition-root state that
+    /// doesn't belong in core (e.g., UI state). Set by the daemon
+    /// composition root; `None` in API-only contexts.
+    pub service_extensions: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,

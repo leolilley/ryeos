@@ -4,6 +4,8 @@
 //! The SSE transport layer in `event_stream_mode` converts them to wire frames.
 //! The browser's `/ui/events/session/{id}` route uses this invoker.
 
+use std::sync::Arc;
+
 use ryeos_api::route_error::RouteDispatchError;
 use ryeos_api::routes::invocation::{
     CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContext,
@@ -11,7 +13,10 @@ use ryeos_api::routes::invocation::{
 };
 use tokio_stream::Stream;
 
+use crate::state::UiState;
+
 pub struct CompiledSessionEventsInvocation {
+    pub ui: Arc<UiState>,
     pub keep_alive_secs: u64,
 }
 
@@ -38,8 +43,8 @@ impl CompiledRouteInvocation for CompiledSessionEventsInvocation {
                 RouteDispatchError::BadRequest("missing session_id in source_config".into())
             })?;
 
-        let session = ctx
-            .state
+        let session = self
+            .ui
             .browser_sessions
             .get_session(session_id)
             .ok_or(RouteDispatchError::Unauthorized)?;
@@ -61,24 +66,24 @@ impl CompiledRouteInvocation for CompiledSessionEventsInvocation {
             .get("Last-Event-ID")
             .and_then(|v| v.to_str().ok())
             .and_then(|last_id| {
-                ctx.state.session_bus.replay_after(session_id, last_id)
+                self.ui.session_bus.replay_after(session_id, last_id)
             });
 
-        let mut receiver = ctx.state.session_bus.subscribe(session_id);
+        let mut receiver = self.ui.session_bus.subscribe(session_id);
         let keep_alive_secs = self.keep_alive_secs;
 
         let stream: std::pin::Pin<
             Box<dyn Stream<Item = Result<ryeos_app::stream_envelope::RouteStreamEnvelope, std::convert::Infallible>> + Send>,
         > = if let Some(events) = replay {
             if events.is_empty() {
-                let snap = ctx.state.session_bus.snapshot_required_envelope();
+                let snap = crate::session_bus::SessionBus::snapshot_required_envelope();
                 Box::pin(async_stream::stream! {
                     yield Ok(snap);
                     loop {
                         match receiver.recv().await {
                             Ok(envelope) => yield Ok(envelope),
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                yield Ok(ctx.state.session_bus.snapshot_required_envelope());
+                                yield Ok(crate::session_bus::SessionBus::snapshot_required_envelope());
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
@@ -93,7 +98,7 @@ impl CompiledRouteInvocation for CompiledSessionEventsInvocation {
                         match receiver.recv().await {
                             Ok(envelope) => yield Ok(envelope),
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                yield Ok(ctx.state.session_bus.snapshot_required_envelope());
+                                yield Ok(crate::session_bus::SessionBus::snapshot_required_envelope());
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
@@ -106,7 +111,7 @@ impl CompiledRouteInvocation for CompiledSessionEventsInvocation {
                     match receiver.recv().await {
                         Ok(envelope) => yield Ok(envelope),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            yield Ok(ctx.state.session_bus.snapshot_required_envelope());
+                            yield Ok(crate::session_bus::SessionBus::snapshot_required_envelope());
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }

@@ -38,9 +38,10 @@ fn build_service_registry() -> ryeos_app::service_registry::ServiceRegistry {
 
 fn build_route_table(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    ui: std::sync::Arc<ryeos_ui::UiState>,
 ) -> anyhow::Result<ryeos_api::routes::RouteTable> {
-    let mode_registry = ryeos_ui::response_mode_registry(service_descriptors());
-    let extensions = ryeos_ui::route_extensions();
+    let mode_registry = ryeos_ui::response_mode_registry(service_descriptors(), ui.clone());
+    let extensions = ryeos_ui::route_extensions(ui);
     ryeos_api::routes::build_route_table_from_snapshot_with_extensions(
         snapshot,
         &mode_registry,
@@ -229,9 +230,12 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Build UI state (browser sessions + session bus).
+    let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
+
     // Build the route table from the node-config snapshot.
     let route_table = {
-        let table = build_route_table(&node_config_snapshot)
+        let table = build_route_table(&node_config_snapshot, ui_state.clone())
             .context("route table build failed at startup — check route YAML files")?;
         Arc::new(arc_swap::ArcSwap::from_pointee(table))
     };
@@ -400,8 +404,7 @@ async fn main() -> Result<()> {
         commands,
         callback_tokens,
         thread_auth,
-        browser_sessions: Arc::new(ryeos_ui::BrowserSessionStore::new()),
-        session_bus: Arc::new(ryeos_ui::SessionBus::new()),
+        service_extensions: Some(ui_state as Arc<dyn std::any::Any + Send + Sync>),
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
@@ -868,8 +871,7 @@ async fn run_service_standalone(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-        browser_sessions: Arc::new(ryeos_ui::BrowserSessionStore::new()),
-        session_bus: Arc::new(ryeos_ui::SessionBus::new()),
+        service_extensions: None,
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),

@@ -4,8 +4,9 @@ mod test_state;
 use test_state::build_test_state;
 
 use std::sync::Arc;
-use ryeos_app::ui_session::LaunchContext;
+use ryeos_ui::browser_session::LaunchContext;
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_ui::state::get_ui_state;
 
 fn test_context() -> LaunchContext {
     LaunchContext {
@@ -28,7 +29,7 @@ fn read_only_context() -> LaunchContext {
 #[tokio::test]
 async fn unknown_command_dispatched_to_session_bus() {
     let (_tmp, state) = build_test_state();
-    let (session_id, _token) = state.browser_sessions.mint_token(test_context());
+    let (session_id, _token) = get_ui_state(&state).unwrap().browser_sessions.mint_token(test_context());
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
@@ -55,7 +56,7 @@ async fn unknown_command_dispatched_to_session_bus() {
 #[tokio::test]
 async fn read_only_session_rejects_action() {
     let (_tmp, state) = build_test_state();
-    let (session_id, _token) = state.browser_sessions.mint_token(read_only_context());
+    let (session_id, _token) = get_ui_state(&state).unwrap().browser_sessions.mint_token(read_only_context());
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
@@ -100,10 +101,10 @@ async fn session_cookie_required() {
 #[tokio::test]
 async fn action_publishes_to_session_bus() {
     let (_tmp, state) = build_test_state();
-    let (session_id, _token) = state.browser_sessions.mint_token(test_context());
+    let (session_id, _token) = get_ui_state(&state).unwrap().browser_sessions.mint_token(test_context());
 
     // Subscribe to the session bus before invoking.
-    let mut rx = state.session_bus.subscribe(&session_id);
+    let mut rx = get_ui_state(&state).unwrap().session_bus.subscribe(&session_id);
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),

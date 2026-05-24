@@ -7,8 +7,9 @@ use test_state::build_test_state;
 
 use std::sync::Arc;
 use std::time::Duration;
-use ryeos_app::ui_session::LaunchContext;
+use ryeos_ui::browser_session::LaunchContext;
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_ui::state::get_ui_state;
 
 fn test_context() -> LaunchContext {
     LaunchContext {
@@ -42,7 +43,7 @@ async fn invalid_token_rejected() {
 async fn valid_token_consumed_and_session_returned() {
     let (_tmp, state) = build_test_state();
 
-    let (session_id, token) = state.browser_sessions.mint_token(test_context());
+    let (session_id, token) = get_ui_state(&state).unwrap().browser_sessions.mint_token(test_context());
 
     let result = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": token }),
@@ -61,7 +62,7 @@ async fn valid_token_consumed_and_session_returned() {
 async fn consumed_token_cannot_be_reused() {
     let (_tmp, state) = build_test_state();
 
-    let (_, token) = state.browser_sessions.mint_token(test_context());
+    let (_, token) = get_ui_state(&state).unwrap().browser_sessions.mint_token(test_context());
 
     // First consume succeeds.
     let result1 = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(

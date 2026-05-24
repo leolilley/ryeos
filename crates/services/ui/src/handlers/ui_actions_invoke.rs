@@ -25,6 +25,8 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
+use crate::state::get_ui_state;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -53,7 +55,9 @@ pub async fn handle(
         HandlerError::Forbidden("session cookie required for action invocation".into())
     })?;
 
-    let session = state
+    let ui = get_ui_state(&state).expect("UiState not set");
+
+    let session = ui
         .browser_sessions
         .get_session(&session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
@@ -70,7 +74,7 @@ pub async fn handle(
     // with a session-bound invocation_id and publish to the session bus.
     let invocation_id = uuid::Uuid::new_v4().to_string();
 
-    state.session_bus.publish(
+    ui.session_bus.publish(
         &session_id,
         "action.invoked",
         json!({

@@ -29,7 +29,6 @@ pub mod state;
 pub mod state_lock;
 pub mod state_store;
 pub mod stream_envelope;
-pub mod ui_session;
 pub mod temp_dir_guard;
 pub mod thread_lifecycle;
 pub mod vault;

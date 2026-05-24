@@ -4,8 +4,9 @@ mod test_state;
 use test_state::build_test_state;
 
 use std::sync::Arc;
-use ryeos_app::ui_session::LaunchContext;
+use ryeos_ui::browser_session::LaunchContext;
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_ui::state::get_ui_state;
 
 fn test_context() -> LaunchContext {
     LaunchContext {
@@ -20,7 +21,7 @@ fn test_context() -> LaunchContext {
 async fn session_current_returns_session_fields() {
     let (_tmp, state) = build_test_state();
 
-    let (session_id, _token) = state.browser_sessions.mint_token(test_context());
+    let (session_id, _token) = get_ui_state(&state).unwrap().browser_sessions.mint_token(test_context());
 
     // Create a handler context that looks like a browser_session principal.
     let ctx = HandlerContext::new(
@@ -92,7 +93,7 @@ async fn session_current_with_read_only_flag() {
         read_only: true,
         granted_caps: vec![],
     };
-    let (session_id, _token) = state.browser_sessions.mint_token(ctx);
+    let (session_id, _token) = get_ui_state(&state).unwrap().browser_sessions.mint_token(ctx);
 
     let hctx = HandlerContext::new(
         format!("session:{session_id}"),

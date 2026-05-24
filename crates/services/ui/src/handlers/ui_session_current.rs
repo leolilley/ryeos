@@ -20,6 +20,8 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
+use crate::state::get_ui_state;
+
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
@@ -49,7 +51,8 @@ pub async fn handle(
         HandlerError::Forbidden("no browser session".into())
     })?;
 
-    let session = state
+    let session = get_ui_state(&state)
+        .expect("UiState not set")
         .browser_sessions
         .get_session(&session_id)
         .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;

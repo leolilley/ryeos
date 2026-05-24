@@ -14,9 +14,11 @@ use serde_json::Value;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_api::registry::ServiceDescriptor;
-use ryeos_app::ui_session::LaunchContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+
+use crate::browser_session::LaunchContext;
+use crate::state::get_ui_state;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,7 +54,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         granted_caps: vec!["ui.read".into()],
     };
 
-    let (session_id, token) = state.browser_sessions.mint_token(launch_ctx);
+    let (session_id, token) = get_ui_state(&state)
+        .expect("UiState not set")
+        .browser_sessions
+        .mint_token(launch_ctx);
 
     let bind = &state.config.bind;
     let launch_url = format!("http://{bind}/ui/launch?token={token}");

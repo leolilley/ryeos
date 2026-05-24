@@ -21,7 +21,6 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
-use ryeos_app::ui_session::{self, SessionBusApi};
 
 /// Default broadcast channel capacity per session.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -116,7 +115,10 @@ impl SessionBus {
 
     /// Create a `snapshot_required` envelope.
     pub fn snapshot_required_envelope() -> RouteStreamEnvelope {
-        ui_session::snapshot_required_envelope()
+        RouteStreamEnvelope::new(
+            "snapshot_required",
+            serde_json::json!({"reason": "event gap exceeds replay ring; re-bootstrap required"}),
+        )
     }
 }
 
@@ -184,23 +186,5 @@ mod tests {
     fn snapshot_required_envelope_has_correct_type() {
         let env = SessionBus::snapshot_required_envelope();
         assert_eq!(env.event_type, "snapshot_required");
-    }
-}
-
-impl SessionBusApi for SessionBus {
-    fn subscribe(&self, session_id: &str) -> broadcast::Receiver<RouteStreamEnvelope> {
-        SessionBus::subscribe(self, session_id)
-    }
-
-    fn publish(&self, session_id: &str, event_type: &str, payload: Value) {
-        SessionBus::publish(self, session_id, event_type, payload)
-    }
-
-    fn replay_after(&self, session_id: &str, last_id: &str) -> Option<Vec<RouteStreamEnvelope>> {
-        SessionBus::replay_after(self, session_id, last_id)
-    }
-
-    fn snapshot_required_envelope(&self) -> RouteStreamEnvelope {
-        SessionBus::snapshot_required_envelope()
     }
 }

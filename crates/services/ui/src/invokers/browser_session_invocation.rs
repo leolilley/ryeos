@@ -6,6 +6,7 @@
 //! granted capabilities.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ryeos_api::route_error::RouteDispatchError;
 use ryeos_api::routes::invocation::{
@@ -13,7 +14,11 @@ use ryeos_api::routes::invocation::{
     RouteInvocationOutput, RouteInvocationResult, RoutePrincipal,
 };
 
-pub struct CompiledBrowserSessionVerifier;
+use crate::state::UiState;
+
+pub struct CompiledBrowserSessionVerifier {
+    pub ui: Arc<UiState>,
+}
 
 static BROWSER_SESSION_CONTRACT: RouteInvocationContract = RouteInvocationContract {
     output: RouteInvocationOutput::Principal,
@@ -34,8 +39,8 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
             RouteDispatchError::Unauthorized
         })?;
 
-        let session = ctx
-            .state
+        let session = self
+            .ui
             .browser_sessions
             .get_session(&session_id)
             .ok_or(RouteDispatchError::Unauthorized)?;

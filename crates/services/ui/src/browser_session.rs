@@ -24,7 +24,26 @@ const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(8 * 3600);
 /// Default launch token TTL: 60 seconds.
 const DEFAULT_LAUNCH_TOKEN_TTL: Duration = Duration::from_secs(60);
 
-use ryeos_app::ui_session::{BrowserSession, BrowserSessionStoreApi, LaunchContext};
+/// Context provided by a client launcher when minting a browser session.
+#[derive(Debug, Clone)]
+pub struct LaunchContext {
+    pub surface_ref: String,
+    pub project_path: Option<String>,
+    pub read_only: bool,
+    pub granted_caps: Vec<String>,
+}
+
+/// Server-side browser session record exposed to handlers and verifiers.
+#[derive(Debug, Clone)]
+pub struct BrowserSession {
+    pub session_id: String,
+    pub created_at: Instant,
+    pub expires_at: Instant,
+    pub granted_caps: Vec<String>,
+    pub project_root: Option<String>,
+    pub surface_ref: String,
+    pub read_only: bool,
+}
 
 /// Single-use launch token that redeems for a session.
 #[derive(Debug)]
@@ -250,23 +269,5 @@ mod tests {
             store.get_session(&session_id).is_none(),
             "expired session should be evicted"
         );
-    }
-}
-
-impl BrowserSessionStoreApi for BrowserSessionStore {
-    fn mint_token(&self, ctx: LaunchContext) -> (String, String) {
-        BrowserSessionStore::mint_token(self, ctx)
-    }
-
-    fn consume_launch_token(&self, token: &str) -> Option<String> {
-        BrowserSessionStore::consume_launch_token(self, token)
-    }
-
-    fn get_session(&self, session_id: &str) -> Option<BrowserSession> {
-        BrowserSessionStore::get_session(self, session_id)
-    }
-
-    fn evict_expired(&self) {
-        BrowserSessionStore::evict_expired(self)
     }
 }

@@ -15,6 +15,8 @@ use ryeos_app::state::AppState;
 
 use ryeos_api::registry::ServiceAvailability;
 
+use crate::state::get_ui_state;
+
 #[derive(Debug, Deserialize)]
 pub struct Request {
     pub token: String,
@@ -42,7 +44,8 @@ pub async fn handle(
     })?;
 
     // Consume the launch token (one-shot).
-    let session_id = state
+    let session_id = get_ui_state(&state)
+        .expect("UiState not set")
         .browser_sessions
         .consume_launch_token(&req.token)
         .ok_or_else(|| anyhow::anyhow!("invalid or expired launch token"))?;

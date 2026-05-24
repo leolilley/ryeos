@@ -111,8 +111,8 @@ fn build_app_state(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-        browser_sessions: Arc::new(ryeos_ui::BrowserSessionStore::new()),
-        session_bus: Arc::new(ryeos_ui::SessionBus::new()),
+        service_extensions: Some(std::sync::Arc::new(ryeos_ui::UiState::new())
+            as std::sync::Arc<dyn std::any::Any + Send + Sync>),
         write_barrier: Arc::new(write_barrier),
         started_at: std::time::Instant::now(),
         started_at_iso: String::new(),
