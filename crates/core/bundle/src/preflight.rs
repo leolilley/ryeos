@@ -39,6 +39,75 @@ pub struct PreflightIssue {
     pub found: String,
 }
 
+/// Warnings collected during a successful preflight verification.
+#[derive(Debug, Clone, Default)]
+pub struct PreflightReport {
+    /// Non-blocking issues (e.g. unknown fields with strict_fields: warn).
+    pub warnings: Vec<PreflightIssue>,
+}
+
+impl PreflightReport {
+    /// Returns true if there are no warnings.
+    pub fn is_clean(&self) -> bool {
+        self.warnings.is_empty()
+    }
+}
+
+/// Collect instance validation issues for identity-composed kinds.
+///
+/// Returns an empty vec for non-identity composers (extends-based kinds
+/// are validated post-composition in the resolution pipeline).
+fn collect_identity_contract_issues(
+    item_rel: &Path,
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    parsed: &serde_json::Value,
+) -> Vec<PreflightIssue> {
+    if kind_schema.composer != "handler:ryeos/core/identity" {
+        return Vec::new();
+    }
+
+    let item_path = item_rel.to_string_lossy().to_string();
+
+    let report = kind_schema
+        .composed_value_contract
+        .validate_instance(parsed);
+
+    let mut issues = Vec::with_capacity(report.errors.len() + report.warnings.len());
+    for v in &report.errors {
+        issues.push(PreflightIssue {
+            item_path: item_path.clone(),
+            severity: PreflightIssueSeverity::Error,
+            code: v.code.clone(),
+            path: v.path.clone(),
+            expected: v.expected.clone(),
+            found: v.found.clone(),
+        });
+    }
+    for v in &report.warnings {
+        issues.push(PreflightIssue {
+            item_path: item_path.clone(),
+            severity: PreflightIssueSeverity::Warning,
+            code: v.code.clone(),
+            path: v.path.clone(),
+            expected: v.expected.clone(),
+            found: v.found.clone(),
+        });
+    }
+    issues
+}
+
+/// Format a preflight issue as a human-readable string.
+fn format_preflight_issue(issue: &PreflightIssue) -> String {
+    let label = match issue.severity {
+        PreflightIssueSeverity::Error => "contract violation",
+        PreflightIssueSeverity::Warning => "contract warning",
+    };
+    format!(
+        "{}: {} [{}] {}: expected {}, found {}",
+        issue.item_path, label, issue.code, issue.path, issue.expected, issue.found,
+    )
+}
+
 pub fn preflight_verify_bundle(
     source_path: &Path,
     system_space_dir: &Path,
@@ -62,6 +131,40 @@ pub fn preflight_verify_bundle_in_context(
     dependency_bundle_roots: &[PathBuf],
     user_root: Option<&Path>,
 ) -> Result<()> {
+    let _report = preflight_verify_bundle_report_in_context(
+        source_path,
+        dependency_bundle_roots,
+        user_root,
+    )?;
+    Ok(())
+}
+
+/// Like [`preflight_verify_bundle_in_context`] but returns a
+/// [`PreflightReport`] containing non-blocking warnings on success.
+///
+/// CLI callers should use this to surface contract warnings to the user
+/// without failing verification.
+pub fn preflight_verify_bundle_report_in_context(
+    source_path: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    user_root: Option<&Path>,
+) -> Result<PreflightReport> {
+    // The core logic below populates `failures` (blocking) and
+    // `warnings` (non-blocking). We lift the loop into this function
+    // so both public APIs share a single implementation.
+    preflight_verify_bundle_in_context_inner(
+        source_path,
+        dependency_bundle_roots,
+        user_root,
+    )
+}
+
+/// Core preflight logic shared by both public entry points.
+fn preflight_verify_bundle_in_context_inner(
+    source_path: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    user_root: Option<&Path>,
+) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     if !ai_dir.is_dir() {
         bail!("preflight: source has no .ai/ at {}", source_path.display());
@@ -163,6 +266,7 @@ pub fn preflight_verify_bundle_in_context(
     let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
 
     let mut failures: Vec<String> = Vec::new();
+    let mut warnings: Vec<PreflightIssue> = Vec::new();
     for kind_name in kinds.kinds() {
         let kind_schema = match kinds.get(kind_name) {
             Some(s) => s,
@@ -271,28 +375,18 @@ pub fn preflight_verify_bundle_in_context(
             // the kind's `composed_value_contract`. Extends-based kinds
             // are validated post-composition in the resolution pipeline
             // (Slice 2), so we skip them here.
-            if kind_schema.composer == "handler:ryeos/core/identity" {
-                let report = kind_schema
-                    .composed_value_contract
-                    .validate_instance(&parsed);
-                for v in &report.errors {
-                    failures.push(format!(
-                        "{}: contract violation [{}] {}: expected {}, found {}",
-                        rel.display(),
-                        v.code,
-                        v.path,
-                        v.expected,
-                        v.found,
-                    ));
-                }
-                for v in &report.warnings {
-                    tracing::warn!(
-                        item = %rel.display(),
-                        code = %v.code,
-                        path = %v.path,
-                        "preflight: {}",
-                        format!("contract warning {}: expected {}, found {}", v.path, v.expected, v.found),
-                    );
+            for issue in collect_identity_contract_issues(
+                rel,
+                kind_schema,
+                &parsed,
+            ) {
+                match issue.severity {
+                    PreflightIssueSeverity::Error => {
+                        failures.push(format_preflight_issue(&issue));
+                    }
+                    PreflightIssueSeverity::Warning => {
+                        warnings.push(issue);
+                    }
                 }
             }
         }
@@ -312,11 +406,19 @@ pub fn preflight_verify_bundle_in_context(
     verify_manifest_signature(&ai_dir, source_path, &trust_store)
         .context("preflight: bundle manifest verification")?;
 
-    tracing::info!(
-        source = %source_path.display(),
-        "preflight verification passed"
-    );
-    Ok(())
+    if !warnings.is_empty() {
+        tracing::info!(
+            source = %source_path.display(),
+            warnings_count = warnings.len(),
+            "preflight verification passed with warnings"
+        );
+    } else {
+        tracing::info!(
+            source = %source_path.display(),
+            "preflight verification passed"
+        );
+    }
+    Ok(PreflightReport { warnings })
 }
 
 pub fn verify_manifest_signature(
@@ -605,39 +707,11 @@ mod tests {
         );
     }
 
-    // ── Slice 3: Instance validation wiring tests ──────────────────
+    // ── Slice 3 follow-up: Contract diagnostics wiring tests ──────
 
     /// Helper: build a minimal `ValueShape` from YAML for tests.
     fn shape_from_yaml(yaml: &str) -> ryeos_engine::contracts::ValueShape {
         serde_yaml::from_str(yaml).expect("test contract YAML must parse")
-    }
-
-    /// Helper: simulate the preflight identity-composer validation path.
-    fn validate_identity_composed_item(
-        kind_schema: &ryeos_engine::kind_registry::KindSchema,
-        parsed: &serde_json::Value,
-    ) -> (Vec<String>, Vec<String>) {
-        if kind_schema.composer != "handler:ryeos/core/identity" {
-            return (vec![], vec![]);
-        }
-        let report = kind_schema
-            .composed_value_contract
-            .validate_instance(parsed);
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-        for v in &report.errors {
-            errors.push(format!(
-                "contract violation [{}] {}: expected {}, found {}",
-                v.code, v.path, v.expected, v.found,
-            ));
-        }
-        for v in &report.warnings {
-            warnings.push(format!(
-                "contract warning [{}] {}: expected {}, found {}",
-                v.code, v.path, v.expected, v.found,
-            ));
-        }
-        (errors, warnings)
     }
 
     /// Helper: build a minimal KindSchema for identity-composer tests.
@@ -667,8 +741,10 @@ mod tests {
         schema
     }
 
+    // ── Tests for collect_identity_contract_issues ────────────────
+
     #[test]
-    fn identity_descriptor_with_invalid_enum_produces_error() {
+    fn collect_issues_returns_errors_for_invalid_enum() {
         let kind_schema = identity_kind_schema(
             r#"root_type: mapping
 required:
@@ -681,18 +757,23 @@ required:
 optional: {}
 "#,
         );
-
         let value = serde_json::json!({ "mode": "web_server" });
-        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
 
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("enum_mismatch"), "error: {}", errors[0]);
-        assert!(errors[0].contains("mode"), "path in error: {}", errors[0]);
-        assert!(warnings.is_empty());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity, PreflightIssueSeverity::Error);
+        assert_eq!(issues[0].code, InstanceViolationCode::EnumMismatch);
+        assert_eq!(issues[0].path, "mode");
+        assert_eq!(issues[0].item_path, "tools/my_tool.py");
+        assert!(issues[0].found.contains("web_server"));
     }
 
     #[test]
-    fn identity_descriptor_missing_nested_required_produces_error() {
+    fn collect_issues_returns_nested_dotted_path() {
         let kind_schema = identity_kind_schema(
             r#"root_type: mapping
 required:
@@ -712,26 +793,21 @@ required:
 optional: {}
 "#,
         );
-
         let value = serde_json::json!({ "launch": {} });
-        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
 
-        assert_eq!(errors.len(), 1);
-        assert!(
-            errors[0].contains("missing_required_field"),
-            "error: {}",
-            errors[0]
-        );
-        assert!(
-            errors[0].contains("launch.mode"),
-            "dotted path in error: {}",
-            errors[0]
-        );
-        assert!(warnings.is_empty());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity, PreflightIssueSeverity::Error);
+        assert_eq!(issues[0].code, InstanceViolationCode::MissingRequiredField);
+        assert_eq!(issues[0].path, "launch.mode");
     }
 
     #[test]
-    fn non_identity_composer_skips_validation() {
+    fn collect_issues_skips_non_identity_composer() {
         let kind_schema = extends_kind_schema(
             r#"root_type: mapping
 required:
@@ -741,18 +817,18 @@ required:
 optional: {}
 "#,
         );
-
-        // Value is missing the required field, but since the composer
-        // is NOT identity, validation should be skipped entirely.
         let value = serde_json::json!({ "other": "stuff" });
-        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("directives/my_directive.md"),
+            &kind_schema,
+            &value,
+        );
 
-        assert!(errors.is_empty(), "should skip validation for non-identity composer");
-        assert!(warnings.is_empty());
+        assert!(issues.is_empty(), "non-identity composer should produce no issues");
     }
 
     #[test]
-    fn unexpected_field_produces_warning_with_strict_warn() {
+    fn collect_issues_returns_warnings_for_strict_fields() {
         let kind_schema = identity_kind_schema(
             r#"root_type: mapping
 required:
@@ -763,26 +839,21 @@ optional: {}
 strict_fields: warn
 "#,
         );
-
         let value = serde_json::json!({ "body": "hello", "extra": "field" });
-        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
 
-        assert!(errors.is_empty(), "unknown field should be warning, not error");
-        assert_eq!(warnings.len(), 1);
-        assert!(
-            warnings[0].contains("unexpected_field"),
-            "warning code: {}",
-            warnings[0]
-        );
-        assert!(
-            warnings[0].contains("extra"),
-            "path in warning: {}",
-            warnings[0]
-        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].severity, PreflightIssueSeverity::Warning);
+        assert_eq!(issues[0].code, InstanceViolationCode::UnexpectedField);
+        assert_eq!(issues[0].path, "extra");
     }
 
     #[test]
-    fn valid_identity_descriptor_passes() {
+    fn collect_issues_returns_nothing_for_valid_descriptor() {
         let kind_schema = identity_kind_schema(
             r#"root_type: mapping
 required:
@@ -799,18 +870,20 @@ optional:
 strict_fields: warn
 "#,
         );
-
         let value = serde_json::json!({ "mode": "cli_exec", "timeout": 30 });
-        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+        let issues = collect_identity_contract_issues(
+            &PathBuf::from("tools/my_tool.py"),
+            &kind_schema,
+            &value,
+        );
 
-        assert!(errors.is_empty(), "should pass: {:?}", errors);
-        assert!(warnings.is_empty(), "no warnings: {:?}", warnings);
+        assert!(issues.is_empty(), "valid descriptor should produce no issues");
     }
 
+    // ── Tests for format_preflight_issue ─────────────────────────────
+
     #[test]
-    fn preflight_issue_types_are_constructible() {
-        // Verify the public types can be constructed for future use
-        // by the output layer.
+    fn format_issue_includes_all_fields() {
         let issue = PreflightIssue {
             item_path: "tools/my_tool.py".to_string(),
             severity: PreflightIssueSeverity::Error,
@@ -819,18 +892,59 @@ strict_fields: warn
             expected: "cli_exec, daemon_ui".to_string(),
             found: "web_server".to_string(),
         };
-        assert_eq!(issue.severity, PreflightIssueSeverity::Error);
-        assert_eq!(issue.code, InstanceViolationCode::EnumMismatch);
-        assert_eq!(issue.path, "launch.mode");
+        let formatted = format_preflight_issue(&issue);
+        assert!(formatted.contains("tools/my_tool.py"), "item_path: {formatted}");
+        assert!(formatted.contains("contract violation"), "label: {formatted}");
+        assert!(formatted.contains("enum_mismatch"), "code: {formatted}");
+        assert!(formatted.contains("launch.mode"), "path: {formatted}");
+        assert!(formatted.contains("cli_exec"), "expected: {formatted}");
+        assert!(formatted.contains("web_server"), "found: {formatted}");
+    }
 
-        let warning = PreflightIssue {
+    #[test]
+    fn format_issue_uses_warning_label_for_warnings() {
+        let issue = PreflightIssue {
             item_path: "tools/my_tool.py".to_string(),
             severity: PreflightIssueSeverity::Warning,
             code: InstanceViolationCode::UnexpectedField,
             path: "extra".to_string(),
             expected: "known field".to_string(),
-            found: "unknown field \"extra\"".to_string(),
+            found: "string".to_string(),
         };
-        assert_eq!(warning.severity, PreflightIssueSeverity::Warning);
+        let formatted = format_preflight_issue(&issue);
+        assert!(formatted.contains("contract warning"), "should use warning label: {formatted}");
+        assert!(!formatted.contains("contract violation"), "should not use error label: {formatted}");
     }
+
+    // ── Tests for PreflightReport ────────────────────────────────────
+
+    #[test]
+    fn preflight_report_is_clean_when_empty() {
+        let report = PreflightReport::default();
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn preflight_report_is_dirty_with_warnings() {
+        let report = PreflightReport {
+            warnings: vec![PreflightIssue {
+                item_path: "tools/x.py".to_string(),
+                severity: PreflightIssueSeverity::Warning,
+                code: InstanceViolationCode::UnexpectedField,
+                path: "extra".to_string(),
+                expected: "known field".to_string(),
+                found: "string".to_string(),
+            }],
+        };
+        assert!(!report.is_clean());
+        assert_eq!(report.warnings.len(), 1);
+    }
+
+    // NOTE: Real preflight wiring tests (calling
+    // `preflight_verify_bundle_in_context` directly with temp bundle
+    // fixtures) require parser binaries installed in the worktree.
+    // These will be validated in CI. The tests above exercise the
+    // production helper functions (`collect_identity_contract_issues`,
+    // `format_preflight_issue`) and public types (`PreflightIssue`,
+    // `PreflightReport`) that the real wiring calls.
 }
