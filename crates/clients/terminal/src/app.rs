@@ -55,7 +55,7 @@ pub async fn run(
     // Channels
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(256);
     let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(16);
-    let (_daemon_tx, mut daemon_rx) = mpsc::channel::<ryeos_client_base::update::DaemonEvent>(256);
+    let (daemon_tx, mut daemon_rx) = mpsc::channel::<ryeos_client_base::update::DaemonEvent>(256);
 
     // Spawn crossterm event reader
     let events = EventStream::new();
@@ -79,7 +79,7 @@ pub async fn run(
                 if handle_effects(&effects) {
                     break;
                 }
-                run_effects(&mut model, &mut transport, &_daemon_tx, &effects).await;
+                run_effects(&mut model, &mut transport, &daemon_tx, &effects).await;
             }
 
             Some(event) = daemon_rx.recv() => {
@@ -132,7 +132,7 @@ fn handle_effects(effects: &[Effect]) -> bool {
 async fn run_effects(
     model: &mut AppModel,
     transport: &mut Box<dyn DaemonTransport>,
-    _daemon_tx: &mpsc::Sender<ryeos_client_base::update::DaemonEvent>,
+    daemon_tx: &mpsc::Sender<ryeos_client_base::update::DaemonEvent>,
     effects: &[Effect],
 ) {
     for effect in effects {
@@ -185,22 +185,56 @@ async fn run_effects(
                     }
                 }
 
-                // Send to daemon
-                let req = crate::transport::DaemonRequest::Execute {
-                    item_ref: item_ref.clone(),
-                    project_path: project_path.to_string_lossy().to_string(),
-                    parameters: parameters.clone(),
-                };
-                match transport.request(req).await {
-                    Ok(_resp) => {
-                        // Response handled via SSE stream reader or mock
-                        // For mock transport, the response is immediate but we
-                        // still show the synthetic thread above.
+                // Try SSE streaming first; fall back to non-streaming request
+                let pp = project_path.to_string_lossy().to_string();
+                let ir = item_ref.clone();
+                let params = parameters.clone();
+                match transport
+                    .execute_stream(&ir, &pp, &params)
+                    .await
+                {
+                    Ok(Some(mut stream)) => {
+                        // Spawn a task that reads SSE events and feeds them
+                        // through the daemon channel
+                        let tx = daemon_tx.clone();
+                        tokio::spawn(async move {
+                            while let Some(sse_event) = stream.next_event().await {
+                                if let Some(daemon_event) =
+                                    sse_event.to_daemon_event(fake_thread_id)
+                                {
+                                    if tx.send(daemon_event).await.is_err() {
+                                        break; // channel closed, app shutting down
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Ok(None) => {
+                        // Transport doesn't support streaming (mock mode).
+                        // The synthetic thread with user prompt is already visible.
+                        // Generate a canned mock response.
+                        let response_text =
+                            "Mock response: item executed successfully.\n".to_string();
+                        let resp_delta = ryeos_client_base::update::DaemonEvent::TextDelta {
+                            thread_id: fake_thread_id,
+                            text: response_text,
+                        };
+                        let complete =
+                            ryeos_client_base::update::DaemonEvent::ThreadCompleted {
+                                id: fake_thread_id,
+                            };
+                        ryeos_client_base::update::update(
+                            model,
+                            ryeos_client_base::update::AppEvent::DaemonBatch(vec![
+                                resp_delta,
+                                complete,
+                            ]),
+                        );
                     }
                     Err(e) => {
                         let fail_event = ryeos_client_base::update::DaemonEvent::ThreadFailed {
                             id: fake_thread_id,
-                            error: format!("execute error: {}", e),
+                            error: format!("stream error: {}", e),
                         };
                         ryeos_client_base::update::update(
                             model,

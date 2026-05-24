@@ -76,6 +76,24 @@ pub trait DaemonTransport {
     > {
         Box::pin(async { Err(TransportError::Transport("not implemented".into())) })
     }
+
+    /// Execute an item and return an SSE stream of events.
+    /// Returns `None` if the transport doesn't support streaming (e.g. mock).
+    fn execute_stream(
+        &self,
+        _item_ref: &str,
+        _project_path: &str,
+        _parameters: &serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Option<crate::daemon::SseStream>, TransportError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +163,34 @@ impl SignedHttpTransport {
 impl DaemonTransport for SignedHttpTransport {
     fn name(&self) -> &str {
         "signed-http"
+    }
+
+    fn execute_stream(
+        &self,
+        item_ref: &str,
+        project_path: &str,
+        parameters: &serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Option<crate::daemon::SseStream>, TransportError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let item_ref = item_ref.to_string();
+        let project_path = project_path.to_string();
+        let parameters = parameters.clone();
+        Box::pin(async move {
+            match self
+                .client
+                .execute_stream(&item_ref, &project_path, &parameters)
+                .await
+            {
+                Ok(stream) => Ok(Some(stream)),
+                Err(e) => Err(TransportError::Daemon(e.to_string())),
+            }
+        })
     }
 
     fn request(
