@@ -2302,6 +2302,397 @@ strict_fields: warn
     }
 }
 
+// ── Kind-contract regression tests (Slice 7) ─────────────────────────
+//
+// Prove that real descriptor shapes satisfy the migrated kind contracts
+// and that malformed variants are correctly rejected. These tests
+// construct ValueShape objects programmatically matching the actual
+// kind schemas, so they don't depend on file loading or signatures.
+
+#[cfg(test)]
+mod kind_contract_regressions {
+    use super::*;
+
+    // ── Helpers ──────────────────────────────────────────────────
+
+    fn validate(shape: &ValueShape, value: &serde_json::Value) -> InstanceValidationReport {
+        shape.validate_instance(value)
+    }
+
+    fn ft_string() -> FieldType {
+        FieldType::Single { prim: PrimType::String, enum_values: None, nested_contract: None, element_type: None }
+    }
+    fn ft_string_enum(values: &[&str]) -> FieldType {
+        FieldType::Single { prim: PrimType::String, enum_values: Some(values.iter().map(|s| s.to_string()).collect()), nested_contract: None, element_type: None }
+    }
+    fn ft_mapping() -> FieldType {
+        FieldType::Single { prim: PrimType::Mapping, enum_values: None, nested_contract: None, element_type: None }
+    }
+    fn ft_mapping_with(contract: ValueShape) -> FieldType {
+        FieldType::Single { prim: PrimType::Mapping, enum_values: None, nested_contract: Some(Box::new(contract)), element_type: None }
+    }
+    fn ft_sequence_of(element: FieldType) -> FieldType {
+        FieldType::Single { prim: PrimType::Sequence, enum_values: None, nested_contract: None, element_type: Some(Box::new(element)) }
+    }
+    fn ft_boolean() -> FieldType {
+        FieldType::Single { prim: PrimType::Boolean, enum_values: None, nested_contract: None, element_type: None }
+    }
+    fn ft_union(prims: &[PrimType]) -> FieldType {
+        FieldType::Union { prims: prims.to_vec() }
+    }
+    fn shape(required: &[(&str, FieldType)], optional: &[(&str, FieldType)]) -> ValueShape {
+        ValueShape {
+            root_type: ShapeType::Mapping,
+            required: required.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            optional: optional.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            strict_fields: None,
+        }
+    }
+
+    // ── client kind ─────────────────────────────────────────────
+
+    fn client_shape() -> ValueShape {
+        shape(
+            &[
+                ("launch", ft_mapping_with(shape(
+                    &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"])),
+                       ("binary_ref", ft_string())],
+                    &[("args", ft_mapping())],
+                ))),
+                ("serves", ft_mapping_with(shape(
+                    &[("kind", ft_string())],
+                    &[("renderer", ft_string())],
+                ))),
+            ],
+            &[
+                ("version", ft_string()),
+                ("description", ft_string()),
+                ("capabilities", ft_mapping()),
+            ],
+        )
+    }
+
+    #[test]
+    fn client_valid_descriptor_passes() {
+        let value = serde_json::json!({
+            "launch": {
+                "mode": "cli_exec",
+                "binary_ref": "bin/{triple}/ryeos-tui",
+                "args": { "surface": "--surface" }
+            },
+            "serves": { "kind": "surface", "renderer": "terminal" },
+            "capabilities": { "requires_daemon": true },
+            "version": "1.0.0",
+            "description": "Terminal UI"
+        });
+        let report = validate(&client_shape(), &value);
+        assert!(report.is_ok(), "valid client should pass: {report}");
+    }
+
+    #[test]
+    fn client_rejects_invalid_launch_mode_enum() {
+        let value = serde_json::json!({
+            "launch": { "mode": "local", "binary_ref": "bin/x" },
+            "serves": { "kind": "surface" }
+        });
+        let report = validate(&client_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "launch.mode" && e.code == InstanceViolationCode::EnumMismatch));
+    }
+
+    #[test]
+    fn client_rejects_missing_launch_binary_ref() {
+        let value = serde_json::json!({
+            "launch": { "mode": "cli_exec" },
+            "serves": { "kind": "surface" }
+        });
+        let report = validate(&client_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "launch.binary_ref" && e.code == InstanceViolationCode::MissingRequiredField));
+    }
+
+    #[test]
+    fn client_rejects_missing_serves_kind() {
+        let value = serde_json::json!({
+            "launch": { "mode": "cli_exec", "binary_ref": "bin/x" },
+            "serves": {}
+        });
+        let report = validate(&client_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "serves.kind" && e.code == InstanceViolationCode::MissingRequiredField));
+    }
+
+    #[test]
+    fn client_rejects_missing_launch_entirely() {
+        let value = serde_json::json!({
+            "serves": { "kind": "surface" }
+        });
+        let report = validate(&client_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "launch" && e.code == InstanceViolationCode::MissingRequiredField));
+    }
+
+    // ── service kind ─────────────────────────────────────────────
+
+    fn service_shape() -> ValueShape {
+        shape(
+            &[("endpoint", ft_string())],
+            &[
+                ("name", ft_string()),
+                ("version", ft_string()),
+                ("availability", ft_string_enum(&["both", "daemon_only", "offline"])),
+                ("offline_execute", ft_string()),
+                ("required_caps", ft_sequence_of(ft_string())),
+                ("description", ft_string()),
+                ("schema", ft_mapping()),
+            ],
+        )
+    }
+
+    #[test]
+    fn service_valid_descriptor_passes() {
+        let value = serde_json::json!({
+            "endpoint": "verify",
+            "description": "Verify signed items",
+            "required_caps": ["ryeos.execute.service.verify"],
+            "availability": "offline"
+        });
+        let report = validate(&service_shape(), &value);
+        assert!(report.is_ok(), "valid service should pass: {report}");
+    }
+
+    #[test]
+    fn service_rejects_missing_endpoint() {
+        let value = serde_json::json!({
+            "description": "no endpoint"
+        });
+        let report = validate(&service_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "endpoint" && e.code == InstanceViolationCode::MissingRequiredField));
+    }
+
+    #[test]
+    fn service_rejects_invalid_availability_enum() {
+        let value = serde_json::json!({
+            "endpoint": "test",
+            "availability": "sometimes"
+        });
+        let report = validate(&service_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "availability" && e.code == InstanceViolationCode::EnumMismatch));
+    }
+
+    // ── handler kind ─────────────────────────────────────────────
+
+    fn handler_shape() -> ValueShape {
+        shape(
+            &[
+                ("category", ft_string()),
+                ("name", ft_string()),
+                ("kind", ft_string_enum(&["handler"])),
+                ("serves", ft_string_enum(&["parser", "composer"])),
+                ("binary_ref", ft_string()),
+                ("abi_version", ft_string()),
+            ],
+            &[
+                ("required_caps", ft_sequence_of(ft_string())),
+                ("description", ft_string()),
+            ],
+        )
+    }
+
+    #[test]
+    fn handler_valid_descriptor_passes() {
+        let value = serde_json::json!({
+            "category": "ryeos/core",
+            "name": "identity",
+            "kind": "handler",
+            "serves": "composer",
+            "binary_ref": "bin/x86_64-unknown-linux-gnu/rye-composer-identity",
+            "abi_version": "v1",
+            "required_caps": [],
+            "description": "Identity composer"
+        });
+        let report = validate(&handler_shape(), &value);
+        assert!(report.is_ok(), "valid handler should pass: {report}");
+    }
+
+    #[test]
+    fn handler_rejects_invalid_serves_enum() {
+        let value = serde_json::json!({
+            "category": "ryeos/core",
+            "name": "test",
+            "kind": "handler",
+            "serves": "executor",
+            "binary_ref": "bin/x",
+            "abi_version": "v1"
+        });
+        let report = validate(&handler_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "serves" && e.code == InstanceViolationCode::EnumMismatch));
+    }
+
+    // ── runtime kind ─────────────────────────────────────────────
+
+    fn runtime_shape() -> ValueShape {
+        shape(
+            &[
+                ("kind", ft_string_enum(&["runtime"])),
+                ("serves", ft_string()),
+                ("binary_ref", ft_string()),
+                ("abi_version", ft_string()),
+            ],
+            &[
+                ("default", ft_boolean()),
+                ("required_caps", ft_sequence_of(ft_string())),
+                ("description", ft_string()),
+                ("schema", ft_mapping_with(shape(
+                    &[("envelope", ft_string()), ("result", ft_string())],
+                    &[],
+                ))),
+            ],
+        )
+    }
+
+    #[test]
+    fn runtime_valid_descriptor_passes() {
+        let value = serde_json::json!({
+            "kind": "runtime",
+            "serves": "ryeos/core/python",
+            "binary_ref": "bin/x86_64-unknown-linux-gnu/rye-runtime-python",
+            "abi_version": "v1",
+            "default": true,
+            "description": "Python runtime"
+        });
+        let report = validate(&runtime_shape(), &value);
+        assert!(report.is_ok(), "valid runtime should pass: {report}");
+    }
+
+    #[test]
+    fn runtime_valid_with_schema_passes() {
+        let value = serde_json::json!({
+            "kind": "runtime",
+            "serves": "ryeos/core/python",
+            "binary_ref": "bin/x",
+            "abi_version": "v1",
+            "schema": { "envelope": "launch_envelope_v1", "result": "runtime_result_v1" }
+        });
+        let report = validate(&runtime_shape(), &value);
+        assert!(report.is_ok(), "runtime with schema should pass: {report}");
+    }
+
+    #[test]
+    fn runtime_rejects_invalid_kind_enum() {
+        let value = serde_json::json!({
+            "kind": "tool",
+            "serves": "ryeos/core/python",
+            "binary_ref": "bin/x",
+            "abi_version": "v1"
+        });
+        let report = validate(&runtime_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "kind" && e.code == InstanceViolationCode::EnumMismatch));
+    }
+
+    #[test]
+    fn runtime_rejects_incomplete_schema() {
+        let value = serde_json::json!({
+            "kind": "runtime",
+            "serves": "ryeos/core/python",
+            "binary_ref": "bin/x",
+            "abi_version": "v1",
+            "schema": { "envelope": "launch_v1" }
+        });
+        let report = validate(&runtime_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "schema.result" && e.code == InstanceViolationCode::MissingRequiredField));
+    }
+
+    // ── surface kind ─────────────────────────────────────────────
+
+    fn surface_shape() -> ValueShape {
+        shape(
+            &[("layout", ft_mapping_with(shape(
+                &[("root", ft_string())],
+                &[("nodes", ft_mapping())],
+            )))],
+            &[
+                ("extends", ft_union(&[PrimType::String, PrimType::Null])),
+                ("input", ft_mapping()),
+                ("ambient", ft_mapping()),
+                ("affordances", ft_sequence_of(ft_mapping_with(shape(
+                    &[("id", ft_string())],
+                    &[
+                        ("label", ft_string()),
+                        ("category", ft_string()),
+                        ("icon", ft_string()),
+                        ("caps", ft_sequence_of(ft_string())),
+                    ],
+                )))),
+                ("instruments", ft_sequence_of(ft_mapping())),
+                ("capabilities", ft_mapping()),
+            ],
+        )
+    }
+
+    #[test]
+    fn surface_valid_composed_value_passes() {
+        let value = serde_json::json!({
+            "layout": {
+                "root": "main",
+                "nodes": {
+                    "main": { "type": "split", "axis": "horizontal" }
+                }
+            },
+            "ambient": { "show_background": true },
+            "affordances": [
+                { "id": "view.threads", "label": "Threads", "category": "View" },
+                { "id": "layout.reset", "category": "Layout" }
+            ]
+        });
+        let report = validate(&surface_shape(), &value);
+        assert!(report.is_ok(), "valid surface should pass: {report}");
+    }
+
+    #[test]
+    fn surface_rejects_missing_layout_root() {
+        let value = serde_json::json!({
+            "layout": { "nodes": {} }
+        });
+        let report = validate(&surface_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path == "layout.root" && e.code == InstanceViolationCode::MissingRequiredField));
+    }
+
+    #[test]
+    fn surface_rejects_affordance_without_id() {
+        let value = serde_json::json!({
+            "layout": { "root": "main" },
+            "affordances": [
+                { "label": "No ID" }
+            ]
+        });
+        let report = validate(&surface_shape(), &value);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.path.starts_with("affordances[") && e.code == InstanceViolationCode::MissingRequiredField));
+    }
+
+    #[test]
+    fn surface_accepts_extends_chain_child() {
+        // Child surface with extends pointing to parent.
+        // Validation only checks the composed value, not extends resolution.
+        let value = serde_json::json!({
+            "extends": "surface:ryeos/cockpit/base",
+            "layout": { "root": "main" },
+            "affordances": [
+                { "id": "view.graph", "label": "Graph", "category": "Graph" }
+            ]
+        });
+        let report = validate(&surface_shape(), &value);
+        assert!(report.is_ok(), "extends-chain child should pass: {report}");
+    }
+}
+
 // ── Signature envelope ───────────────────────────────────────────────
 
 /// How a `ryeos:signed:...` payload is embedded in a source file.
