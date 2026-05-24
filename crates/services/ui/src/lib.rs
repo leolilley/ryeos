@@ -3,6 +3,7 @@
 //! Browser sessions, `/ui` service handlers, and UI-specific route invokers
 //! live here so `ryeos-api` can remain generic HTTP/route substrate.
 
+pub mod assets;
 pub mod browser_session;
 pub mod handlers;
 pub mod invokers;
@@ -36,6 +37,7 @@ pub fn response_mode_registry(
 ) -> ryeos_api::routes::response_modes::ResponseModeRegistry {
     ryeos_api::routes::response_modes::ResponseModeRegistry::with_builtins_and_session_events_from(
         service_descriptors,
+        Some(std::sync::Arc::new(assets::WebAssetProvider)),
         std::sync::Arc::new(invokers::session_events_invocation::CompiledSessionEventsInvocation {
             ui,
             keep_alive_secs: 15,

@@ -1,7 +1,6 @@
 pub mod abs_path;
 pub mod compile;
 pub mod dispatcher;
-pub mod embedded_assets;
 pub mod interpolation;
 pub mod invocation;
 pub mod invokers;

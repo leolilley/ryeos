@@ -160,7 +160,7 @@ mod tests {
             RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
         };
 
-        let mode = StaticMode;
+        let mode = StaticMode::default();
         let raw = RawRouteSpec {
             section: "routes".to_string(),
             category: None,

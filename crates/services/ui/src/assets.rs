@@ -1,10 +1,13 @@
-//! Embedded web UI assets.
+//! Web UI static asset provider.
 //!
-//! Static files from `crates/clients/web/pkg/` are embedded at compile time
-//! via `include_bytes!`. The `source: embedded_asset` static mode resolves
-//! asset paths at dispatch time through this module.
+//! Embeds files from `crates/clients/web/pkg/` at compile time via
+//! `include_bytes!`. Implements the `StaticAssetProvider` trait defined
+//! in `ryeos-api` so that generic static mode can resolve web assets
+//! without the API crate knowing about web-specific paths.
 
 use sha2::{Digest, Sha256};
+
+use ryeos_api::routes::response_modes::static_mode::{StaticAsset, StaticAssetProvider};
 
 /// Content type inferred from file extension.
 fn content_type_for_path(path: &str) -> &'static str {
@@ -38,36 +41,29 @@ fn compute_etag(bytes: &[u8]) -> String {
     format!("\"{:x}", hash)
 }
 
-/// An embedded asset with its bytes, content type, and ETag.
-pub struct EmbeddedAsset {
-    pub bytes: &'static [u8],
-    pub content_type: &'static str,
-    pub etag: String,
-    /// Whether this asset has a content-hashed name (eligible for immutable caching).
-    pub is_hashed: bool,
-}
-
 // ── Compile-time embedded bytes ─────────────────────────────────────────
 
-static INDEX_HTML: &[u8] = include_bytes!("../../../../clients/web/pkg/index.html");
-static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../../clients/web/pkg/bootstrap.js");
+static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html");
+static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
 
-/// Look up an embedded asset by path (without leading slash).
-///
-/// Returns `None` if no asset matches the given path.
-pub fn get_asset(path: &str) -> Option<EmbeddedAsset> {
-    let trimmed = path.trim_start_matches('/');
-    let (bytes, is_hashed) = match trimmed {
-        "index.html" | "ui/index.html" => (INDEX_HTML, false),
-        "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, false),
-        _ => return None,
-    };
-    Some(EmbeddedAsset {
-        bytes,
-        content_type: content_type_for_path(trimmed),
-        etag: compute_etag(bytes),
-        is_hashed,
-    })
+/// Web UI static asset provider — owns the embedded web client assets.
+pub struct WebAssetProvider;
+
+impl StaticAssetProvider for WebAssetProvider {
+    fn get(&self, path: &str) -> Option<StaticAsset> {
+        let trimmed = path.trim_start_matches('/');
+        let (bytes, cache_control) = match trimmed {
+            "index.html" | "ui/index.html" => (INDEX_HTML, "no-cache"),
+            "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
+            _ => return None,
+        };
+        Some(StaticAsset {
+            bytes,
+            content_type: content_type_for_path(trimmed),
+            etag: compute_etag(bytes),
+            cache_control,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -76,7 +72,8 @@ mod tests {
 
     #[test]
     fn get_index_html() {
-        let asset = get_asset("index.html").expect("index.html must be embedded");
+        let provider = WebAssetProvider;
+        let asset = provider.get("index.html").expect("index.html must be embedded");
         assert!(asset.bytes.len() > 0);
         assert!(asset.content_type.contains("text/html"));
         assert!(asset.etag.starts_with('"'));
@@ -84,25 +81,29 @@ mod tests {
 
     #[test]
     fn get_bootstrap_js() {
-        let asset = get_asset("bootstrap.js").expect("bootstrap.js must be embedded");
+        let provider = WebAssetProvider;
+        let asset = provider.get("bootstrap.js").expect("bootstrap.js must be embedded");
         assert!(asset.bytes.len() > 0);
         assert!(asset.content_type.contains("javascript"));
     }
 
     #[test]
     fn get_asset_leading_slash_stripped() {
-        assert!(get_asset("/index.html").is_some());
+        let provider = WebAssetProvider;
+        assert!(provider.get("/index.html").is_some());
     }
 
     #[test]
     fn get_unknown_asset_returns_none() {
-        assert!(get_asset("nonexistent.css").is_none());
+        let provider = WebAssetProvider;
+        assert!(provider.get("nonexistent.css").is_none());
     }
 
     #[test]
     fn etag_is_deterministic() {
-        let a1 = get_asset("index.html").unwrap();
-        let a2 = get_asset("index.html").unwrap();
+        let provider = WebAssetProvider;
+        let a1 = provider.get("index.html").unwrap();
+        let a2 = provider.get("index.html").unwrap();
         assert_eq!(a1.etag, a2.etag);
     }
 

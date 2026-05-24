@@ -44,16 +44,18 @@ impl ResponseModeRegistry {
     ) -> Self {
         Self::with_builtins_and_session_events_from(
             crate::handlers::ALL,
+            None,
             session_events_invoker,
         )
     }
 
     pub fn with_builtins_and_session_events_from(
         service_descriptors: &'static [crate::registry::ServiceDescriptor],
+        asset_provider: Option<Arc<dyn static_mode::StaticAssetProvider>>,
         session_events_invoker: Arc<dyn crate::routes::invocation::CompiledRouteInvocation>,
     ) -> Self {
         let mut r = Self::new();
-        r.register(Arc::new(static_mode::StaticMode));
+        r.register(Arc::new(static_mode::StaticMode { asset_provider }));
         r.register(Arc::new(event_stream_mode::EventStreamMode::with_session_events(
             session_events_invoker,
         )));
@@ -72,7 +74,7 @@ impl ResponseModeRegistry {
         service_descriptors: &'static [crate::registry::ServiceDescriptor],
     ) -> Self {
         let mut r = Self::new();
-        r.register(Arc::new(static_mode::StaticMode));
+        r.register(Arc::new(static_mode::StaticMode::default()));
         r.register(Arc::new(event_stream_mode::EventStreamMode::default()));
         r.register(Arc::new(launch_mode::LaunchMode::default()));
         r.register(Arc::new(json_mode::JsonMode { service_descriptors }));
@@ -116,7 +118,7 @@ mod tests {
     #[should_panic(expected = "duplicate mode")]
     fn duplicate_registration_panics() {
         let mut r = ResponseModeRegistry::new();
-        r.register(Arc::new(static_mode::StaticMode));
-        r.register(Arc::new(static_mode::StaticMode));
+        r.register(Arc::new(static_mode::StaticMode::default()));
+        r.register(Arc::new(static_mode::StaticMode::default()));
     }
 }

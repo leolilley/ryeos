@@ -9,9 +9,45 @@ use crate::routes::compile::{
 };
 use ryeos_app::route_raw::RawRouteSpec;
 
-use crate::routes::embedded_assets;
+// ── Generic static asset provider trait ────────────────────────────────────
 
-pub struct StaticMode;
+/// A static asset served by an injected provider.
+pub struct StaticAsset {
+    pub bytes: &'static [u8],
+    pub content_type: &'static str,
+    pub etag: String,
+    /// Cache-Control header value.
+    pub cache_control: &'static str,
+}
+
+/// Provider trait for resolving embedded static assets by path.
+///
+/// Implemented by UI/composition layers that own the actual asset bytes.
+/// API's `static_mode` uses this at compile time (literal path validation)
+/// and dispatch time (asset resolution).
+pub trait StaticAssetProvider: Send + Sync {
+    fn get(&self, path: &str) -> Option<StaticAsset>;
+}
+
+// ── StaticMode ─────────────────────────────────────────────────────────────
+
+pub struct StaticMode {
+    /// Injected static asset provider. When `None`, `source: embedded_asset`
+    /// routes are rejected at compile time.
+    pub asset_provider: Option<Arc<dyn StaticAssetProvider>>,
+}
+
+impl Default for StaticMode {
+    fn default() -> Self {
+        Self { asset_provider: None }
+    }
+}
+
+impl StaticMode {
+    pub fn with_provider(provider: Arc<dyn StaticAssetProvider>) -> Self {
+        Self { asset_provider: Some(provider) }
+    }
+}
 
 /// Compiled static source — either inline (body_b64) or embedded asset.
 enum CompiledStaticSource {
@@ -33,6 +69,7 @@ pub struct CompiledStaticMode {
     status: StatusCode,
     content_type: Option<HeaderValue>,
     source: CompiledStaticSource,
+    asset_provider: Option<Arc<dyn StaticAssetProvider>>,
 }
 
 /// Security headers applied to all embedded asset responses.
@@ -69,6 +106,14 @@ impl ResponseMode for StaticMode {
 
         let source = match raw.response.source.as_deref() {
             Some("embedded_asset") => {
+                let provider = self.asset_provider.as_ref().ok_or_else(|| {
+                    RouteConfigError::InvalidSourceConfig {
+                        id: raw.id.clone(),
+                        src: "embedded_asset".into(),
+                        reason: "no static asset provider registered".into(),
+                    }
+                })?;
+
                 let path_val = raw.response.source_config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
                     RouteConfigError::InvalidSourceConfig {
                         id: raw.id.clone(),
@@ -89,8 +134,8 @@ impl ResponseMode for StaticMode {
                         });
                     }
                 } else {
-                    // Validate the literal path resolves to an embedded asset.
-                    if embedded_assets::get_asset(path_val).is_none() {
+                    // Validate the literal path resolves to an asset.
+                    if provider.get(path_val).is_none() {
                         return Err(RouteConfigError::InvalidSourceConfig {
                             id: raw.id.clone(),
                             src: "embedded_asset".into(),
@@ -142,6 +187,7 @@ impl ResponseMode for StaticMode {
                     status,
                     content_type: Some(header_val),
                     source: CompiledStaticSource::Inline { body },
+                    asset_provider: None,
                 }));
             }
         };
@@ -156,6 +202,7 @@ impl ResponseMode for StaticMode {
             status,
             content_type,
             source,
+            asset_provider: self.asset_provider.clone(),
         }))
     }
 }
@@ -189,7 +236,11 @@ impl CompiledResponseMode for CompiledStaticMode {
                         .unwrap_or_default(),
                 };
 
-                let asset = embedded_assets::get_asset(&path).ok_or_else(|| {
+                let provider = self.asset_provider.as_ref().ok_or_else(|| {
+                    RouteDispatchError::Internal("no static asset provider".into())
+                })?;
+
+                let asset = provider.get(&path).ok_or_else(|| {
                     RouteDispatchError::NotFound
                 })?;
 
@@ -208,11 +259,7 @@ impl CompiledResponseMode for CompiledStaticMode {
                     asset.content_type.parse().unwrap()
                 });
 
-                let cache_control = if asset.is_hashed {
-                    "public, max-age=31536000, immutable"
-                } else {
-                    "no-cache"
-                };
+                let cache_control = asset.cache_control;
 
                 let mut resp = (self.status, asset.bytes.to_vec()).into_response();
                 let headers = resp.headers_mut();
@@ -237,6 +284,33 @@ mod tests {
     use ryeos_app::route_raw::{
         RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
     };
+
+    /// Fake provider for testing: knows "index.html" and "bootstrap.js".
+    struct FakeProvider;
+
+    impl StaticAssetProvider for FakeProvider {
+        fn get(&self, path: &str) -> Option<StaticAsset> {
+            match path.trim_start_matches('/') {
+                "index.html" | "ui/index.html" => Some(StaticAsset {
+                    bytes: b"<html></html>",
+                    content_type: "text/html; charset=utf-8",
+                    etag: "\"fake-etag-html\"".to_string(),
+                    cache_control: "no-cache",
+                }),
+                "bootstrap.js" | "ui/assets/bootstrap.js" => Some(StaticAsset {
+                    bytes: b"// bootstrap",
+                    content_type: "application/javascript; charset=utf-8",
+                    etag: "\"fake-etag-js\"".to_string(),
+                    cache_control: "no-cache",
+                }),
+                _ => None,
+            }
+        }
+    }
+
+    fn mode_with_provider() -> StaticMode {
+        StaticMode::with_provider(Arc::new(FakeProvider))
+    }
 
     fn make_raw(
         status: Option<u16>,
@@ -300,7 +374,7 @@ mod tests {
 
     #[test]
     fn valid_static_compiles() {
-        let mode = StaticMode;
+        let mode = StaticMode::default();
         let raw = make_raw(Some(200), Some("text/plain"), Some("aGVsbG8="));
         let result = mode.compile(&raw);
         assert!(result.is_ok());
@@ -318,7 +392,7 @@ mod tests {
 
     #[test]
     fn embedded_asset_literal_compiles() {
-        let mode = StaticMode;
+        let mode = mode_with_provider();
         let raw = make_embedded_raw("index.html", Some(200), None);
         let result = mode.compile(&raw);
         assert!(result.is_ok(), "embedded asset compile should succeed");
@@ -326,7 +400,7 @@ mod tests {
 
     #[test]
     fn embedded_asset_capture_compiles() {
-        let mode = StaticMode;
+        let mode = mode_with_provider();
         let raw = make_embedded_raw("${path.asset}", Some(200), None);
         let result = mode.compile(&raw);
         assert!(result.is_ok(), "embedded asset capture compile should succeed");
@@ -334,7 +408,7 @@ mod tests {
 
     #[test]
     fn embedded_asset_unknown_path_rejected() {
-        let mode = StaticMode;
+        let mode = mode_with_provider();
         let raw = make_embedded_raw("nonexistent.css", Some(200), None);
         let result = mode.compile(&raw);
         let err = match result {
@@ -347,7 +421,7 @@ mod tests {
 
     #[test]
     fn embedded_asset_missing_path_rejected() {
-        let mode = StaticMode;
+        let mode = mode_with_provider();
         let mut raw = make_embedded_raw("index.html", Some(200), None);
         raw.response.source_config = serde_json::json!({});
         let result = mode.compile(&raw);
@@ -360,13 +434,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_asset_no_provider_rejected() {
+        let mode = StaticMode::default();
+        let raw = make_embedded_raw("index.html", Some(200), None);
+        let result = mode.compile(&raw);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("no static asset provider"), "got: {msg}");
+    }
+
+    #[test]
     fn allows_zero_timeout() {
-        assert!(StaticMode.allows_zero_timeout());
+        assert!(StaticMode::default().allows_zero_timeout());
     }
 
     #[test]
     fn bad_base64_rejected() {
-        let mode = StaticMode;
+        let mode = StaticMode::default();
         let raw = make_raw(Some(200), Some("text/plain"), Some("not-valid-base64!!!"));
         let result = mode.compile(&raw);
         match result {
@@ -380,7 +467,7 @@ mod tests {
 
     #[test]
     fn bad_status_code_rejected() {
-        let mode = StaticMode;
+        let mode = StaticMode::default();
         let raw = make_raw(Some(99), Some("text/plain"), Some("aGVsbG8="));
         let result = mode.compile(&raw);
         match result {
@@ -394,7 +481,7 @@ mod tests {
 
     #[test]
     fn missing_status_rejected() {
-        let mode = StaticMode;
+        let mode = StaticMode::default();
         let raw = make_raw(None, Some("text/plain"), Some("aGVsbG8="));
         let result = mode.compile(&raw);
         match result {
@@ -408,7 +495,7 @@ mod tests {
 
     #[test]
     fn missing_content_type_rejected_inline() {
-        let mode = StaticMode;
+        let mode = StaticMode::default();
         let raw = make_raw(Some(200), None, Some("aGVsbG8="));
         let result = mode.compile(&raw);
         match result {
@@ -422,7 +509,7 @@ mod tests {
 
     #[test]
     fn missing_body_b64_rejected_inline() {
-        let mode = StaticMode;
+        let mode = StaticMode::default();
         let raw = make_raw(Some(200), Some("text/plain"), None);
         let result = mode.compile(&raw);
         match result {
