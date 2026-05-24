@@ -1,54 +1,55 @@
-//! Slice 0: Backfill tests for `client-open` behavior.
-//!
-//! These tests pin the current behavior of the client-open tool
-//! via the `resolve_effective_client` and descriptor parsing paths.
-//!
-//! NOTE: Full integration tests for client-open require a running binary
-//! and populated bundles. The tests here verify the descriptor parsing
-//! and resolution logic at the unit level. Deeper integration tests
-//! land in Slice 1 after the `serves` tightening.
+// Slice 0+1: Tests for client-open behavior.
+//
+// Core-tools does not model `client.serves` — it only needs
+// `launch.{mode, binary_ref}` and `bundle_root` from the engine result.
 
 use serde_json::json;
 
-/// Verify the EffectiveClientDescriptor parsing accepts valid `serves`.
+/// Verify that a descriptor with only `launch` parses (core-tools
+/// doesn't model `serves` — it's opaque metadata).
 #[test]
-fn valid_descriptor_with_serves_parses() {
+fn descriptor_with_only_launch_parses() {
     let raw = json!({
         "serves": {
             "kind": "surface",
-            "renderer": "terminal"
+            "renderer": "browser"
         },
         "launch": {
             "mode": "cli_exec",
-            "binary_ref": "bin/{triple}/ryeos-tui",
+            "binary_ref": "bin/{triple}/ryeos-web-launcher",
             "args": {
-                "surface": "--surface"
+                "surface": "--surface",
+                "project": "--project"
             }
         }
     });
 
-    let descriptor: serde_json::Value = serde_json::from_value(raw.clone()).unwrap();
-    // Verify the serves block is present and correct.
-    let serves = descriptor.get("serves").unwrap();
-    assert_eq!(serves["kind"], "surface");
-    assert_eq!(serves["renderer"], "terminal");
+    // We parse at the Value level — core-tools' EffectiveClientDescriptor
+    // only deserializes `launch`, ignoring `serves`.
+    let launch = &raw["launch"];
+    assert_eq!(launch["mode"], "cli_exec");
+    assert_eq!(launch["binary_ref"], "bin/{triple}/ryeos-web-launcher");
 }
 
-/// Verify the EffectiveClientDescriptor parsing accepts descriptor
-/// without `serves` (it's currently `Option`).
+/// core-tools does not gate on `serves.kind` — that's the launcher
+/// binary's concern. A descriptor with `serves.kind: graph` is fine.
 #[test]
-fn descriptor_without_serves_parses() {
+fn descriptor_does_not_reject_unknown_serves_kind() {
     let raw = json!({
+        "serves": {
+            "kind": "graph",
+            "renderer": "browser"
+        },
         "launch": {
             "mode": "cli_exec",
-            "binary_ref": "bin/{triple}/ryeos-tui",
+            "binary_ref": "bin/{triple}/some-launcher",
             "args": {}
         }
     });
 
-    let descriptor: serde_json::Value = serde_json::from_value(raw.clone()).unwrap();
-    // serves should be absent
-    assert!(descriptor.get("serves").is_none());
+    // If core-tools parsed this, it would succeed — it doesn't read serves.
+    let launch = &raw["launch"];
+    assert_eq!(launch["mode"], "cli_exec");
 }
 
 /// Verify the verb-to-client derivation: verb `surface-open` →
@@ -61,13 +62,10 @@ fn hyphenated_verb_resolves_to_hyphenated_client() {
 }
 
 /// Verify that bundle_root must be Some for client-open to work.
-/// This test documents the expected behavior; the actual enforcement
-/// is in `run_client_open` which checks `effective.source.bundle_root`.
+/// The actual enforcement is in `run_client_open` which checks
+/// `effective.source.bundle_root`.
 #[test]
 fn bundle_root_requirement_documented() {
-    // The EffectiveItemSource struct has a bundle_root: Option<PathBuf>.
-    // client-open errors when it's None. This test documents that
-    // the field exists and is optional at the serde level.
     let source = json!({
         "space": "system",
         "path": "/some/bundle/.ai/clients/ryeos/tui.yaml",

@@ -37,6 +37,7 @@ pub struct BrowserSession {
 #[derive(Debug)]
 struct LaunchToken {
     session_id: String,
+    #[allow(dead_code)]
     created_at: Instant,
     expires_at: Instant,
 }

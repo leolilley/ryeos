@@ -726,16 +726,7 @@ struct ClientOpenParams {
 
 #[derive(Debug, serde::Deserialize)]
 struct EffectiveClientDescriptor {
-    #[serde(default)]
-    serves: Option<ClientServesDescriptor>,
     launch: ClientLaunchDescriptor,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ClientServesDescriptor {
-    kind: String,
-    #[serde(default)]
-    renderer: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -779,17 +770,6 @@ fn run_client_open(
 
     let descriptor: EffectiveClientDescriptor = serde_json::from_value(effective.composed_value)
         .map_err(|e| anyhow::anyhow!("invalid effective client descriptor: {e}"))?;
-
-    // Validate serves.kind == "surface".
-    if let Some(serves) = &descriptor.serves {
-        if serves.kind != "surface" {
-            anyhow::bail!(
-                "client `{}` serves.kind must be `surface`, got `{}`",
-                effective.canonical_ref,
-                serves.kind
-            );
-        }
-    }
 
     // Validate launch mode for offline dispatch.
     if descriptor.launch.mode != "cli_exec" {

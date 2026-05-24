@@ -55,7 +55,7 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
 /// parsing error messages.
 fn map_engine_error(e: EngineError) -> HandlerError {
     match &e {
-        EngineError::EffectiveItemNotFound { canonical_ref } => HandlerError::NotFound,
+        EngineError::EffectiveItemNotFound { canonical_ref: _ } => HandlerError::NotFound,
         EngineError::EffectiveItemWrongKind {
             expected,
             found,
