@@ -212,6 +212,16 @@ fn validate_field_shape(
         }
     }
 
+    if rule.strategy == ComposerStrategy::DictMergeRootLast && !value.is_object() {
+        return Err((
+            ResolutionStepNameWire::PipelineInit,
+            format!(
+                "{ref_label}: `{}` must be a mapping for dict_merge_root_last",
+                rule.name
+            ),
+        ));
+    }
+
     if rule.strategy == ComposerStrategy::DictMergeStringSeqRootLast {
         let obj = value.as_object().ok_or_else(|| {
             (
@@ -340,6 +350,23 @@ fn apply_strategy(
                 }
             }
         }
+        ComposerStrategy::ReplaceRootLast => {
+            if let Some(value) = last_non_null_field(ancestor_parsed, root_parsed, &rule.name) {
+                if let Value::Object(obj) = composed {
+                    obj.insert(rule.name.clone(), value.clone());
+                }
+            }
+        }
+        ComposerStrategy::DictMergeRootLast => {
+            let mut merged: Map<String, Value> = Map::new();
+            for parent in ancestor_parsed {
+                merge_object_root_last(&mut merged, parent.get(&rule.name));
+            }
+            merge_object_root_last(&mut merged, root_parsed.get(&rule.name));
+            if let Value::Object(obj) = composed {
+                obj.insert(rule.name.clone(), Value::Object(merged));
+            }
+        }
         ComposerStrategy::DictMergeStringSeqRootLast => {
             let mut merged: Map<String, Value> = Map::new();
             for parent in ancestor_parsed {
@@ -451,6 +478,18 @@ fn apply_strategy(
     Ok(())
 }
 
+fn last_non_null_field<'a>(
+    ancestor_parsed: &'a [&'a Value],
+    root_parsed: &'a Value,
+    field: &str,
+) -> Option<&'a Value> {
+    ancestor_parsed
+        .iter()
+        .filter_map(|parent| parent.get(field).filter(|v| !v.is_null()))
+        .chain(root_parsed.get(field).filter(|v| !v.is_null()))
+        .last()
+}
+
 fn merge_keyed_seq_root_last(
     ancestor_parsed: &[&Value],
     root_value: Option<&Value>,
@@ -488,6 +527,15 @@ fn merge_keyed_seq_root_last(
         .into_iter()
         .filter_map(|item_key| by_key.remove(&item_key))
         .collect()
+}
+
+fn merge_object_root_last(into: &mut Map<String, Value>, source: Option<&Value>) {
+    let Some(Value::Object(obj)) = source else {
+        return;
+    };
+    for (key, value) in obj {
+        into.insert(key.clone(), value.clone());
+    }
 }
 
 fn merge_string_seq_dict(into: &mut Map<String, Value>, source: Option<&Value>) {
@@ -583,6 +631,8 @@ struct ComposerFieldRule {
 enum ComposerStrategy {
     RootVerbatim,
     InheritFromTopmost,
+    ReplaceRootLast,
+    DictMergeRootLast,
     DictMergeStringSeqRootLast,
     KeyedSeqMergeRootLast,
     NarrowAgainstParentEffective,
@@ -978,6 +1028,63 @@ mod tests {
         let p = json!({ "f": { "any": "shape" } });
         let view = run(cfg, r, vec![ancestor_input("p", p)]).unwrap();
         assert_eq!(view.composed.get("f").unwrap(), &json!({ "any": "shape" }));
+    }
+
+    #[test]
+    fn replace_root_last_uses_root_when_present() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                { "name": "layout", "strategy": "replace_root_last", "expect_value_type": "mapping" }
+            ]
+        });
+        let r = json!({ "ext": "p", "layout": { "root": "child" } });
+        let p = json!({ "layout": { "root": "parent" } });
+        let view = run(cfg, r, vec![ancestor_input("p", p)]).unwrap();
+        assert_eq!(
+            view.composed.get("layout").unwrap(),
+            &json!({ "root": "child" })
+        );
+    }
+
+    #[test]
+    fn replace_root_last_uses_nearest_parent_when_root_omits_field() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                { "name": "layout", "strategy": "replace_root_last", "expect_value_type": "mapping" }
+            ]
+        });
+        let r = json!({ "ext": "mid" });
+        let base = json!({ "layout": { "root": "base" } });
+        let mid = json!({ "layout": { "root": "mid" } });
+        let view = run(
+            cfg,
+            r,
+            vec![ancestor_input("base", base), ancestor_input("mid", mid)],
+        )
+        .unwrap();
+        assert_eq!(
+            view.composed.get("layout").unwrap(),
+            &json!({ "root": "mid" })
+        );
+    }
+
+    #[test]
+    fn dict_merge_root_last_shallow_merges_with_root_override() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                { "name": "ambient", "strategy": "dict_merge_root_last", "expect_value_type": "mapping" }
+            ]
+        });
+        let r = json!({ "ext": "p", "ambient": { "theme": "dark", "child": true } });
+        let p = json!({ "ambient": { "theme": "light", "parent": true } });
+        let view = run(cfg, r, vec![ancestor_input("p", p)]).unwrap();
+        assert_eq!(
+            view.composed.get("ambient").unwrap(),
+            &json!({ "theme": "dark", "parent": true, "child": true })
+        );
     }
 
     #[test]

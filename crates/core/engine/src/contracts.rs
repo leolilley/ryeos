@@ -506,7 +506,7 @@ impl ValueShape {
 ///     (recursive subset check).
 ///   * **Element types:** Both sides must be Sequence; the producer's
 ///     element type must satisfy the consumer's element type.
-fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> bool {
+pub(crate) fn field_type_covers(consumer: &FieldType, producer: &FieldType) -> bool {
     match (consumer, producer) {
         (FieldType::Single { prim: c_prim, .. }, FieldType::Single { prim: p_prim, .. }) => {
             if *c_prim == PrimType::Any {

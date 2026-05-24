@@ -32,10 +32,10 @@ pub struct ParserDescriptor {
     /// and consumes it.
     #[serde(default)]
     pub parser_config: serde_json::Value,
-    /// Declared shape of this parser's output `Value`. Required.
-    /// The boot validator checks every consuming kind's
-    /// `composed_value_contract` against this shape; making it
-    /// mandatory removes the silent-skip class of bugs where a parser
-    /// without a declaration would never be type-checked.
+    /// Lower-bound declared shape of this parser's output `Value`.
+    /// Required. The boot validator checks this shape for
+    /// compatibility/no-contradiction with each consuming kind's final
+    /// `composed_value_contract`; concrete descriptor instances are
+    /// still validated by preflight and post-composition checks.
     pub output_schema: ValueShape,
 }

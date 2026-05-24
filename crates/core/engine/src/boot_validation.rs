@@ -32,7 +32,7 @@ const VALIDATION_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
-use crate::contracts::ContractViolation;
+use crate::contracts::{field_type_covers, ContractViolation, ShapeType, ValueShape};
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
 use crate::handlers::{HandlerRegistry, HandlerServes};
@@ -98,9 +98,14 @@ pub enum BootIssue {
         parser_ref: String,
         paths: Vec<PathBuf>,
     },
-    /// The parser's declared `output_schema` does not satisfy the
-    /// kind's `composed_value_contract`. One variant per individual
+    /// The parser's declared `output_schema` contradicts the kind's
+    /// `composed_value_contract`. One variant per individual
     /// `ContractViolation` so callers see every problem.
+    ///
+    /// This is a boot-time compatibility/no-contradiction check, not
+    /// a proof that a generic parser guarantees every required final
+    /// composed field. Concrete descriptor instances are enforced by
+    /// preflight and post-composition validation.
     ParserComposerContractViolation {
         kind: String,
         ext: String,
@@ -501,10 +506,10 @@ fn schedule_contract_check(
     schema: &crate::kind_registry::KindSchema,
     descriptor: &crate::parsers::ParserDescriptor,
 ) {
-    for violation in schema
-        .composed_value_contract
-        .is_satisfied_by(&descriptor.output_schema)
-    {
+    for violation in parser_output_compatible_with_kind_contract(
+        &schema.composed_value_contract,
+        &descriptor.output_schema,
+    ) {
         issues.push(BootIssue::ParserComposerContractViolation {
             kind: kind.to_string(),
             ext: ext.ext.clone(),
@@ -512,6 +517,61 @@ fn schedule_contract_check(
             violation,
         });
     }
+}
+
+/// Boot-time parser/kind compatibility check.
+///
+/// Parser `output_schema` is a lower-bound declaration of what the
+/// parser can guarantee syntactically. Generic parsers such as the YAML
+/// document parser can honestly guarantee only `root_type: mapping`;
+/// they cannot enumerate consumer-specific fields like `launch`,
+/// `layout`, or `endpoint`.
+///
+/// Therefore boot validation checks for contradictions only:
+///
+/// - root types must be compatible;
+/// - parser-declared fields that overlap the kind contract must have
+///   compatible types;
+/// - missing kind-required fields are not boot issues unless an actual
+///   descriptor instance violates the contract later.
+fn parser_output_compatible_with_kind_contract(
+    kind_contract: &ValueShape,
+    parser_output: &ValueShape,
+) -> Vec<ContractViolation> {
+    let mut violations = Vec::new();
+
+    if kind_contract.root_type != ShapeType::Any
+        && kind_contract.root_type != parser_output.root_type
+    {
+        violations.push(ContractViolation::RootTypeMismatch {
+            needed: kind_contract.root_type,
+            produced: parser_output.root_type,
+        });
+    }
+
+    if kind_contract.root_type == ShapeType::Mapping {
+        for (name, produced) in parser_output
+            .required
+            .iter()
+            .chain(parser_output.optional.iter())
+        {
+            if let Some(needed) = kind_contract
+                .required
+                .get(name)
+                .or_else(|| kind_contract.optional.get(name))
+            {
+                if !field_type_covers(needed, produced) {
+                    violations.push(ContractViolation::FieldTypeMismatch {
+                        name: name.clone(),
+                        needed: needed.clone(),
+                        produced: produced.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    violations
 }
 
 #[cfg(test)]
@@ -599,6 +659,9 @@ mod tests {
             "\
 location:
   directory: directives
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".md\"]
     parser: {parser_ref}
@@ -639,6 +702,9 @@ composed_value_contract:
             "\
 location:
   directory: directives
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".md\"]
     parser: {parser_ref}
@@ -939,6 +1005,9 @@ composed_value_contract:
             "\
 location:
   directory: parsers
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".yaml\"]
     parser: {parser_ref}
@@ -1062,6 +1131,32 @@ composed_value_contract:
     }
 
     #[test]
+    fn generic_mapping_parser_does_not_have_to_prove_required_kind_fields() {
+        let parser_ref = "parser:ryeos/core/yaml/yaml";
+        let kinds = kinds_with_directive_contract(
+            parser_ref,
+            "  root_type: mapping\n  required:\n    launch:\n      type: single\n      prim: mapping\n      contract:\n        root_type: mapping\n        required:\n          mode: { type: single, prim: string }\n",
+        );
+        let parsers = ParserRegistry::from_entries(vec![(
+            parser_ref.to_string(),
+            parser_descriptor_with_schema(
+                "handler:ryeos/core/yaml-document",
+                serde_json::json!({ "require_mapping": true }),
+                ValueShape::any_mapping(),
+            ),
+        )]);
+        let hr = handler_registry();
+        let composers = composers_from(&kinds);
+        let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
+        assert!(
+            !issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::ParserComposerContractViolation { .. })),
+            "generic mapping parser should be compatible; actual descriptor instances enforce required fields later: {issues:?}"
+        );
+    }
+
+    #[test]
     fn kind_schema_missing_contract_rejected_at_load() {
         let root = tempdir();
         let sk = signing_key();
@@ -1069,6 +1164,10 @@ composed_value_contract:
         let yaml = "\
 location:
   directory: directives
+resolution: []
+composer: handler:ryeos/core/identity
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".md\"]
     parser: parser:ryeos/core/markdown/directive
@@ -1097,6 +1196,9 @@ formats:
         let yaml = "\
 location:
   directory: directives
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".md\"]
     parser: parser:ryeos/core/markdown/directive
@@ -1128,6 +1230,9 @@ composed_value_contract:
         let yaml = "\
 location:
   directory: directives
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".md\"]
     parser: parser:ryeos/core/markdown/directive
@@ -1170,7 +1275,7 @@ composed_value_contract:
     }
 
     #[test]
-    fn aggregates_all_contract_violations() {
+    fn aggregates_parser_contract_contradictions_without_missing_required_fields() {
         let parser_ref = "parser:ryeos/core/markdown/directive";
         let mut required = BTreeMap::new();
         required.insert(
@@ -1257,8 +1362,8 @@ composed_value_contract:
             )
         });
         assert!(
-            has_root && has_missing && has_type_mismatch,
-            "expected root + missing + type-mismatch all aggregated, got: {issues:?}"
+            has_root && !has_missing && has_type_mismatch,
+            "expected root + type-mismatch contradictions only (not missing required fields), got: {issues:?}"
         );
     }
 
@@ -1272,6 +1377,9 @@ composed_value_contract:
                 "\
 location:
   directory: {kind}s
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".md\"]
     parser: parser:ryeos/core/markdown/x

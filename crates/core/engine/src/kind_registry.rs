@@ -745,15 +745,16 @@ pub struct KindSchema {
     /// Execution configuration (dispatch, operations, aliases).
     /// `None` if this kind is not executable (e.g., config kind).
     pub execution: Option<ExecutionSchema>,
-    /// Declared shape contract on the parsed `Value` that the parser
-    /// must produce for this kind's composer. REQUIRED on every
-    /// kind schema. Kinds with no field-level constraint at boot
-    /// must declare an explicit empty contract
+    /// Declared shape contract on the final composed `Value` for this
+    /// kind. REQUIRED on every kind schema. Kinds with no field-level
+    /// constraint must declare an explicit empty contract
     /// (`root_type: mapping, required: {}`) — absence is no longer a
     /// silent default but a deliberate, reviewed declaration.
-    /// The boot validator runs `is_satisfied_by` against each
-    /// extension parser's `output_schema` and aggregates ALL
-    /// violations.
+    ///
+    /// The boot validator checks each extension parser's
+    /// `output_schema` for compatibility/no-contradiction. Actual
+    /// required-field enforcement happens against concrete descriptor
+    /// values in preflight and post-composition validation.
     pub composed_value_contract: ValueShape,
     /// Native composer handler ID this kind binds to (e.g.
     /// `"handler:ryeos/core/extends-chain"`,
