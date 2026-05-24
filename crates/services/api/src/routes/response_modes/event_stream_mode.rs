@@ -1,17 +1,23 @@
 //! `event_stream` response mode — unified SSE gateway + subscription + session.
 //!
-//! Three strategies, selected at compile time by the `source` field:
+//! Stream sources are registered at composition time via [`EventStreamMode`]:
 //!
-//! | Source value        | Strategy       | Description                                  |
-//! |---------------------|---------------|----------------------------------------------|
-//! | `"dispatch_launch"` | Gateway       | Body-driven: parses item_ref from request body, mints thread ID, dispatches via engine, streams events |
-//! | `"thread_events"`   | Subscription  | Path-driven: extracts thread_id from path capture, subscribes to existing thread, streams events with principal ownership check |
-//! | `"session_events"`  | SessionEvents | Path-driven: extracts session_id from path capture, subscribes to the SessionBus, streams events with browser_session auth |
+//! | Source value        | Strategy       | Registered by |
+//! |---------------------|----------------|---------------|
+//! | `"dispatch_launch"` | Gateway        | API builtins  |
+//! | `"thread_events"`   | Subscription   | API builtins  |
+//! | `"session_events"`  | SessionEvents  | UI layer      |
 //!
-//! Both strategies produce SSE frames. Both share lag-recovery and
+//! API's `EventStreamMode::default()` registers `dispatch_launch` and
+//! `thread_events`.  The UI layer calls `with_session_events(invoker)` to
+//! add `session_events`.  Unknown source names are rejected by registry
+//! lookup at compile time.
+//!
+//! All strategies produce SSE frames. Both share lag-recovery and
 //! post-launch drain logic. The compile-time bifurcation ensures each
 //! strategy gets its own validation rules.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,14 +63,76 @@ enum EventStreamStrategy {
     },
 }
 
-#[derive(Clone, Default)]
+// ── Stream source registry ─────────────────────────────────────────────
+
+/// A compiled source that produces an [`EventStreamStrategy`] from a raw route spec.
+///
+/// Each known stream source (`dispatch_launch`, `thread_events`, `session_events`)
+/// implements this trait. The registry enables source lookup instead of a hardcoded
+/// match, so UI-specific sources can be registered by the composition root without
+/// API knowing about them.
+trait StreamSourceCompile: Send + Sync {
+    fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError>;
+}
+
+// ── Source compiler implementations ────────────────────────────────────
+
+struct DispatchLaunchSource;
+
+impl StreamSourceCompile for DispatchLaunchSource {
+    fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
+        compile_gateway(raw)
+    }
+}
+
+struct ThreadEventsSource;
+
+impl StreamSourceCompile for ThreadEventsSource {
+    fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
+        compile_subscription(raw)
+    }
+}
+
+struct SessionEventsSource {
+    invoker: Arc<dyn CompiledRouteInvocation>,
+}
+
+impl StreamSourceCompile for SessionEventsSource {
+    fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
+        compile_session_events(raw, self.invoker.clone())
+    }
+}
+
+// ── EventStreamMode ────────────────────────────────────────────────────
+
+#[derive(Clone)]
 pub struct EventStreamMode {
-    pub session_events_invoker: Option<Arc<dyn CompiledRouteInvocation>>,
+    sources: HashMap<String, Arc<dyn StreamSourceCompile>>,
+}
+
+impl Default for EventStreamMode {
+    fn default() -> Self {
+        let mut sources = HashMap::new();
+        sources.insert(
+            "dispatch_launch".into(),
+            Arc::new(DispatchLaunchSource) as Arc<dyn StreamSourceCompile>,
+        );
+        sources.insert(
+            "thread_events".into(),
+            Arc::new(ThreadEventsSource) as Arc<dyn StreamSourceCompile>,
+        );
+        Self { sources }
+    }
 }
 
 impl EventStreamMode {
     pub fn with_session_events(invoker: Arc<dyn CompiledRouteInvocation>) -> Self {
-        Self { session_events_invoker: Some(invoker) }
+        let mut mode = Self::default();
+        mode.sources.insert(
+            "session_events".into(),
+            Arc::new(SessionEventsSource { invoker }) as Arc<dyn StreamSourceCompile>,
+        );
+        mode
     }
 }
 
@@ -95,39 +163,27 @@ impl ResponseMode for EventStreamMode {
 
         let source = raw.response.source.as_deref().unwrap_or("");
 
-        let strategy = match source {
-            "dispatch_launch" => compile_gateway(raw)?,
-            "thread_events" => compile_subscription(raw)?,
-            "session_events" => {
-                let invoker = self.session_events_invoker.clone().ok_or_else(|| {
-                    RouteConfigError::InvalidSourceConfig {
-                        id: raw.id.clone(),
-                        src: "session_events".into(),
-                        reason: "session_events source is not registered".into(),
-                    }
-                })?;
-                compile_session_events(raw, invoker)?
-            },
-            "" => {
-                return Err(RouteConfigError::InvalidResponseSpec {
-                    id: raw.id.clone(),
-                    mode: "event_stream".into(),
-                    reason: "event_stream mode requires `response.source` \
-                        (expected 'dispatch_launch', 'thread_events', or 'session_events')"
-                        .into(),
-                });
+        if source.is_empty() {
+            return Err(RouteConfigError::InvalidResponseSpec {
+                id: raw.id.clone(),
+                mode: "event_stream".into(),
+                reason: "event_stream mode requires `response.source`".into(),
+            });
+        }
+
+        let compiler = self.sources.get(source).ok_or_else(|| {
+            let registered: Vec<&str> = self.sources.keys().map(|s| s.as_str()).collect();
+            RouteConfigError::InvalidSourceConfig {
+                id: raw.id.clone(),
+                src: source.into(),
+                reason: format!(
+                    "unknown event_stream source '{source}'; registered sources: [{}]",
+                    registered.join(", ")
+                ),
             }
-            other => {
-                return Err(RouteConfigError::InvalidSourceConfig {
-                    id: raw.id.clone(),
-                    src: other.into(),
-                    reason: format!(
-                        "unknown event_stream source '{other}'; \
-                         expected 'dispatch_launch', 'thread_events', or 'session_events'"
-                    ),
-                });
-            }
-        };
+        })?;
+
+        let strategy = compiler.compile(raw)?;
 
         Ok(Arc::new(CompiledEventStreamMode { strategy }))
     }
@@ -661,6 +717,30 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(msg.contains("unknown event_stream source"), "got: {msg}");
+    }
+
+    /// `session_events` is not registered in the default (API-only) mode.
+    /// It must be rejected as an unknown source.
+    #[test]
+    fn compile_rejects_session_events_without_ui_registry() {
+        let mut raw = make_gateway_raw("r1", "/sessions/{id}/stream");
+        raw.auth = "browser_session".into();
+        raw.response.source = Some("session_events".into());
+        raw.response.source_config = serde_json::json!({
+            "session_id": "${path.id}",
+            "keep_alive_secs": 15,
+        });
+        raw.request.body = RawRequestBody::None;
+        let result = EventStreamMode::default().compile(&raw);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for session_events without UI registry"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown event_stream source 'session_events'"),
+            "got: {msg}"
+        );
     }
 
     #[test]
