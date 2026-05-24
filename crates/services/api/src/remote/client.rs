@@ -305,6 +305,12 @@ impl RemoteClient {
     /// This is the extended variant used by target-site forwarding
     /// which needs to forward operation and inputs fields that the
     /// basic `execute()` method does not support.
+    /// POST /execute with optional operation/inputs overrides.
+    ///
+    /// Used by the shared unary forward helper. Note: `target_site_id`
+    /// is intentionally **not** forwarded to prevent forwarding loops —
+    /// if site A forwards to site B, B should execute locally, not
+    /// attempt to forward again.
     pub async fn execute_with_options(
         &self,
         item_ref: &str,

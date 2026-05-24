@@ -198,6 +198,43 @@ pub enum DispatchError {
     /// authorised to know it exists. Maps to 404.
     #[error("not found")]
     NotFound,
+    // ── Target-site forwarding errors ────────────────────────────
+    /// The requested target site is not configured as a remote.
+    #[error("unknown target site '{target_site_id}'; configured sites: [{known_sites}]")]
+    UnknownTargetSite {
+        target_site_id: String,
+        known_sites: String,
+    },
+    /// The target-site request shape is outside unary forwarding v1.
+    #[error("target site '{target_site_id}' is unsupported for this request: {reason}")]
+    TargetSiteUnsupported {
+        target_site_id: String,
+        reason: String,
+    },
+    /// Target-site resolution or project binding failed before remote I/O.
+    #[error("target site '{target_site_id}' resolution failed: {detail}")]
+    TargetSiteResolutionFailed {
+        target_site_id: String,
+        detail: String,
+    },
+    /// Pull-back found local workspace changes since the remote push.
+    #[error("target site '{target_site_id}' pull conflict: {detail}")]
+    TargetSiteForwardConflict {
+        target_site_id: String,
+        detail: String,
+    },
+    /// Remote site, remote CAS, or returned remote snapshot failed.
+    #[error("target site '{target_site_id}' remote failure: {detail}")]
+    TargetSiteForwardBadGateway {
+        target_site_id: String,
+        detail: String,
+    },
+    /// Local forwarding orchestration failed unexpectedly.
+    #[error("target site '{target_site_id}' forward failed internally: {detail}")]
+    TargetSiteForwardInternal {
+        target_site_id: String,
+        detail: String,
+    },
     /// Composed descriptor fails its `composed_value_contract`
     /// instance validation. This is a local preflight gate: a malformed
     /// descriptor must fail before any remote push, remote execute,
@@ -252,10 +289,18 @@ impl DispatchError {
             | Self::OpInvalidInput { .. }
             | Self::ProjectionInvariant { .. }
             | Self::InvalidLaunchMode { .. }
-            | Self::ComposedValueContractViolation { .. } => StatusCode::BAD_REQUEST,
-            Self::ProtocolNotRegistered(_) => StatusCode::BAD_GATEWAY,
+            | Self::ComposedValueContractViolation { .. }
+            | Self::UnknownTargetSite { .. }
+            | Self::TargetSiteUnsupported { .. }
+            | Self::TargetSiteResolutionFailed { .. } => StatusCode::BAD_REQUEST,
+            Self::TargetSiteForwardConflict { .. } => StatusCode::CONFLICT,
+            Self::ProtocolNotRegistered(_) | Self::TargetSiteForwardBadGateway { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) | Self::TargetSiteForwardInternal { .. } => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 
@@ -291,6 +336,12 @@ impl DispatchError {
             Self::StreamingNotDetachable => "streaming_not_detachable",
             Self::InvalidLaunchMode { .. } => "invalid_launch_mode",
             Self::ComposedValueContractViolation { .. } => "contract_violation",
+            Self::UnknownTargetSite { .. } => "unknown_target_site",
+            Self::TargetSiteUnsupported { .. } => "target_site_unsupported",
+            Self::TargetSiteResolutionFailed { .. } => "target_site_resolution_failed",
+            Self::TargetSiteForwardConflict { .. } => "target_site_forward_conflict",
+            Self::TargetSiteForwardBadGateway { .. } => "target_site_forward_bad_gateway",
+            Self::TargetSiteForwardInternal { .. } => "target_site_forward_internal",
             Self::Internal(_) => "internal",
         }
     }

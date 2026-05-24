@@ -15,6 +15,8 @@
 //! 3. Capability check via the unified Authorizer (derived from item_ref).
 //! 4. Full dispatch pipeline (token resolution, project source, engine dispatch).
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -22,13 +24,15 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::remote::config::{ProjectSyncScope, RemoteConfig, ResolvedRemote, TargetSiteError};
 use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
-use ryeos_executor::execution::project_source::{self, ProjectSource};
+use ryeos_executor::execution::project_source::{self, ProjectSource, NO_PROJECT_SENTINEL};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
+use ryeos_state::ignore::IgnoreMatcher;
 
 // ── Request shape ─────────────────────────────────────────────────────────
 
@@ -255,6 +259,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
         }
 
         let item_ref = request.item_ref.as_ref().unwrap();
+        let no_project_requested = request.project_path.is_none();
 
         // Capability check: derive the required cap from the item_ref
         // (e.g. "directive:apps/tv-tracker/ai_chat" →
@@ -440,9 +445,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 .request_engine
                 .effective_parser_dispatcher(Some(&project_ctx.effective_path))
                 .map_err(|e| {
-                    RouteDispatchError::Internal(format!(
-                        "preflight parser dispatcher: {e}"
-                    ))
+                    RouteDispatchError::Internal(format!("preflight parser dispatcher: {e}"))
                 })?;
 
             match run_resolution_pipeline(
@@ -490,9 +493,94 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         }
 
+        // ── Phase 3: target-site forwarding ────────────────────────
+        // After preflight validation passes, check whether the caller
+        // requested execution on a remote site. This runs BEFORE the
+        // local executor protocol dispatch, so protocol-specific
+        // capability checks (e.g. "remote execution not yet supported
+        // for native runtimes") don't reject us first.
+        let remote_target_requested = request
+            .target_site_id
+            .as_deref()
+            .is_some_and(|target| target != site_id);
+        let request_can_need_remote_config = request.launch_mode == "inline"
+            && !request.validate_only
+            && matches!(project_source, ProjectSource::LiveFs)
+            && request.operation.is_none()
+            && request.inputs.is_none();
+        let remotes = if remote_target_requested && request_can_need_remote_config {
+            Some(
+                crate::remote::config::load_remotes(&state.config.system_space_dir)
+                    .map_err(|e| RouteDispatchError::Internal(format!("load remotes: {e:#}")))?,
+            )
+        } else {
+            None
+        };
+
+        let target_site_plan = match plan_target_site_forward(
+            &request,
+            &project_source,
+            no_project_requested,
+            site_id,
+            &project_ctx.effective_path,
+            remotes.as_ref(),
+        ) {
+            Ok(plan) => plan,
+            Err(e) => return Ok(dispatch_error_response(e)),
+        };
+
+        let dispatch_target_site_id = match target_site_plan {
+            TargetSitePlan::Local => None,
+            TargetSitePlan::Remote(plan) => {
+                let client = crate::remote::client::RemoteClient::new(
+                    &plan.remote.remote.url,
+                    &plan.remote.remote.principal_id,
+                    state.identity.clone(),
+                );
+                let remote_ignore = IgnoreMatcher::from_config(&plan.remote.remote.ingest_ignore)
+                    .map_err(|e| {
+                    RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+                })?;
+                let state_arc = Arc::new(state.clone());
+                let forward_req = crate::remote::forward::RemoteForwardRequest {
+                    remote: &plan.remote,
+                    item_ref,
+                    local_project_path: plan.local_project_path.as_deref(),
+                    remote_project_path: &plan.remote_project_path,
+                    parameters: request.parameters.clone(),
+                    acting_principal: &caller_principal_id,
+                    remote_ignore: &remote_ignore,
+                    operation: None,
+                    inputs: None,
+                };
+                match crate::remote::forward::execute_unary_forward(
+                    &state_arc,
+                    &client,
+                    forward_req,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        // The remote executed successfully and pull-back
+                        // completed. Return the remote result in the normal
+                        // /execute response shape.
+                        return Ok(axum::Json(result.remote_result).into_response());
+                    }
+                    Err(e) => {
+                        let dispatch_err = map_forward_error_to_dispatch(&e, &plan.target_site_id);
+                        return Ok(dispatch_error_response(dispatch_err));
+                    }
+                }
+            }
+        };
+
+        // ── Local dispatch ─────────────────────────────────────────
+        // No target_site_id, or target_site_id == current_site_id
+        // (normalized to None above). Build dispatch request and call
+        // local executor.
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: request.launch_mode.as_str(),
-            target_site_id: request.target_site_id.as_deref(),
+            target_site_id: dispatch_target_site_id,
             validate_only: request.validate_only,
             params: request.parameters.clone(),
             acting_principal: caller_principal_id.as_str(),
@@ -523,6 +611,205 @@ fn dispatch_error_response(
     let status = e.http_status();
     let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);
     (status, axum::Json(payload.to_value())).into_response()
+}
+
+#[derive(Debug)]
+enum TargetSitePlan {
+    Local,
+    Remote(TargetSiteForwardPlan),
+}
+
+#[derive(Debug)]
+struct TargetSiteForwardPlan {
+    target_site_id: String,
+    remote: ResolvedRemote,
+    local_project_path: Option<PathBuf>,
+    remote_project_path: String,
+}
+
+fn plan_target_site_forward(
+    request: &ExecuteRequest,
+    project_source: &ProjectSource,
+    no_project_requested: bool,
+    current_site_id: &str,
+    effective_project_path: &Path,
+    remotes: Option<&HashMap<String, RemoteConfig>>,
+) -> Result<TargetSitePlan, ryeos_executor::dispatch_error::DispatchError> {
+    let Some(target_site_id) = request.target_site_id.as_deref() else {
+        return Ok(TargetSitePlan::Local);
+    };
+
+    if target_site_id == current_site_id {
+        tracing::debug!(
+            target_site_id = %target_site_id,
+            "target_site_id equals current site; normalizing to local execution"
+        );
+        return Ok(TargetSitePlan::Local);
+    }
+
+    if request.launch_mode != "inline" {
+        return Err(target_site_unsupported(
+            target_site_id,
+            format!(
+                "launch_mode '{}' is not supported; target-site forwarding v1 supports inline only",
+                request.launch_mode
+            ),
+        ));
+    }
+
+    if request.validate_only {
+        return Err(target_site_unsupported(
+            target_site_id,
+            "validate_only with remote target_site_id is not supported; validation already ran locally",
+        ));
+    }
+
+    if !matches!(project_source, ProjectSource::LiveFs) {
+        return Err(target_site_unsupported(
+            target_site_id,
+            "project_source pushed_head is not supported for target-site forwarding v1",
+        ));
+    }
+
+    if request.operation.is_some() || request.inputs.is_some() {
+        return Err(target_site_unsupported(
+            target_site_id,
+            "operation/inputs are not supported for target-site forwarding v1",
+        ));
+    }
+
+    let remotes = remotes.ok_or_else(|| {
+        ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
+            target_site_id: target_site_id.to_string(),
+            detail: "remote config was not loaded for remote target".into(),
+        }
+    })?;
+
+    let remote = crate::remote::config::resolve_remote_by_site_id(remotes, target_site_id)
+        .map_err(|e| target_site_error_to_dispatch(e, target_site_id))?;
+
+    let (local_project_path, remote_project_path) = if no_project_requested {
+        (None, NO_PROJECT_SENTINEL.to_string())
+    } else {
+        let binding =
+            crate::remote::config::resolve_project_binding(&remote.remote, effective_project_path)
+                .map_err(|e| {
+                    ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
+                        target_site_id: target_site_id.to_string(),
+                        detail: format!(
+                    "project binding for '{}' is required for target-site forwarding: {e:#}",
+                    effective_project_path.display()
+                ),
+                    }
+                })?;
+
+        if binding.sync_scope != ProjectSyncScope::FullProject {
+            return Err(target_site_unsupported(
+                target_site_id,
+                format!(
+                    "binding for '{}' has sync_scope {:?}; target-site forwarding requires full_project",
+                    binding.local_project_path.display(),
+                    binding.sync_scope
+                ),
+            ));
+        }
+
+        (
+            Some(binding.local_project_path),
+            binding.remote_project_path,
+        )
+    };
+
+    Ok(TargetSitePlan::Remote(TargetSiteForwardPlan {
+        target_site_id: target_site_id.to_string(),
+        remote,
+        local_project_path,
+        remote_project_path,
+    }))
+}
+
+fn target_site_unsupported(
+    target_site_id: &str,
+    reason: impl Into<String>,
+) -> ryeos_executor::dispatch_error::DispatchError {
+    ryeos_executor::dispatch_error::DispatchError::TargetSiteUnsupported {
+        target_site_id: target_site_id.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn target_site_error_to_dispatch(
+    e: TargetSiteError,
+    requested_target_site_id: &str,
+) -> ryeos_executor::dispatch_error::DispatchError {
+    match e {
+        TargetSiteError::UnknownSite {
+            target_site_id,
+            known_sites,
+        } => ryeos_executor::dispatch_error::DispatchError::UnknownTargetSite {
+            target_site_id,
+            known_sites,
+        },
+        TargetSiteError::AmbiguousSite { .. } | TargetSiteError::MissingSiteId { .. } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
+                target_site_id: requested_target_site_id.to_string(),
+                detail: e.to_string(),
+            }
+        }
+    }
+}
+
+/// Map a `RemoteForwardError` into a `DispatchError` for the client
+/// response. Extracted as a pure function for testability.
+fn map_forward_error_to_dispatch(
+    e: &crate::remote::forward::RemoteForwardError,
+    target_site_id: &str,
+) -> ryeos_executor::dispatch_error::DispatchError {
+    use crate::remote::forward::RemoteForwardError;
+    match e {
+        RemoteForwardError::PushFailed(detail) | RemoteForwardError::PullFailed(detail) => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardInternal {
+                target_site_id: target_site_id.to_string(),
+                detail: detail.clone(),
+            }
+        }
+        RemoteForwardError::ExecuteFailed(detail) => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: detail.clone(),
+            }
+        }
+        RemoteForwardError::MissingSnapshotHash => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: "remote result missing snapshot_hash".into(),
+            }
+        }
+        RemoteForwardError::PullLocalConflict { path } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardConflict {
+                target_site_id: target_site_id.to_string(),
+                detail: format!("local workspace conflict at '{path}' — files changed since push"),
+            }
+        }
+        RemoteForwardError::PullMissingSnapshotHash => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: "remote result missing snapshot hash for pull".into(),
+            }
+        }
+        RemoteForwardError::PullInvalidRemoteSnapshot { message } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: format!("invalid remote snapshot: {message}"),
+            }
+        }
+        RemoteForwardError::PullUnrelatedSnapshot { pushed, result } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: format!("remote result snapshot '{result}' is not a descendant of pushed snapshot '{pushed}'"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -636,5 +923,377 @@ mod tests {
             msg.contains("must not set static-mode fields"),
             "got: {msg}"
         );
+    }
+
+    // ── Target-site forwarding planning ────────────────────────────
+
+    fn target_request(target_site_id: Option<&str>) -> ExecuteRequest {
+        ExecuteRequest {
+            item_ref: Some("tool:test/thing".into()),
+            tokens: None,
+            project_path: Some("/tmp/project".into()),
+            parameters: serde_json::Value::Null,
+            launch_mode: "inline".into(),
+            target_site_id: target_site_id.map(String::from),
+            validate_only: false,
+            project_source: None,
+            operation: None,
+            inputs: None,
+        }
+    }
+
+    fn make_remote(name: &str, site_id: &str) -> RemoteConfig {
+        RemoteConfig {
+            name: name.to_string(),
+            url: format!("https://{name}.example.com"),
+            principal_id: format!("fp:{name}"),
+            site_id: site_id.to_string(),
+            vault_fingerprint: "sha256:test".into(),
+            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            project_bindings: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn target_site_plan_no_target_is_local() {
+        let req = target_request(None);
+        let plan = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            Path::new("/tmp/project"),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(plan, TargetSitePlan::Local));
+    }
+
+    #[test]
+    fn target_site_plan_self_target_is_local() {
+        let req = target_request(Some("site:local"));
+        let plan = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            Path::new("/tmp/project"),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(plan, TargetSitePlan::Local));
+    }
+
+    #[test]
+    fn target_site_plan_rejects_non_inline_launch_mode() {
+        let mut req = target_request(Some("site:remote"));
+        req.launch_mode = "detached".into();
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            Path::new("/tmp/project"),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteUnsupported { .. }
+        ));
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn target_site_plan_rejects_validate_only() {
+        let mut req = target_request(Some("site:remote"));
+        req.validate_only = true;
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            Path::new("/tmp/project"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("validate_only"));
+    }
+
+    #[test]
+    fn target_site_plan_rejects_pushed_head() {
+        let req = target_request(Some("site:remote"));
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::PushedHead,
+            false,
+            "site:local",
+            Path::new("/tmp/project"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("pushed_head"));
+    }
+
+    #[test]
+    fn target_site_plan_rejects_operation_or_inputs() {
+        let mut req = target_request(Some("site:remote"));
+        req.operation = Some("op".into());
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            Path::new("/tmp/project"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("operation/inputs"));
+    }
+
+    #[test]
+    fn target_site_plan_unknown_site_is_typed_error() {
+        let req = target_request(Some("site:missing"));
+        let mut remotes = HashMap::new();
+        remotes.insert("gpu".into(), make_remote("gpu", "site:gpu"));
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            true,
+            "site:local",
+            Path::new("/tmp/project"),
+            Some(&remotes),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ryeos_executor::dispatch_error::DispatchError::UnknownTargetSite { .. }
+        ));
+    }
+
+    #[test]
+    fn target_site_plan_ambiguous_site_is_resolution_error() {
+        let req = target_request(Some("site:gpu"));
+        let mut remotes = HashMap::new();
+        remotes.insert("gpu1".into(), make_remote("gpu1", "site:gpu"));
+        remotes.insert("gpu2".into(), make_remote("gpu2", "site:gpu"));
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            true,
+            "site:local",
+            Path::new("/tmp/project"),
+            Some(&remotes),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed { .. }
+        ));
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn target_site_plan_missing_site_sentinel_is_resolution_error() {
+        let req = target_request(Some("site:remote"));
+        let mut remotes = HashMap::new();
+        remotes.insert(
+            "old".into(),
+            make_remote("old", crate::remote::config::MISSING_SITE_ID_SENTINEL),
+        );
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            true,
+            "site:local",
+            Path::new("/tmp/project"),
+            Some(&remotes),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed { .. }
+        ));
+        assert!(err.to_string().contains("remote configure"));
+    }
+
+    #[test]
+    fn target_site_plan_no_project_uses_sentinel() {
+        let mut req = target_request(Some("site:remote"));
+        req.project_path = None;
+        let mut remotes = HashMap::new();
+        remotes.insert("remote".into(), make_remote("remote", "site:remote"));
+        let plan = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            true,
+            "site:local",
+            Path::new("/tmp/user-root"),
+            Some(&remotes),
+        )
+        .unwrap();
+        match plan {
+            TargetSitePlan::Remote(plan) => {
+                assert!(plan.local_project_path.is_none());
+                assert_eq!(plan.remote_project_path, NO_PROJECT_SENTINEL);
+            }
+            TargetSitePlan::Local => panic!("expected remote plan"),
+        }
+    }
+
+    #[test]
+    fn target_site_plan_requires_project_binding() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let req = target_request(Some("site:remote"));
+        let mut remotes = HashMap::new();
+        remotes.insert("remote".into(), make_remote("remote", "site:remote"));
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            tmpdir.path(),
+            Some(&remotes),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed { .. }
+        ));
+        assert!(err.to_string().contains("project binding"));
+    }
+
+    #[test]
+    fn target_site_plan_rejects_ai_only_binding() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let local_key = tmpdir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let req = target_request(Some("site:remote"));
+        let mut remote = make_remote("remote", "site:remote");
+        remote.project_bindings.insert(
+            local_key,
+            crate::remote::config::RemoteProjectBinding {
+                remote_project_path: "/remote/project".into(),
+                sync_scope: ProjectSyncScope::AiOnly,
+            },
+        );
+        let mut remotes = HashMap::new();
+        remotes.insert("remote".into(), remote);
+        let err = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            tmpdir.path(),
+            Some(&remotes),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteUnsupported { .. }
+        ));
+        assert!(err.to_string().contains("full_project"));
+    }
+
+    #[test]
+    fn target_site_plan_uses_full_project_binding() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let local_key = tmpdir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let req = target_request(Some("site:remote"));
+        let mut remote = make_remote("remote", "site:remote");
+        remote.project_bindings.insert(
+            local_key,
+            crate::remote::config::RemoteProjectBinding {
+                remote_project_path: "/remote/project".into(),
+                sync_scope: ProjectSyncScope::FullProject,
+            },
+        );
+        let mut remotes = HashMap::new();
+        remotes.insert("remote".into(), remote);
+        let plan = plan_target_site_forward(
+            &req,
+            &ProjectSource::LiveFs,
+            false,
+            "site:local",
+            tmpdir.path(),
+            Some(&remotes),
+        )
+        .unwrap();
+        match plan {
+            TargetSitePlan::Remote(plan) => {
+                assert_eq!(plan.local_project_path.as_deref(), Some(tmpdir.path()));
+                assert_eq!(plan.remote_project_path, "/remote/project");
+            }
+            TargetSitePlan::Local => panic!("expected remote plan"),
+        }
+    }
+
+    // ── Target-site forwarding error mapping ───────────────────────
+
+    #[test]
+    fn forward_error_push_failed_maps_to_internal() {
+        use crate::remote::forward::RemoteForwardError;
+        let err = RemoteForwardError::PushFailed("walk failed".into());
+        let dispatch_err = map_forward_error_to_dispatch(&err, "site:remote");
+        assert!(matches!(
+            dispatch_err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardInternal { .. }
+        ));
+        assert_eq!(
+            dispatch_err.http_status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn forward_error_execute_failed_maps_to_bad_gateway() {
+        use crate::remote::forward::RemoteForwardError;
+        let err = RemoteForwardError::ExecuteFailed("remote 500".into());
+        let dispatch_err = map_forward_error_to_dispatch(&err, "site:b");
+        assert!(matches!(
+            dispatch_err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway { .. }
+        ));
+        assert_eq!(dispatch_err.http_status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn forward_error_pull_local_conflict_maps_to_conflict() {
+        use crate::remote::forward::RemoteForwardError;
+        let err = RemoteForwardError::PullLocalConflict {
+            path: "/src/main.rs".into(),
+        };
+        let dispatch_err = map_forward_error_to_dispatch(&err, "site:x");
+        assert!(matches!(
+            dispatch_err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardConflict { .. }
+        ));
+        assert_eq!(dispatch_err.http_status(), StatusCode::CONFLICT);
+        assert!(dispatch_err.to_string().contains("/src/main.rs"));
+    }
+
+    #[test]
+    fn forward_error_pull_unrelated_snapshot_maps_to_bad_gateway() {
+        use crate::remote::forward::RemoteForwardError;
+        let err = RemoteForwardError::PullUnrelatedSnapshot {
+            pushed: "abc123".into(),
+            result: "def456".into(),
+        };
+        let dispatch_err = map_forward_error_to_dispatch(&err, "site:x");
+        assert!(matches!(
+            dispatch_err,
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway { .. }
+        ));
+        assert_eq!(dispatch_err.http_status(), StatusCode::BAD_GATEWAY);
+        assert!(dispatch_err.to_string().contains("not a descendant"));
     }
 }
