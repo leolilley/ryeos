@@ -1,0 +1,16 @@
+category: routes
+section: routes
+id: ui/api/launch/mint
+path: /ui/api/launch/mint
+methods:
+  - POST
+auth: ryeos_signed
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 16
+request:
+  body: json
+response:
+  mode: json
+  source: "service:ui/launch/mint"

@@ -1,15 +1,18 @@
 //! Browser session store for `/ui` routes.
 //!
-//! In-memory store with TTL eviction. Sessions are created by the launch
-//! token flow (`GET /ui/launch?token=...`) and consumed by session-authed
-//! routes (`/ui/api/*`, `/ui/events/*`).
+//! In-memory store with TTL eviction. Sessions are created by
+//! `ui.launch.mint` and consumed by `GET /ui/launch?token=...` which
+//! sets a session cookie. Session-authed routes (`/ui/api/*`,
+//! `/ui/events/*`) validate the cookie against this store.
 //!
 //! ## Lifecycle
 //!
-//! 1. `client:ryeos/web` launcher mints a launch token via the daemon.
-//! 2. Browser hits `GET /ui/launch?token=...`, token is consumed, session
-//!    cookie is set.
-//! 3. Session-authed routes validate the cookie against this store.
+//! 1. `client:ryeos/web` launcher calls `ui.launch.mint` on the daemon.
+//! 2. Daemon creates a session record with context (surface_ref,
+//!    project_path, read_only) and a one-shot launch token.
+//! 3. Browser hits `GET /ui/launch?token=...`, token is consumed,
+//!    session cookie is set, browser is redirected to `/ui`.
+//! 4. Session-authed routes validate the cookie against this store.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -21,16 +24,29 @@ const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(8 * 3600);
 /// Default launch token TTL: 60 seconds.
 const DEFAULT_LAUNCH_TOKEN_TTL: Duration = Duration::from_secs(60);
 
+/// Context provided by the launcher when minting a session.
+#[derive(Debug, Clone)]
+pub struct LaunchContext {
+    pub surface_ref: String,
+    pub project_path: Option<String>,
+    pub read_only: bool,
+    pub granted_caps: Vec<String>,
+}
+
 /// Server-side session record.
 #[derive(Debug, Clone)]
 pub struct BrowserSession {
     pub session_id: String,
     pub created_at: Instant,
     pub expires_at: Instant,
-    /// Capabilities granted to this session (intersected from caller + surface).
+    /// Capabilities granted to this session (from launch context).
     pub granted_caps: Vec<String>,
-    /// Project root the session is bound to (from launch context).
+    /// Project root the session is bound to.
     pub project_root: Option<String>,
+    /// Surface ref this session renders.
+    pub surface_ref: String,
+    /// Whether this session is read-only.
+    pub read_only: bool,
 }
 
 /// Single-use launch token that redeems for a session.
@@ -66,25 +82,31 @@ impl BrowserSessionStore {
         }
     }
 
-    /// Create a new session and return its ID.
-    /// Also returns a launch token that can be used once to associate
-    /// a browser request with this session.
-    pub fn create_session(
-        &self,
-        granted_caps: Vec<String>,
-        project_root: Option<String>,
-    ) -> (String, String) {
+    /// Create a store with very short TTLs for testing.
+    pub fn new_with_short_ttl(session_ttl: Duration, launch_token_ttl: Duration) -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            launch_tokens: Mutex::new(HashMap::new()),
+            session_ttl,
+            launch_token_ttl,
+        }
+    }
+
+    /// Mint a launch token bound to a new session with full context.
+    /// Returns `(session_id, token_hex)`.
+    pub fn mint_token(&self, ctx: LaunchContext) -> (String, String) {
         let session_id = uuid::Uuid::new_v4().to_string();
         let now = Instant::now();
         let session = BrowserSession {
             session_id: session_id.clone(),
             created_at: now,
             expires_at: now + self.session_ttl,
-            granted_caps,
-            project_root,
+            granted_caps: ctx.granted_caps,
+            project_root: ctx.project_path,
+            surface_ref: ctx.surface_ref,
+            read_only: ctx.read_only,
         };
 
-        // Mint a launch token for this session.
         let token_bytes: [u8; 32] = rand::random();
         let token_hex = lillux::cas::sha256_hex(&token_bytes);
         let launch_token = LaunchToken {
@@ -117,43 +139,6 @@ impl BrowserSessionStore {
         }
     }
 
-    /// Create a new session with a custom TTL and return its ID + launch token.
-    pub fn create_session_with_ttl(
-        &self,
-        granted_caps: Vec<String>,
-        project_root: Option<String>,
-        ttl: Duration,
-    ) -> (String, String) {
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let now = Instant::now();
-        let session = BrowserSession {
-            session_id: session_id.clone(),
-            created_at: now,
-            expires_at: now + ttl,
-            granted_caps,
-            project_root,
-        };
-
-        let token_bytes: [u8; 32] = rand::random();
-        let token_hex = lillux::cas::sha256_hex(&token_bytes);
-        let launch_token = LaunchToken {
-            session_id: session_id.clone(),
-            created_at: now,
-            expires_at: now + Duration::min(ttl, self.launch_token_ttl),
-        };
-
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session_id.clone(), session);
-        self.launch_tokens
-            .lock()
-            .unwrap()
-            .insert(token_hex.clone(), launch_token);
-
-        (session_id, token_hex)
-    }
-
     /// Look up a session by ID. Returns `None` if not found or expired.
     pub fn get_session(&self, session_id: &str) -> Option<BrowserSession> {
         let sessions = self.sessions.lock().unwrap();
@@ -183,11 +168,20 @@ impl BrowserSessionStore {
 mod tests {
     use super::*;
 
+    fn test_context() -> LaunchContext {
+        LaunchContext {
+            surface_ref: "surface:ryeos/cockpit/base".into(),
+            project_path: Some("/tmp/project".into()),
+            read_only: false,
+            granted_caps: vec!["ui.read".into()],
+        }
+    }
+
     #[test]
-    fn create_and_retrieve_session() {
+    fn mint_creates_session_with_full_context() {
         let store = BrowserSessionStore::new();
-        let (session_id, token) =
-            store.create_session(vec!["ui.read".into()], Some("/tmp/project".into()));
+        let ctx = test_context();
+        let (session_id, token) = store.mint_token(ctx.clone());
 
         // Token can be consumed.
         let redeemed = store.consume_launch_token(&token);
@@ -195,23 +189,59 @@ mod tests {
         assert_eq!(redeemed.unwrap(), session_id);
 
         // Session is retrievable.
-        let session = store.get_session(&session_id);
-        assert!(session.is_some());
-        let s = session.unwrap();
-        assert_eq!(s.granted_caps, vec!["ui.read"]);
-        assert_eq!(s.project_root, Some("/tmp/project".into()));
+        let session = store.get_session(&session_id).unwrap();
+        assert_eq!(session.granted_caps, vec!["ui.read"]);
+        assert_eq!(session.project_root, Some("/tmp/project".into()));
+        assert_eq!(session.surface_ref, "surface:ryeos/cockpit/base");
+        assert!(!session.read_only);
+    }
+
+    #[test]
+    fn session_record_carries_surface_ref_and_read_only() {
+        let store = BrowserSessionStore::new();
+        let ctx = LaunchContext {
+            surface_ref: "surface:ryeos/test/ro".into(),
+            project_path: None,
+            read_only: true,
+            granted_caps: vec![],
+        };
+        let (session_id, _token) = store.mint_token(ctx);
+
+        let session = store.get_session(&session_id).unwrap();
+        assert_eq!(session.surface_ref, "surface:ryeos/test/ro");
+        assert!(session.read_only);
+        assert!(session.project_root.is_none());
     }
 
     #[test]
     fn launch_token_consumed_once() {
         let store = BrowserSessionStore::new();
-        let (_, token) = store.create_session(vec![], None);
+        let (_, token) = store.mint_token(test_context());
 
         let first = store.consume_launch_token(&token);
         assert!(first.is_some());
 
         let second = store.consume_launch_token(&token);
         assert!(second.is_none(), "token should not be reusable");
+    }
+
+    #[test]
+    fn expired_token_rejected() {
+        let store = BrowserSessionStore {
+            sessions: Mutex::new(HashMap::new()),
+            launch_tokens: Mutex::new(HashMap::new()),
+            session_ttl: Duration::from_millis(1),
+            launch_token_ttl: Duration::from_millis(1),
+        };
+
+        let (_, token) = store.mint_token(test_context());
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert!(
+            store.consume_launch_token(&token).is_none(),
+            "expired token should be rejected"
+        );
     }
 
     #[test]
@@ -228,16 +258,13 @@ mod tests {
 
     #[test]
     fn evict_removes_expired() {
-        let store = BrowserSessionStore {
-            sessions: Mutex::new(HashMap::new()),
-            launch_tokens: Mutex::new(HashMap::new()),
-            session_ttl: Duration::from_millis(1),
-            launch_token_ttl: Duration::from_millis(1),
-        };
+        let store = BrowserSessionStore::new_with_short_ttl(
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
 
-        let (session_id, _token) = store.create_session(vec![], None);
+        let (session_id, _token) = store.mint_token(test_context());
 
-        // Wait for expiry.
         std::thread::sleep(Duration::from_millis(5));
 
         store.evict_expired();

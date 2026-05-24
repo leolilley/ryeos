@@ -1,0 +1,6 @@
+kind: service
+name: launch-mint
+version: "1.0.0"
+description: Mints a launch token bound to a browser session. Requires local-trust auth.
+endpoint: ui.launch.mint
+availability: daemon_only

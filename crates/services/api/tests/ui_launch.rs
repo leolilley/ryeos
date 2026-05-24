@@ -1,12 +1,23 @@
-//! Slice 0: Tests for `ui.launch` handler.
-//!
-//! Pins current behavior so Slice 3 can refactor with a net.
+// Tests for `ui.launch` handler.
+//
+// Pins current behavior so Slice 3 can refactor with a net.
 
 mod test_state;
 use test_state::build_test_state;
 
 use std::sync::Arc;
+use std::time::Duration;
+use ryeos_app::browser_session::LaunchContext;
 use ryeos_app::handler_context::HandlerContext;
+
+fn test_context() -> LaunchContext {
+    LaunchContext {
+        surface_ref: "surface:ryeos/cockpit/base".into(),
+        project_path: None,
+        read_only: false,
+        granted_caps: vec!["ui.read".into()],
+    }
+}
 
 #[tokio::test]
 async fn invalid_token_rejected() {
@@ -31,9 +42,7 @@ async fn invalid_token_rejected() {
 async fn valid_token_consumed_and_session_returned() {
     let (_tmp, state) = build_test_state();
 
-    let (session_id, token) = state
-        .browser_sessions
-        .create_session(vec!["ui.read".into()], None);
+    let (session_id, token) = state.browser_sessions.mint_token(test_context());
 
     let result = (ryeos_api::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": token }),
@@ -52,9 +61,7 @@ async fn valid_token_consumed_and_session_returned() {
 async fn consumed_token_cannot_be_reused() {
     let (_tmp, state) = build_test_state();
 
-    let (_, token) = state
-        .browser_sessions
-        .create_session(vec![], None);
+    let (_, token) = state.browser_sessions.mint_token(test_context());
 
     // First consume succeeds.
     let result1 = (ryeos_api::handlers::ui_launch::DESCRIPTOR.handler)(
@@ -77,24 +84,19 @@ async fn consumed_token_cannot_be_reused() {
 
 #[tokio::test]
 async fn expired_token_rejected() {
-    let (_tmp, state) = build_test_state();
-
-    let (_, token) = state.browser_sessions.create_session_with_ttl(
-        vec![],
-        None,
-        std::time::Duration::from_millis(0),
+    let short_store = ryeos_app::browser_session::BrowserSessionStore::new_with_short_ttl(
+        Duration::from_millis(1),
+        Duration::from_millis(1),
     );
 
-    // Wait for expiry.
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    let (_, token) = short_store.mint_token(test_context());
 
-    let result = (ryeos_api::handlers::ui_launch::DESCRIPTOR.handler)(
-        serde_json::json!({ "token": token }),
-        HandlerContext::anonymous(),
-        Arc::new(state),
-    )
-    .await;
-    assert!(result.is_err(), "expired token should fail");
+    std::thread::sleep(Duration::from_millis(5));
+
+    assert!(
+        short_store.consume_launch_token(&token).is_none(),
+        "expired token should be rejected"
+    );
 }
 
 #[tokio::test]
