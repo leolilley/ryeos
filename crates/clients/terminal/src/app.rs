@@ -24,14 +24,9 @@ pub async fn run(
     let mut term = TerminalGuard::init()?;
     let _caps = RenderCapabilities::default();
 
-    // Load scene config from scene.toml (CWD or ~/.config/ryeos/)
-    let config = ryeos_client_base::scene_config::SceneConfig::find();
-    let tick_ms = config.animation.tick_ms;
-
     let (width, height) = term.size();
     let mut model = ryeos_client_base::model::AppModel::from_surface(project_path, &loaded_surface);
     model.runtime.viewport = ryeos_client_base::layout::Rect::new(0, 0, width, height);
-    model.visual.animation.set_config(config);
 
     // Create transport: try real daemon first, fall back to mock
     let mut transport: Box<dyn DaemonTransport> = if mock {
@@ -63,7 +58,7 @@ pub async fn run(
 
     let mut renderer = FrameRenderer::new();
     let mut stdout = std::io::stdout();
-    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(5));
 
     // Initial render

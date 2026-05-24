@@ -5,13 +5,11 @@
 
 mod app;
 mod bootstrap;
-mod braille;
 mod capabilities;
 mod daemon;
 mod mock_transport;
 mod persistence;
 mod render;
-mod render_scene;
 mod render_text;
 mod sse;
 mod terminal;

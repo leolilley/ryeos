@@ -1,30 +1,28 @@
-//! Frame renderer — composites braille background + text surfaces for the terminal.
+//! Frame renderer — composites text surfaces for the terminal.
 //!
 //! Pipeline:
-//! 1. Rasterize ScenePrimitives into ColoredBrailleBuffer
-//! 2. Emit ANSI for the background
-//! 3. Paint TextSurface layers (tiles, status bar, input bar) on top using crossterm
-//! 4. Paint overlay surfaces last (highest z-order)
+//! 1. Clear screen with background color
+//! 2. Paint TextSurface layers (tiles, status bar, input bar) using crossterm
+//! 3. Paint overlay surfaces last (highest z-order)
+//!
+//! Background animation (braille scene rasterizer) is disabled during
+//! early development. Re-enable by restoring Layer 1 from git history.
 
-use crate::braille::ColoredBrailleBuffer;
-use crate::render_scene;
 use crate::render_text;
 use crossterm::{
     cursor::MoveTo,
     queue,
-    style::{Attribute, Print, ResetColor, SetAttribute},
+    style::{Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor},
 };
 use ryeos_client_base::frame::OverlayType;
 use ryeos_client_base::text_surface::{Attr, Color as CoreColor};
 use std::io::Write;
 
-pub struct FrameRenderer {
-    buf: Option<ColoredBrailleBuffer>,
-}
+pub struct FrameRenderer;
 
 impl FrameRenderer {
     pub fn new() -> Self {
-        Self { buf: None }
+        Self
     }
 
     pub fn render(
@@ -40,29 +38,21 @@ impl FrameRenderer {
             return Ok(());
         }
 
-        // Ensure buffer matches terminal size
-        let needs_resize = self
-            .buf
-            .as_ref()
-            .map_or(true, |b| b.width != tw || b.height != th);
-        if needs_resize {
-            self.buf = Some(ColoredBrailleBuffer::new(tw, th));
-        }
-
-        let buf = self.buf.as_mut().unwrap();
-
         // Build frame
         let frame = ryeos_client_base::frame::build_frame(model);
 
-        // Layer 1: Rasterize background scene into braille buffer
-        render_scene::render_to_braille(&frame.background, buf);
+        // Layer 1: Clear screen with background color
+        queue!(
+            stdout,
+            MoveTo(0, 0),
+            SetBackgroundColor(crossterm::style::Color::Rgb { r: 30, g: 30, b: 30 })
+        )?;
+        // Fill each row to ensure full coverage
+        for y in 0..viewport_h {
+            queue!(stdout, MoveTo(0, y), Print(" ".repeat(tw)))?;
+        }
 
-        // Layer 2: Emit braille ANSI as base layer
-        let ansi = buf.to_ansi();
-        queue!(stdout, MoveTo(0, 0))?;
-        stdout.write_all(ansi.as_bytes())?;
-
-        // Layer 3: Paint tile text surfaces on top of the background
+        // Layer 2: Paint tile text surfaces
         for tile in &frame.tiles {
             paint_text_surface(stdout, &tile.cells, tile.rect.x, tile.rect.y)?;
         }
@@ -83,7 +73,7 @@ impl FrameRenderer {
             frame.input.rect.y,
         )?;
 
-        // Layer 6: Paint overlays (highest z-order)
+        // Layer 3: Paint overlays (highest z-order)
         for overlay in &frame.overlays {
             // Draw a semi-transparent backdrop behind the overlay
             paint_overlay_backdrop(stdout, &overlay.rect, overlay.overlay_type.clone())?;
