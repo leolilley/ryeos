@@ -1018,12 +1018,16 @@ composed_value_contract:
             "body".to_string(),
             FieldType::Single {
                 prim: PrimType::String,
+                enum_values: None,
+                nested_contract: None,
+                element_type: None,
             },
         );
         ValueShape {
             root_type: ShapeType::Mapping,
             required,
             optional: BTreeMap::new(),
+            strict_fields: None,
         }
     }
 
@@ -1173,18 +1177,25 @@ composed_value_contract:
             "body".to_string(),
             FieldType::Single {
                 prim: PrimType::String,
+                enum_values: None,
+                nested_contract: None,
+                element_type: None,
             },
         );
         required.insert(
             "name".to_string(),
             FieldType::Single {
                 prim: PrimType::String,
+                enum_values: None,
+                nested_contract: None,
+                element_type: None,
             },
         );
         let _kind_shape = ValueShape {
             root_type: ShapeType::Mapping,
             required,
             optional: BTreeMap::new(),
+            strict_fields: None,
         };
         let kinds = kinds_with_directive_contract(
             parser_ref,
@@ -1195,12 +1206,16 @@ composed_value_contract:
             "body".to_string(),
             FieldType::Single {
                 prim: PrimType::Integer,
+                enum_values: None,
+                nested_contract: None,
+                element_type: None,
             },
         );
         let bad_producer = ValueShape {
             root_type: ShapeType::Sequence,
             required: p_required,
             optional: BTreeMap::new(),
+            strict_fields: None,
         };
         let parsers = ParserRegistry::from_entries(vec![(
             parser_ref.to_string(),
