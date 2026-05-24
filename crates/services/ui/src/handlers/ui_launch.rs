@@ -25,7 +25,7 @@ pub struct Request {
 pub const DESCRIPTOR: ryeos_api::registry::ServiceDescriptor = ryeos_api::registry::ServiceDescriptor {
     service_ref: "service:ui/launch",
     endpoint: "ui.launch",
-    availability: ServiceAvailability::Both,
+    availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| {
         Box::pin(async move {

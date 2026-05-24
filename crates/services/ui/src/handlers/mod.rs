@@ -13,3 +13,18 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_session_current::DESCRIPTOR,
     ui_actions_invoke::DESCRIPTOR,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_api::registry::ServiceAvailability;
+
+    #[test]
+    fn ui_launch_descriptor_is_daemon_only() {
+        let desc = ui_launch::DESCRIPTOR;
+        assert!(
+            matches!(desc.availability, ServiceAvailability::DaemonOnly),
+            "ui.launch must be DaemonOnly (requires UiState from daemon composition)"
+        );
+    }
+}
