@@ -25,6 +25,8 @@ pub enum AppEvent {
     PollSnapshot(PollSnapshot),
     Resize { width: u16, height: u16 },
     Tick { now_ms: u64 },
+    /// The surface file has changed on disk; spec contains the new parsed spec.
+    SurfaceReloaded { spec: crate::surface::SurfaceSpec },
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +133,13 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             apply_poll_snapshot(model, &snapshot);
             model.mark_dirty();
             vec![Effect::RefreshState]
+        }
+
+        AppEvent::SurfaceReloaded { spec } => {
+            model.surface.spec = spec;
+            model.workspace = model.surface.rebuild_workspace();
+            model.mark_dirty();
+            Vec::new()
         }
     }
 }

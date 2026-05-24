@@ -28,6 +28,16 @@ pub async fn run(
     let mut model = ryeos_client_base::model::AppModel::from_surface(project_path, &loaded_surface);
     model.runtime.viewport = ryeos_client_base::layout::Rect::new(0, 0, width, height);
 
+    // Track surface file for hot reload (only for --surface-file)
+    let surface_file_path: Option<std::path::PathBuf> = match &loaded_surface {
+        ryeos_client_base::surface::LoadedSurface::LocalPreview { path, .. } => Some(path.clone()),
+        _ => None,
+    };
+    let mut surface_file_mtime: Option<std::time::SystemTime> = surface_file_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+
     // Create transport: try real daemon first, fall back to mock
     let mut transport: Box<dyn DaemonTransport> = if mock {
         Box::new(MockTransport)
@@ -95,6 +105,44 @@ pub async fn run(
             }
 
             _ = poll_interval.tick() => {
+                // Hot reload: check if surface file changed
+                if let Some(ref path) = surface_file_path {
+                    let new_mtime = std::fs::metadata(path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    let changed = match (surface_file_mtime, new_mtime) {
+                        (Some(old), Some(new)) => new > old,
+                        (None, Some(_)) => true,
+                        _ => false,
+                    };
+                    if changed {
+                        surface_file_mtime = new_mtime;
+                        let opts = ryeos_client_base::surface::SurfaceLoadOptions {
+                            explicit_file: Some(path.clone()),
+                            surface_name: None,
+                        };
+                        let reloaded = ryeos_client_base::surface::load_surface(&opts);
+                        let spec = reloaded.spec().clone();
+                        for diag in reloaded.all_diagnostics() {
+                            match diag {
+                                ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message } => {
+                                    tracing::warn!("surface reload: {}", message);
+                                }
+                                ryeos_client_base::surface::SurfaceDiagnostic::UnsupportedField { field, message } => {
+                                    tracing::info!("surface reload: {}: {}", field, message);
+                                }
+                                ryeos_client_base::surface::SurfaceDiagnostic::Info { message } => {
+                                    tracing::info!("surface reload: {}", message);
+                                }
+                            }
+                        }
+                        update::update(
+                            &mut model,
+                            AppEvent::SurfaceReloaded { spec },
+                        );
+                    }
+                }
+
                 match transport.poll_snapshot().await {
                     Ok(snapshot) => {
                         update::update(&mut model, AppEvent::PollSnapshot(snapshot));
