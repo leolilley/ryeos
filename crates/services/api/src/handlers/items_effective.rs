@@ -3,6 +3,21 @@
 //! Works for any item kind (executable or not). The engine owns the
 //! resolution/trust/composition semantics; this handler is intentionally
 //! only a typed service wrapper.
+//!
+//! ## Error codes
+//!
+//! The handler maps engine errors to `HandlerError` variants whose messages
+//! carry a stable prefix that clients can branch on:
+//!
+//! | Prefix | HTTP | Meaning |
+//! |--------|------|---------|
+//! | `invalid canonical ref` | 400 | Malformed canonical ref string |
+//! | `wrong_kind:` | 400 | `expected_kind` guard failed |
+//! | `untrusted:` | 403 | Signer not in trust store |
+//! | `composition_failed:` | 400 | Composer chain error |
+//! | `parse_failed:` | 400 | Parser produced invalid output |
+//! | (none) | 404 | Item not found in any space |
+//! | (none) | 500 | Unexpected internal error |
 
 use std::sync::Arc;
 

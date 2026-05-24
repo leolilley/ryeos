@@ -1,12 +1,7 @@
-//! Slice 0: Backfill tests for `items.effective` handler.
-//!
-//! These tests pin the current behavior of the items.effective
-//! service handler so corrective slices can detect regressions.
-//!
-//! Currently tests error paths with an empty engine. Happy-path
-//! tests (resolving real surfaces/clients) require the full engine
-//! boot from workspace bundles, which has boot-validation issues
-//! that need resolving first.
+// Tests for `items.effective` handler.
+//
+// Error-path tests with an empty engine. The kind mismatch check
+// happens before resolution, so wrong_kind works without real items.
 
 use std::sync::Arc;
 
@@ -15,7 +10,6 @@ use ryeos_app::handler_context::HandlerContext;
 mod test_state;
 use test_state::build_test_state;
 
-/// Helper: call the items.effective handler with the given request JSON.
 async fn call_effective(
     state: &ryeos_app::state::AppState,
     req_json: serde_json::Value,
@@ -38,24 +32,18 @@ async fn nonexistent_ref_returns_not_found() {
     .await;
     let err = result.expect_err("should fail for nonexistent ref");
     let msg = format!("{err:#}");
-    // The handler maps EffectiveItemNotFound → NotFound.
     assert!(
-        msg.contains("not found") || msg.contains("NotFound"),
+        msg.contains("not found"),
         "expected not_found, got: {msg}"
     );
 }
 
 #[tokio::test]
-async fn wrong_kind_returns_typed_error() {
+async fn wrong_kind_returns_typed_error_code() {
     let (_tmp, state) = build_test_state();
-    // With an empty engine, any ref will fail as "not found" before
-    // kind checking. This test verifies that the wrong_kind error
-    // mapping exists and would produce the right error IF the engine
-    // reached that point. The mapping is exercised by checking that
-    // the map_engine_error function handles the WrongKind variant.
-    //
-    // A deeper integration test with a real engine lands when the
-    // boot-validation issues are resolved.
+    // The engine checks expected_kind against item_ref.kind before
+    // resolution. surface: ref with expected_kind=client produces
+    // EffectiveItemWrongKind immediately.
     let result = call_effective(
         &state,
         serde_json::json!({
@@ -64,15 +52,19 @@ async fn wrong_kind_returns_typed_error() {
         }),
     )
     .await;
-    let err = result.expect_err("should fail");
+    let err = result.expect_err("should fail with wrong_kind");
     let msg = format!("{err:#}");
-    // With empty engine this is "not found", but the error mapping
-    // for wrong_kind exists in the handler code.
     assert!(
-        msg.contains("not found")
-            || msg.contains("wrong_kind")
-            || msg.contains("NotFound"),
-        "expected error, got: {msg}"
+        msg.contains("wrong_kind:"),
+        "expected 'wrong_kind:' error code prefix, got: {msg}"
+    );
+    assert!(
+        msg.contains("expected `client`"),
+        "should mention expected kind, got: {msg}"
+    );
+    assert!(
+        msg.contains("got `surface`"),
+        "should mention found kind, got: {msg}"
     );
 }
 
@@ -91,5 +83,30 @@ async fn invalid_canonical_ref_returns_bad_request() {
     assert!(
         msg.contains("invalid canonical ref"),
         "expected invalid ref error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn same_kind_passes_validation_but_not_found() {
+    let (_tmp, state) = build_test_state();
+    // surface: ref with expected_kind=surface passes the kind check
+    // but fails at resolution (empty engine).
+    let result = call_effective(
+        &state,
+        serde_json::json!({
+            "canonical_ref": "surface:nonexistent/surface",
+            "expected_kind": "surface"
+        }),
+    )
+    .await;
+    let err = result.expect_err("should fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("not found"),
+        "expected not_found after kind check passed, got: {msg}"
+    );
+    assert!(
+        !msg.contains("wrong_kind"),
+        "should NOT contain wrong_kind, got: {msg}"
     );
 }
