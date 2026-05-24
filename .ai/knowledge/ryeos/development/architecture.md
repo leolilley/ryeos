@@ -1,8 +1,12 @@
----
+<!-- rye:signed:2026-05-24T09:22:21Z:e9e2d3c0656c57573b22e07911ced15f78d93a89e9a4d6c378404f0571c235e5:D-qpD5hgeqNrxTc3r439xbFZGnC8-hdXnIhqi1QeR9XsxqImWygBCSTWMyFrcGI_fk-bpDSj_uu2Ae6q5KFqCw:4b987fd4e40303ac -->
+```yaml
 category: "ryeos/development"
 name: "architecture"
+title: "Architecture"
 description: "Rust crate architecture, workspace structure, and how components connect"
----
+entry_type: reference
+version: "1.1.0"
+```
 
 # Architecture
 
@@ -18,6 +22,8 @@ ryeos-next/
 ├── crates/tools/handler-bins/  # Parser/composer binary implementations
 ├── crates/core/tracing/       # Structured tracing utilities
 ├── crates/tools/core-tools/         # CLI action implementations (init, publish, trust, vault)
+├── crates/clients/base/       # Shared TUI model/update/views/frame (platform-agnostic)
+├── crates/clients/terminal/   # Native terminal client (crossterm + braille renderer)
 ├── crates/bin/daemon/              # The daemon (HTTP + UDS server)
 ├── crates/bin/cli/           # The CLI binary (`ryeos`)
 ├── crates/runtimes/directive/  # Directive execution subprocess
@@ -60,6 +66,12 @@ ryeos-knowledge-runtime (subprocess runtime)
 
 ryeos-handler-bins (parser/composer binaries)
   └── ryeos-handler-protocol
+
+ryeos-client-base (shared TUI model, Elm architecture)
+  └── (no engine/daemon deps — pure view/update/frame)
+
+ryeos-ui-terminal (native terminal client, ryeos-tui)
+  └── ryeos-client-base, ryeos-cli (transport/signing reuse)
 ```
 
 ## Execution flow

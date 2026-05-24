@@ -1,7 +1,11 @@
+<!-- rye:signed:2026-05-24T09:22:40Z:c532c0344b69f7788864a32ad7fcd65fffbc8561fd8228c5dccc791f0ee175c0:obUYk-W9NeV6fQXhifV5QImy0gxtj4WfNl_7HlQbpk-nUnUg9ZbpgwLcy8ecxhHs-rl_NBAuBYg61pw-D6FoAA:4b987fd4e40303ac -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
+title: "Build and Test"
 description: "Build the Rust workspace, populate bundles, run the test gate"
+entry_type: reference
+version: "1.1.0"
 ```
 
 # Build and Test
@@ -47,6 +51,7 @@ Produces these binaries in `target/release/`:
 |---|---|
 | `ryeosd` | The daemon |
 | `ryeos` | The CLI |
+| `ryeos-tui` | Native terminal TUI client |
 | `ryeos-directive-runtime` | Directive execution runtime |
 | `ryeos-graph-runtime` | State graph execution runtime |
 | `ryeos-knowledge-runtime` | Knowledge composition runtime |

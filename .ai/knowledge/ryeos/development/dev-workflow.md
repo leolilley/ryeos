@@ -1,8 +1,12 @@
----
+<!-- rye:signed:2026-05-24T09:23:01Z:b2c94b7429244e2944277741b06c32721362b2a8cf8138ad41e3aa2451fadaa1:biqPK5WlPV8TaoZgf22_TXdm1jBeDuZqUpBwQLUhlBfa33Sj4UOFGVHcIebmhzvyEAFajql7jrHSAG_6YGKeCQ:4b987fd4e40303ac -->
+```yaml
 category: "ryeos/development"
 name: "dev-workflow"
+title: "Development Workflow"
 description: "Day-to-day development workflow: edit, build, sign, test, iterate"
----
+entry_type: reference
+version: "1.1.0"
+```
 
 # Development Workflow
 
@@ -66,10 +70,13 @@ Note: `dev-up.sh` uses `--system-space-dir .local/ryeos` for isolation from any 
 | Daemon source | `crates/bin/daemon/src/` |
 | CLI source | `crates/bin/cli/src/` |
 | Engine core | `crates/core/engine/src/` |
+| TUI shared model | `crates/clients/base/src/` |
+| TUI terminal client | `crates/clients/terminal/src/` |
 | Test support | `crates/core/engine/src/test_support.rs` |
 | CLI actions | `crates/tools/core-tools/src/actions/` |
 | Core bundle items | `bundles/core/.ai/` |
 | Standard bundle items | `bundles/standard/.ai/` |
+| Surface specs | `bundles/standard/.ai/surfaces/ryeos/cockpit/` |
 | Dev publisher key | `.dev-keys/PUBLISHER_DEV.pem` |
 | Gate script | `scripts/gate.sh` |
 | Bundle populator | `scripts/populate-bundles.sh` |

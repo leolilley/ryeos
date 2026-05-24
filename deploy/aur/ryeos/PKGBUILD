@@ -42,6 +42,7 @@ package() {
     # ── Primary user-facing binaries ────────────────────────
     install -Dm755 target/release/ryeosd                "$pkgdir/usr/bin/ryeosd"
     install -Dm755 target/release/ryeos                 "$pkgdir/usr/bin/ryeos"
+    install -Dm755 target/release/ryeos-tui             "$pkgdir/usr/bin/ryeos-tui"
     install -Dm755 target/release/lillux                "$pkgdir/usr/bin/lillux"
 
     # ── Core tools ──────────────────────────────────────────

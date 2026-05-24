@@ -98,6 +98,7 @@ required_bins=(
     ryeos-directive-runtime
     ryeos-graph-runtime
     ryeos-knowledge-runtime
+    ryeos-tui
     rye-parser-yaml-document
     rye-parser-yaml-header-document
     rye-parser-regex-kv

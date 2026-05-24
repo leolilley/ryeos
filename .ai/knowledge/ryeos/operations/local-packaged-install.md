@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-05-23T12:36:25Z:9602210cdd40fa894c1664597649bc00ba38ccc229509dc740a696c442a93996:dXS2LmyhDeN4HMc_-J-10xrn2Nc9zoPoE5_2-QW4GhEVHNe5ty5GdxQFulyaqBbnByZCYShEGS8BhxFEwyVqAw:4b987fd4e40303ac -->
+<!-- rye:signed:2026-05-24T09:21:50Z:80acce8752243c3aa307cfe6ccba66f95be343a754f155b3c2d7d8b2228a8b52:-lxy2I6J0lTBzRrZiYOOVACF8v7AemK8MZBTiLt1Pu9cbt1-oLWdokc2q_3zzu-JcV9ZFaghqyBRD8t-v3RSDw:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/operations
 name: local-packaged-install
@@ -54,6 +54,7 @@ User-facing binaries should resolve from the package path:
 /usr/bin/ryeos-directive-runtime
 /usr/bin/ryeos-graph-runtime
 /usr/bin/ryeos-knowledge-runtime
+/usr/bin/ryeos-tui
 /usr/bin/rye-parser-yaml-document
 /usr/bin/rye-parser-yaml-header-document
 /usr/bin/rye-parser-regex-kv
@@ -150,6 +151,7 @@ Then copy already-built release binaries into `/usr/bin`:
 sudo install -Dm755 target/release/ryeos /usr/bin/ryeos
 sudo install -Dm755 target/release/ryeosd /usr/bin/ryeosd
 sudo install -Dm755 target/release/ryeos-core-tools /usr/bin/ryeos-core-tools
+sudo install -Dm755 target/release/ryeos-tui /usr/bin/ryeos-tui
 
 sudo install -Dm755 target/release/ryeos-directive-runtime /usr/bin/ryeos-directive-runtime
 sudo install -Dm755 target/release/ryeos-graph-runtime /usr/bin/ryeos-graph-runtime
@@ -222,7 +224,7 @@ If `/usr/local/bin` or `~/.local/bin` copies exist, move them aside rather than 
 stamp="$(date +%Y%m%d%H%M%S)"
 
 for b in \
-  ryeos ryeosd lillux ryeos-core-tools \
+  ryeos ryeosd lillux ryeos-core-tools ryeos-tui \
   ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
   rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
   rye-composer-extends-chain rye-composer-graph-permissions rye-composer-identity
