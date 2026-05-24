@@ -24,9 +24,23 @@ use response_modes::ResponseModeRegistry;
 use invokers::AuthInvokerRegistry;
 use ryeos_app::route_raw::RawRouteSpec;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct RouteExtensionRegistry {
     pub auth: AuthInvokerRegistry,
+}
+
+impl Default for RouteExtensionRegistry {
+    fn default() -> Self {
+        Self::with_api_builtins()
+    }
+}
+
+impl RouteExtensionRegistry {
+    pub fn with_api_builtins() -> Self {
+        Self {
+            auth: AuthInvokerRegistry::with_api_builtins(),
+        }
+    }
 }
 
 pub struct RouteTable {
@@ -196,7 +210,7 @@ pub fn build_route_table_with_extensions(
     })
 }
 
-pub fn build_route_table_from_snapshot(
+    pub fn build_route_table_from_snapshot(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mode_registry = ResponseModeRegistry::with_builtins();

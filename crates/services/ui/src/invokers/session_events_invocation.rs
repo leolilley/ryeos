@@ -11,6 +11,10 @@ use ryeos_api::routes::invocation::{
     CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContext,
     RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
+use ryeos_api::routes::response_modes::event_stream_mode::{
+    EventStreamStrategy, StreamSourceCompiler,
+};
+use ryeos_app::route_raw::RawRouteSpec;
 use tokio_stream::Stream;
 
 use crate::state::UiState;
@@ -18,6 +22,30 @@ use crate::state::UiState;
 pub struct CompiledSessionEventsInvocation {
     pub ui: Arc<UiState>,
     pub keep_alive_secs: u64,
+}
+
+/// Stream source compiler for `session_events`.
+///
+/// Registered as `"session_events"` in the event stream source registry by
+/// the UI composition root. Wraps the API's `compile_session_events` validation
+/// with a UI-provided invoker.
+pub struct SessionEventsSourceFactory {
+    pub ui: Arc<UiState>,
+}
+
+impl StreamSourceCompiler for SessionEventsSourceFactory {
+    fn compile(
+        &self,
+        raw: &RawRouteSpec,
+    ) -> Result<EventStreamStrategy, ryeos_api::route_error::RouteConfigError> {
+        let invoker: Arc<dyn CompiledRouteInvocation> = Arc::new(
+            CompiledSessionEventsInvocation {
+                ui: self.ui.clone(),
+                keep_alive_secs: 15,
+            },
+        );
+        ryeos_api::routes::response_modes::event_stream_mode::compile_session_events(raw, invoker)
+    }
 }
 
 static SESSION_EVENTS_CONTRACT: RouteInvocationContract = RouteInvocationContract {

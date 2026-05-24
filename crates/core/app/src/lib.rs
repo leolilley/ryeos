@@ -25,6 +25,7 @@ pub mod route_raw;
 pub mod runtime_db;
 pub mod service_registry;
 pub mod standalone_audit;
+pub mod extension_state;
 pub mod state;
 pub mod state_lock;
 pub mod state_store;

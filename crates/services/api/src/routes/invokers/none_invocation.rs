@@ -140,7 +140,7 @@ mod tests {
             commands,
             callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-            service_extensions: None,
+            extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
             write_barrier: Arc::new(write_barrier),
             started_at: std::time::Instant::now(),
             started_at_iso: String::new(),

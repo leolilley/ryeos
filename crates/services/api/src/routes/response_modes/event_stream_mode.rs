@@ -9,9 +9,9 @@
 //! | `"session_events"`  | SessionEvents  | UI layer      |
 //!
 //! API's `EventStreamMode::default()` registers `dispatch_launch` and
-//! `thread_events`.  The UI layer calls `with_session_events(invoker)` to
-//! add `session_events`.  Unknown source names are rejected by registry
-//! lookup at compile time.
+//! `thread_events`.  Extension layers register additional sources via
+//! `EventStreamMode::register_source`.  Unknown source names are rejected
+//! by registry lookup at compile time.
 //!
 //! All strategies produce SSE frames. Both share lag-recovery and
 //! post-launch drain logic. The compile-time bifurcation ensures each
@@ -44,7 +44,7 @@ use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 // ── Compile-time strategy selection ─────────────────────────────────────
 
 /// The compiled strategy selected at route-table build time.
-enum EventStreamStrategy {
+pub enum EventStreamStrategy {
     /// Body-driven launch: mode parses body, invoker spawns dispatch + tails events.
     Gateway {
         invoker: Arc<dyn CompiledRouteInvocation>,
@@ -65,21 +65,20 @@ enum EventStreamStrategy {
 
 // ── Stream source registry ─────────────────────────────────────────────
 
-/// A compiled source that produces an [`EventStreamStrategy`] from a raw route spec.
+/// Compiles a stream source from a raw route spec into an [`EventStreamStrategy`].
 ///
-/// Each known stream source (`dispatch_launch`, `thread_events`, `session_events`)
-/// implements this trait. The registry enables source lookup instead of a hardcoded
-/// match, so UI-specific sources can be registered by the composition root without
-/// API knowing about them.
-trait StreamSourceCompile: Send + Sync {
+/// API registers built-in compilers for `dispatch_launch` and `thread_events`.
+/// Extension layers (e.g. `ryeos-ui`) register additional compilers for sources
+/// like `session_events`.
+pub trait StreamSourceCompiler: Send + Sync {
     fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError>;
 }
 
-// ── Source compiler implementations ────────────────────────────────────
+// ── Source compiler implementations (API builtins) ─────────────────────
 
 struct DispatchLaunchSource;
 
-impl StreamSourceCompile for DispatchLaunchSource {
+impl StreamSourceCompiler for DispatchLaunchSource {
     fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
         compile_gateway(raw)
     }
@@ -87,19 +86,9 @@ impl StreamSourceCompile for DispatchLaunchSource {
 
 struct ThreadEventsSource;
 
-impl StreamSourceCompile for ThreadEventsSource {
+impl StreamSourceCompiler for ThreadEventsSource {
     fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
         compile_subscription(raw)
-    }
-}
-
-struct SessionEventsSource {
-    invoker: Arc<dyn CompiledRouteInvocation>,
-}
-
-impl StreamSourceCompile for SessionEventsSource {
-    fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
-        compile_session_events(raw, self.invoker.clone())
     }
 }
 
@@ -107,7 +96,7 @@ impl StreamSourceCompile for SessionEventsSource {
 
 #[derive(Clone)]
 pub struct EventStreamMode {
-    sources: HashMap<String, Arc<dyn StreamSourceCompile>>,
+    sources: HashMap<String, Arc<dyn StreamSourceCompiler>>,
 }
 
 impl Default for EventStreamMode {
@@ -115,24 +104,24 @@ impl Default for EventStreamMode {
         let mut sources = HashMap::new();
         sources.insert(
             "dispatch_launch".into(),
-            Arc::new(DispatchLaunchSource) as Arc<dyn StreamSourceCompile>,
+            Arc::new(DispatchLaunchSource) as Arc<dyn StreamSourceCompiler>,
         );
         sources.insert(
             "thread_events".into(),
-            Arc::new(ThreadEventsSource) as Arc<dyn StreamSourceCompile>,
+            Arc::new(ThreadEventsSource) as Arc<dyn StreamSourceCompiler>,
         );
         Self { sources }
     }
 }
 
 impl EventStreamMode {
-    pub fn with_session_events(invoker: Arc<dyn CompiledRouteInvocation>) -> Self {
-        let mut mode = Self::default();
-        mode.sources.insert(
-            "session_events".into(),
-            Arc::new(SessionEventsSource { invoker }) as Arc<dyn StreamSourceCompile>,
-        );
-        mode
+    /// Register an additional stream source compiler.
+    pub fn register_source(
+        &mut self,
+        name: impl Into<String>,
+        compiler: Arc<dyn StreamSourceCompiler>,
+    ) {
+        self.sources.insert(name.into(), compiler);
     }
 }
 
@@ -313,7 +302,7 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
 
 const SESSION_EVENTS_REQUIRED_AUTH: &str = "browser_session";
 
-fn compile_session_events(
+pub fn compile_session_events(
     raw: &RawRouteSpec,
     invoker: Arc<dyn CompiledRouteInvocation>,
 ) -> Result<EventStreamStrategy, RouteConfigError> {

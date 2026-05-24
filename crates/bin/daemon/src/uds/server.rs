@@ -480,7 +480,7 @@ mod tests {
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-            service_extensions: None,
+            extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
             write_barrier: Arc::new(WriteBarrier::new()),
             started_at: Instant::now(),
             started_at_iso: lillux::time::iso8601_now(),

@@ -16,18 +16,93 @@ pub mod service_invocation;
 pub mod stream_helpers;
 pub mod subscription_stream_invocation;
 
+use std::collections::HashMap;
 use std::sync::Arc;
-
-#[derive(Default, Clone)]
-pub struct AuthInvokerRegistry {
-    pub browser_session: Option<Arc<dyn CompiledRouteInvocation>>,
-}
-
 
 use serde_json::Value;
 
 use crate::route_error::RouteConfigError;
 use crate::routes::invocation::CompiledRouteInvocation;
+
+// ── Auth verifier factory trait ────────────────────────────────────────
+
+/// Factory that compiles an auth verifier for a given auth key.
+///
+/// Built-in factories (`none`, `ryeos_signed`, `hmac`) are registered by
+/// the API crate. Extension factories (e.g. `browser_session` from
+/// `ryeos-ui`) are registered by the composition root.
+pub trait AuthVerifierFactory: Send + Sync {
+    fn compile(
+        &self,
+        auth_config: Option<&Value>,
+        route_id: &str,
+    ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError>;
+}
+
+// ── Built-in auth factories ────────────────────────────────────────────
+
+struct NoneAuthFactory;
+
+impl AuthVerifierFactory for NoneAuthFactory {
+    fn compile(
+        &self,
+        _auth_config: Option<&Value>,
+        _route_id: &str,
+    ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+        Ok(Arc::new(none_invocation::CompiledNoneVerifier))
+    }
+}
+
+struct RyeosSignedAuthFactory;
+
+impl AuthVerifierFactory for RyeosSignedAuthFactory {
+    fn compile(
+        &self,
+        _auth_config: Option<&Value>,
+        _route_id: &str,
+    ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+        Ok(Arc::new(ryeos_signed_invocation::CompiledRyeosSignedVerifier))
+    }
+}
+
+struct HmacAuthFactory;
+
+impl AuthVerifierFactory for HmacAuthFactory {
+    fn compile(
+        &self,
+        auth_config: Option<&Value>,
+        route_id: &str,
+    ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+        let config = auth_config.ok_or_else(|| RouteConfigError::InvalidSourceConfig {
+            id: route_id.into(),
+            src: "hmac_verifier".into(),
+            reason: "auth_config is required".into(),
+        })?;
+        hmac_invocation::compile_hmac_verifier(route_id, config)
+    }
+}
+
+// ── Auth invoker registry ──────────────────────────────────────────────
+
+#[derive(Default, Clone)]
+pub struct AuthInvokerRegistry {
+    verifiers: HashMap<String, Arc<dyn AuthVerifierFactory>>,
+}
+
+impl AuthInvokerRegistry {
+    /// Registry with API built-in auth verifiers: `none`, `ryeos_signed`, `hmac`.
+    pub fn with_api_builtins() -> Self {
+        let mut r = Self::default();
+        r.register("none", Arc::new(NoneAuthFactory));
+        r.register("ryeos_signed", Arc::new(RyeosSignedAuthFactory));
+        r.register("hmac", Arc::new(HmacAuthFactory));
+        r
+    }
+
+    pub fn register(&mut self, name: impl Into<String>, factory: Arc<dyn AuthVerifierFactory>) {
+        self.verifiers.insert(name.into(), factory);
+    }
+}
 
 /// Compile an auth invoker from the route's `auth` field.
 ///
@@ -39,7 +114,7 @@ pub fn compile_auth_invoker(
     auth_config: Option<&Value>,
     route_id: &str,
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-    compile_auth_invoker_with_registry(auth_key, auth_config, route_id, &AuthInvokerRegistry::default())
+    compile_auth_invoker_with_registry(auth_key, auth_config, route_id, &AuthInvokerRegistry::with_api_builtins())
 }
 
 pub fn compile_auth_invoker_with_registry(
@@ -48,26 +123,12 @@ pub fn compile_auth_invoker_with_registry(
     route_id: &str,
     registry: &AuthInvokerRegistry,
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-    match auth_key {
-        "none" => Ok(Arc::new(none_invocation::CompiledNoneVerifier)),
-        "ryeos_signed" => Ok(Arc::new(
-            ryeos_signed_invocation::CompiledRyeosSignedVerifier,
-        )),
-        "browser_session" => registry.browser_session.clone().ok_or_else(|| RouteConfigError::UnknownVerifier {
+    let factory = registry.verifiers.get(auth_key);
+    match factory {
+        Some(f) => f.compile(auth_config, route_id),
+        None => Err(RouteConfigError::UnknownVerifier {
             id: route_id.into(),
-            name: "browser_session".into(),
-        }),
-        "hmac" => {
-            let config = auth_config.ok_or_else(|| RouteConfigError::InvalidSourceConfig {
-                id: route_id.into(),
-                src: "hmac_verifier".into(),
-                reason: "auth_config is required".into(),
-            })?;
-            hmac_invocation::compile_hmac_verifier(route_id, config)
-        }
-        other => Err(RouteConfigError::UnknownVerifier {
-            id: route_id.into(),
-            name: other.into(),
+            name: auth_key.into(),
         }),
     }
 }

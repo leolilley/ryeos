@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
+use crate::extension_state::ExtensionState;
 use crate::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::node_config::NodeConfigSnapshot;
@@ -54,10 +55,11 @@ pub struct AppState {
     pub commands: Arc<CommandService>,
     pub callback_tokens: Arc<CallbackCapabilityStore>,
     pub thread_auth: Arc<ThreadAuthStore>,
-    /// Generic service extension slot for composition-root state that
-    /// doesn't belong in core (e.g., UI state). Set by the daemon
-    /// composition root; `None` in API-only contexts.
-    pub service_extensions: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Generic extension state bag for composition-root state that
+    /// doesn't belong in core (e.g., UI state). Populated by the
+    /// daemon composition root. Use `extensions.get::<T>()` to
+    /// retrieve typed state.
+    pub extensions: Arc<ExtensionState>,
     pub write_barrier: Arc<WriteBarrier>,
     pub started_at: Instant,
     pub started_at_iso: String,

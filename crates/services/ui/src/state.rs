@@ -2,7 +2,7 @@
 //!
 //! `UiState` holds browser session and session bus state that was previously
 //! on `AppState`. The daemon composition root creates `UiState` and injects
-//! it via the generic `AppState::service_extensions` slot.
+//! it via the generic `AppState::extensions` typed state bag.
 
 use std::sync::Arc;
 
@@ -24,14 +24,9 @@ impl UiState {
     }
 }
 
-/// Downcast `AppState::service_extensions` to `UiState`.
+/// Retrieve `UiState` from the typed extension bag on `AppState`.
 ///
 /// Returns `None` if the extension is not set (e.g., in API-only tests).
 pub fn get_ui_state(state: &ryeos_app::state::AppState) -> Option<Arc<UiState>> {
-    state
-        .service_extensions
-        .as_ref()?
-        .clone()
-        .downcast::<UiState>()
-        .ok()
+    state.extensions.get::<UiState>()
 }

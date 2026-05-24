@@ -40,8 +40,15 @@ fn build_route_table(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     ui: std::sync::Arc<ryeos_ui::UiState>,
 ) -> anyhow::Result<ryeos_api::routes::RouteTable> {
-    let mode_registry = ryeos_ui::response_mode_registry(service_descriptors(), ui.clone());
-    let extensions = ryeos_ui::route_extensions(ui);
+    let mut mode_registry = ryeos_api::routes::response_modes::ResponseModeRegistry::with_api_builtins_from(
+        service_descriptors(),
+    );
+    let mut extensions = ryeos_api::routes::RouteExtensionRegistry {
+        auth: ryeos_api::routes::invokers::AuthInvokerRegistry::with_api_builtins(),
+    };
+
+    ryeos_ui::register_extensions(&mut extensions, &mut mode_registry, ui);
+
     ryeos_api::routes::build_route_table_from_snapshot_with_extensions(
         snapshot,
         &mode_registry,
@@ -404,7 +411,11 @@ async fn main() -> Result<()> {
         commands,
         callback_tokens,
         thread_auth,
-        service_extensions: Some(ui_state as Arc<dyn std::any::Any + Send + Sync>),
+        extensions: {
+            let mut ext = ryeos_app::extension_state::ExtensionState::new();
+            ext.insert(ui_state);
+            Arc::new(ext)
+        },
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),
@@ -871,7 +882,7 @@ async fn run_service_standalone(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-        service_extensions: None,
+        extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),

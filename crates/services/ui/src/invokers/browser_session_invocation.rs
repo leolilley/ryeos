@@ -8,16 +8,37 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ryeos_api::route_error::RouteDispatchError;
+use ryeos_api::route_error::{RouteConfigError, RouteDispatchError};
 use ryeos_api::routes::invocation::{
     CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
     RouteInvocationOutput, RouteInvocationResult, RoutePrincipal,
 };
+use ryeos_api::routes::invokers::AuthVerifierFactory;
 
 use crate::state::UiState;
 
 pub struct CompiledBrowserSessionVerifier {
     pub ui: Arc<UiState>,
+}
+
+/// Factory that creates `CompiledBrowserSessionVerifier` instances.
+///
+/// Registered as `"browser_session"` in the auth verifier registry by
+/// the UI composition root.
+pub struct BrowserSessionAuthFactory {
+    pub ui: Arc<UiState>,
+}
+
+impl AuthVerifierFactory for BrowserSessionAuthFactory {
+    fn compile(
+        &self,
+        _auth_config: Option<&serde_json::Value>,
+        _route_id: &str,
+    ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+        Ok(Arc::new(CompiledBrowserSessionVerifier {
+            ui: self.ui.clone(),
+        }))
+    }
 }
 
 static BROWSER_SESSION_CONTRACT: RouteInvocationContract = RouteInvocationContract {
