@@ -116,6 +116,43 @@ impl BrowserSessionStore {
         }
     }
 
+    /// Create a new session with a custom TTL and return its ID + launch token.
+    pub fn create_session_with_ttl(
+        &self,
+        granted_caps: Vec<String>,
+        project_root: Option<String>,
+        ttl: Duration,
+    ) -> (String, String) {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let now = Instant::now();
+        let session = BrowserSession {
+            session_id: session_id.clone(),
+            created_at: now,
+            expires_at: now + ttl,
+            granted_caps,
+            project_root,
+        };
+
+        let token_bytes: [u8; 32] = rand::random();
+        let token_hex = lillux::cas::sha256_hex(&token_bytes);
+        let launch_token = LaunchToken {
+            session_id: session_id.clone(),
+            created_at: now,
+            expires_at: now + Duration::min(ttl, self.launch_token_ttl),
+        };
+
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), session);
+        self.launch_tokens
+            .lock()
+            .unwrap()
+            .insert(token_hex.clone(), launch_token);
+
+        (session_id, token_hex)
+    }
+
     /// Look up a session by ID. Returns `None` if not found or expired.
     pub fn get_session(&self, session_id: &str) -> Option<BrowserSession> {
         let sessions = self.sessions.lock().unwrap();

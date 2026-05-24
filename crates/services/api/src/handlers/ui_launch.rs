@@ -32,7 +32,7 @@ pub const DESCRIPTOR: crate::registry::ServiceDescriptor = crate::registry::Serv
     },
 };
 
-async fn handle(
+pub async fn handle(
     input: Value,
     _ctx: HandlerContext,
     state: Arc<AppState>,

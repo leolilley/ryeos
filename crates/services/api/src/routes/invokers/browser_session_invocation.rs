@@ -58,6 +58,15 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
 
 /// Extract the `ryeos_session` cookie value from request headers.
 fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    extract_session_cookie_impl(headers)
+}
+
+/// Visible for testing.
+pub fn extract_session_cookie_for_test(headers: &axum::http::HeaderMap) -> Option<String> {
+    extract_session_cookie_impl(headers)
+}
+
+fn extract_session_cookie_impl(headers: &axum::http::HeaderMap) -> Option<String> {
     let cookie_header = headers.get("cookie")?.to_str().ok()?;
     for cookie in cookie_header.split(';') {
         let trimmed = cookie.trim();
