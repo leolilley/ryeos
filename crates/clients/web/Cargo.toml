@@ -8,8 +8,8 @@ description = "Web/WASM TUI renderer for Rye OS"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "ryeos-web-launcher"
-path = "src/bin/ryeos-web-launcher.rs"
+name = "web"
+path = "src/bin/web.rs"
 
 [dependencies]
 anyhow = "1"

@@ -1,4 +1,4 @@
-//! `ryeos-web-launcher` — mints a launch token and opens the browser.
+//! `web` — mints a launch token and opens the browser.
 //!
 //! This binary is the `cli_exec` target for `client:ryeos/web`. It:
 //! 1. Resolves the daemon URL from `daemon.json` or `RYEOSD_URL`.
@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "ryeos-web-launcher", about = "Launch RyeOS in the browser")]
+#[command(name = "web", about = "Launch RyeOS in the browser")]
 struct Cli {
     /// Surface ref to open (e.g. surface:ryeos/cockpit/base)
     #[arg(long = "surface")]

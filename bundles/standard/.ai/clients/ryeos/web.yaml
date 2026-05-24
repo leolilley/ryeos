@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T14:30:39Z:85f7982bd514c585d811d0c1e18d9ccefc2fdcb2a7c99d2e747bd2214a338713:0n6qjG0IsT4X56vw9uighagkoUbu/jCQznxisf5QXcBdxJGczUVBwidR6Et4RrmLBhkAC3b/v7BIcCD1LdshBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-24T02:21:45Z:b9b4d94e9d2ebc8fdee950e8794742ad5d3cca4ce5093bd745391138ba171d68:+UX4NBpQJ4s0xPUw2hIEB4J+Dtc0NPuak8VfsYvZjNKN7BzQog3fgUJ1HAyRTQxOrl6zEyK0c9vdoczEalxVAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: client
 name: web
 version: "1.0.0"
@@ -10,7 +10,7 @@ serves:
 
 launch:
   mode: cli_exec
-  binary_ref: bin/{triple}/ryeos-web-launcher
+  binary_ref: bin/{triple}/web
   args:
     surface: "--surface"
     read_only: "--read-only"
