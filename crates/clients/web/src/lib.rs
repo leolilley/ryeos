@@ -1,4 +1,4 @@
-//! ryeos-tui-web — Web/WASM renderer for the TUI.
+//! ryeos-ui-web — Web renderer for Rye OS.
 //!
 //! Provides DOM and Canvas rendering from core data structures.
 //! WASM bridge for live updates is in the wasm module.

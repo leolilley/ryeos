@@ -2502,7 +2502,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-tui-terminal"
+name = "ryeos-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "lillux",
+ "rand 0.8.5",
+ "ryeos-api",
+ "ryeos-app",
+ "ryeos-engine",
+ "ryeos-executor",
+ "ryeos-runtime",
+ "ryeos-scheduler",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "uuid",
+]
+
+[[package]]
+name = "ryeos-ui-terminal"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -2525,7 +2548,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-tui-web"
+name = "ryeos-ui-web"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2545,29 +2568,6 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "web-sys",
-]
-
-[[package]]
-name = "ryeos-ui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "axum",
- "lillux",
- "rand 0.8.5",
- "ryeos-api",
- "ryeos-app",
- "ryeos-engine",
- "ryeos-executor",
- "ryeos-runtime",
- "ryeos-scheduler",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "uuid",
 ]
 
 [[package]]

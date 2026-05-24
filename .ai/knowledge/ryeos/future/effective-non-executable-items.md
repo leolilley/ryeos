@@ -370,7 +370,7 @@ Do not encode Rye operations as an expanding TUI-specific command enum.
 Minimum checks for the effective item substrate:
 
 ```sh
-cargo check -p ryeos-engine -p ryeos-api -p ryeos-tui-core -p ryeos-tui-terminal
+cargo check -p ryeos-engine -p ryeos-api -p ryeos-ui-terminal
 cargo test -p ryeos-engine resolution
 cargo test -p ryeos-api items_effective
 ```

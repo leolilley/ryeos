@@ -21,10 +21,10 @@ what remains after the completed work through:
 - UI/browser substrate: `crates/services/ui`
 - Shared renderer/client substrate: `crates/clients/base`
 - Terminal renderer crate and bundled binary: `crates/clients/terminal`
-  - package: `ryeos-tui-terminal`
+  - package: `ryeos-ui-terminal`
   - binary: `ryeos-tui`
 - Web renderer crate and bundled binary: `crates/clients/web`
-  - package: `ryeos-tui-web`
+  - package: `ryeos-ui-web`
   - binary: `web`
   - binary source: `crates/clients/web/src/bin/web.rs`
 
@@ -37,7 +37,7 @@ inside their renderer crate as `[[bin]]` targets.
 - `client:ryeos/web` lives at `bundles/standard/.ai/clients/ryeos/web.yaml`.
 - Its launch binary is `binary_ref: bin/{triple}/web`.
 - `scripts/populate-bundles.sh` builds it with:
-  `cargo build --release -p ryeos-tui-web --bin web`.
+  `cargo build --release -p ryeos-ui-web --bin web`.
 
 There should be no `ryeos-web-launcher` or `web-launcher` references in live
 code/descriptors/scripts. If one appears, treat it as stale naming and remove it
@@ -96,10 +96,60 @@ in the same slice.
 
 | Slice | Commit prefix | Purpose |
 |---|---|---|
+| rename | `slice-rename:` | Rename `ryeos-tui-terminal` → `ryeos-ui-terminal`, `ryeos-tui-web` → `ryeos-ui-web`. TUI is terminal-only; both are UI clients. |
 | 6b | `slice-6b:` | Adopt `RouteStreamEnvelope` for every stream and make `event_stream_mode` the only SSE framer. |
 | 7 | `slice-7:` | Implement embedded assets and rewrite `/ui` shell away from `body_b64`. |
 | 8 | `slice-8:` | Complete web launcher arg propagation and `client:ryeos/web` descriptor/alias/verb surface. |
 | 9 | `slice-9:` | Full workspace test pass and engine failure identity audit. |
+
+---
+
+## Slice rename — package name cleanup: `ryeos-tui-*` → `ryeos-ui-*`
+
+### Goal
+
+Rename both client crate packages from `ryeos-tui-*` to `ryeos-ui-*`. The "TUI"
+prefix only applies to the terminal renderer; both crates are UI clients.
+
+- `ryeos-tui-terminal` → `ryeos-ui-terminal`
+- `ryeos-tui-web` → `ryeos-ui-web`
+
+Binary names (`ryeos-tui`, `web`) are **not** affected. Directory names
+(`crates/clients/terminal`, `crates/clients/web`) are **not** affected.
+
+### Files
+
+- `crates/clients/terminal/Cargo.toml` — `name = "ryeos-ui-terminal"`
+- `crates/clients/web/Cargo.toml` — `name = "ryeos-ui-web"`
+- Every `Cargo.toml` or `.rs` file referencing `ryeos-tui-terminal` or
+  `ryeos-tui-web` as a dependency or `extern crate`.
+- `scripts/populate-bundles.sh` — build command uses `-p ryeos-ui-web`.
+- Any test files or doc comments referencing the old package names.
+
+### Implementation
+
+1. Update `package.name` in both `Cargo.toml` files.
+2. Search the entire workspace for `ryeos-tui-terminal` and `ryeos-tui-web`.
+   Replace every in-tree reference. There are no backwards-compatibility
+   aliases — rename and update all consumers in the same commit.
+3. Update `scripts/populate-bundles.sh` build target.
+4. Verify `cargo check --workspace` is clean.
+
+### Verify
+
+```sh
+cargo check --workspace
+rg -c 'ryeos-tui-terminal\|ryeos-tui-web' --type rust --type toml
+# ^ should return zero matches
+./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
+# verify both bundles with isolated roots, see process rule above
+```
+
+### Commit
+
+```sh
+git commit -m "slice-rename: ryeos-tui-* → ryeos-ui-* package names"
+```
 
 ---
 
@@ -371,8 +421,8 @@ client where appropriate.
 ### Verify
 
 ```sh
-cargo test -p ryeos-tui-web --bin web
-cargo test -p ryeos-tui-web
+cargo test -p ryeos-ui-web --bin web
+cargo test -p ryeos-ui-web
 cargo test -p ryeos-cli offline_dispatch
 cargo check --workspace
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev

@@ -1,8 +1,8 @@
 [package]
-name = "ryeos-tui-web"
+name = "ryeos-ui-web"
 version = "0.1.0"
 edition = "2021"
-description = "Web/WASM TUI renderer for Rye OS"
+description = "Web renderer for Rye OS"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
