@@ -58,10 +58,10 @@ pub struct DaemonClient {
 impl DaemonClient {
     /// Try to connect to the daemon.
     pub async fn try_connect() -> Result<Self, ClientError> {
-        let system_space_dir = dirs::data_local_dir()
-            .ok_or(ClientError::NoSystemDir)?
-            .join("ryeos")
-            .join(".ai");
+        let system_space_dir = std::env::var_os("RYEOS_SYSTEM_SPACE_DIR")
+            .map(PathBuf::from)
+            .or_else(|| dirs::data_dir().map(|d| d.join("ryeos")))
+            .ok_or(ClientError::NoSystemDir)?;
 
         let base_url = resolve_daemon_url(&system_space_dir).await?;
 
@@ -213,7 +213,7 @@ impl DaemonClient {
         parameters: &serde_json::Value,
     ) -> Result<SseStream, ClientError> {
         let body = serde_json::json!({
-            "item_id": item_ref,
+            "item_ref": item_ref,
             "project_path": project_path,
             "parameters": parameters,
             "stream": true,
@@ -293,22 +293,12 @@ impl DaemonClient {
         self.signed_post(
             "/execute",
             &serde_json::json!({
-                "item_id": item_ref,
+                "item_ref": item_ref,
                 "project_path": project_path,
                 "parameters": parameters,
             }),
         )
         .await
-    }
-
-    /// Call a daemon service endpoint by name.
-    pub async fn call_service(
-        &self,
-        endpoint: &str,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, ClientError> {
-        self.signed_post(&format!("/services/{}", endpoint), params)
-            .await
     }
 
     /// Resolve an effective surface via the daemon's items.effective service.
@@ -329,7 +319,15 @@ impl DaemonClient {
                 "expected_kind": "surface",
             })
         };
-        self.call_service("items.effective", &params).await
+        let mut body = serde_json::json!({
+            "item_ref": "service:items/effective",
+            "parameters": params,
+        });
+        if let Some(pp) = project_path {
+            body["project_path"] = serde_json::Value::String(pp.to_string());
+        }
+        let response = self.signed_post("/execute", &body).await?;
+        Ok(response.get("result").cloned().unwrap_or(response))
     }
 
     /// Fetch a full poll snapshot (threads + remotes + status).

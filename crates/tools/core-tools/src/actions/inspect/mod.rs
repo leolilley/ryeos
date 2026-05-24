@@ -27,7 +27,12 @@ use ryeos_engine::trust::TrustStore;
 pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
     let user_root = roots::user_root().ok();
     let bundle_roots = discover_bundle_roots();
-    let system_roots = roots::system_roots(&bundle_roots);
+    // Match daemon boot semantics: content roots are the installed bundle
+    // roots only. `RYEOS_SYSTEM_SPACE_DIR` is the daemon state root that
+    // contains registrations and runtime state; treating it as a content
+    // root makes effective items report the state dir as their bundle_root,
+    // which breaks bundle-local binary resolution for client launchers.
+    let system_roots = bundle_roots;
 
     let trust_store =
         TrustStore::load_three_tier(project_path, user_root.as_deref(), &system_roots)

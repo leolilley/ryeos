@@ -67,6 +67,8 @@ pub struct SurfaceSpec {
     pub description: Option<String>,
     pub layout: SurfaceLayoutSpec,
     #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    #[serde(default)]
     pub ambient: Option<AmbientSpec>,
     #[serde(default)]
     pub affordances: Vec<SurfaceCommandSpec>,
@@ -500,6 +502,7 @@ pub fn builtin_default() -> SurfaceSpec {
             root: "main".into(),
             nodes,
         },
+        input: None,
         ambient: None,
         affordances: Vec::new(),
         instruments: Vec::new(),
@@ -924,6 +927,7 @@ mod tests {
                 root: "nonexistent".into(),
                 nodes: std::collections::HashMap::new(),
             },
+            input: None,
             ambient: None,
             affordances: Vec::new(),
             instruments: Vec::new(),
@@ -963,6 +967,7 @@ mod tests {
                 root: "a".into(),
                 nodes,
             },
+            input: None,
             ambient: None,
             affordances: Vec::new(),
             instruments: Vec::new(),
