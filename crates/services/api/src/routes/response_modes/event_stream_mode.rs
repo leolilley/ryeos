@@ -19,6 +19,7 @@ use axum::response::sse::{KeepAlive, Sse};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio_stream::StreamExt;
 
 use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
@@ -28,6 +29,7 @@ use crate::routes::invocation::{
     CompiledRouteInvocation, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
     RouteInvocationResult,
 };
+use crate::routes::stream_envelope::envelope_to_sse;
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 
 // ── Shared constants ────────────────────────────────────────────────────
@@ -483,7 +485,9 @@ impl CompiledResponseMode for CompiledEventStreamMode {
                 let keep_alive = KeepAlive::new()
                     .interval(Duration::from_secs(keep_alive_secs))
                     .text(":");
-                let sse = Sse::new(stream.events).keep_alive(keep_alive);
+                // Convert transport-neutral envelopes to SSE frames.
+                let sse_stream = stream.events.map(|result| result.map(|env| envelope_to_sse(&env)));
+                let sse = Sse::new(sse_stream).keep_alive(keep_alive);
                 Ok(sse.into_response())
             }
             // invoke_checked guarantees Stream.

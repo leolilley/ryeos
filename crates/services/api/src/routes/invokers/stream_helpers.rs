@@ -1,10 +1,11 @@
-//! Shared helpers for SSE event stream invokers.
+//! Shared helpers for envelope stream invokers.
 //!
-//! Gateway and subscription stream invokers share lag-recovery logic,
-//! terminal event detection, and SSE event formatting. Those live here
+//! Gateway, subscription, and session stream invokers share lag-recovery logic,
+//! terminal event detection, and envelope formatting. Those live here
 //! to avoid duplication.
 
 use ryeos_app::state_store::PersistedEventRecord;
+use ryeos_app::stream_envelope::RouteStreamEnvelope;
 
 /// Number of events to replay per batch during lag recovery.
 pub const REPLAY_BATCH_SIZE: usize = 200;
@@ -28,18 +29,18 @@ pub fn is_terminal_status(status: &str) -> bool {
     )
 }
 
-pub fn sse_error_event(code: &str, message: &str) -> axum::response::sse::Event {
-    sse_error_event_with(code, message, None)
+pub fn error_envelope(code: &str, message: &str) -> RouteStreamEnvelope {
+    error_envelope_with(code, message, None)
 }
 
-/// Emit a `stream_error` SSE event. When `extras` is provided, its keys are
+/// Emit a `stream_error` envelope. When `extras` is provided, its keys are
 /// merged into the event payload alongside `code` and `error`. Existing
 /// `code`/`error` keys in `extras` are ignored — the explicit args win.
-pub fn sse_error_event_with(
+pub fn error_envelope_with(
     code: &str,
     message: &str,
     extras: Option<serde_json::Value>,
-) -> axum::response::sse::Event {
+) -> RouteStreamEnvelope {
     let mut payload = serde_json::Map::new();
     if let Some(serde_json::Value::Object(map)) = extras {
         for (k, v) in map {
@@ -57,14 +58,13 @@ pub fn sse_error_event_with(
         "error".to_string(),
         serde_json::Value::String(message.to_string()),
     );
-    axum::response::sse::Event::default()
-        .event("stream_error")
-        .data(serde_json::Value::Object(payload).to_string())
+    RouteStreamEnvelope::new("stream_error", serde_json::Value::Object(payload))
 }
 
-pub fn sse_event_for_persisted(ev: &PersistedEventRecord) -> axum::response::sse::Event {
-    axum::response::sse::Event::default()
-        .event(ev.event_type.clone())
-        .id(ev.chain_seq.to_string())
-        .data(serde_json::to_string(ev).expect("PersistedEventRecord serializes"))
+pub fn envelope_for_persisted(ev: &PersistedEventRecord) -> RouteStreamEnvelope {
+    RouteStreamEnvelope::with_id(
+        ev.chain_seq.to_string(),
+        ev.event_type.clone(),
+        serde_json::to_value(ev).expect("PersistedEventRecord serializes"),
+    )
 }

@@ -20,6 +20,7 @@ use tokio_stream::Stream;
 
 use crate::route_error::RouteDispatchError;
 use ryeos_app::state::AppState;
+use ryeos_app::stream_envelope::RouteStreamEnvelope;
 
 // ── Principal ──────────────────────────────────────────────────────────────
 
@@ -120,11 +121,14 @@ impl RouteInvocationResult {
     }
 }
 
-/// SSE event stream returned by streaming invokers.
+/// Envelope stream returned by streaming invokers.
+///
+/// All streaming invokers emit transport-neutral `RouteStreamEnvelope` values.
+/// The SSE transport layer in `event_stream_mode` converts envelopes to SSE frames.
 pub struct RouteEventStream {
-    /// SSE event stream producing `axum::response::sse::Event` items.
+    /// Envelope stream producing `RouteStreamEnvelope` items.
     pub events: Pin<
-        Box<dyn Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>> + Send>,
+        Box<dyn Stream<Item = Result<RouteStreamEnvelope, std::convert::Infallible>> + Send>,
     >,
     /// Keep-alive interval in seconds.
     pub keep_alive_secs: u64,

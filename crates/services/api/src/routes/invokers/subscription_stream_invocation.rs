@@ -10,6 +10,7 @@ use crate::routes::invocation::{
     RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_app::event_store_service::EventReplayParams;
+use ryeos_app::stream_envelope::RouteStreamEnvelope;
 
 use super::stream_helpers::*;
 
@@ -76,9 +77,10 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
 
         let stream = async_stream::stream! {
             yield Ok(
-                axum::response::sse::Event::default()
-                    .event("stream_started")
-                    .data(serde_json::json!({"thread_id": thread_id}).to_string())
+                RouteStreamEnvelope::new(
+                    "stream_started",
+                    serde_json::json!({"thread_id": thread_id}),
+                )
             );
 
             let replay_batch_size = REPLAY_BATCH_SIZE;
@@ -100,7 +102,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
 
                     for ev in &result.events {
                         max_seq = max_seq.max(ev.chain_seq);
-                        yield Ok(sse_event_for_persisted(ev));
+                        yield Ok(envelope_for_persisted(ev));
                         yielded_any_replay_event = true;
                         if is_terminal(&ev.event_type) {
                             saw_terminal = true;
@@ -128,7 +130,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                 }
                                 for ev in &page_result.events {
                                     max_seq = max_seq.max(ev.chain_seq);
-                                    yield Ok(sse_event_for_persisted(ev));
+                                    yield Ok(envelope_for_persisted(ev));
                                     yielded_any_replay_event = true;
                                     if is_terminal(&ev.event_type) {
                                         return;
@@ -137,7 +139,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                 cursor = page_result.next_cursor;
                             }
                             Err(e) => {
-                                yield Ok(sse_error_event("replay_paging_failed", &format!("replay paging failed: {e}")));
+                                yield Ok(error_envelope("replay_paging_failed", &format!("replay paging failed: {e}")));
                                 return;
                             }
                         }
@@ -160,7 +162,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                     continue;
                                 }
                                 current_max = ev.chain_seq;
-                                yield Ok(sse_event_for_persisted(&ev));
+                                yield Ok(envelope_for_persisted(&ev));
                                 if is_terminal(&ev.event_type) {
                                     return;
                                 }
@@ -191,7 +193,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                             for ev in &page.events {
                                                 lag_max = lag_max.max(ev.chain_seq);
                                                 if ev.chain_seq > current_max {
-                                                    yield Ok(sse_event_for_persisted(ev));
+                                                    yield Ok(envelope_for_persisted(ev));
                                                     if is_terminal(&ev.event_type) {
                                                         return;
                                                     }
@@ -215,7 +217,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                             return;
                                         }
                                     }
-                                    yield Ok(sse_error_event("replay_failed", &err_msg));
+                                    yield Ok(error_envelope("replay_failed", &err_msg));
                                     return;
                                 }
 
@@ -224,7 +226,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                                 tracing::info!(
                                     thread_id = %thread_id,
                                     lagged = n,
-                                    "SSE subscriber lag recovery complete"
+                                    "envelope subscriber lag recovery complete"
                                 );
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -234,7 +236,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                     }
                 }
                 Err(e) => {
-                    yield Ok(sse_error_event("initial_replay_failed", &format!("replay failed: {e}")));
+                    yield Ok(error_envelope("initial_replay_failed", &format!("replay failed: {e}")));
                     return;
                 }
             }

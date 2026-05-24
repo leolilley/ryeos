@@ -13,6 +13,7 @@ use crate::routes::invocation::{
     RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_app::event_store_service::EventReplayParams;
+use ryeos_app::stream_envelope::RouteStreamEnvelope;
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 
 use super::stream_helpers::*;
@@ -141,9 +142,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         let stream = async_stream::stream! {
             let _guard = span.enter();
             yield Ok(
-                axum::response::sse::Event::default()
-                    .event("stream_started")
-                    .data(serde_json::json!({"thread_id": thread_id_for_stream}).to_string())
+                RouteStreamEnvelope::new(
+                    "stream_started",
+                    serde_json::json!({"thread_id": thread_id_for_stream}),
+                )
             );
 
             let mut current_max: i64 = 0;
@@ -157,12 +159,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                 let event_type = ev.event_type.clone();
                                 if ev.chain_seq > current_max {
                                     current_max = ev.chain_seq;
-                                    yield Ok(
-                                        axum::response::sse::Event::default()
-                                            .event(ev.event_type.clone())
-                                            .id(ev.chain_seq.to_string())
-                                            .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                    );
+                                    yield Ok(envelope_for_persisted(&ev));
                                 }
                                 if is_terminal(&event_type) {
                                     return;
@@ -188,12 +185,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             for ev in &page_result.events {
                                                 if ev.chain_seq > lag_max {
                                                     lag_max = ev.chain_seq;
-                                                    yield Ok(
-                                                        axum::response::sse::Event::default()
-                                                            .event(ev.event_type.clone())
-                                                            .id(ev.chain_seq.to_string())
-                                                            .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                                    );
+                                                    yield Ok(envelope_for_persisted(ev));
                                                     if is_terminal(&ev.event_type) {
                                                         return;
                                                     }
@@ -218,7 +210,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             return;
                                         }
                                     }
-                                    yield Ok(sse_error_event("replay_failed", &err_msg));
+                                    yield Ok(error_envelope("replay_failed", &err_msg));
                                     return;
                                 }
 
@@ -227,7 +219,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                 tracing::info!(
                                     thread_id = %thread_id_for_stream,
                                     lagged = n,
-                                    "dispatch_launch SSE subscriber lag recovery complete"
+                                    "dispatch_launch envelope subscriber lag recovery complete"
                                 );
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -258,12 +250,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             for ev in &page_result.events {
                                                 if ev.chain_seq > current_max {
                                                     current_max = ev.chain_seq;
-                                                    yield Ok(
-                                                        axum::response::sse::Event::default()
-                                                            .event(ev.event_type.clone())
-                                                            .id(ev.chain_seq.to_string())
-                                                            .data(serde_json::to_string(&ev).expect("PersistedEventRecord serializes"))
-                                                    );
+                                                    yield Ok(envelope_for_persisted(ev));
                                                     if is_terminal(&ev.event_type) {
                                                         saw_terminal = true;
                                                         break;
@@ -279,7 +266,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             next_after = Some(current_max);
                                         }
                                         Err(e) => {
-                                            yield Ok(sse_error_event("post_launch_replay_failed", &format!("post-launch replay failed: {e}")));
+                                            yield Ok(error_envelope("post_launch_replay_failed", &format!("post-launch replay failed: {e}")));
                                             return;
                                         }
                                     }
@@ -290,14 +277,14 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                         return;
                                     }
                                 }
-                                yield Ok(sse_error_event("thread_not_terminal", "launch completed but thread is not terminal"));
+                                yield Ok(error_envelope("thread_not_terminal", "launch completed but thread is not terminal"));
                                 return;
                             }
                             Ok(Err(e)) => {
                                 let extras = match &e {
                                     crate::routes::launch::LaunchSpawnError::Dispatch(de) => {
                                         let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(de);
-                                        // Strip `code` and `error` so the SSE helper's explicit args win.
+                                        // Strip `code` and `error` so the helper's explicit args win.
                                         let mut value = payload.to_value();
                                         if let Some(map) = value.as_object_mut() {
                                             map.remove("code");
@@ -307,7 +294,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                     }
                                     _ => None,
                                 };
-                                yield Ok(sse_error_event_with(
+                                yield Ok(error_envelope_with(
                                     e.code(),
                                     &format!("launch failed: {e}"),
                                     extras,
@@ -315,7 +302,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                 return;
                             }
                             Err(_) => {
-                                yield Ok(sse_error_event("task_panicked", "launch task panicked"));
+                                yield Ok(error_envelope("task_panicked", "launch task panicked"));
                                 return;
                             }
                         }
