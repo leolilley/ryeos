@@ -19,6 +19,10 @@ pub struct AppModel {
     pub visual: VisualState,
     pub generation: u64,
     pub dirty: bool,
+    /// Active keymap (built from defaults + config overrides).
+    /// Not serialized — rebuilt at startup from config.
+    #[serde(skip)]
+    pub keymap: crate::commands::Keymap,
 }
 
 /// Serializable wrapper for LoadedSurface.
@@ -82,6 +86,7 @@ impl AppModel {
             },
             generation: 0,
             dirty: true,
+            keymap: crate::commands::Keymap::defaults(),
         }
     }
 
@@ -107,6 +112,7 @@ impl AppModel {
             },
             generation: 0,
             dirty: true,
+            keymap: crate::commands::Keymap::defaults(),
         }
     }
 
@@ -165,7 +171,7 @@ pub struct VisualState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverlayState {
-    CommandPalette { query: String, cursor: usize },
+    CommandPalette { query: String, selected: usize },
     Confirm { message: String, action: String },
     Help,
 }

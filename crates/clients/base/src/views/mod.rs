@@ -10,6 +10,7 @@ pub mod thread;
 pub mod thread_list;
 pub mod trust;
 
+use crate::commands::format_keybind_display;
 use crate::ids::TileId;
 use crate::layout::Rect;
 use crate::model::AppModel;
@@ -155,48 +156,52 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 theme::style_border_active(),
             );
 
-            let help_lines = [
-                "Rye OS TUI — Keybindings",
-                "",
-                "  Global:",
-                "  Enter        Submit prompt / confirm",
-                "  Tab          Focus next tile",
-                "  Shift+Tab    Focus previous tile",
-                "  Ctrl+C       Quit (when input empty)",
-                "  Ctrl+N       New session (clear input)",
-                "  Ctrl+P       Command palette",
-                "  ?            This help",
-                "",
-                "  Tile management:",
-                "  Ctrl+S       Split tile horizontally",
-                "  Ctrl+V       Split tile vertically",
-                "  Ctrl+X       Close focused tile",
-                "  Ctrl+R       Reset layout to default",
-                "  Ctrl+W       Focus next tile",
-                "",
-                "  List navigation (when input empty):",
-                "  j / k        Cursor down / up",
-                "  Space        Expand / collapse (thread)",
-                "  PageUp/Down  Scroll by page",
-                "",
-                "  Input editing:",
-                "  Left/Right   Move cursor",
-                "  Up/Down      History navigation",
-                "  Home/End     Jump to start/end",
-                "  Backspace    Delete character",
-                "",
-                "  Press any key to close",
+            // Build help lines from keymap
+            let km = &model.keymap;
+            let bind = |id: &str| -> String {
+                km.get_binding(id)
+                    .map(format_keybind_display)
+                    .unwrap_or_else(|| "—".into())
+            };
+
+            let mut help_lines: Vec<(String, bool)> = vec![
+                ("Rye OS TUI — Keybindings".into(), false),
+                ("".into(), false),
+                ("  Global:".into(), true),
+                (format!("  {:<14}Submit / open item", bind("nav.open")), false),
+                (format!("  {:<14}Focus next tile", bind("focus.next")), false),
+                (format!("  {:<14}Focus previous tile", bind("focus.prev")), false),
+                (format!("  {:<14}Quit / clear input", bind("app.quit")), false),
+                (format!("  {:<14}New session", bind("session.new")), false),
+                (format!("  {:<14}Command palette", bind("palette")), false),
+                (format!("  {:<14}This help", bind("help")), false),
+                ("".into(), false),
+                ("  Tile management:".into(), true),
+                (format!("  {:<14}Split horizontal", bind("layout.split_h")), false),
+                (format!("  {:<14}Split vertical", bind("layout.split_v")), false),
+                (format!("  {:<14}Close focused tile", bind("layout.close")), false),
+                (format!("  {:<14}Reset layout", bind("layout.reset")), false),
+                ("".into(), false),
+                ("  Navigation:".into(), true),
+                (format!("  {:<14}Cursor up", bind("nav.up")), false),
+                (format!("  {:<14}Cursor down", bind("nav.down")), false),
+                (format!("  {:<14}Expand / collapse", bind("nav.toggle_expand")), false),
+                (format!("  {:<14}Scroll by page", bind("nav.page_up") + "/" + &bind("nav.page_down")), false),
+                ("".into(), false),
+                ("  Input editing (hardcoded):".into(), true),
+                ("  ←/→          Move cursor".into(), false),
+                ("  Home/End     Jump to start/end".into(), false),
+                ("  Backspace    Delete character".into(), false),
+                ("  Delete       Delete forward".into(), false),
+                ("".into(), false),
+                ("  Press any key to close".into(), false),
             ];
 
-            for (i, line) in help_lines.iter().enumerate() {
+            for (i, (line, is_header)) in help_lines.iter().enumerate() {
                 if i + 1 < h - 1 {
                     let style = if i == 0 {
                         Style::new().fg(theme::ACCENT).bg(theme::BG).bold()
-                    } else if line.starts_with("  Global:")
-                        || line.starts_with("  Tile management:")
-                        || line.starts_with("  List navigation:")
-                        || line.starts_with("  Input editing:")
-                    {
+                    } else if *is_header {
                         Style::new().fg(theme::YELLOW).bg(theme::BG).bold()
                     } else {
                         Style::new().fg(theme::FG).bg(theme::BG)
@@ -213,7 +218,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 overlay_type: OverlayType::Help,
             }]
         }
-        OverlayState::CommandPalette { query, .. } => {
+        OverlayState::CommandPalette { query, selected } => {
             let w = 60.min(viewport.w as usize);
             let h = 16.min(viewport.h as usize);
             let mut surface = TextSurface::new(w, h);
@@ -246,15 +251,23 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
             // Filter and display affordances
             let all_affordances = model.active_affordances();
             let matches = crate::commands::filter_affordances(&all_affordances, query);
+            let max_visible = h.saturating_sub(5);
 
-            for (i, aff) in matches.iter().take(h.saturating_sub(5)).enumerate() {
-                let is_first = i == 0;
-                let bg = if is_first {
+            // Scroll window: ensure selected item is visible
+            let scroll_offset = if *selected >= max_visible {
+                *selected - max_visible + 1
+            } else {
+                0
+            };
+
+            for (i, aff) in matches.iter().skip(scroll_offset).take(max_visible).enumerate() {
+                let is_selected = scroll_offset + i == *selected;
+                let bg = if is_selected {
                     theme::ACCENT
                 } else {
                     theme::BG
                 };
-                let fg = if is_first {
+                let fg = if is_selected {
                     theme::BG
                 } else {
                     theme::FG_DIM
@@ -267,8 +280,8 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 );
                 surface.draw_text(3, 5 + i, &label, style);
 
-                // Description on right
-                if is_first && w > label.len() + 10 {
+                // Description on right for selected item
+                if is_selected && w > label.len() + 10 {
                     let desc = crate::widgets::text::truncate(
                         &aff.description,
                         w.saturating_sub(label.len() + 8),

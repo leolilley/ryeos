@@ -162,111 +162,98 @@ fn handle_key(model: &mut AppModel, key: Key) -> Vec<Effect> {
         return handle_overlay_input(model, key);
     }
 
+    // --- Hardcoded input editing keys (not configurable) ---
+    // These are terminal conventions that must always work.
     match key {
-        // Global keybindings
-        Key::Ctrl('c') | Key::Escape => {
-            // If focused view is a thread and input is empty, quit
-            if model.workspace.input_bar.text.is_empty() {
-                return vec![Effect::Quit];
-            }
-            // Otherwise clear input
-            model.workspace.input_bar.clear();
+        Key::Backspace => {
+            model.workspace.input_bar.backspace();
+            model.mark_dirty();
+            return Vec::new();
+        }
+        Key::Delete => {
+            model.workspace.input_bar.delete();
+            model.mark_dirty();
+            return Vec::new();
+        }
+        Key::ArrowLeft => {
+            model.workspace.input_bar.move_left();
+            model.mark_dirty();
+            return Vec::new();
+        }
+        Key::ArrowRight => {
+            model.workspace.input_bar.move_right();
+            model.mark_dirty();
+            return Vec::new();
+        }
+        Key::Home => {
+            model.workspace.input_bar.move_home();
+            model.mark_dirty();
+            return Vec::new();
+        }
+        Key::End => {
+            model.workspace.input_bar.move_end();
+            model.mark_dirty();
+            return Vec::new();
+        }
+        Key::CtrlEnter | Key::ShiftEnter => {
+            model.workspace.input_bar.insert_char('\n');
+            model.mark_dirty();
+            return Vec::new();
+        }
+        _ => {}
+    }
+
+    // --- Keymap-driven actions ---
+    let action = model.keymap.lookup(&key).map(String::from);
+    if let Some(action) = action {
+        return dispatch_keymap_action(model, &action);
+    }
+
+    // --- Char keys: type into input bar if capable ---
+    if let Key::Char(ch) = key {
+        let cap = model.workspace.focused_capability();
+        if cap == InputCapability::Prompt || cap == InputCapability::Filter {
+            model.workspace.input_bar.insert_char(ch);
+            model.mark_dirty();
+        }
+    }
+
+    Vec::new()
+}
+
+/// Dispatch a keymap action by ID.
+fn dispatch_keymap_action(model: &mut AppModel, action: &str) -> Vec<Effect> {
+    match action {
+        // Navigation actions — inline handling
+        "nav.up" => {
+            model.workspace.cursor_up();
             model.mark_dirty();
             Vec::new()
         }
-
-        Key::Ctrl('n') => {
-            // New session — clear input
-            model.workspace.input_bar.clear();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::Ctrl('p') => {
-            // Command palette
-            model.overlay = Some(crate::model::OverlayState::CommandPalette {
-                query: String::new(),
-                cursor: 0,
-            });
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::Char('?') if model.workspace.input_bar.text.is_empty() => {
-            let inv = crate::commands::InvocationSpec::Ui(
-                crate::commands::UiInvocation { verb: crate::commands::UiVerb::ToggleHelp, args: serde_json::Value::Null }
-            );
-            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
-            effects
-        }
-
-        // Focus navigation
-        Key::Ctrl('w') => {
-            let inv = crate::commands::InvocationSpec::Ui(
-                crate::commands::UiInvocation { verb: crate::commands::UiVerb::FocusNext, args: serde_json::Value::Null }
-            );
-            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
-            effects
-        }
-
-        // Tile management
-        Key::Ctrl('s') => {
-            let inv = crate::commands::InvocationSpec::Ui(
-                crate::commands::UiInvocation {
-                    verb: crate::commands::UiVerb::SplitPane,
-                    args: serde_json::json!({ "axis": "horizontal", "view": "thread_list" }),
-                }
-            );
-            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
-            effects
-        }
-
-        Key::Ctrl('v') => {
-            let inv = crate::commands::InvocationSpec::Ui(
-                crate::commands::UiInvocation {
-                    verb: crate::commands::UiVerb::SplitPane,
-                    args: serde_json::json!({ "axis": "vertical", "view": "event_inspector" }),
-                }
-            );
-            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
-            effects
-        }
-
-        Key::Ctrl('x') => {
-            let inv = crate::commands::InvocationSpec::Ui(
-                crate::commands::UiInvocation { verb: crate::commands::UiVerb::ClosePane, args: serde_json::Value::Null }
-            );
-            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
-            effects
-        }
-
-        Key::Ctrl('r') => {
-            let inv = crate::commands::InvocationSpec::Ui(
-                crate::commands::UiInvocation { verb: crate::commands::UiVerb::ResetLayout, args: serde_json::Value::Null }
-            );
-            let (_, effects) = crate::commands::dispatch_affordance(&inv, model);
-            effects
-        }
-
-        // List navigation (when input is empty)
-        Key::Char('j') if model.workspace.input_bar.text.is_empty() => {
+        "nav.down" => {
             let count = list_item_count(model);
             model.workspace.cursor_down(count);
             model.mark_dirty();
             Vec::new()
         }
-
-        Key::Char('k') if model.workspace.input_bar.text.is_empty() => {
-            model.workspace.cursor_up();
+        "nav.page_up" => {
+            for _ in 0..10 {
+                model.workspace.cursor_up();
+            }
             model.mark_dirty();
             Vec::new()
         }
-
-        Key::Char(' ') if model.workspace.input_bar.text.is_empty() => {
-            // Toggle expand/collapse in thread view
+        "nav.page_down" => {
+            let count = list_item_count(model);
+            for _ in 0..10 {
+                model.workspace.cursor_down(count);
+            }
+            model.mark_dirty();
+            Vec::new()
+        }
+        "nav.toggle_expand" => {
             if let Some(tile) = model.workspace.tiles.get_mut(&model.workspace.focused_tile) {
                 if let crate::workspace::ViewLocalState::Thread(ref mut state) = tile.local {
-                    // Toggle the turn at the cursor
                     let turn_id = state.timeline_cursor as u64;
                     if state.expanded_turns.contains(&turn_id) {
                         state.expanded_turns.remove(&turn_id);
@@ -278,107 +265,32 @@ fn handle_key(model: &mut AppModel, key: Key) -> Vec<Effect> {
             }
             Vec::new()
         }
-
-        // Scrolling
-        Key::PageUp => {
-            // Move cursor up by ~10
-            for _ in 0..10 {
-                model.workspace.cursor_up();
-            }
-            model.mark_dirty();
-            Vec::new()
+        "nav.open" => {
+            handle_enter(model)
         }
-
-        Key::PageDown => {
-            // Move cursor down by ~10
-            let count = list_item_count(model);
-            for _ in 0..10 {
-                model.workspace.cursor_down(count);
-            }
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::Tab => {
-            model.workspace.focus_next();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::ShiftTab => {
-            model.workspace.focus_prev();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        // Input bar editing
-        Key::Char(ch) => {
-            let cap = model.workspace.focused_capability();
-            if cap == InputCapability::Prompt || cap == InputCapability::Filter {
-                model.workspace.input_bar.insert_char(ch);
+        // Quit with special case: clear input if non-empty
+        "app.quit" => {
+            if !model.workspace.input_bar.text.is_empty() {
+                model.workspace.input_bar.clear();
                 model.mark_dirty();
+                Vec::new()
+            } else {
+                vec![Effect::Quit]
             }
-            Vec::new()
         }
-
-        Key::Backspace => {
-            model.workspace.input_bar.backspace();
+        // All other actions: look up affordance and dispatch
+        affordance_id => {
+            let affordances = model.active_affordances();
+            let invoke = affordances.iter().find(|a| a.id == affordance_id).map(|a| a.invoke.clone());
+            if let Some(inv) = invoke {
+                let (handled, effects) = crate::commands::dispatch_affordance(&inv, model);
+                if handled {
+                    return effects;
+                }
+            }
             model.mark_dirty();
             Vec::new()
         }
-
-        Key::Delete => {
-            model.workspace.input_bar.delete();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::ArrowLeft => {
-            model.workspace.input_bar.move_left();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::ArrowRight => {
-            model.workspace.input_bar.move_right();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::Home => {
-            model.workspace.input_bar.move_home();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::End => {
-            model.workspace.input_bar.move_end();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::ArrowUp => {
-            model.workspace.input_bar.history_prev();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::ArrowDown => {
-            model.workspace.input_bar.history_next();
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        Key::Enter => handle_enter(model),
-
-        Key::CtrlEnter | Key::ShiftEnter => {
-            // Insert newline (for future multiline input)
-            model.workspace.input_bar.insert_char('\n');
-            model.mark_dirty();
-            Vec::new()
-        }
-
-        _ => Vec::new(),
     }
 }
 
@@ -463,16 +375,16 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
             // Any key dismisses help
             model.mark_dirty();
         }
-        Some(crate::model::OverlayState::CommandPalette { ref query, .. }) => {
+        Some(crate::model::OverlayState::CommandPalette { ref query, ref selected }) => {
             match key {
                 Key::Escape => {
                     model.mark_dirty();
                 }
                 Key::Enter => {
-                    // Execute the first matching affordance through the registry
+                    // Execute the selected matching affordance through the registry
                     let affordances = model.active_affordances();
                     let matches = crate::commands::filter_affordances(&affordances, query);
-                    if let Some(aff) = matches.first() {
+                    if let Some(aff) = matches.into_iter().nth(*selected) {
                         let (handled, effects) = crate::commands::dispatch_affordance(&aff.invoke, model);
                         // overlay already taken above
                         if handled {
@@ -482,38 +394,37 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
                     model.mark_dirty();
                 }
                 Key::ArrowDown => {
-                    // TODO: cycle through matches
-                    let cursor = query.len();
+                    let affordances = model.active_affordances();
+                    let matches = crate::commands::filter_affordances(&affordances, query);
+                    let max = matches.len().saturating_sub(1);
+                    let new_selected = (*selected + 1).min(max);
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), selected: new_selected });
                     model.mark_dirty();
                 }
                 Key::ArrowUp => {
-                    let cursor = query.len();
+                    let new_selected = selected.saturating_sub(1);
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), selected: new_selected });
                     model.mark_dirty();
                 }
                 Key::Char(ch) => {
                     let mut q = query.clone();
                     q.push(ch);
-                    let cursor = q.len();
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: q, cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: q, selected: 0 });
                     model.mark_dirty();
                 }
                 Key::Backspace => {
                     let mut q = query.clone();
                     q.pop();
-                    let cursor = q.len();
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: q, cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: q, selected: 0 });
                     model.mark_dirty();
                 }
                 _ => {
-                    let cursor = query.len();
                     model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), cursor });
+                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), selected: *selected });
                 }
             }
         }
@@ -751,8 +662,44 @@ fn handle_list_enter(model: &mut AppModel) -> Vec<Effect> {
                 }
             }
             ViewSpec::SpaceBrowser { .. } => {
-                // TODO: Open item detail view (future feature)
-                model.mark_dirty();
+                // Open selected item for execution
+                let cursor = match &tile.local {
+                    crate::workspace::ViewLocalState::SpaceBrowser { cursor, .. } => *cursor,
+                    _ => return Vec::new(),
+                };
+
+                let mut items: Vec<_> = model.store.items.values().collect();
+                items.sort_by(|a, b| a.name.cmp(&b.name));
+
+                // Apply the same filter the view uses
+                let filter = match &tile.local {
+                    crate::workspace::ViewLocalState::SpaceBrowser { query, .. } => query.clone(),
+                    _ => String::new(),
+                };
+
+                let filtered: Vec<_> = items
+                    .into_iter()
+                    .filter(|item| {
+                        if filter.is_empty() {
+                            return true;
+                        }
+                        let f = filter.to_lowercase();
+                        item.kind.to_lowercase().contains(&f)
+                            || item.name.to_lowercase().contains(&f)
+                            || item.description.as_ref().is_some_and(|d| d.to_lowercase().contains(&f))
+                    })
+                    .collect();
+
+                if let Some(selected) = filtered.into_iter().nth(cursor) {
+                    let item_ref = format!("{}:{}", selected.kind, selected.name);
+                    model.workspace.input_bar.clear();
+                    model.mark_dirty();
+                    return vec![Effect::Execute {
+                        project_path: std::path::PathBuf::from("."),
+                        item_ref,
+                        parameters: serde_json::json!({}),
+                    }];
+                }
             }
             _ => {}
         }

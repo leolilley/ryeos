@@ -28,6 +28,10 @@ pub async fn run(
     let mut model = ryeos_client_base::model::AppModel::from_surface(project_path, &loaded_surface);
     model.runtime.viewport = ryeos_client_base::layout::Rect::new(0, 0, width, height);
 
+    // Load config and apply keybind overrides
+    let config = crate::persistence::load_config();
+    model.keymap.apply_overrides(&config.keybindings);
+
     // Create transport: try real daemon first, fall back to mock
     let mut transport: Box<dyn DaemonTransport> = if mock {
         Box::new(MockTransport)

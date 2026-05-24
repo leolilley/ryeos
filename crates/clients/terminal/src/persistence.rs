@@ -18,6 +18,12 @@ pub struct TuiConfig {
     pub content_max_width: usize,
     pub tick_interval_ms: u64,
     pub poll_interval_secs: u64,
+    /// Keybinding overrides: maps affordance IDs to keybind strings.
+    /// Overrides are merged on top of defaults at startup.
+    /// Value `"none"` disables a binding.
+    /// Example: `{"palette": "ctrl+k", "help": "none"}`
+    #[serde(default)]
+    pub keybindings: std::collections::HashMap<String, String>,
 }
 
 impl Default for TuiConfig {
@@ -27,6 +33,7 @@ impl Default for TuiConfig {
             content_max_width: 160,
             tick_interval_ms: 50,
             poll_interval_secs: 5,
+            keybindings: std::collections::HashMap::new(),
         }
     }
 }

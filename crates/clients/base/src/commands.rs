@@ -342,7 +342,7 @@ fn dispatch_ui_verb(
                 Some(crate::model::OverlayState::CommandPalette { .. }) => None,
                 _ => Some(crate::model::OverlayState::CommandPalette {
                     query: String::new(),
-                    cursor: 0,
+                    selected: 0,
                 }),
             };
             model.mark_dirty();
@@ -359,7 +359,7 @@ fn dispatch_ui_verb(
                 "palette" => {
                     model.overlay = Some(crate::model::OverlayState::CommandPalette {
                         query: String::new(),
-                        cursor: 0,
+                        selected: 0,
                     });
                 }
                 "confirm" => {
@@ -516,6 +516,213 @@ pub fn filter_affordances<'a>(affordances: &'a [Affordance], query: &str) -> Vec
                 || a.id.to_lowercase().contains(&query_lower)
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Keybind parsing and keymap
+// ---------------------------------------------------------------------------
+
+use crate::input::Key;
+
+/// A single key combo parsed from a string like `"ctrl+p"` or `"page_up"`.
+///
+/// Format: `[mod+mod+...]key` where mods are `ctrl`, `alt`, `shift`, `meta`
+/// and key is a character or named key like `escape`, `enter`, `tab`, `page_up`, etc.
+/// Multiple combos can be separated by commas: `"ctrl+p,mod+shift+p"`.
+/// The special value `"none"` disables the binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KeybindCombo {
+    pub key: String,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub meta: bool,
+}
+
+/// Parse a keybind config string into one or more combos.
+/// Returns empty for `"none"` or empty string.
+pub fn parse_keybind(config: &str) -> Vec<KeybindCombo> {
+    if config.is_empty() || config == "none" {
+        return Vec::new();
+    }
+
+    config.split(',').map(|part| {
+        let mut combo = KeybindCombo {
+            key: String::new(),
+            ctrl: false,
+            alt: false,
+            shift: false,
+            meta: false,
+        };
+        for token in part.trim().to_lowercase().split('+') {
+            match token {
+                "ctrl" | "control" => combo.ctrl = true,
+                "alt" | "option" => combo.alt = true,
+                "shift" => combo.shift = true,
+                "meta" | "cmd" | "command" => combo.meta = true,
+                _ => combo.key = token.to_string(),
+            }
+        }
+        combo
+    }).collect()
+}
+
+/// Try to match a `Key` event against a keybind combo.
+pub fn match_keybind(combo: &KeybindCombo, key: &Key) -> bool {
+    match key {
+        Key::Ctrl(c) => {
+            combo.ctrl
+                && !combo.alt
+                && !combo.shift
+                && !combo.meta
+                && combo.key == c.to_lowercase().to_string()
+        }
+        Key::Alt(c) => {
+            combo.alt
+                && !combo.ctrl
+                && !combo.shift
+                && !combo.meta
+                && combo.key == c.to_lowercase().to_string()
+        }
+        Key::Char(c) => {
+            !combo.ctrl
+                && !combo.alt
+                && !combo.meta
+                && combo.shift == c.is_uppercase()
+                && combo.key == c.to_lowercase().to_string()
+        }
+        Key::ArrowUp => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowup",
+        Key::ArrowDown => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowdown",
+        Key::ArrowLeft => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowleft",
+        Key::ArrowRight => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowright",
+        Key::Home => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "home",
+        Key::End => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "end",
+        Key::PageUp => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "pageup",
+        Key::PageDown => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "pagedown",
+        Key::Backspace => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "backspace",
+        Key::Delete => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "delete",
+        Key::Tab => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "tab",
+        Key::ShiftTab => !combo.ctrl && !combo.alt && combo.shift && !combo.meta && combo.key == "tab",
+        Key::Enter => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "enter",
+        Key::Escape => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "escape",
+        Key::F(n) => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == format!("f{}", n),
+        _ => false,
+    }
+}
+
+/// A keymap that maps affordance IDs to keybind config strings.
+///
+/// Built from defaults, with optional overrides from user config.
+/// Lookup iterates all bindings and returns the affordance ID whose
+/// keybind matches the pressed key.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Keymap {
+    /// Maps affordance ID → keybind config string (e.g. `"ctrl+p"`).
+    pub bindings: std::collections::HashMap<String, String>,
+}
+
+impl Keymap {
+    /// Create a keymap with default bindings.
+    pub fn defaults() -> Self {
+        let mut bindings = std::collections::HashMap::new();
+        // Global
+        bindings.insert("app.quit".into(), "escape".into());
+        bindings.insert("session.new".into(), "ctrl+n".into());
+        bindings.insert("palette".into(), "ctrl+p".into());
+        bindings.insert("help".into(), "shift+slash".into()); // ?
+        // Focus
+        bindings.insert("focus.next".into(), "tab".into());
+        bindings.insert("focus.prev".into(), "shift+tab".into());
+        // Layout
+        bindings.insert("layout.split_h".into(), "ctrl+s".into());
+        bindings.insert("layout.split_v".into(), "ctrl+v".into());
+        bindings.insert("layout.close".into(), "ctrl+x".into());
+        bindings.insert("layout.reset".into(), "ctrl+r".into());
+        // Navigation
+        bindings.insert("nav.up".into(), "arrowup".into());
+        bindings.insert("nav.down".into(), "arrowdown".into());
+        bindings.insert("nav.page_up".into(), "pageup".into());
+        bindings.insert("nav.page_down".into(), "pagedown".into());
+        bindings.insert("nav.toggle_expand".into(), "space".into());
+        bindings.insert("nav.open".into(), "enter".into());
+        Self { bindings }
+    }
+
+    /// Apply user overrides from config (affordance ID → keybind string).
+    /// Overrides replace existing bindings. Value `"none"` disables a binding.
+    pub fn apply_overrides(&mut self, overrides: &std::collections::HashMap<String, String>) {
+        for (id, keybind) in overrides {
+            if keybind == "none" {
+                self.bindings.remove(id);
+            } else {
+                self.bindings.insert(id.clone(), keybind.clone());
+            }
+        }
+    }
+
+    /// Look up the affordance ID for a pressed key.
+    /// Returns the first matching affordance ID, or None.
+    pub fn lookup(&self, key: &Key) -> Option<&str> {
+        for (affordance_id, config) in &self.bindings {
+            let combos = parse_keybind(config);
+            for combo in &combos {
+                if match_keybind(combo, key) {
+                    return Some(affordance_id.as_str());
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the keybind config string for an affordance ID.
+    /// Used by help overlay and settings UI.
+    pub fn get_binding(&self, affordance_id: &str) -> Option<&str> {
+        self.bindings.get(affordance_id).map(|s| s.as_str())
+    }
+
+    /// Get all bindings as an iterator (for help display).
+    pub fn all_bindings(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.bindings.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Display formatting
+// ---------------------------------------------------------------------------
+
+/// Format a keybind config string for display in the help overlay.
+///
+/// Converts e.g. `"ctrl+p"` → `"Ctrl+P"`, `"shift+slash"` → `"?"`,
+/// `"arrowup"` → `"↑"`, `"escape"` → `"Esc"`, `"space"` → `"Space"`.
+pub fn format_keybind_display(config: &str) -> String {
+    // Handle special named keys
+    match config {
+        "escape" => return "Esc".into(),
+        "space" => return "Space".into(),
+        "arrowup" => return "↑".into(),
+        "arrowdown" => return "↓".into(),
+        "arrowleft" => return "←".into(),
+        "arrowright" => return "→".into(),
+        "pageup" => return "PgUp".into(),
+        "pagedown" => return "PgDn".into(),
+        "shift+slash" => return "?".into(),
+        "shift+tab" => return "Shift+Tab".into(),
+        "tab" => return "Tab".into(),
+        "enter" => return "Enter".into(),
+        _ => {}
+    }
+    // General case: capitalize each part
+    config
+        .split('+')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 // ---------------------------------------------------------------------------
@@ -834,5 +1041,87 @@ requires_capabilities:
 
         let inv = spec.invoke.unwrap();
         assert!(matches!(inv, InvocationSpec::Rye(_)));
+    }
+
+    // --- Keybind tests ---
+
+    #[test]
+    fn parse_keybind_single() {
+        let combos = parse_keybind("ctrl+p");
+        assert_eq!(combos.len(), 1);
+        assert_eq!(combos[0].key, "p");
+        assert!(combos[0].ctrl);
+        assert!(!combos[0].alt);
+    }
+
+    #[test]
+    fn parse_keybind_multi_combo() {
+        let combos = parse_keybind("ctrl+p,alt+x");
+        assert_eq!(combos.len(), 2);
+        assert!(combos[0].ctrl);
+        assert!(combos[1].alt);
+    }
+
+    #[test]
+    fn parse_keybind_none() {
+        assert!(parse_keybind("none").is_empty());
+        assert!(parse_keybind("").is_empty());
+    }
+
+    #[test]
+    fn match_ctrl_key() {
+        let combo = &parse_keybind("ctrl+p")[0];
+        assert!(match_keybind(combo, &Key::Ctrl('p')));
+        assert!(match_keybind(combo, &Key::Ctrl('P')));
+        assert!(!match_keybind(combo, &Key::Ctrl('x')));
+        assert!(!match_keybind(combo, &Key::Char('p')));
+    }
+
+    #[test]
+    fn match_named_key() {
+        let combo = &parse_keybind("escape")[0];
+        assert!(match_keybind(combo, &Key::Escape));
+        assert!(!match_keybind(combo, &Key::Enter));
+    }
+
+    #[test]
+    fn match_arrow_key() {
+        let combo = &parse_keybind("arrowup")[0];
+        assert!(match_keybind(combo, &Key::ArrowUp));
+        assert!(!match_keybind(combo, &Key::ArrowDown));
+    }
+
+    #[test]
+    fn keymap_defaults_lookup() {
+        let km = Keymap::defaults();
+        assert_eq!(km.lookup(&Key::Escape), Some("app.quit"));
+        assert_eq!(km.lookup(&Key::Ctrl('p')), Some("palette"));
+        assert_eq!(km.lookup(&Key::ArrowUp), Some("nav.up"));
+        assert_eq!(km.lookup(&Key::ArrowDown), Some("nav.down"));
+    }
+
+    #[test]
+    fn keymap_override_replaces() {
+        let mut km = Keymap::defaults();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("palette".into(), "ctrl+k".into());
+        km.apply_overrides(&overrides);
+        assert_eq!(km.lookup(&Key::Ctrl('k')), Some("palette"));
+        assert!(km.lookup(&Key::Ctrl('p')).is_none());
+    }
+
+    #[test]
+    fn keymap_override_none_disables() {
+        let mut km = Keymap::defaults();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("help".into(), "none".into());
+        km.apply_overrides(&overrides);
+        assert!(km.lookup(&Key::Char('?')).is_none());
+    }
+
+    #[test]
+    fn keymap_unmatched_returns_none() {
+        let km = Keymap::defaults();
+        assert!(km.lookup(&Key::Char('z')).is_none());
     }
 }
