@@ -13,6 +13,8 @@ use ryeos_engine::trust::TrustStore;
 
 use crate::manifest::{derive_provides_kinds, BundleManifest};
 
+const IDENTITY_COMPOSER: &str = "handler:ryeos/core/identity";
+
 /// Severity of a preflight validation issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreflightIssueSeverity {
@@ -23,7 +25,7 @@ pub enum PreflightIssueSeverity {
 }
 
 /// A single validation issue found during bundle preflight.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreflightIssue {
     /// Relative path of the item within the bundle (e.g. `tools/my_tool.py`).
     pub item_path: String,
@@ -40,7 +42,7 @@ pub struct PreflightIssue {
 }
 
 /// Warnings collected during a successful preflight verification.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PreflightReport {
     /// Non-blocking issues (e.g. unknown fields with strict_fields: warn).
     pub warnings: Vec<PreflightIssue>,
@@ -62,7 +64,7 @@ fn collect_identity_contract_issues(
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
     parsed: &serde_json::Value,
 ) -> Vec<PreflightIssue> {
-    if kind_schema.composer != "handler:ryeos/core/identity" {
+    if kind_schema.composer != IDENTITY_COMPOSER {
         return Vec::new();
     }
 
@@ -521,6 +523,7 @@ mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
+    use std::os::unix::fs::PermissionsExt;
 
     struct BundleLayout {
         _tmp: tempfile::TempDir,
@@ -594,6 +597,165 @@ mod tests {
             let tampered = signed.replace("version: '1.0'", "version: '9.9'");
             fs::write(self.ai_dir.join("manifest.yaml"), &tampered).unwrap();
         }
+
+        fn sign_and_write(&self, rel: &str, body: &str) {
+            let path = self.ai_dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let signed = lillux::signature::sign_content(body, &self.signing_key, "#", None);
+            fs::write(path, signed).unwrap();
+        }
+
+        fn add_signed_kind_schema(&self, kind_name: &str, body: &str) {
+            self.sign_and_write(
+                &format!("node/engine/kinds/{kind_name}/{kind_name}.kind-schema.yaml"),
+                body,
+            );
+        }
+
+        fn add_test_parser_kind_schema(&self) {
+            self.add_signed_kind_schema(
+                "parser",
+                &format!(r##"location:
+  directory: parsers
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:test/fixed/fixed
+    signature:
+      prefix: "#"
+effective_trust:
+  include_references: false
+resolution: []
+composer: {IDENTITY_COMPOSER}
+composed_value_contract:
+  root_type: mapping
+  required: {{}}
+"##),
+            );
+        }
+
+        fn add_test_item_kind_schema(&self, composer: &str, contract: &str) {
+            self.add_signed_kind_schema(
+                "mykind",
+                &format!(
+                    r##"location:
+  directory: items
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:test/fixed/fixed
+    signature:
+      prefix: "#"
+effective_trust:
+  include_references: false
+resolution: []
+composer: {composer}
+composed_value_contract:
+{contract}
+"##
+                ),
+            );
+        }
+
+        fn add_fixed_parser_descriptor(&self) {
+            self.sign_and_write(
+                "parsers/test/fixed/fixed.yaml",
+                r#"version: "1.0.0"
+description: "fixed parser for preflight tests"
+handler: "handler:test/fixed-parser"
+parser_api_version: 1
+parser_config: {}
+output_schema:
+  root_type: mapping
+  required: {}
+"#,
+            );
+        }
+
+        fn add_fixed_parser_handler(&self, value: serde_json::Value) {
+            let triple = host_triple();
+            let name = "fixed-parser";
+            let bin_rel = format!("bin/{triple}/{name}");
+            let bin_path = self.ai_dir.join(&bin_rel);
+            fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
+
+            let response = serde_json::json!({
+                "result": "parse_ok",
+                "value": value,
+            })
+            .to_string();
+            let script = format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{response}'\n");
+            fs::write(&bin_path, script.as_bytes()).unwrap();
+            let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&bin_path, perms).unwrap();
+
+            self.sign_and_write(
+                "handlers/test/fixed-parser.yaml",
+                &format!(
+                    r#"category: test
+name: fixed-parser
+kind: handler
+serves: parser
+binary_ref: {bin_rel}
+abi_version: "v1"
+required_caps: []
+description: "fixed parser handler for preflight tests"
+"#
+                ),
+            );
+            self.write_binary_manifest(&bin_rel, &bin_path);
+        }
+
+        fn write_binary_manifest(&self, item_ref: &str, bin_path: &Path) {
+            let cas = lillux::cas::CasStore::new(self.ai_dir.join("objects"));
+            let bytes = fs::read(bin_path).unwrap();
+            let blob_hash = cas.store_blob(&bytes).unwrap();
+            let fingerprint = ryeos_engine::trust::compute_fingerprint(
+                &self.signing_key.verifying_key(),
+            );
+            let item_source = serde_json::json!({
+                "item_ref": item_ref,
+                "content_blob_hash": blob_hash,
+                "integrity": format!("sha256:{blob_hash}"),
+                "signature_info": { "fingerprint": fingerprint },
+                "mode": 0o755,
+            });
+            let item_source_hash = cas.store_object(&item_source).unwrap();
+            let manifest = serde_json::json!({
+                "item_source_hashes": {
+                    item_ref: item_source_hash,
+                }
+            });
+            let manifest_hash = cas.store_object(&manifest).unwrap();
+            let manifest_ref = self.ai_dir.join("refs/bundles/manifest");
+            fs::create_dir_all(manifest_ref.parent().unwrap()).unwrap();
+            fs::write(manifest_ref, manifest_hash).unwrap();
+        }
+
+        fn write_signed_item(&self, rel: &str, body: &str) {
+            self.sign_and_write(rel, body);
+        }
+    }
+
+    fn host_triple() -> String {
+        let output = std::process::Command::new("rustc")
+            .args(["-vV"])
+            .output()
+            .expect("rustc -vV");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .lines()
+            .find(|l| l.starts_with("host:"))
+            .expect("host triple in rustc -vV")
+            .strip_prefix("host:")
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    fn indented_contract(body: &str) -> String {
+        body.lines()
+            .map(|line| format!("  {line}\n"))
+            .collect::<String>()
     }
 
     #[test]
@@ -707,6 +869,108 @@ mod tests {
         );
     }
 
+    fn add_real_preflight_fixture(
+        layout: &BundleLayout,
+        composer: &str,
+        contract: &str,
+        parsed_value: serde_json::Value,
+    ) {
+        layout.add_test_parser_kind_schema();
+        layout.add_test_item_kind_schema(composer, &indented_contract(contract));
+        layout.add_fixed_parser_descriptor();
+        layout.add_fixed_parser_handler(parsed_value);
+        layout.write_signed_item("items/demo.yaml", "name: demo\n");
+    }
+
+    #[test]
+    fn preflight_report_real_wiring_rejects_identity_contract_error() {
+        let layout = BundleLayout::new("test-bundle");
+        add_real_preflight_fixture(
+            &layout,
+            IDENTITY_COMPOSER,
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+    enum:
+      - cli_exec
+      - daemon_ui
+optional: {}
+"#,
+            serde_json::json!({ "mode": "web_server" }),
+        );
+
+        let err = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            Some(&layout.user_root),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+
+        assert!(msg.contains("contract violation [enum_mismatch]"), "error: {msg}");
+        assert!(msg.contains("items/demo.yaml"), "item path: {msg}");
+        assert!(msg.contains("mode"), "field path: {msg}");
+    }
+
+    #[test]
+    fn preflight_report_real_wiring_skips_non_identity_contract_error() {
+        let layout = BundleLayout::new("test-bundle");
+        add_real_preflight_fixture(
+            &layout,
+            "handler:ryeos/core/extends-chain",
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+optional: {}
+"#,
+            serde_json::json!({ "other": "stuff" }),
+        );
+
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            Some(&layout.user_root),
+        )
+        .expect("non-identity composer should skip pre-composition contract validation");
+
+        assert!(report.is_clean(), "no warnings expected: {report:?}");
+    }
+
+    #[test]
+    fn preflight_report_real_wiring_returns_contract_warnings() {
+        let layout = BundleLayout::new("test-bundle");
+        add_real_preflight_fixture(
+            &layout,
+            IDENTITY_COMPOSER,
+            r#"root_type: mapping
+required:
+  body:
+    type: single
+    prim: string
+optional: {}
+strict_fields: warn
+"#,
+            serde_json::json!({ "body": "hello", "extra": "field" }),
+        );
+
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            Some(&layout.user_root),
+        )
+        .expect("warnings should not fail preflight");
+
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].severity, PreflightIssueSeverity::Warning);
+        assert_eq!(report.warnings[0].code, InstanceViolationCode::UnexpectedField);
+        assert_eq!(report.warnings[0].item_path, "items/demo.yaml");
+        assert_eq!(report.warnings[0].path, "extra");
+    }
+
     // ── Slice 3 follow-up: Contract diagnostics wiring tests ──────
 
     /// Helper: build a minimal `ValueShape` from YAML for tests.
@@ -726,7 +990,7 @@ mod tests {
             },
             execution: None,
             composed_value_contract: shape_from_yaml(contract_yaml),
-            composer: "handler:ryeos/core/identity".to_string(),
+            composer: IDENTITY_COMPOSER.to_string(),
             composer_config: serde_json::Value::Null,
             runtime: None,
             inventory_kinds: vec![],
