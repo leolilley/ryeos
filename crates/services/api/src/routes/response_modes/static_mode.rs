@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::http::{header, HeaderValue, StatusCode};
@@ -32,20 +33,25 @@ pub trait StaticAssetProvider: Send + Sync {
 // ── StaticMode ─────────────────────────────────────────────────────────────
 
 pub struct StaticMode {
-    /// Injected static asset provider. When `None`, `source: embedded_asset`
-    /// routes are rejected at compile time.
-    pub asset_provider: Option<Arc<dyn StaticAssetProvider>>,
+    /// Static asset providers keyed by source name (e.g. "embedded_asset").
+    /// When empty, `source: embedded_asset` routes are rejected at compile time.
+    providers: HashMap<String, Arc<dyn StaticAssetProvider>>,
 }
 
 impl Default for StaticMode {
     fn default() -> Self {
-        Self { asset_provider: None }
+        Self { providers: HashMap::new() }
     }
 }
 
 impl StaticMode {
-    pub fn with_provider(provider: Arc<dyn StaticAssetProvider>) -> Self {
-        Self { asset_provider: Some(provider) }
+    /// Register a static asset provider under the given source name.
+    pub fn register_provider(
+        &mut self,
+        name: impl Into<String>,
+        provider: Arc<dyn StaticAssetProvider>,
+    ) {
+        self.providers.insert(name.into(), provider);
     }
 }
 
@@ -54,7 +60,10 @@ enum CompiledStaticSource {
     /// Inline body decoded from `body_b64` at compile time.
     Inline { body: Vec<u8> },
     /// Embedded asset resolved at dispatch time by path.
-    EmbeddedAsset { path_template: PathTemplate },
+    EmbeddedAsset {
+        path_template: PathTemplate,
+        provider: Arc<dyn StaticAssetProvider>,
+    },
 }
 
 /// Path template for embedded asset lookup.
@@ -69,7 +78,6 @@ pub struct CompiledStaticMode {
     status: StatusCode,
     content_type: Option<HeaderValue>,
     source: CompiledStaticSource,
-    asset_provider: Option<Arc<dyn StaticAssetProvider>>,
 }
 
 /// Security headers applied to all embedded asset responses.
@@ -105,51 +113,8 @@ impl ResponseMode for StaticMode {
         })?;
 
         let source = match raw.response.source.as_deref() {
-            Some("embedded_asset") => {
-                let provider = self.asset_provider.as_ref().ok_or_else(|| {
-                    RouteConfigError::InvalidSourceConfig {
-                        id: raw.id.clone(),
-                        src: "embedded_asset".into(),
-                        reason: "no static asset provider registered".into(),
-                    }
-                })?;
-
-                let path_val = raw.response.source_config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-                    RouteConfigError::InvalidSourceConfig {
-                        id: raw.id.clone(),
-                        src: "embedded_asset".into(),
-                        reason: "missing 'path' in source_config".into(),
-                    }
-                })?;
-
-                // Check if it's a ${path.<name>} interpolation.
-                let path_template = if let Some(rest) = path_val.strip_prefix("${path.") {
-                    if let Some(name) = rest.strip_suffix('}') {
-                        PathTemplate::Capture(name.to_string())
-                    } else {
-                        return Err(RouteConfigError::InvalidSourceConfig {
-                            id: raw.id.clone(),
-                            src: "embedded_asset".into(),
-                            reason: format!("invalid path template: {path_val}"),
-                        });
-                    }
-                } else {
-                    // Validate the literal path resolves to an asset.
-                    if provider.get(path_val).is_none() {
-                        return Err(RouteConfigError::InvalidSourceConfig {
-                            id: raw.id.clone(),
-                            src: "embedded_asset".into(),
-                            reason: format!("no embedded asset for path: {path_val}"),
-                        });
-                    }
-                    PathTemplate::Literal(path_val.to_string())
-                };
-
-                // content_type is optional for embedded assets (auto-detected from extension).
-                CompiledStaticSource::EmbeddedAsset { path_template }
-            }
-            _ => {
-                // Legacy inline body_b64 mode.
+            None | Some("") => {
+                // Inline body_b64 mode (no source specified).
                 let content_type = raw.response.content_type.as_ref().ok_or_else(|| {
                     RouteConfigError::InvalidResponseSpec {
                         id: raw.id.clone(),
@@ -179,16 +144,60 @@ impl ResponseMode for StaticMode {
                     RouteConfigError::InvalidResponseSpec {
                         id: raw.id.clone(),
                         mode: "static".into(),
-                        reason: format!("invalid content_type header value: {content_type}"),
+                        reason: format!("invalid content_type: {content_type}"),
                     }
                 })?;
 
-                return Ok(Arc::new(CompiledStaticMode {
-                    status,
-                    content_type: Some(header_val),
-                    source: CompiledStaticSource::Inline { body },
-                    asset_provider: None,
-                }));
+                CompiledStaticSource::Inline { body }
+            }
+            Some(source_name) => {
+                // Look up the source name in the provider registry.
+                let provider = self.providers.get(source_name).ok_or_else(|| {
+                    RouteConfigError::InvalidSourceConfig {
+                        id: raw.id.clone(),
+                        src: source_name.into(),
+                        reason: format!(
+                            "no static asset provider registered for source '{source_name}'"
+                        ),
+                    }
+                })?;
+
+                let path_val = raw.response.source_config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                    RouteConfigError::InvalidSourceConfig {
+                        id: raw.id.clone(),
+                        src: source_name.into(),
+                        reason: "missing 'path' in source_config".into(),
+                    }
+                })?;
+
+                // Check if it's a ${path.<name>} interpolation.
+                let path_template = if let Some(rest) = path_val.strip_prefix("${path.") {
+                    if let Some(name) = rest.strip_suffix('}') {
+                        PathTemplate::Capture(name.to_string())
+                    } else {
+                        return Err(RouteConfigError::InvalidSourceConfig {
+                            id: raw.id.clone(),
+                            src: source_name.into(),
+                            reason: format!("invalid path template: {path_val}"),
+                        });
+                    }
+                } else {
+                    // Validate the literal path resolves to an asset.
+                    if provider.get(path_val).is_none() {
+                        return Err(RouteConfigError::InvalidSourceConfig {
+                            id: raw.id.clone(),
+                            src: source_name.into(),
+                            reason: format!("no embedded asset for path: {path_val}"),
+                        });
+                    }
+                    PathTemplate::Literal(path_val.to_string())
+                };
+
+                // content_type is optional for embedded assets (auto-detected from extension).
+                CompiledStaticSource::EmbeddedAsset {
+                    path_template,
+                    provider: provider.clone(),
+                }
             }
         };
 
@@ -202,7 +211,6 @@ impl ResponseMode for StaticMode {
             status,
             content_type,
             source,
-            asset_provider: self.asset_provider.clone(),
         }))
     }
 }
@@ -226,7 +234,7 @@ impl CompiledResponseMode for CompiledStaticMode {
                 }
                 Ok(resp)
             }
-            CompiledStaticSource::EmbeddedAsset { path_template } => {
+            CompiledStaticSource::EmbeddedAsset { path_template, provider } => {
                 let path = match path_template {
                     PathTemplate::Literal(p) => p.clone(),
                     PathTemplate::Capture(name) => ctx
@@ -235,10 +243,6 @@ impl CompiledResponseMode for CompiledStaticMode {
                         .cloned()
                         .unwrap_or_default(),
                 };
-
-                let provider = self.asset_provider.as_ref().ok_or_else(|| {
-                    RouteDispatchError::Internal("no static asset provider".into())
-                })?;
 
                 let asset = provider.get(&path).ok_or_else(|| {
                     RouteDispatchError::NotFound
@@ -309,7 +313,9 @@ mod tests {
     }
 
     fn mode_with_provider() -> StaticMode {
-        StaticMode::with_provider(Arc::new(FakeProvider))
+        let mut mode = StaticMode::default();
+        mode.register_provider("embedded_asset", Arc::new(FakeProvider));
+        mode
     }
 
     fn make_raw(

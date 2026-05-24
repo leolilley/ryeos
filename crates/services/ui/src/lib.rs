@@ -44,6 +44,7 @@ pub fn register_extensions(
         ),
     );
     response_modes.set_static_asset_provider(
+        "embedded_asset",
         std::sync::Arc::new(assets::WebAssetProvider),
     );
 }

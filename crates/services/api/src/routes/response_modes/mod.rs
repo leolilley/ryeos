@@ -74,15 +74,18 @@ impl ResponseModeRegistry {
         self.register(Arc::new(new_mode));
     }
 
-    /// Set the static asset provider for the static response mode.
+    /// Set the static asset provider for the given source name.
     ///
-    /// Replaces the existing static mode with one that uses the provided provider.
+    /// Replaces the existing static mode with one that includes the registered provider.
     pub fn set_static_asset_provider(
         &mut self,
+        source_name: impl Into<String>,
         provider: Arc<dyn static_mode::StaticAssetProvider>,
     ) {
         self.modes.retain(|m| m.key() != "static");
-        self.register(Arc::new(static_mode::StaticMode { asset_provider: Some(provider) }));
+        let mut mode = static_mode::StaticMode::default();
+        mode.register_provider(source_name, provider);
+        self.register(Arc::new(mode));
     }
 }
 
