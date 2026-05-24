@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-24T02:13:50Z:82be41c57baec7ca7a8d11f4d0472c7cbbe83e41e64c3119004c5266130dc26e:TpS6Wmbwd0IZvHrQDGcAWzF4t5jXgS1cFgOTjlTJpC5qhThm3dh7NG67zXBVeu/2r3yUyyBOw0PhTrxjII4sAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-24T02:52:18Z:d795aaf126eed67cf2763f3fbc72609543f632605a7be4f3013a2d4574fb475b:fYZt2eEWAsXDcCNYvrGZ2bW5STfykPjR06uzCkE3MX3/x4bqK5f1t/JhJXhPMQlczBcmkaMggtncSoltMn+oBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: routes
 section: routes
 id: ui/index
@@ -12,6 +12,8 @@ limits:
   concurrent_max: 256
 response:
   mode: static
+  source: embedded_asset
+  source_config:
+    path: index.html
   status: 200
   content_type: "text/html; charset=utf-8"
-  body_b64: "PCFET0NUWVBFIGh0bWw+PGh0bWw+PGhlYWQ+PHRpdGxlPlJ5ZU9TPC90aXRsZT48L2hlYWQ+PGJvZHk+PGRpdiBpZD0iYXBwIj5Mb2FkaW5nLi4uPC9kaXY+PHNjcmlwdD5mZXRjaCgiL3VpL2FwaS9zZXNzaW9uL2N1cnJlbnQiKS50aGVuKHI9PnIuanNvbigpKS50aGVuKHM9Pntkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgiYXBwIikuaW5uZXJUZXh0PSJSeWVPUyBzZXNzaW9uOiAiK3Muc2Vzc2lvbl9pZCsiIHN1cmZhY2U6ICIrcy5zdXJmYWNlX3JlZjt9KTs8L3NjcmlwdD48L2JvZHk+PC9odG1sPg=="
