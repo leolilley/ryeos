@@ -197,4 +197,51 @@ mod tests {
             matches!(unknown, SseEvent::Unknown { event_type, .. } if event_type == "custom_event")
         );
     }
+
+    #[test]
+    fn sse_to_daemon_event_text_delta() {
+        let event = SseEvent::parse("text_delta", r#"{"text":"hello world"}"#);
+        let daemon = event.to_daemon_event(ThreadId::new(99)).unwrap();
+        assert!(
+            matches!(daemon, DaemonEvent::TextDelta { thread_id, text } if thread_id.0 == 99 && text == "hello world")
+        );
+    }
+
+    #[test]
+    fn sse_to_daemon_event_done_completed() {
+        let event = SseEvent::parse("done", r#"{"status":"completed"}"#);
+        let daemon = event.to_daemon_event(ThreadId::new(42)).unwrap();
+        assert!(matches!(daemon, DaemonEvent::ThreadCompleted { id } if id.0 == 42));
+    }
+
+    #[test]
+    fn sse_to_daemon_event_done_error() {
+        let event = SseEvent::parse("done", r#"{"status":"error"}"#);
+        let daemon = event.to_daemon_event(ThreadId::new(42)).unwrap();
+        assert!(matches!(daemon, DaemonEvent::ThreadFailed { id, .. } if id.0 == 42));
+    }
+
+    #[test]
+    fn sse_to_daemon_event_error() {
+        let event = SseEvent::parse("error", r#"{"message":"timeout"}"#);
+        let daemon = event.to_daemon_event(ThreadId::new(7)).unwrap();
+        assert!(
+            matches!(daemon, DaemonEvent::ThreadFailed { id, error } if id.0 == 7 && error == "timeout")
+        );
+    }
+
+    #[test]
+    fn sse_to_daemon_event_unknown_returns_none() {
+        let event = SseEvent::parse("custom_event", r#"{"foo":"bar"}"#);
+        assert!(event.to_daemon_event(ThreadId::new(1)).is_none());
+    }
+
+    #[test]
+    fn sse_to_daemon_event_tool_call() {
+        let event = SseEvent::parse("tool_call", r#"{"name":"read","input":{}}"#);
+        let daemon = event.to_daemon_event(ThreadId::new(10)).unwrap();
+        assert!(
+            matches!(daemon, DaemonEvent::ToolCallStart { thread_id, name } if thread_id.0 == 10 && name == "read")
+        );
+    }
 }
