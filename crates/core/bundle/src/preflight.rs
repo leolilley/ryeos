@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use std::sync::Arc;
 
-use ryeos_engine::contracts::SignatureEnvelope;
+use ryeos_engine::contracts::{InstanceViolationCode, SignatureEnvelope};
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::KindRegistry;
@@ -12,6 +12,32 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use crate::manifest::{derive_provides_kinds, BundleManifest};
+
+/// Severity of a preflight validation issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightIssueSeverity {
+    /// Blocking — bundle verification fails.
+    Error,
+    /// Non-blocking — informational for authors.
+    Warning,
+}
+
+/// A single validation issue found during bundle preflight.
+#[derive(Debug, Clone)]
+pub struct PreflightIssue {
+    /// Relative path of the item within the bundle (e.g. `tools/my_tool.py`).
+    pub item_path: String,
+    /// Whether this blocks verification.
+    pub severity: PreflightIssueSeverity,
+    /// Machine-readable violation code.
+    pub code: InstanceViolationCode,
+    /// Dot-separated path within the item value (e.g. `launch.mode`).
+    pub path: String,
+    /// Human-readable description of what was expected.
+    pub expected: String,
+    /// Human-readable description of what was found.
+    pub found: String,
+}
 
 pub fn preflight_verify_bundle(
     source_path: &Path,
@@ -236,6 +262,37 @@ pub fn preflight_verify_bundle_in_context(
                         rel.display()
                     ));
                     continue;
+                }
+            }
+
+            // ── Instance validation (identity-composed kinds only) ──
+            // For kinds using the identity composer, the parsed value IS
+            // the composed value, so we can validate it directly against
+            // the kind's `composed_value_contract`. Extends-based kinds
+            // are validated post-composition in the resolution pipeline
+            // (Slice 2), so we skip them here.
+            if kind_schema.composer == "handler:ryeos/core/identity" {
+                let report = kind_schema
+                    .composed_value_contract
+                    .validate_instance(&parsed);
+                for v in &report.errors {
+                    failures.push(format!(
+                        "{}: contract violation [{}] {}: expected {}, found {}",
+                        rel.display(),
+                        v.code,
+                        v.path,
+                        v.expected,
+                        v.found,
+                    ));
+                }
+                for v in &report.warnings {
+                    tracing::warn!(
+                        item = %rel.display(),
+                        code = %v.code,
+                        path = %v.path,
+                        "preflight: {}",
+                        format!("contract warning {}: expected {}, found {}", v.path, v.expected, v.found),
+                    );
                 }
             }
         }
@@ -546,5 +603,234 @@ mod tests {
             verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok(),
             "no manifest should pass (optional)"
         );
+    }
+
+    // ── Slice 3: Instance validation wiring tests ──────────────────
+
+    /// Helper: build a minimal `ValueShape` from YAML for tests.
+    fn shape_from_yaml(yaml: &str) -> ryeos_engine::contracts::ValueShape {
+        serde_yaml::from_str(yaml).expect("test contract YAML must parse")
+    }
+
+    /// Helper: simulate the preflight identity-composer validation path.
+    fn validate_identity_composed_item(
+        kind_schema: &ryeos_engine::kind_registry::KindSchema,
+        parsed: &serde_json::Value,
+    ) -> (Vec<String>, Vec<String>) {
+        if kind_schema.composer != "handler:ryeos/core/identity" {
+            return (vec![], vec![]);
+        }
+        let report = kind_schema
+            .composed_value_contract
+            .validate_instance(parsed);
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        for v in &report.errors {
+            errors.push(format!(
+                "contract violation [{}] {}: expected {}, found {}",
+                v.code, v.path, v.expected, v.found,
+            ));
+        }
+        for v in &report.warnings {
+            warnings.push(format!(
+                "contract warning [{}] {}: expected {}, found {}",
+                v.code, v.path, v.expected, v.found,
+            ));
+        }
+        (errors, warnings)
+    }
+
+    /// Helper: build a minimal KindSchema for identity-composer tests.
+    fn identity_kind_schema(contract_yaml: &str) -> ryeos_engine::kind_registry::KindSchema {
+        ryeos_engine::kind_registry::KindSchema {
+            directory: "tools".to_string(),
+            extensions: vec![],
+            extraction_rules: std::collections::HashMap::new(),
+            resolution: vec![],
+            effective_trust: ryeos_engine::kind_registry::EffectiveTrustPolicy {
+                include_references: false,
+            },
+            execution: None,
+            composed_value_contract: shape_from_yaml(contract_yaml),
+            composer: "handler:ryeos/core/identity".to_string(),
+            composer_config: serde_json::Value::Null,
+            runtime: None,
+            inventory_kinds: vec![],
+            inventory_schema_keys: vec![],
+        }
+    }
+
+    /// Helper: build a minimal KindSchema for non-identity (extends) composer.
+    fn extends_kind_schema(contract_yaml: &str) -> ryeos_engine::kind_registry::KindSchema {
+        let mut schema = identity_kind_schema(contract_yaml);
+        schema.composer = "handler:ryeos/core/extends-chain".to_string();
+        schema
+    }
+
+    #[test]
+    fn identity_descriptor_with_invalid_enum_produces_error() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+    enum:
+      - cli_exec
+      - daemon_ui
+optional: {}
+"#,
+        );
+
+        let value = serde_json::json!({ "mode": "web_server" });
+        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("enum_mismatch"), "error: {}", errors[0]);
+        assert!(errors[0].contains("mode"), "path in error: {}", errors[0]);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn identity_descriptor_missing_nested_required_produces_error() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  launch:
+    type: single
+    prim: mapping
+    contract:
+      root_type: mapping
+      required:
+        mode:
+          type: single
+          prim: string
+          enum:
+            - cli_exec
+            - daemon_ui
+      optional: {}
+optional: {}
+"#,
+        );
+
+        let value = serde_json::json!({ "launch": {} });
+        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("missing_required_field"),
+            "error: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("launch.mode"),
+            "dotted path in error: {}",
+            errors[0]
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn non_identity_composer_skips_validation() {
+        let kind_schema = extends_kind_schema(
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+optional: {}
+"#,
+        );
+
+        // Value is missing the required field, but since the composer
+        // is NOT identity, validation should be skipped entirely.
+        let value = serde_json::json!({ "other": "stuff" });
+        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+
+        assert!(errors.is_empty(), "should skip validation for non-identity composer");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn unexpected_field_produces_warning_with_strict_warn() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  body:
+    type: single
+    prim: string
+optional: {}
+strict_fields: warn
+"#,
+        );
+
+        let value = serde_json::json!({ "body": "hello", "extra": "field" });
+        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+
+        assert!(errors.is_empty(), "unknown field should be warning, not error");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("unexpected_field"),
+            "warning code: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("extra"),
+            "path in warning: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn valid_identity_descriptor_passes() {
+        let kind_schema = identity_kind_schema(
+            r#"root_type: mapping
+required:
+  mode:
+    type: single
+    prim: string
+    enum:
+      - cli_exec
+      - daemon_ui
+optional:
+  timeout:
+    type: single
+    prim: integer
+strict_fields: warn
+"#,
+        );
+
+        let value = serde_json::json!({ "mode": "cli_exec", "timeout": 30 });
+        let (errors, warnings) = validate_identity_composed_item(&kind_schema, &value);
+
+        assert!(errors.is_empty(), "should pass: {:?}", errors);
+        assert!(warnings.is_empty(), "no warnings: {:?}", warnings);
+    }
+
+    #[test]
+    fn preflight_issue_types_are_constructible() {
+        // Verify the public types can be constructed for future use
+        // by the output layer.
+        let issue = PreflightIssue {
+            item_path: "tools/my_tool.py".to_string(),
+            severity: PreflightIssueSeverity::Error,
+            code: InstanceViolationCode::EnumMismatch,
+            path: "launch.mode".to_string(),
+            expected: "cli_exec, daemon_ui".to_string(),
+            found: "web_server".to_string(),
+        };
+        assert_eq!(issue.severity, PreflightIssueSeverity::Error);
+        assert_eq!(issue.code, InstanceViolationCode::EnumMismatch);
+        assert_eq!(issue.path, "launch.mode");
+
+        let warning = PreflightIssue {
+            item_path: "tools/my_tool.py".to_string(),
+            severity: PreflightIssueSeverity::Warning,
+            code: InstanceViolationCode::UnexpectedField,
+            path: "extra".to_string(),
+            expected: "known field".to_string(),
+            found: "unknown field \"extra\"".to_string(),
+        };
+        assert_eq!(warning.severity, PreflightIssueSeverity::Warning);
     }
 }
