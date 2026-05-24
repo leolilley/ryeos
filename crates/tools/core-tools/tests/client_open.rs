@@ -16,7 +16,7 @@ fn descriptor_with_only_launch_parses() {
         },
         "launch": {
             "mode": "cli_exec",
-            "binary_ref": "bin/{triple}/ryeos-web-launcher",
+            "binary_ref": "bin/{triple}/web",
             "args": {
                 "surface": "--surface",
                 "project": "--project"
@@ -28,7 +28,7 @@ fn descriptor_with_only_launch_parses() {
     // only deserializes `launch`, ignoring `serves`.
     let launch = &raw["launch"];
     assert_eq!(launch["mode"], "cli_exec");
-    assert_eq!(launch["binary_ref"], "bin/{triple}/ryeos-web-launcher");
+    assert_eq!(launch["binary_ref"], "bin/{triple}/web");
 }
 
 /// core-tools does not gate on `serves.kind` — that's the launcher
