@@ -45,3 +45,4 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+ryeos-engine = { path = "../../core/engine", features = ["test-support"] }
