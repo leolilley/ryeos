@@ -201,8 +201,19 @@ impl DaemonTransport for SignedHttpTransport {
                         Err(e) => Err(TransportError::Daemon(e.to_string())),
                     }
                 }
-                DaemonRequest::GetRemotes => todo!("GetRemotes via signed-http"),
-                DaemonRequest::ExecuteStream { .. } => todo!("ExecuteStream via signed-http"),
+                DaemonRequest::GetRemotes => match self.client.get_remotes().await {
+                    Ok(remotes) => Ok(DaemonResponse::Json(
+                        serde_json::to_value(remotes).unwrap_or_default(),
+                    )),
+                    Err(e) => Err(TransportError::Daemon(e.to_string())),
+                },
+                DaemonRequest::ExecuteStream { .. } => {
+                    // ExecuteStream is handled directly by the event loop via
+                    // DaemonClient::execute_stream, not through the request method.
+                    Err(TransportError::Transport(
+                        "ExecuteStream must be called via execute_stream, not request()".into(),
+                    ))
+                }
             }
         })
     }

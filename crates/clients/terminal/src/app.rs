@@ -55,6 +55,7 @@ pub async fn run(
     // Channels
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(256);
     let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(16);
+    let (_daemon_tx, mut daemon_rx) = mpsc::channel::<ryeos_client_base::update::DaemonEvent>(256);
 
     // Spawn crossterm event reader
     let events = EventStream::new();
@@ -78,7 +79,11 @@ pub async fn run(
                 if handle_effects(&effects) {
                     break;
                 }
-                run_effects(&mut model, &mut transport, &effects).await;
+                run_effects(&mut model, &mut transport, &_daemon_tx, &effects).await;
+            }
+
+            Some(event) = daemon_rx.recv() => {
+                update::update(&mut model, AppEvent::Daemon(event));
             }
 
             Some((w, h)) = resize_rx.recv() => {
@@ -127,6 +132,7 @@ fn handle_effects(effects: &[Effect]) -> bool {
 async fn run_effects(
     model: &mut AppModel,
     transport: &mut Box<dyn DaemonTransport>,
+    _daemon_tx: &mpsc::Sender<ryeos_client_base::update::DaemonEvent>,
     effects: &[Effect],
 ) {
     for effect in effects {
@@ -187,8 +193,9 @@ async fn run_effects(
                 };
                 match transport.request(req).await {
                     Ok(_resp) => {
-                        // SSE streaming will be handled by the poll interval
-                        // feeding daemon events back
+                        // Response handled via SSE stream reader or mock
+                        // For mock transport, the response is immediate but we
+                        // still show the synthetic thread above.
                     }
                     Err(e) => {
                         let fail_event = ryeos_client_base::update::DaemonEvent::ThreadFailed {
