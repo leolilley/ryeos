@@ -1,236 +1,464 @@
-# Client / Surface / Renderer Substrate — Next Run Implementation Plan
+# Client / Surface / UI Boundary Hardening — Implementation Plan
 
 Date: 2026-05-24
 Branch: `next`
-Current HEAD at time of writing: `42969e60 slice-layout: rename web client binary to web`
-Mode: slice-by-slice development directly on `next`.
+Current base at time of writing: `0a486bc4 slice-9: fix pre-existing Config init and bundle_parity test, audit workspace test failures`
+Next planned train after this: `/home/leo/projects/ryeos-next-descriptor-validation/.tmp/descriptor-instance-validation/00-implementation-plan.md`
 
-This document replaces the superseded v2 corrective plan. It only describes
-what remains after the completed work through:
+This document replaces the previous client/surface next-run plan. The original
+client/surface corrective train is complete through all feature slices. This
+plan is a short boundary-hardening train before descriptor-instance validation.
 
-- `slice-0` through `slice-5`
-- `slice-6a`
-- `slice-layout`
-- `slice-layout: rename web client binary to web`
+## 0. Purpose
 
-## Ground truth / current layout
+The remaining architectural issue is not product behavior; it is boundary
+cleanliness.
 
-### Crates
+We want:
 
-- Generic daemon HTTP substrate: `crates/services/api`
-- UI/browser substrate: `crates/services/ui`
-- Shared renderer/client substrate: `crates/clients/base`
-- Terminal renderer crate and bundled binary: `crates/clients/terminal`
-  - package: `ryeos-ui-terminal`
-  - binary: `ryeos-tui`
-- Web renderer crate and bundled binary: `crates/clients/web`
-  - package: `ryeos-ui-web`
-  - binary: `web`
-  - binary source: `crates/clients/web/src/bin/web.rs`
+- `crates/services/api` to be generic daemon HTTP / route substrate.
+- `crates/services/ui` to own UI/browser concerns.
+- `crates/core/app` to own domain/application state only.
+- `crates/clients/*` to own renderer/client code.
+- future `web` extraction into its own bundle to be plausible instead of
+  blocked by hardcoded API/core coupling.
 
-`crates/bin/*` is for user-PATH binaries only (`ryeos`, `ryeosd`). Do not put
-bundle-shipped renderer binaries there. Bundle-shipped renderer binaries live
-inside their renderer crate as `[[bin]]` targets.
+The hard constraint for this plan:
 
-### Bundle descriptors
+> **No UI-specific stuff in `crates/core/*`.**
 
-- `client:ryeos/web` lives at `bundles/standard/.ai/clients/ryeos/web.yaml`.
-- Its launch binary is `binary_ref: bin/{triple}/web`.
-- `scripts/populate-bundles.sh` builds it with:
-  `cargo build --release -p ryeos-ui-web --bin web`.
+Specifically, `crates/core/app/src/ui_session.rs` must be deleted by the end of
+this plan, and no equivalent browser/session/UI abstraction may be reintroduced
+under `crates/core/*`.
 
-There should be no `ryeos-web-launcher` or `web-launcher` references in live
-code/descriptors/scripts. If one appears, treat it as stale naming and remove it
-in the same slice.
+## 1. Current ground truth
 
-### UI session state
+Completed recent commits:
 
-- `BrowserSessionStore` implementation: `crates/services/ui/src/browser_session.rs`
-- `SessionBus` implementation: `crates/services/ui/src/session_bus.rs`
-- Minimal traits/DTOs used by `AppState`: `crates/core/app/src/ui_session.rs`
-- Transport-neutral stream DTO: `crates/core/app/src/stream_envelope.rs`
+- `3cdd3379` — package rename: `ryeos-tui-terminal` → `ryeos-ui-terminal`,
+  `ryeos-tui-web` → `ryeos-ui-web`.
+- `0d6dbf87` — route streams carry `RouteStreamEnvelope`; `event_stream_mode` is
+  the only SSE framer.
+- `77d5e50b` — `/ui` and `/ui/assets/{asset}` serve embedded assets; inline
+  `body_b64` route was removed.
+- `62d0ad3a` — `web` binary parses launch args, signs requests, calls
+  `ui.launch.mint`, and opens daemon-returned `launch_url`.
+- `0a486bc4` — full workspace audit and pre-existing test fixes.
 
-### Known current gaps
+Current crate layout:
 
-1. Streams still return `RouteEventStream` containing
-   `axum::response::sse::Event` values. This means some invokers still frame SSE
-   themselves. Slice 6b fixes this.
-2. `/ui` is still served from `body_b64` in
-   `bundles/standard/.ai/node/routes/ui_index.yaml`. Slice 7 replaces this with
-   embedded assets.
-3. The web binary exists as `web`, but argument propagation and descriptor/alias
-   completeness are still not done. Slice 8 fixes this.
-4. Full workspace test/audit remains. Slice 9 handles this.
+```text
+crates/services/api       generic HTTP route substrate
+crates/services/ui        UI/browser handlers, auth, session events, asset code
+crates/clients/base       shared renderer/client model
+crates/clients/terminal   terminal UI client package `ryeos-ui-terminal`, bin `ryeos-tui`
+crates/clients/web        web UI client package `ryeos-ui-web`, bin `web`
+crates/bin/cli            user-PATH binary `ryeos`
+crates/bin/daemon         user-PATH binary `ryeosd`
+```
 
-## Non-negotiable process rules
+Bundle rule:
+
+- `crates/bin/*` is for user-PATH binaries only.
+- Bundle-shipped renderer/client binaries live in their renderer/client crate as
+  `[[bin]]` targets.
+- `client:ryeos/web` uses `binary_ref: bin/{triple}/web`.
+- There should be no live `ryeos-web-launcher` / `web-launcher` references.
+
+Current boundary problems to fix:
+
+1. `crates/core/app/src/ui_session.rs` defines UI/browser-specific traits and
+   DTOs (`BrowserSession`, `LaunchContext`, `BrowserSessionStoreApi`,
+   `SessionBusApi`, noop UI stores). This violates the hard constraint.
+2. `AppState` carries `browser_sessions` and `session_bus` fields. Those are UI
+   state, not core app state.
+3. API route compilation still has API-owned assumptions for extension lookup.
+   It should compile against composition-root registries, not hardcoded
+   `ryeos_api::handlers::ALL`-style tables.
+4. Static asset support should be generic in API, but web asset ownership should
+   be provided by UI/composition, not hardcoded in API.
+5. `session_events` should be registered as a UI stream source rather than a
+   hardcoded API stream source if doing so stays small and focused.
+
+## 2. Alignment with descriptor-instance validation
+
+After this boundary train, descriptor-instance validation starts from:
+
+`/home/leo/projects/ryeos-next-descriptor-validation/.tmp/descriptor-instance-validation/00-implementation-plan.md`
+
+That plan makes the engine the descriptor contract authority:
+
+- nested contracts
+- string enums
+- typed sequence elements
+- post-composition validation
+- structured `items.effective` validation errors
+- bundle-verify lint/error output
+- standard/core schema migration from live descriptor shapes
+
+This boundary train must **not** implement descriptor validation. It must prepare
+for it by making ownership lines clean:
+
+- `client` kind schema migration later can validate `client.launch.mode`,
+  `client.launch.binary_ref`, and `client.serves` without depending on
+  core-tools or API-specific value gates.
+- `service` kind schema migration later can validate service descriptor shape,
+  while route compilation here already uses composed service descriptor
+  registries instead of API-local handler lists.
+- `surface` and UI/client descriptors remain owned by standard/UI/client layers,
+  not by `crates/core/*`.
+- Do not add new shape/value gates in binaries unless they are policy/dispatch
+  checks. Descriptor typo detection belongs to the descriptor-validation train.
+
+## 3. Process rules
 
 1. Work stays on `next`. No feature branches.
-2. One slice = one focused diff committed directly to `next`.
-3. Tests first for behavioral slices. Tests should fail before implementation
-   when practical, then pass after implementation.
-4. No backwards compatibility, no legacy refs, no migration aliases, no
-   deprecation shims, no "support both for one release" paths. Rename/move/delete
-   the old form in the same commit and update every in-tree consumer.
-5. After any bundle-affecting slice:
-   ```sh
-   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
-   ```
-   Then verify bundles. Use isolated roots to avoid duplicate installed-bundle
-   provider state from the developer machine:
-   ```sh
-   tmp=$(mktemp -d)
-   mkdir -p "$tmp/user/.ai/config/keys/trusted" "$tmp/system/.ai"
-   printf '%s' 'sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk=' \
-     > "$tmp/user/.ai/config/keys/trusted/741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea.pub"
-   USER_SPACE="$tmp/user" RYEOS_SYSTEM_SPACE_DIR="$tmp/system" \
-     target/release/ryeos-core-tools bundle-verify bundles/core
-   USER_SPACE="$tmp/user" RYEOS_SYSTEM_SPACE_DIR="$tmp/system" \
-     target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core
-   rm -rf "$tmp"
-   ```
-6. Keep `cargo check --workspace` clean. Do not introduce new warnings.
-7. If a slice reveals a structural problem beyond its scope, commit what is
-   clean, write a short follow-up note under `.tmp/`, and stop.
+2. One slice = one focused commit.
+3. Tests first where behavior changes.
+4. No backwards compatibility paths, aliases, legacy refs, or deprecation shims.
+5. No UI-specific code under `crates/core/*` by the end of this train.
+6. Keep `cargo check --workspace` clean and introduce no new warnings.
+7. If a slice touches bundles, republish and verify both bundles.
+8. If a change reveals descriptor-contract needs, write a note for the
+   descriptor-validation train; do not implement validation here.
 
-## Remaining slice order
+Bundle verification command with isolated roots:
 
-| Slice | Commit prefix | Purpose |
+```sh
+tmp=$(mktemp -d)
+mkdir -p "$tmp/user/.ai/config/keys/trusted" "$tmp/system/.ai"
+printf '%s' 'sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk=' \
+  > "$tmp/user/.ai/config/keys/trusted/741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea.pub"
+USER_SPACE="$tmp/user" RYEOS_SYSTEM_SPACE_DIR="$tmp/system" \
+  target/release/ryeos-core-tools bundle-verify bundles/core
+USER_SPACE="$tmp/user" RYEOS_SYSTEM_SPACE_DIR="$tmp/system" \
+  target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core
+rm -rf "$tmp"
+```
+
+## 4. Slice order
+
+| Slice | Commit prefix | Goal |
 |---|---|---|
-| rename | `slice-rename:` | Rename `ryeos-tui-terminal` → `ryeos-ui-terminal`, `ryeos-tui-web` → `ryeos-ui-web`. TUI is terminal-only; both are UI clients. |
-| 6b | `slice-6b:` | Adopt `RouteStreamEnvelope` for every stream and make `event_stream_mode` the only SSE framer. |
-| 7 | `slice-7:` | Implement embedded assets and rewrite `/ui` shell away from `body_b64`. |
-| 8 | `slice-8:` | Complete web launcher arg propagation and `client:ryeos/web` descriptor/alias/verb surface. |
-| 9 | `slice-9:` | Full workspace test pass and engine failure identity audit. |
+| B0 | `slice-boundary-0:` | Make API route compilation consume composition-root service descriptors. |
+| B1 | `slice-boundary-1:` | Move UI session state out of `AppState`; delete `core/app/src/ui_session.rs`. |
+| B2 | `slice-boundary-2:` | Move web asset ownership out of API behind injected static asset providers. |
+| B3 | `slice-boundary-3:` | Make stream sources composition-root driven; register `session_events` from UI. |
+| B4 | `slice-boundary-4:` | Boundary audit, docs, tests, and descriptor-validation handoff check. |
+
+If B0–B3 can be safely combined without making review difficult, keep them as
+separate commits anyway. The point is to make each boundary move reviewable.
 
 ---
 
-## Slice rename — package name cleanup: `ryeos-tui-*` → `ryeos-ui-*`
+## Slice B0 — composition-root service descriptor lookup
 
 ### Goal
 
-Rename both client crate packages from `ryeos-tui-*` to `ryeos-ui-*`. The "TUI"
-prefix only applies to the terminal renderer; both crates are UI clients.
+Route compilation validates `service:` refs against the same composed service
+descriptor set used at runtime, not against API-local handler tables.
 
-- `ryeos-tui-terminal` → `ryeos-ui-terminal`
-- `ryeos-tui-web` → `ryeos-ui-web`
+### Why first
 
-Binary names (`ryeos-tui`, `web`) are **not** affected. Directory names
-(`crates/clients/terminal`, `crates/clients/web`) are **not** affected.
+This removes the asymmetric extension seam before moving more UI state behind
+composition. It also aligns with the descriptor-validation plan's later `service`
+kind migration: service descriptors become data contracts, not API-local Rust
+module assumptions.
 
 ### Files
 
-- `crates/clients/terminal/Cargo.toml` — `name = "ryeos-ui-terminal"`
-- `crates/clients/web/Cargo.toml` — `name = "ryeos-ui-web"`
-- Every `Cargo.toml` or `.rs` file referencing `ryeos-tui-terminal` or
-  `ryeos-tui-web` as a dependency or `extern crate`.
-- `scripts/populate-bundles.sh` — build command uses `-p ryeos-ui-web`.
-- Any test files or doc comments referencing the old package names.
+- `crates/services/api/src/routes/invokers/mod.rs`
+- `crates/services/api/src/routes/mod.rs`
+- `crates/services/api/src/registry.rs`
+- `crates/services/ui/src/lib.rs`
+- `crates/bin/daemon/src/main.rs`
+- `crates/bin/daemon/src/uds/server.rs`
+- tests under `crates/services/api` and/or `crates/services/ui`
 
 ### Implementation
 
-1. Update `package.name` in both `Cargo.toml` files.
-2. Search the entire workspace for `ryeos-tui-terminal` and `ryeos-tui-web`.
-   Replace every in-tree reference. There are no backwards-compatibility
-   aliases — rename and update all consumers in the same commit.
-3. Update `scripts/populate-bundles.sh` build target.
-4. Verify `cargo check --workspace` is clean.
+1. Extend the route extension/composition registry to include service
+   descriptors or a service lookup:
+   ```rust
+   pub struct RouteExtensionRegistry {
+       pub auth: AuthInvokerRegistry,
+       pub services: ServiceDescriptorRegistry,
+       // existing or future extension fields
+   }
+   ```
+   Keep the shape minimal; a borrowed descriptor slice or `Arc<[ServiceDescriptor]>`
+   is enough if it avoids lifetime pain.
+2. Update `compile_canonical_ref_invoker` / service-ref compile path to validate
+   against the provided service descriptors.
+3. API built-in tests can keep using API-only descriptors via a default registry.
+4. Daemon composition must pass the composed descriptor set:
+   - `ryeos_api::handlers::ALL`
+   - `ryeos_ui::handlers::ALL`
+5. Runtime service registry and route compile registry must be built from the
+   same descriptor source. Avoid two different hand-built lists.
+6. Do not move UI session state in this slice.
+
+### Tests first
+
+- API route compile rejects an unknown `service:` ref using a supplied descriptor
+  registry.
+- API route compile accepts a non-API extension service when its descriptor is in
+  the supplied registry.
+- Existing API service-ref compile tests still pass.
+- A UI route using `service:ui/session/current` compiles only when UI descriptors
+  are included.
 
 ### Verify
 
 ```sh
+cargo test -p ryeos-api routes::invokers
+cargo test -p ryeos-api routes
+cargo test -p ryeos-ui
 cargo check --workspace
-rg -c 'ryeos-tui-terminal\|ryeos-tui-web' --type rust --type toml
-# ^ should return zero matches
-./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
-# verify both bundles with isolated roots, see process rule above
 ```
 
 ### Commit
 
 ```sh
-git commit -m "slice-rename: ryeos-tui-* → ryeos-ui-* package names"
+git commit -m "slice-boundary-0: compile service refs from composed descriptors"
 ```
 
 ---
 
-## Slice 6b — `RouteStreamEnvelope` adoption for all streams
+## Slice B1 — remove UI session state from `core/app`
 
 ### Goal
 
-Every streaming invoker emits transport-neutral `RouteStreamEnvelope` values.
-`event_stream_mode` is the only layer that converts envelopes to SSE frames.
-Per-invoker SSE framing is deleted.
+Delete `crates/core/app/src/ui_session.rs` and remove UI/browser session fields
+from `AppState`. UI state lives entirely in `crates/services/ui` and is injected
+into UI handlers/invokers at the daemon composition root.
 
-### Current state to change
-
-- `crates/services/api/src/routes/invocation.rs` defines `RouteEventStream` as a
-  stream of `axum::response::sse::Event`.
-- `crates/services/api/src/routes/invokers/gateway_stream_invocation.rs` returns
-  SSE events.
-- `crates/services/api/src/routes/invokers/subscription_stream_invocation.rs`
-  returns SSE events.
-- `crates/services/ui/src/invokers/session_events_invocation.rs` currently
-  converts envelopes to SSE internally.
-- `crates/services/api/src/routes/stream_envelope.rs` already has an
-  envelope-to-SSE helper that can become the single framing helper used by
-  `event_stream_mode`.
+This is the hard-constraint slice.
 
 ### Files
 
-- `crates/core/app/src/stream_envelope.rs`
-- `crates/services/api/src/routes/stream_envelope.rs`
-- `crates/services/api/src/routes/invocation.rs`
-- `crates/services/api/src/routes/response_modes/event_stream_mode.rs`
-- `crates/services/api/src/routes/invokers/gateway_stream_invocation.rs`
-- `crates/services/api/src/routes/invokers/subscription_stream_invocation.rs`
-- `crates/services/api/src/routes/invokers/stream_helpers.rs`
-- `crates/services/ui/src/invokers/session_events_invocation.rs`
+- delete `crates/core/app/src/ui_session.rs`
+- `crates/core/app/src/lib.rs`
+- `crates/core/app/src/state.rs`
+- `crates/core/app/src/stream_envelope.rs` (stays in core/app)
+- `crates/services/ui/src/lib.rs`
+- add `crates/services/ui/src/state.rs`
+- `crates/services/ui/src/browser_session.rs`
 - `crates/services/ui/src/session_bus.rs`
-- tests under `crates/services/api` and `crates/services/ui`
+- `crates/services/ui/src/handlers/*`
+- `crates/services/ui/src/invokers/*`
+- `crates/services/api/src/routes/invocation.rs` only if context needs an
+  extension bag
+- `crates/bin/daemon/src/main.rs`
+- `crates/bin/daemon/src/uds/server.rs`
+- tests under `crates/services/api`, `crates/services/ui`, daemon test helpers
+
+### Target shape
+
+`crates/services/ui/src/state.rs`:
+
+```rust
+#[derive(Clone)]
+pub struct UiState {
+    pub browser_sessions: Arc<BrowserSessionStore>,
+    pub session_bus: Arc<SessionBus>,
+}
+```
+
+`AppState` must no longer contain:
+
+```rust
+browser_sessions
+session_bus
+```
+
+`crates/core/app/src/lib.rs` must no longer export `ui_session`.
 
 ### Implementation
 
-1. Change the stream result contract from SSE-event streams to envelope streams.
-   The shape can keep the name `RouteEventStream` if that minimizes churn, but
-   its `events` field should become:
+1. Add `UiState` to `ryeos-ui`.
+2. Change UI handlers to receive `Arc<UiState>` by closure capture or explicit
+   handler wrapper, rather than reading `state.browser_sessions` or
+   `state.session_bus`.
+3. Change UI auth/stream invokers to hold `Arc<UiState>`:
    ```rust
-   Pin<Box<dyn Stream<Item = Result<RouteStreamEnvelope, Infallible>> + Send>>
+   pub struct CompiledBrowserSessionVerifier { ui: Arc<UiState> }
+   pub struct CompiledSessionEventsInvocation { ui: Arc<UiState>, keep_alive_secs: u64 }
    ```
-   If renaming is cleaner, use a single rename and update all in-tree users in
-   the same commit.
-2. Move all envelope-to-SSE framing into `event_stream_mode`.
-   - `event:` = `envelope.event_type`
-   - `id:` = `envelope.id` when present
-   - `data:` = JSON serialization of `envelope.payload`
-   - keepalive comments remain owned by Axum `Sse`/`KeepAlive`
-3. Update `gateway_stream_invocation` to emit envelopes instead of SSE events.
-4. Update `subscription_stream_invocation` to emit envelopes instead of SSE
-   events.
-5. Update `session_events_invocation` to yield the envelopes from `SessionBus`
-   directly. It must not call `axum::response::sse::Event` or its own
-   `envelope_to_sse` helper.
-6. Delete per-invoker SSE framing helpers that become unused.
-7. Finish and test `Last-Event-ID` behavior through the `SessionBus` replay
-   ring:
-   - known ID replays events after that ID
-   - unknown/gapped ID emits `snapshot_required`
-   - broadcast lag also emits `snapshot_required`
-8. Seed/publish session events from the correct code paths where available:
-   - action invocation already publishes `action.invoked`
-   - add thread upsert / capability changed / reload available publishers only
-     where the source-of-truth code path is clear; do not invent fake events
-     just to satisfy tests.
+4. Adjust service handler registration so UI service handlers can capture
+   `Arc<UiState>`. If the existing `ServiceDescriptor` requires fn pointers,
+   split descriptor metadata from runtime handler registration:
+   - descriptor metadata remains static and data-like
+   - runtime registry stores `Arc<dyn Fn(...)>` handlers
+   - API handlers can still register plain function handlers
+   - UI handlers register closures capturing `UiState`
+5. Remove `browser_sessions` and `session_bus` from `AppState` construction in
+   daemon and tests.
+6. Delete `crates/core/app/src/ui_session.rs`.
+7. Replace API test noop UI stores with either no fields or API-local test
+   extension state. There should be no `NoopBrowserSessionStore` in core.
+8. Keep `RouteStreamEnvelope` in `crates/core/app/src/stream_envelope.rs`. It is
+   transport-neutral and not UI-specific.
 
 ### Tests first
 
-Add or update focused tests before implementation:
+- `rg 'ui_session|BrowserSession|BrowserSessionStore|SessionBus|browser_sessions|session_bus' crates/core` returns no UI-specific matches except generic comments only if unavoidable. Prefer zero matches for all listed terms except `RouteStreamEnvelope`.
+- UI handlers still pass:
+  - `cargo test -p ryeos-ui ui_launch`
+  - `cargo test -p ryeos-ui ui_session_current`
+  - `cargo test -p ryeos-ui ui_actions_invoke`
+- API tests still build without UI noop state in `AppState`.
+- Daemon state construction compiles.
 
-- `crates/services/api`: event stream mode frames an envelope as SSE.
-- `crates/services/ui`: session events invoker subscribes and yields envelopes.
-- `crates/services/ui`: `Last-Event-ID` known ID replays missed envelopes.
-- `crates/services/ui`: unknown/gapped ID yields `snapshot_required`.
-- One existing gateway/subscription stream test is rewritten to assert envelope
-  output and `event_stream_mode` SSE output. Delete old raw SSE-byte assertions.
+### Verify
+
+```sh
+cargo test -p ryeos-ui
+cargo test -p ryeos-api
+cargo check --workspace
+rg 'ui_session|BrowserSession|BrowserSessionStore|SessionBus|browser_sessions|session_bus' crates/core
+```
+
+The final `rg` should show **no UI-specific core usage**. If it finds a real UI
+reference under `crates/core/*`, the slice is not done.
+
+### Commit
+
+```sh
+git commit -m "slice-boundary-1: move UI session state out of core app"
+```
+
+---
+
+## Slice B2 — injected static asset providers
+
+### Goal
+
+`ryeos-api` owns generic static response mechanics, but not web asset bytes or
+`clients/web/pkg` knowledge. UI/composition provides the web asset provider.
+
+### Current problem
+
+`crates/services/api` currently has API-owned embedded asset code that knows the
+web client asset layout. That couples generic API substrate to the web client and
+makes future web-bundle extraction harder.
+
+### Files
+
+- `crates/services/api/src/routes/response_modes/static_mode.rs`
+- `crates/services/api/src/routes/mod.rs`
+- current API embedded asset module (move/delete from API)
+- add/move to `crates/services/ui/src/assets.rs` or similar
+- `crates/services/ui/src/lib.rs`
+- `crates/bin/daemon/src/main.rs`
+- `crates/bin/daemon/src/uds/server.rs`
+- `crates/services/api/tests/routes_ui.rs` or split API/UI tests as needed
+
+### Target shape
+
+API defines generic provider traits/types, with no web-specific paths:
+
+```rust
+pub struct StaticAsset {
+    pub bytes: &'static [u8],
+    pub content_type: &'static str,
+    pub etag: &'static str,
+    pub cache_control: &'static str,
+}
+
+pub trait StaticAssetProvider: Send + Sync {
+    fn get(&self, path: &str) -> Option<StaticAsset>;
+}
+```
+
+The route/response extension registry supplies named providers:
+
+```rust
+embedded_asset -> Arc<dyn StaticAssetProvider>
+```
+
+`ryeos-ui` owns the concrete web provider that embeds
+`crates/clients/web/pkg/*`.
+
+### Implementation
+
+1. Move web asset bytes and path manifest out of `ryeos-api` and into
+   `ryeos-ui`.
+2. Keep `static_mode` support for `source: embedded_asset`, but resolve that
+   source through an injected provider registry.
+3. Validate route specs at compile time only against provider existence and
+   literal asset existence when the path is literal. Dynamic path captures are
+   runtime 404s when missing.
+4. Preserve current headers and ETag/304 behavior.
+5. Do not introduce bundle-backed asset loading yet unless it is smaller than
+   keeping the existing embedded provider. The goal is ownership inversion, not
+   a new asset delivery system.
+
+### Tests first
+
+- API static mode can serve an injected fake asset provider.
+- API static mode rejects `source: embedded_asset` when no provider is registered.
+- UI/web provider serves `index.html` and an asset with existing headers.
+- `/ui` and `/ui/assets/{asset}` behavior remains unchanged from Slice 7.
+- `rg 'clients/web|pkg/index.html|bootstrap.js|embedded web' crates/services/api`
+  shows no web-specific asset ownership in API.
+
+### Verify
+
+```sh
+cargo test -p ryeos-api static_mode
+cargo test -p ryeos-api --test routes_ui
+cargo test -p ryeos-ui
+cargo check --workspace
+./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
+# verify both bundles with isolated roots
+```
+
+### Commit
+
+```sh
+git commit -m "slice-boundary-2: inject UI static asset provider"
+```
+
+---
+
+## Slice B3 — stream source registry
+
+### Goal
+
+`event_stream_mode` should not hardcode UI-specific source names. API owns the
+transport/framing mode; UI registers `session_events` as a stream source.
+
+### Files
+
+- `crates/services/api/src/routes/response_modes/event_stream_mode.rs`
+- `crates/services/api/src/routes/response_modes/mod.rs`
+- `crates/services/api/src/routes/mod.rs`
+- `crates/services/ui/src/lib.rs`
+- `crates/services/ui/src/invokers/session_events_invocation.rs`
+- tests under API/UI
+
+### Implementation
+
+1. Define a stream source registry used by `event_stream_mode` during route
+   compile.
+2. Built-in API sources remain registered by API:
+   - `dispatch_launch`
+   - `thread_events`
+3. UI registers:
+   - `session_events`
+4. `event_stream_mode` should validate generic stream source contract and then
+   delegate source-specific validation/invoker construction to the registered
+   source compiler.
+5. Preserve current `session_events` route YAML. This is an internal compiler
+   boundary change, not a route protocol change.
+
+### Tests first
+
+- API event stream mode rejects unknown sources through registry lookup.
+- Built-in `dispatch_launch` and `thread_events` still compile.
+- `session_events` compiles only when UI stream source registry is included.
+- Existing session-events tests still pass.
 
 ### Verify
 
@@ -240,268 +468,116 @@ cargo test -p ryeos-ui session_events
 cargo check --workspace
 ```
 
-If bundle route files or service descriptors change, republish and verify both
-bundles with the isolated-root commands above.
+If route specs or bundles change, republish and verify bundles.
 
 ### Commit
 
 ```sh
-git commit -m "slice-6b: adopt RouteStreamEnvelope for route streams"
+git commit -m "slice-boundary-3: register UI stream sources outside API"
 ```
 
 ---
 
-## Slice 7 — embedded assets + `/ui` shell rewrite
+## Slice B4 — boundary audit and descriptor-validation handoff
 
 ### Goal
 
-`/ui` and `/ui/assets/{asset}` serve real embedded files from
-`crates/clients/web/pkg/` through data-driven route specs. `ui_index.yaml` no
-longer carries a `body_b64` HTML blob. The shell calls:
+Prove the boundaries are clean enough to start descriptor-instance validation.
 
-1. `GET /ui/api/session/current`
-2. `items.effective` for `session.surface_ref`
-3. `EventSource(session.events_url)`
+### Required audit checks
 
-No `ui.bootstrap` references remain.
+Run and record results in the commit message or a small `.tmp` note if useful:
 
-### Current state to change
+```sh
+# no UI-specific code in core
+rg 'ui_session|BrowserSession|BrowserSessionStore|SessionBus|browser_sessions|session_bus' crates/core
 
-- `bundles/standard/.ai/node/routes/ui_index.yaml` still uses static
-  `body_b64`.
-- `static_mode` only supports inline static responses.
-- `embedded_asset` is not implemented.
-- `crates/clients/web/pkg/` may not exist yet; current checked-in web static
-  files live under `crates/clients/web/static/` and `crates/clients/web/src/static/`.
+# no web asset ownership in API
+rg 'clients/web|crates/clients/web|pkg/index.html|bootstrap.js|ryeos-ui-web' crates/services/api
 
-### Files
+# no stale old names
+rg 'ryeos-web-launcher|web-launcher|ryeos-tui-web|ryeos-tui-terminal' . -g '!target'
 
-- `crates/services/api/build.rs` or an equivalent API-side asset module
-- `crates/services/api/Cargo.toml`
-- `crates/services/api/src/routes/response_modes/static_mode.rs`
-- optional: `crates/services/api/src/routes/static_sources/mod.rs`
-- optional: `crates/services/api/src/routes/static_sources/embedded.rs`
-- `bundles/standard/.ai/node/routes/ui_index.yaml`
-- `bundles/standard/.ai/node/routes/ui_assets.yaml`
-- `crates/clients/web/pkg/index.html`
-- `crates/clients/web/pkg/bootstrap.js`
-- tests, likely `crates/services/api/tests/routes_ui.rs`
-- `scripts/populate-bundles.sh` if it needs to build/copy web pkg assets
+# expected current package names
+rg 'ryeos-ui-web|ryeos-ui-terminal|ryeos-client-base' Cargo.toml crates scripts bundles
+```
 
-### Implementation
+Expected:
 
-1. Add a build-time embedded asset source for `crates/clients/web/pkg/`.
-   - Prefer a small, direct implementation over a large abstraction.
-   - Use `include_dir` or generated `include_bytes!` map.
-   - Add `cargo:rerun-if-changed=...` if using `build.rs`.
-2. Extend `static_mode` so a route can declare:
-   ```yaml
-   response:
-     mode: static
-     source: embedded_asset
-     source_config:
-       path: index.html
-   ```
-   and for assets:
-   ```yaml
-   source_config:
-     path: "${path.asset}"
-   ```
-3. Serve `/ui` from embedded `index.html`.
-4. Serve `/ui/assets/{asset}` from embedded assets.
-5. Set headers:
-   - `Content-Type` from extension (`.html`, `.js`, `.css`, `.wasm`, `.ico`)
-   - `ETag` from sha256 of bytes
-   - `Cache-Control: no-cache` for `index.html`
-   - `Cache-Control: public, max-age=31536000, immutable` for hashed assets;
-     otherwise conservative `no-cache`
-   - `Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:`
-   - `X-Content-Type-Options: nosniff`
-   - `Referrer-Policy: same-origin`
-6. Implement `If-None-Match` / ETag round trip returning `304`.
-7. Write minimal `crates/clients/web/pkg/index.html` and `bootstrap.js`:
-   - no `ui.bootstrap`
-   - calls `/ui/api/session/current`
-   - calls `items.effective` for `surface_ref`
-   - opens `EventSource(events_url)`
-   - renders a simple placeholder status using the returned session/surface
-8. Delete the old inline `body_b64` route shape for `/ui` in the same commit.
+- first command: no real UI-specific core references
+- second command: no web asset ownership in API
+- third command: zero stale live-code references; historical notes under ignored
+  `.tmp` are okay only if intentionally kept and not part of the active plan
+- fourth command: finds current package names where expected
 
-### Tests first
+### Descriptor-validation alignment checklist
 
-- `/ui` serves embedded `index.html`.
-- `/ui/assets/<asset>` serves an asset with correct content type.
-- missing asset returns 404.
-- ETag round trip returns 304.
-- security headers are present.
-- `index.html` / `bootstrap.js` contain no `ui.bootstrap` string.
-- route specs compile from bundle YAML.
+Before handing off to descriptor validation, confirm:
+
+1. `client:ryeos/web` still uses `binary_ref: bin/{triple}/web`.
+2. API route compile service-ref lookup is descriptor-list driven.
+3. UI service descriptors are part of the composed service descriptor set.
+4. No Rust value-shape gates were added for descriptor typo detection.
+5. `crates/core/*` contains no UI/browser session state or traits.
+6. `ryeos-api` does not own web asset bytes.
+7. `items.effective` behavior was not changed except through generic registry
+   plumbing if unavoidable.
+8. Bundle verify passes for core and standard.
 
 ### Verify
 
 ```sh
-cargo test -p ryeos-api --test routes_ui
 cargo check --workspace
-./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
-# verify both bundles with isolated roots, see process rule above
-```
-
-### Commit
-
-```sh
-git commit -m "slice-7: serve embedded web assets through ui routes"
-```
-
----
-
-## Slice 8 — web client arg propagation + descriptor completeness
-
-### Goal
-
-`client:ryeos/web` and the `web` binary propagate every documented launch arg
-into `ui.launch.mint`. The descriptor/alias/verb surface mirrors the terminal
-client where appropriate.
-
-### Current state to change
-
-- Binary source: `crates/clients/web/src/bin/web.rs`
-- Binary target: `web`
-- Current code parses only `surface`, `project`, `read_only`; it ignores parsed
-  args via `_cli` and still uses placeholder token minting.
-- `bundles/standard/.ai/clients/ryeos/web.yaml` lacks full arg coverage compared
-  to `client:ryeos/tui`.
-
-### Files
-
-- `crates/clients/web/src/bin/web.rs`
-- `crates/clients/web/Cargo.toml`
-- tests under `crates/clients/web/tests/`
-- `bundles/standard/.ai/clients/ryeos/web.yaml`
-- `bundles/standard/.ai/node/aliases/web.yaml`
-- `bundles/standard/.ai/node/verbs/web.yaml`
-- CLI/offline-dispatch tests if alias/verb dispatch changes
-- `scripts/populate-bundles.sh` only if build/install target changes again
-
-### Implementation
-
-1. Parse and preserve:
-   - `--surface <ref>`
-   - `--surface-file <path>` if the product wants parity with `tui`
-   - `--mock` if the product wants parity with `tui`
-   - `--read-only`
-   - `--project <path>`
-2. Replace placeholder UUID minting with a real request to `ui.launch.mint`.
-   The request body should carry the launch context:
-   ```json
-   {
-     "surface_ref": "surface:...",
-     "project_path": "... or null",
-     "read_only": true/false
-   }
-   ```
-   If `surface_file` / `mock` cannot be represented by the current mint API,
-   either extend the API in this slice with tests or explicitly remove those
-   descriptor args. Do not silently parse-and-drop arguments.
-3. Open the returned `launch_url` exactly as returned by the daemon.
-4. Ensure `/ui/launch?token=...` shape is used consistently. Do not reintroduce
-   `/ui/launch/<token>`.
-5. Update `web.yaml` args to mirror the accepted binary args.
-6. Ensure alias/verb dispatch for `ryeos web` reaches `client-open` for
-   `client:ryeos/web` and ultimately `bin/{triple}/web`.
-
-### Tests first
-
-- binary request builder includes `surface`, `project`, `read_only`.
-- if supported, `surface_file` and `mock` are represented or rejected clearly.
-- launcher opens daemon-returned `launch_url` rather than constructing a stale
-  URL shape.
-- `web_descriptor_uses_bin_web`.
-- `web_alias_dispatches_through_client_open`.
-
-### Verify
-
-```sh
-cargo test -p ryeos-ui-web --bin web
+cargo test -p ryeos-api
+cargo test -p ryeos-ui
 cargo test -p ryeos-ui-web
-cargo test -p ryeos-cli offline_dispatch
-cargo check --workspace
+cargo test -p ryeos-ui-terminal
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
-# verify both bundles with isolated roots, see process rule above
+# verify both bundles with isolated roots
 ```
 
 ### Commit
 
 ```sh
-git commit -m "slice-8: complete web client launch args"
+git commit -m "slice-boundary-4: audit UI/API/core boundaries"
 ```
 
 ---
 
-## Slice 9 — full workspace test and engine failure identity audit
+## End state before descriptor validation
 
-### Goal
+```text
+crates/core/app
+  domain AppState only
+  stream_envelope remains transport-neutral
+  no UI/browser session contracts or noop UI stores
 
-Run the full workspace tests and make any remaining failure state explicit by
-identity, not by count.
+crates/services/api
+  route matching/compilation substrate
+  invocation contracts
+  response modes and HTTP framing
+  generic service/static/stream extension registries
+  no web asset bytes
+  no UI handler ownership
 
-### Tasks
+crates/services/ui
+  UiState
+  BrowserSessionStore
+  SessionBus
+  browser_session auth source
+  session_events stream source
+  /ui service handlers
+  web static asset provider
 
-1. Confirm disk headroom first. Full workspace tests can grow `target/` by ~20G.
-2. Run:
-   ```sh
-   cargo test --workspace --no-fail-fast 2>&1 | tee .tmp/workspace-test-output.txt
-   ```
-3. For each failure:
-   - record test name
-   - expected vs. actual summary
-   - whether it is pre-existing, fixed, or regressed
-4. If failures are pre-existing, write:
-   `.tmp/known-engine-test-failures.md`
-5. Fix any regression caused by this corrective work. Do not hide failures by
-   changing tests to weaker assertions.
+crates/clients/web
+  renderer/client package
+  binary target `web`
+  web pkg assets as client-owned inputs
 
-### Verify
-
-```sh
-cargo check --workspace
-cargo test --workspace --no-fail-fast
+crates/bin/daemon
+  composition root wiring app + api + ui
 ```
 
-### Commit
-
-If the audit produces a known-failures note only:
-
-```sh
-git commit -m "slice-9: audit workspace test failures"
-```
-
-If code fixes are needed, use a more specific `slice-9:` message.
-
----
-
-## Final smoke target
-
-After Slices 6b–8, this should work end-to-end:
-
-```sh
-ryeosd &
-ryeos tui --surface surface:ryeos/cockpit/base
-ryeos web --surface surface:ryeos/cockpit/base
-```
-
-Expected web flow:
-
-1. `ryeos web` dispatches through `client:ryeos/web`.
-2. `client-open` execs bundle binary `bin/{triple}/web`.
-3. `web` calls `ui.launch.mint` with launch context.
-4. Browser opens the daemon-returned `/ui/launch?token=...` URL.
-5. Daemon sets `ryeos_session` cookie and redirects to `/ui`.
-6. `/ui` serves embedded shell assets.
-7. Shell calls `ui.session.current`.
-8. Shell calls `items.effective` for `session.surface_ref`.
-9. Shell opens `/ui/events/session/{session_id}`.
-10. Actions go through `ui.actions.invoke` and publish session events.
-
-Terminal and web renderers should share daemon semantics, effective surface
-provenance, and session events. Renderer-local state such as focus/scroll stays
-local.
+At that point the descriptor-validation plan can safely make the engine the
+source of truth for descriptor contracts without fighting hidden UI/core/API
+coupling.
