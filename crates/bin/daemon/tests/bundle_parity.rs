@@ -164,16 +164,11 @@ fn live_bundle_kind_registry_loads_with_pinned_signer() {
         .as_ref()
         .expect("directive kind has execution block");
 
-    let has_extends = directive_exec.resolution.iter().any(|d| {
-        matches!(
-            d,
-            ryeos_engine::resolution::ResolutionStepDecl::ResolveExtendsChain { .. }
-        )
-    });
+    let has_extends = directive_exec.delegate.is_some();
     assert!(
         has_extends,
-        "directive kind must declare resolve_extends_chain; got {:?}",
-        directive_exec.resolution
+        "directive kind must declare execution.delegate; got {:?}",
+        directive_exec.delegate
     );
 }
 

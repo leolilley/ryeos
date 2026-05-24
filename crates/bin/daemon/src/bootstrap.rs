@@ -732,6 +732,7 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
             require_auth: false,
+            tool_env_passthrough: Vec::new(),
         }
     }
 
@@ -1057,6 +1058,7 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
             require_auth: false,
+            tool_env_passthrough: Vec::new(),
         };
 
         let err = repair_daemon_local(&config).expect_err("should refuse without user key");
