@@ -40,7 +40,9 @@ pub struct StaticMode {
 
 impl Default for StaticMode {
     fn default() -> Self {
-        Self { providers: HashMap::new() }
+        Self {
+            providers: HashMap::new(),
+        }
     }
 }
 
@@ -51,7 +53,11 @@ impl StaticMode {
         name: impl Into<String>,
         provider: Arc<dyn StaticAssetProvider>,
     ) {
-        self.providers.insert(name.into(), provider);
+        let name = name.into();
+        if self.providers.contains_key(&name) {
+            panic!("StaticMode: duplicate asset provider `{name}`");
+        }
+        self.providers.insert(name, provider);
     }
 }
 
@@ -96,13 +102,14 @@ impl ResponseMode for StaticMode {
         &self,
         raw: &RawRouteSpec,
     ) -> Result<Arc<dyn CompiledResponseMode>, RouteConfigError> {
-        let status_raw = raw.response.status.ok_or_else(|| {
-            RouteConfigError::InvalidResponseSpec {
-                id: raw.id.clone(),
-                mode: "static".into(),
-                reason: "missing 'status' field".into(),
-            }
-        })?;
+        let status_raw =
+            raw.response
+                .status
+                .ok_or_else(|| RouteConfigError::InvalidResponseSpec {
+                    id: raw.id.clone(),
+                    mode: "static".into(),
+                    reason: "missing 'status' field".into(),
+                })?;
 
         let status = StatusCode::from_u16(status_raw).map_err(|_| {
             RouteConfigError::InvalidResponseSpec {
@@ -115,13 +122,13 @@ impl ResponseMode for StaticMode {
         let source = match raw.response.source.as_deref() {
             None | Some("") => {
                 // Inline body_b64 mode (no source specified).
-                let content_type = raw.response.content_type.as_ref().ok_or_else(|| {
-                    RouteConfigError::InvalidResponseSpec {
+                if raw.response.content_type.is_none() {
+                    return Err(RouteConfigError::InvalidResponseSpec {
                         id: raw.id.clone(),
                         mode: "static".into(),
                         reason: "missing 'content_type' field".into(),
-                    }
-                })?;
+                    });
+                }
 
                 let body_b64 = raw.response.body_b64.as_ref().ok_or_else(|| {
                     RouteConfigError::InvalidResponseSpec {
@@ -140,14 +147,6 @@ impl ResponseMode for StaticMode {
                         reason: format!("body_b64 is not valid base64: {e}"),
                     })?;
 
-                let header_val = content_type.parse::<HeaderValue>().map_err(|_| {
-                    RouteConfigError::InvalidResponseSpec {
-                        id: raw.id.clone(),
-                        mode: "static".into(),
-                        reason: format!("invalid content_type: {content_type}"),
-                    }
-                })?;
-
                 CompiledStaticSource::Inline { body }
             }
             Some(source_name) => {
@@ -162,13 +161,16 @@ impl ResponseMode for StaticMode {
                     }
                 })?;
 
-                let path_val = raw.response.source_config.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-                    RouteConfigError::InvalidSourceConfig {
+                let path_val = raw
+                    .response
+                    .source_config
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
                         id: raw.id.clone(),
                         src: source_name.into(),
                         reason: "missing 'path' in source_config".into(),
-                    }
-                })?;
+                    })?;
 
                 // Check if it's a ${path.<name>} interpolation.
                 let path_template = if let Some(rest) = path_val.strip_prefix("${path.") {
@@ -202,10 +204,19 @@ impl ResponseMode for StaticMode {
         };
 
         // content_type may be provided explicitly or auto-detected.
-        let content_type = raw.response.content_type.as_ref().map(|ct| {
-            ct.parse::<HeaderValue>()
-                .expect("content_type validated elsewhere")
-        });
+        let content_type = raw
+            .response
+            .content_type
+            .as_ref()
+            .map(|ct| {
+                ct.parse::<HeaderValue>()
+                    .map_err(|_| RouteConfigError::InvalidResponseSpec {
+                        id: raw.id.clone(),
+                        mode: "static".into(),
+                        reason: format!("invalid content_type: {ct}"),
+                    })
+            })
+            .transpose()?;
 
         Ok(Arc::new(CompiledStaticMode {
             status,
@@ -234,34 +245,37 @@ impl CompiledResponseMode for CompiledStaticMode {
                 }
                 Ok(resp)
             }
-            CompiledStaticSource::EmbeddedAsset { path_template, provider } => {
+            CompiledStaticSource::EmbeddedAsset {
+                path_template,
+                provider,
+            } => {
                 let path = match path_template {
                     PathTemplate::Literal(p) => p.clone(),
-                    PathTemplate::Capture(name) => ctx
-                        .captures
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_default(),
+                    PathTemplate::Capture(name) => {
+                        ctx.captures.get(name).cloned().unwrap_or_default()
+                    }
                 };
 
-                let asset = provider.get(&path).ok_or_else(|| {
-                    RouteDispatchError::NotFound
-                })?;
+                let asset = provider
+                    .get(&path)
+                    .ok_or_else(|| RouteDispatchError::NotFound)?;
 
                 // ETag / If-None-Match → 304.
                 if let Some(inm) = ctx.request_parts.headers.get(header::IF_NONE_MATCH) {
                     if let Ok(inm_str) = inm.to_str() {
                         if inm_str == asset.etag {
                             let mut resp = StatusCode::NOT_MODIFIED.into_response();
-                            resp.headers_mut().insert(header::ETAG, asset.etag.parse().unwrap());
+                            resp.headers_mut()
+                                .insert(header::ETAG, asset.etag.parse().unwrap());
                             return Ok(resp);
                         }
                     }
                 }
 
-                let ct = self.content_type.clone().unwrap_or_else(|| {
-                    asset.content_type.parse().unwrap()
-                });
+                let ct = self
+                    .content_type
+                    .clone()
+                    .unwrap_or_else(|| asset.content_type.parse().unwrap());
 
                 let cache_control = asset.cache_control;
 
@@ -289,20 +303,20 @@ mod tests {
         RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
     };
 
-    /// Fake provider for testing: knows "index.html" and "bootstrap.js".
+    /// Fake provider for testing: knows two generic asset paths.
     struct FakeProvider;
 
     impl StaticAssetProvider for FakeProvider {
         fn get(&self, path: &str) -> Option<StaticAsset> {
             match path.trim_start_matches('/') {
-                "index.html" | "ui/index.html" => Some(StaticAsset {
+                "index.html" | "app/index.html" => Some(StaticAsset {
                     bytes: b"<html></html>",
                     content_type: "text/html; charset=utf-8",
                     etag: "\"fake-etag-html\"".to_string(),
                     cache_control: "no-cache",
                 }),
-                "bootstrap.js" | "ui/assets/bootstrap.js" => Some(StaticAsset {
-                    bytes: b"// bootstrap",
+                "main.js" | "app/assets/main.js" => Some(StaticAsset {
+                    bytes: b"// main",
                     content_type: "application/javascript; charset=utf-8",
                     etag: "\"fake-etag-js\"".to_string(),
                     cache_control: "no-cache",
@@ -314,8 +328,16 @@ mod tests {
 
     fn mode_with_provider() -> StaticMode {
         let mut mode = StaticMode::default();
-        mode.register_provider("embedded_asset", Arc::new(FakeProvider));
+        mode.register_provider("asset_source", Arc::new(FakeProvider));
         mode
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate asset provider")]
+    fn duplicate_provider_registration_panics() {
+        let mut mode = StaticMode::default();
+        mode.register_provider("asset_source", Arc::new(FakeProvider));
+        mode.register_provider("asset_source", Arc::new(FakeProvider));
     }
 
     fn make_raw(
@@ -364,7 +386,7 @@ mod tests {
             limits: RawLimits::default(),
             response: RawResponseSpec {
                 mode: "static".to_string(),
-                source: Some("embedded_asset".to_string()),
+                source: Some("asset_source".to_string()),
                 source_config: serde_json::json!({ "path": path }),
                 status,
                 content_type: content_type.map(|s| s.to_string()),
@@ -397,23 +419,26 @@ mod tests {
     }
 
     #[test]
-    fn embedded_asset_literal_compiles() {
+    fn asset_source_literal_compiles() {
         let mode = mode_with_provider();
         let raw = make_embedded_raw("index.html", Some(200), None);
         let result = mode.compile(&raw);
-        assert!(result.is_ok(), "embedded asset compile should succeed");
+        assert!(result.is_ok(), "asset source compile should succeed");
     }
 
     #[test]
-    fn embedded_asset_capture_compiles() {
+    fn asset_source_capture_compiles() {
         let mode = mode_with_provider();
         let raw = make_embedded_raw("${path.asset}", Some(200), None);
         let result = mode.compile(&raw);
-        assert!(result.is_ok(), "embedded asset capture compile should succeed");
+        assert!(
+            result.is_ok(),
+            "asset source capture compile should succeed"
+        );
     }
 
     #[test]
-    fn embedded_asset_unknown_path_rejected() {
+    fn asset_source_unknown_path_rejected() {
         let mode = mode_with_provider();
         let raw = make_embedded_raw("nonexistent.css", Some(200), None);
         let result = mode.compile(&raw);
@@ -426,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_asset_missing_path_rejected() {
+    fn asset_source_missing_path_rejected() {
         let mode = mode_with_provider();
         let mut raw = make_embedded_raw("index.html", Some(200), None);
         raw.response.source_config = serde_json::json!({});
@@ -440,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_asset_no_provider_rejected() {
+    fn asset_source_no_provider_rejected() {
         let mode = StaticMode::default();
         let raw = make_embedded_raw("index.html", Some(200), None);
         let result = mode.compile(&raw);

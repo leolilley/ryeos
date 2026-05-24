@@ -29,8 +29,7 @@ use crate::routes::invocation::CompiledRouteInvocation;
 /// Factory that compiles an auth verifier for a given auth key.
 ///
 /// Built-in factories (`none`, `ryeos_signed`, `hmac`) are registered by
-/// the API crate. Extension factories (e.g. `browser_session` from
-/// `ryeos-ui`) are registered by the composition root.
+/// the API crate. Extension factories are registered by the composition root.
 pub trait AuthVerifierFactory: Send + Sync {
     fn compile(
         &self,
@@ -100,7 +99,11 @@ impl AuthInvokerRegistry {
     }
 
     pub fn register(&mut self, name: impl Into<String>, factory: Arc<dyn AuthVerifierFactory>) {
-        self.verifiers.insert(name.into(), factory);
+        let name = name.into();
+        if self.verifiers.contains_key(&name) {
+            panic!("AuthInvokerRegistry: duplicate verifier `{name}`");
+        }
+        self.verifiers.insert(name, factory);
     }
 }
 
@@ -276,6 +279,13 @@ mod tests {
             Err(other) => panic!("expected UnknownVerifier, got: {other}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate verifier")]
+    fn duplicate_auth_verifier_registration_panics() {
+        let mut registry = AuthInvokerRegistry::with_api_builtins();
+        registry.register("none", Arc::new(NoneAuthFactory));
     }
 
     #[test]

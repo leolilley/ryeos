@@ -1,6 +1,6 @@
 //! `ui/launch` service — consumes a launch token and sets a session cookie.
 //!
-//! The route `GET /ui/launch?token=...` consumes a single-use launch token
+//! The configured `service:ui/launch` route consumes a single-use launch token
 //! (minted by the web launcher binary), establishes a browser session,
 //! sets a `ryeos_session` cookie, and redirects to `/ui`.
 

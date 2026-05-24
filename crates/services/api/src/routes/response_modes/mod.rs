@@ -9,6 +9,8 @@ use std::sync::Arc;
 use crate::routes::compile::ResponseMode;
 
 pub struct ResponseModeRegistry {
+    static_mode: static_mode::StaticMode,
+    event_stream_mode: event_stream_mode::EventStreamMode,
     modes: Vec<Arc<dyn ResponseMode>>,
 }
 
@@ -20,11 +22,18 @@ impl Default for ResponseModeRegistry {
 
 impl ResponseModeRegistry {
     pub fn new() -> Self {
-        Self { modes: Vec::new() }
+        Self {
+            static_mode: static_mode::StaticMode::default(),
+            event_stream_mode: event_stream_mode::EventStreamMode::default(),
+            modes: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, mode: Arc<dyn ResponseMode>) {
         let key = mode.key();
+        if key == self.static_mode.key() || key == self.event_stream_mode.key() {
+            panic!("ResponseModeRegistry: duplicate mode `{key}`");
+        }
         if self.modes.iter().any(|m| m.key() == key) {
             panic!("ResponseModeRegistry: duplicate mode `{key}`");
         }
@@ -32,6 +41,12 @@ impl ResponseModeRegistry {
     }
 
     pub fn get(&self, key: &str) -> Option<&dyn ResponseMode> {
+        if key == self.static_mode.key() {
+            return Some(&self.static_mode);
+        }
+        if key == self.event_stream_mode.key() {
+            return Some(&self.event_stream_mode);
+        }
         self.modes
             .iter()
             .find(|m| m.key() == key)
@@ -43,10 +58,10 @@ impl ResponseModeRegistry {
         service_descriptors: &'static [crate::registry::ServiceDescriptor],
     ) -> Self {
         let mut r = Self::new();
-        r.register(Arc::new(static_mode::StaticMode::default()));
-        r.register(Arc::new(event_stream_mode::EventStreamMode::default()));
         r.register(Arc::new(launch_mode::LaunchMode::default()));
-        r.register(Arc::new(json_mode::JsonMode { service_descriptors }));
+        r.register(Arc::new(json_mode::JsonMode {
+            service_descriptors,
+        }));
         r.register(Arc::new(execute_mode::ExecuteMode));
         r.register(Arc::new(launch_mode::LaunchMode::with_key("accepted")));
         r
@@ -58,34 +73,21 @@ impl ResponseModeRegistry {
     }
 
     /// Register an additional stream source in the event_stream response mode.
-    ///
-    /// This replaces the existing event_stream mode with one that includes
-    /// the additional source compiler.
     pub fn register_event_stream_source(
         &mut self,
         name: impl Into<String>,
         compiler: std::sync::Arc<dyn event_stream_mode::StreamSourceCompiler>,
     ) {
-        // Rebuild event_stream mode with defaults + the additional source.
-        let mut new_mode = event_stream_mode::EventStreamMode::default();
-        new_mode.register_source(name, compiler);
-        // Replace the existing event_stream mode.
-        self.modes.retain(|m| m.key() != "event_stream");
-        self.register(Arc::new(new_mode));
+        self.event_stream_mode.register_source(name, compiler);
     }
 
-    /// Set the static asset provider for the given source name.
-    ///
-    /// Replaces the existing static mode with one that includes the registered provider.
+    /// Register a static asset provider for the given source name.
     pub fn set_static_asset_provider(
         &mut self,
         source_name: impl Into<String>,
         provider: Arc<dyn static_mode::StaticAssetProvider>,
     ) {
-        self.modes.retain(|m| m.key() != "static");
-        let mut mode = static_mode::StaticMode::default();
-        mode.register_provider(source_name, provider);
-        self.register(Arc::new(mode));
+        self.static_mode.register_provider(source_name, provider);
     }
 }
 
@@ -122,7 +124,6 @@ mod tests {
     #[should_panic(expected = "duplicate mode")]
     fn duplicate_registration_panics() {
         let mut r = ResponseModeRegistry::new();
-        r.register(Arc::new(static_mode::StaticMode::default()));
         r.register(Arc::new(static_mode::StaticMode::default()));
     }
 }

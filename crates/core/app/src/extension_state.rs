@@ -2,8 +2,7 @@
 //!
 //! `AppState::extensions` holds an `Arc<ExtensionState>` that can store
 //! typed `Arc<T>` values keyed by `TypeId`. The core crate does not
-//! define any specific extension types — those come from service layers
-//! (e.g. `ryeos-ui` stores `UiState` here).
+//! define any specific extension types — those come from service layers.
 //!
 //! # Usage
 //!

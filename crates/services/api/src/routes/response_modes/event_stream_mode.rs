@@ -1,21 +1,20 @@
-//! `event_stream` response mode — unified SSE gateway + subscription + session.
+//! `event_stream` response mode — unified SSE gateway + subscription substrate.
 //!
 //! Stream sources are registered at composition time via [`EventStreamMode`]:
 //!
-//! | Source value        | Strategy       | Registered by |
-//! |---------------------|----------------|---------------|
-//! | `"dispatch_launch"` | Gateway        | API builtins  |
-//! | `"thread_events"`   | Subscription   | API builtins  |
-//! | `"session_events"`  | SessionEvents  | UI layer      |
+//! | Source value        | Strategy         | Registered by |
+//! |---------------------|------------------|---------------|
+//! | `"dispatch_launch"` | BodyJson         | API builtins  |
+//! | `"thread_events"`   | PathCaptureInput | API builtins  |
 //!
 //! API's `EventStreamMode::default()` registers `dispatch_launch` and
 //! `thread_events`.  Extension layers register additional sources via
 //! `EventStreamMode::register_source`.  Unknown source names are rejected
 //! by registry lookup at compile time.
 //!
-//! All strategies produce SSE frames. Both share lag-recovery and
-//! post-launch drain logic. The compile-time bifurcation ensures each
-//! strategy gets its own validation rules.
+//! All strategies produce stream envelopes. This mode owns SSE framing,
+//! keep-alive transport, and generic request-input preparation; source-specific
+//! validation belongs to the source compiler that registered the source.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,21 +44,16 @@ use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 
 /// The compiled strategy selected at route-table build time.
 pub enum EventStreamStrategy {
-    /// Body-driven launch: mode parses body, invoker spawns dispatch + tails events.
-    Gateway {
+    /// Body-driven source: mode parses the JSON request body as invoker input.
+    BodyJson {
         invoker: Arc<dyn CompiledRouteInvocation>,
     },
-    /// Path-driven subscription: mode extracts thread_id from captures,
-    /// invoker checks ownership + subscribes to events.
-    Subscription {
+    /// Path-driven source: mode extracts one path capture into a JSON object
+    /// field before invoking the compiled stream source.
+    PathCaptureInput {
         invoker: Arc<dyn CompiledRouteInvocation>,
-        thread_id_capture: String,
-    },
-    /// Session-driven events: mode extracts session_id from captures,
-    /// invoker subscribes to the SessionBus for that session.
-    SessionEvents {
-        invoker: Arc<dyn CompiledRouteInvocation>,
-        session_id_capture: String,
+        input_field: String,
+        capture_name: String,
     },
 }
 
@@ -68,8 +62,7 @@ pub enum EventStreamStrategy {
 /// Compiles a stream source from a raw route spec into an [`EventStreamStrategy`].
 ///
 /// API registers built-in compilers for `dispatch_launch` and `thread_events`.
-/// Extension layers (e.g. `ryeos-ui`) register additional compilers for sources
-/// like `session_events`.
+/// Extension layers register additional compilers for their own source names.
 pub trait StreamSourceCompiler: Send + Sync {
     fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError>;
 }
@@ -121,7 +114,11 @@ impl EventStreamMode {
         name: impl Into<String>,
         compiler: Arc<dyn StreamSourceCompiler>,
     ) {
-        self.sources.insert(name.into(), compiler);
+        let name = name.into();
+        if self.sources.contains_key(&name) {
+            panic!("EventStreamMode: duplicate source `{name}`");
+        }
+        self.sources.insert(name, compiler);
     }
 }
 
@@ -227,7 +224,7 @@ fn compile_gateway(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfi
         },
     );
 
-    Ok(EventStreamStrategy::Gateway { invoker })
+    Ok(EventStreamStrategy::BodyJson { invoker })
 }
 
 // ── Subscription compile ────────────────────────────────────────────────
@@ -255,24 +252,13 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
             reason: "missing 'thread_id' in source_config".into(),
         })?;
 
-    let capture_name = validate_and_extract_path_capture(thread_id_template, "thread_id", &raw.id)?;
-
-    let declared_captures = extract_path_captures(&raw.path);
-    if !declared_captures.contains(&capture_name) {
-        return Err(RouteConfigError::InvalidSourceConfig {
-            id: raw.id.clone(),
-            src: "thread_events".into(),
-            reason: format!(
-                "thread_id references undeclared path capture '{capture_name}'; \
-                 route path declares: [{declared}]",
-                declared = declared_captures
-                    .iter()
-                    .map(|c| format!("'{c}'"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        });
-    }
+    let capture_name = validate_and_extract_path_capture(
+        thread_id_template,
+        "thread_events",
+        "thread_id",
+        &raw.id,
+        &raw.path,
+    )?;
 
     let keep_alive_secs = source_config
         .get("keep_alive_secs")
@@ -292,85 +278,21 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
         },
     );
 
-    Ok(EventStreamStrategy::Subscription {
+    Ok(EventStreamStrategy::PathCaptureInput {
         invoker,
-        thread_id_capture: capture_name,
-    })
-}
-
-// ── Session events compile ────────────────────────────────────────────
-
-const SESSION_EVENTS_REQUIRED_AUTH: &str = "browser_session";
-
-pub fn compile_session_events(
-    raw: &RawRouteSpec,
-    invoker: Arc<dyn CompiledRouteInvocation>,
-) -> Result<EventStreamStrategy, RouteConfigError> {
-    if raw.auth != SESSION_EVENTS_REQUIRED_AUTH {
-        return Err(RouteConfigError::SourceAuthRequirement {
-            id: raw.id.clone(),
-            src: "session_events".into(),
-            required: SESSION_EVENTS_REQUIRED_AUTH.into(),
-            got: raw.auth.clone(),
-        });
-    }
-
-    let source_config = &raw.response.source_config;
-
-    let session_id_template = source_config
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
-            id: raw.id.clone(),
-            src: "session_events".into(),
-            reason: "missing 'session_id' in source_config".into(),
-        })?;
-
-    let capture_name = validate_and_extract_path_capture(session_id_template, "session_id", &raw.id)?;
-
-    let declared_captures = extract_path_captures(&raw.path);
-    if !declared_captures.contains(&capture_name) {
-        return Err(RouteConfigError::InvalidSourceConfig {
-            id: raw.id.clone(),
-            src: "session_events".into(),
-            reason: format!(
-                "session_id references undeclared path capture '{capture_name}'; \
-                 route path declares: [{declared}]",
-                declared = declared_captures
-                    .iter()
-                    .map(|c| format!("'{c}'"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        });
-    }
-
-    let keep_alive_secs = source_config
-        .get("keep_alive_secs")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(15);
-    if keep_alive_secs == 0 {
-        return Err(RouteConfigError::InvalidSourceConfig {
-            id: raw.id.clone(),
-            src: "session_events".into(),
-            reason: "keep_alive_secs must be > 0".into(),
-        });
-    }
-
-    let _ = keep_alive_secs;
-
-    Ok(EventStreamStrategy::SessionEvents {
-        invoker,
-        session_id_capture: capture_name,
+        input_field: "thread_id".into(),
+        capture_name,
     })
 }
 
 /// Validate that `template` is a single `${path.<name>}` interpolation
 /// and return the capture name.
-fn validate_and_extract_path_capture(
+pub fn validate_and_extract_path_capture(
     template: &str,
+    source_name: &str,
     field: &str,
     route_id: &str,
+    route_path: &str,
 ) -> Result<String, RouteConfigError> {
     let trimmed = template.trim();
     let prefix = "${path.";
@@ -383,7 +305,7 @@ fn validate_and_extract_path_capture(
             if !inner.starts_with("path.") {
                 return Err(RouteConfigError::InvalidSourceConfig {
                     id: route_id.into(),
-                    src: "thread_events".into(),
+                    src: source_name.into(),
                     reason: format!(
                         "{field} must use ${{path.<name>}} interpolation, got ${{{inner}}}"
                     ),
@@ -392,7 +314,7 @@ fn validate_and_extract_path_capture(
         } else {
             return Err(RouteConfigError::InvalidSourceConfig {
                 id: route_id.into(),
-                src: "thread_events".into(),
+                src: source_name.into(),
                 reason: format!("{field} contains unterminated '${{...}}' template"),
             });
         }
@@ -402,14 +324,14 @@ fn validate_and_extract_path_capture(
         if after_first.find("${").is_some() {
             return Err(RouteConfigError::InvalidSourceConfig {
                 id: route_id.into(),
-                src: "thread_events".into(),
+                src: source_name.into(),
                 reason: format!("{field} must be a single ${{path.<name>}} template"),
             });
         }
     } else {
         return Err(RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
-            src: "thread_events".into(),
+            src: source_name.into(),
             reason: format!("{field} must use ${{path.<name>}} interpolation"),
         });
     }
@@ -417,13 +339,29 @@ fn validate_and_extract_path_capture(
     // Extract the capture name.
     if let Some(rest) = trimmed.strip_prefix(prefix) {
         if let Some(name) = rest.strip_suffix(suffix) {
+            let declared_captures = extract_path_captures(route_path);
+            if !declared_captures.contains(name) {
+                return Err(RouteConfigError::InvalidSourceConfig {
+                    id: route_id.into(),
+                    src: source_name.into(),
+                    reason: format!(
+                        "{field} references undeclared path capture '{name}'; \
+                         route path declares: [{declared}]",
+                        declared = declared_captures
+                            .iter()
+                            .map(|c| format!("'{c}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
             return Ok(name.to_string());
         }
     }
 
     Err(RouteConfigError::InvalidSourceConfig {
         id: route_id.into(),
-        src: "thread_events".into(),
+        src: source_name.into(),
         reason: format!("{field} has invalid path capture template"),
     })
 }
@@ -457,47 +395,34 @@ impl CompiledResponseMode for CompiledEventStreamMode {
     ) -> Result<axum::response::Response, RouteDispatchError> {
         // Prepare invocation input depending on strategy.
         let (invoker, input): (&Arc<dyn CompiledRouteInvocation>, Value) = match &self.strategy {
-            EventStreamStrategy::Gateway { invoker } => {
-                // Gateway: pass the raw body as input for the invoker to parse.
+            EventStreamStrategy::BodyJson { invoker } => {
+                // BodyJson: pass the raw body as input for the invoker to parse.
                 let input = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
                     RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
                 })?;
                 (invoker, input)
             }
-            EventStreamStrategy::Subscription {
+            EventStreamStrategy::PathCaptureInput {
                 invoker,
-                thread_id_capture,
+                input_field,
+                capture_name,
             } => {
-                // Subscription: extract thread_id from path captures.
-                let thread_id = ctx
+                // PathCaptureInput: extract the configured capture into the
+                // configured invoker input field.
+                let value = ctx
                     .captures
-                    .get(thread_id_capture)
+                    .get(capture_name)
                     .ok_or_else(|| {
                         RouteDispatchError::Internal(format!(
                             "path capture '{}' not found in request",
-                            thread_id_capture
+                            capture_name
                         ))
                     })?
                     .clone();
-                let input = serde_json::json!({ "thread_id": thread_id });
-                (invoker, input)
-            }
-            EventStreamStrategy::SessionEvents {
-                invoker,
-                session_id_capture,
-            } => {
-                // Session events: extract session_id from path captures.
-                let session_id = ctx
-                    .captures
-                    .get(session_id_capture)
-                    .ok_or_else(|| {
-                        RouteDispatchError::Internal(format!(
-                            "path capture '{}' not found in request",
-                            session_id_capture
-                        ))
-                    })?
-                    .clone();
-                let input = serde_json::json!({ "session_id": session_id });
+                let input = serde_json::Value::Object(serde_json::Map::from_iter([(
+                    input_field.clone(),
+                    serde_json::Value::String(value),
+                )]));
                 (invoker, input)
             }
         };
@@ -531,7 +456,9 @@ impl CompiledResponseMode for CompiledEventStreamMode {
                     .interval(Duration::from_secs(keep_alive_secs))
                     .text(":");
                 // Convert transport-neutral envelopes to SSE frames.
-                let sse_stream = stream.events.map(|result| result.map(|env| envelope_to_sse(&env)));
+                let sse_stream = stream
+                    .events
+                    .map(|result| result.map(|env| envelope_to_sse(&env)));
                 let sse = Sse::new(sse_stream).keep_alive(keep_alive);
                 Ok(sse.into_response())
             }
@@ -599,6 +526,13 @@ mod tests {
     #[test]
     fn allows_zero_timeout() {
         assert!(EventStreamMode::default().allows_zero_timeout());
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate source")]
+    fn duplicate_source_registration_panics() {
+        let mut mode = EventStreamMode::default();
+        mode.register_source("thread_events", Arc::new(ThreadEventsSource));
     }
 
     // ── Compile-time validation ────────────────
@@ -708,26 +642,26 @@ mod tests {
         assert!(msg.contains("unknown event_stream source"), "got: {msg}");
     }
 
-    /// `session_events` is not registered in the default (API-only) mode.
+    /// Extension stream sources are not registered in the default (API-only) mode.
     /// It must be rejected as an unknown source.
     #[test]
-    fn compile_rejects_session_events_without_ui_registry() {
-        let mut raw = make_gateway_raw("r1", "/sessions/{id}/stream");
-        raw.auth = "browser_session".into();
-        raw.response.source = Some("session_events".into());
+    fn compile_rejects_extension_source_without_registry() {
+        let mut raw = make_gateway_raw("r1", "/extension/{id}/stream");
+        raw.auth = "extension_auth".into();
+        raw.response.source = Some("extension_events".into());
         raw.response.source_config = serde_json::json!({
-            "session_id": "${path.id}",
+            "event_id": "${path.id}",
             "keep_alive_secs": 15,
         });
         raw.request.body = RawRequestBody::None;
         let result = EventStreamMode::default().compile(&raw);
         let err = match result {
             Err(e) => e,
-            Ok(_) => panic!("expected error for session_events without UI registry"),
+            Ok(_) => panic!("expected error for extension source without registry"),
         };
         let msg = format!("{err}");
         assert!(
-            msg.contains("unknown event_stream source 'session_events'"),
+            msg.contains("unknown event_stream source 'extension_events'"),
             "got: {msg}"
         );
     }
@@ -959,14 +893,28 @@ mod tests {
     #[test]
     fn extract_path_capture_valid() {
         assert_eq!(
-            validate_and_extract_path_capture("${path.thread_id}", "thread_id", "r1").unwrap(),
+            validate_and_extract_path_capture(
+                "${path.thread_id}",
+                "thread_events",
+                "thread_id",
+                "r1",
+                "/threads/{thread_id}/stream",
+            )
+            .unwrap(),
             "thread_id"
         );
     }
 
     #[test]
     fn extract_path_capture_rejects_non_path() {
-        assert!(validate_and_extract_path_capture("${query.id}", "thread_id", "r1").is_err());
+        assert!(validate_and_extract_path_capture(
+            "${query.id}",
+            "thread_events",
+            "thread_id",
+            "r1",
+            "/threads/{id}/stream",
+        )
+        .is_err());
     }
 
     #[test]
@@ -979,11 +927,25 @@ mod tests {
 
     #[test]
     fn validate_rejects_double_interpolation() {
-        assert!(validate_and_extract_path_capture("${path.x}-${path.y}", "f", "r1").is_err());
+        assert!(validate_and_extract_path_capture(
+            "${path.x}-${path.y}",
+            "thread_events",
+            "f",
+            "r1",
+            "/threads/{x}/{y}",
+        )
+        .is_err());
     }
 
     #[test]
     fn validate_rejects_static_string() {
-        assert!(validate_and_extract_path_capture("static", "f", "r1").is_err());
+        assert!(validate_and_extract_path_capture(
+            "static",
+            "thread_events",
+            "f",
+            "r1",
+            "/threads/{id}",
+        )
+        .is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! Browser session store for `/ui` routes.
 //!
 //! In-memory store with TTL eviction. Sessions are created by
-//! `ui.launch.mint` and consumed by `GET /ui/launch?token=...` which
+//! `ui.launch.mint` and consumed by the configured `service:ui/launch` route, which
 //! sets a session cookie. Session-authed routes (`/ui/api/*`,
 //! `/ui/events/*`) validate the cookie against this store.
 //!
@@ -10,7 +10,7 @@
 //! 1. `client:ryeos/web` launcher calls `ui.launch.mint` on the daemon.
 //! 2. Daemon creates a session record with context (surface_ref,
 //!    project_path, read_only) and a one-shot launch token.
-//! 3. Browser hits `GET /ui/launch?token=...`, token is consumed,
+//! 3. Browser hits the daemon-returned launch URL, token is consumed,
 //!    session cookie is set, browser is redirected to `/ui`.
 //! 4. Session-authed routes validate the cookie against this store.
 

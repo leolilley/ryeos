@@ -7,13 +7,13 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -60,7 +60,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .mint_token(launch_ctx);
 
     let bind = &state.config.bind;
-    let launch_url = format!("http://{bind}/ui/launch?token={token}");
+    let launch_path = launch_path_for_token(&state, &token)?;
+    let launch_url = format!("http://{bind}{launch_path}");
 
     let response = Response {
         token,
@@ -83,3 +84,103 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+fn launch_path_for_token(state: &AppState, token: &str) -> Result<String> {
+    launch_path_from_routes(&state.node_config.routes, token)
+}
+
+fn launch_path_from_routes(
+    routes: &[ryeos_app::route_raw::RawRouteSpec],
+    token: &str,
+) -> Result<String> {
+    let route = routes
+        .iter()
+        .find(|route| {
+            route.response.source.as_deref() == Some(super::ui_launch::DESCRIPTOR.service_ref)
+        })
+        .context("no route configured for service:ui/launch")?;
+
+    let token_template = route
+        .response
+        .source_config
+        .get("token")
+        .and_then(|value| value.as_str())
+        .context("ui.launch route source_config.token must reference a path capture")?;
+
+    let capture = path_capture_name(token_template)
+        .context("ui.launch route source_config.token must be ${path.<name>}")?;
+    let placeholder = format!("{{{capture}}}");
+    if !route.path.contains(&placeholder) {
+        anyhow::bail!(
+            "ui.launch route path '{}' does not declare token capture '{}'; source_config.token = '{}'",
+            route.path,
+            capture,
+            token_template
+        );
+    }
+
+    Ok(route.path.replace(&placeholder, token))
+}
+
+fn path_capture_name(template: &str) -> Option<&str> {
+    let rest = template.trim().strip_prefix("${path.")?;
+    rest.strip_suffix('}')
+}
+
+#[cfg(test)]
+mod tests {
+    use ryeos_app::route_raw::{
+        RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
+    };
+
+    use super::*;
+
+    fn make_launch_route(path: &str, token_template: &str) -> RawRouteSpec {
+        RawRouteSpec {
+            section: "routes".into(),
+            category: None,
+            id: "ui/launch".into(),
+            path: path.into(),
+            methods: ["GET".into()].into_iter().collect(),
+            auth: "none".into(),
+            auth_config: None,
+            limits: RawLimits::default(),
+            response: RawResponseSpec {
+                mode: "json".into(),
+                source: Some(super::super::ui_launch::DESCRIPTOR.service_ref.into()),
+                source_config: serde_json::json!({ "token": token_template }),
+                status: None,
+                content_type: None,
+                body_b64: None,
+            },
+            execute: None,
+            request: RawRequest {
+                body: RawRequestBody::None,
+            },
+            source_file: std::path::PathBuf::from("/test/ui_launch.yaml"),
+        }
+    }
+
+    #[test]
+    fn launch_path_is_rendered_from_route_snapshot() {
+        let routes = vec![make_launch_route(
+            "/custom/launch/{secret}",
+            "${path.secret}",
+        )];
+
+        let path = launch_path_from_routes(&routes, "abc-123").unwrap();
+        assert_eq!(path, "/custom/launch/abc-123");
+    }
+
+    #[test]
+    fn launch_path_rejects_route_without_declared_capture() {
+        let routes = vec![make_launch_route(
+            "/custom/launch/{other}",
+            "${path.secret}",
+        )];
+
+        let err =
+            launch_path_from_routes(&routes, "abc-123").expect_err("route mismatch must fail");
+        assert!(err.to_string().contains("does not declare token capture"));
+    }
+}

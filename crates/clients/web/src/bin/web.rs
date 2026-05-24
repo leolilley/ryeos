@@ -372,11 +372,11 @@ mod tests {
     fn mint_response_parses() {
         let raw = serde_json::json!({
             "token": "abc-123",
-            "launch_url": "http://localhost:8080/ui/launch?token=abc-123",
+            "launch_url": "http://localhost:8080/custom/launch/abc-123",
             "session_id": "sess-456"
         });
         let resp: MintResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(resp.launch_url, "http://localhost:8080/ui/launch?token=abc-123");
+        assert_eq!(resp.launch_url, "http://localhost:8080/custom/launch/abc-123");
         assert_eq!(resp.session_id, "sess-456");
     }
 }
