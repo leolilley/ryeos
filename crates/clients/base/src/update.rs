@@ -25,6 +25,8 @@ pub enum AppEvent {
     PollSnapshot(PollSnapshot),
     Resize { width: u16, height: u16 },
     Tick { now_ms: u64 },
+    /// Surface spec changed (file hot-reload or explicit switch).
+    SurfaceChanged { spec: crate::surface::SurfaceSpec },
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +133,13 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             apply_poll_snapshot(model, &snapshot);
             model.mark_dirty();
             vec![Effect::RefreshState]
+        }
+
+        AppEvent::SurfaceChanged { spec } => {
+            model.surface.spec = spec;
+            model.workspace = model.surface.rebuild_workspace();
+            model.mark_dirty();
+            Vec::new()
         }
     }
 }

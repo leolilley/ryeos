@@ -51,10 +51,17 @@ pub async fn run(
     let (input_tx, mut input_rx) = mpsc::channel::<InputEvent>(256);
     let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(16);
     let (daemon_tx, mut daemon_rx) = mpsc::channel::<ryeos_client_base::update::DaemonEvent>(256);
+    let (surface_tx, mut surface_rx) = mpsc::channel::<ryeos_client_base::surface::SurfaceSpec>(16);
 
     // Spawn crossterm event reader
     let events = EventStream::new();
     tokio::spawn(event_reader(events, input_tx, resize_tx));
+
+    // Spawn surface file watcher (only for --surface-file)
+    if let ryeos_client_base::surface::LoadedSurface::LocalPreview { ref path, .. } = loaded_surface {
+        let watch_path = path.clone();
+        tokio::spawn(surface_file_watcher(watch_path, surface_tx));
+    }
 
     let mut renderer = FrameRenderer::new();
     let mut stdout = std::io::stdout();
@@ -79,6 +86,11 @@ pub async fn run(
 
             Some(event) = daemon_rx.recv() => {
                 update::update(&mut model, AppEvent::Daemon(event));
+            }
+
+            Some(spec) = surface_rx.recv() => {
+                tracing::info!("surface file changed, rebuilding workspace");
+                update::update(&mut model, AppEvent::SurfaceChanged { spec });
             }
 
             Some((w, h)) = resize_rx.recv() => {
@@ -373,4 +385,104 @@ fn convert_mouse(event: crossterm::event::MouseEvent) -> InputEvent {
         y: event.row,
         action,
     })
+}
+
+/// Watch a surface file for changes using inotify and send re-parsed specs.
+///
+/// Uses `notify::RecommendedWatcher` (inotify on Linux) for instant,
+/// zero-polling file change events. On each change, re-parses the file
+/// and sends the new spec through the channel.
+async fn surface_file_watcher(
+    path: std::path::PathBuf,
+    tx: mpsc::Sender<ryeos_client_base::surface::SurfaceSpec>,
+) {
+    use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+
+    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<Event>(16);
+
+    let mut watcher = match recommended_watcher(move |res: Result<Event, notify::Error>| {
+        if let Ok(event) = res {
+            let _ = notify_tx.blocking_send(event);
+        }
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("failed to create file watcher: {e}");
+            return;
+        }
+    };
+
+    // Watch the parent directory (more reliable than watching the file directly)
+    let watch_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
+        tracing::warn!("failed to watch {}: {e}", watch_dir.display());
+        return;
+    }
+
+    let file_name = path.file_name().map(|n| n.to_os_string());
+
+    // Debounce: avoid duplicate reloads from editor save patterns
+    let mut last_reload = std::time::Instant::now();
+    let debounce = std::time::Duration::from_millis(100);
+
+    while let Some(event) = notify_rx.recv().await {
+        if !matches!(
+            event.kind,
+            notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+        ) {
+            continue;
+        }
+
+        let matches_our_file = event.paths.iter().any(|p| {
+            file_name
+                .as_ref()
+                .map(|name| p.file_name() == Some(name))
+                .unwrap_or(false)
+        });
+        if !matches_our_file {
+            continue;
+        }
+
+        if last_reload.elapsed() < debounce {
+            continue;
+        }
+        last_reload = std::time::Instant::now();
+
+        let opts = ryeos_client_base::surface::SurfaceLoadOptions {
+            explicit_file: Some(path.clone()),
+            surface_name: None,
+        };
+        let reloaded = ryeos_client_base::surface::load_surface(&opts);
+
+        for diag in reloaded.all_diagnostics() {
+            match diag {
+                ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message } => {
+                    tracing::warn!("surface reload: {}", message);
+                }
+                ryeos_client_base::surface::SurfaceDiagnostic::UnsupportedField {
+                    field,
+                    message,
+                } => {
+                    tracing::info!("surface reload: {}: {}", field, message);
+                }
+                ryeos_client_base::surface::SurfaceDiagnostic::Info { message } => {
+                    tracing::info!("surface reload: {}", message);
+                }
+            }
+        }
+
+        let has_errors = reloaded.all_diagnostics().iter().any(|d| {
+            matches!(
+                d,
+                ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { .. }
+            )
+        });
+
+        if !has_errors {
+            let spec = reloaded.spec().clone();
+            if tx.send(spec).await.is_err() {
+                break;
+            }
+        }
+    }
 }
