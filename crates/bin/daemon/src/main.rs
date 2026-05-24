@@ -39,7 +39,7 @@ fn build_service_registry() -> ryeos_app::service_registry::ServiceRegistry {
 fn build_route_table(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> anyhow::Result<ryeos_api::routes::RouteTable> {
-    let mode_registry = ryeos_ui::response_mode_registry();
+    let mode_registry = ryeos_ui::response_mode_registry(service_descriptors());
     let extensions = ryeos_ui::route_extensions();
     ryeos_api::routes::build_route_table_from_snapshot_with_extensions(
         snapshot,

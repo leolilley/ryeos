@@ -25,7 +25,12 @@ use crate::routes::invocation::{
 };
 use ryeos_app::route_raw::RawRouteSpec;
 
-pub struct JsonMode;
+pub struct JsonMode {
+    /// Service descriptors used to validate `service:` refs at compile time.
+    /// The composition root provides the full set (API + UI); API-only tests
+    /// can pass `handlers::ALL`.
+    pub service_descriptors: &'static [crate::registry::ServiceDescriptor],
+}
 
 /// Compiled state for a `json` mode route.
 pub struct CompiledJsonMode {
@@ -79,8 +84,13 @@ impl ResponseMode for JsonMode {
             }
         })?;
 
-        // Compile the invoker via the universal canonical-ref compiler.
-        let invoker = crate::routes::invokers::compile_canonical_ref_invoker(source_str, &raw.id)?;
+        // Compile the invoker via the universal canonical-ref compiler,
+        // using the provided service descriptor set for `service:` ref lookup.
+        let invoker = crate::routes::invokers::compile_canonical_ref_invoker_with_descriptors(
+            source_str,
+            &raw.id,
+            self.service_descriptors,
+        )?;
 
         // Non-service sources require typed { project_path, parameters } config.
         let parsed_kind = crate::routes::parsed_ref::ParsedItemRef::parse(source_str)
@@ -260,9 +270,15 @@ mod tests {
         }
     }
 
+    fn api_mode() -> JsonMode {
+        JsonMode {
+            service_descriptors: crate::handlers::ALL,
+        }
+    }
+
     #[test]
     fn compile_valid_service_ref() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/threads/{thread_id}",
             Some("service:threads/get"),
@@ -274,7 +290,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_missing_source() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw("/test", None, serde_json::Value::Null);
         let result = mode.compile(&raw);
         let err = match result {
@@ -287,7 +303,7 @@ mod tests {
 
     #[test]
     fn compile_accepts_tool_kind_with_project_path() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/test",
             Some("tool:ryeos/core/execute"),
@@ -303,7 +319,7 @@ mod tests {
 
     #[test]
     fn compile_accepts_directive_kind_with_project_path() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/test",
             Some("directive:my/agent"),
@@ -319,7 +335,7 @@ mod tests {
 
     #[test]
     fn compile_accepts_graph_kind_with_project_path() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/test",
             Some("graph:workflows/approval"),
@@ -335,7 +351,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_tool_without_project_path() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/test",
             Some("tool:ryeos/core/execute"),
@@ -352,7 +368,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_directive_with_null_source_config() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw("/test", Some("directive:my/agent"), serde_json::Value::Null);
         let result = mode.compile(&raw);
         let err = match result {
@@ -365,7 +381,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_unknown_kind() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/test",
             Some("fictional:item/path"),
@@ -382,7 +398,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_unknown_service() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/test",
             Some("service:nonexistent/handler"),
@@ -400,7 +416,7 @@ mod tests {
     #[test]
     fn compile_rejects_static_fields() {
         use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = RawRouteSpec {
             section: "routes".into(),
             category: None,
@@ -441,7 +457,7 @@ mod tests {
         use ryeos_app::route_raw::{
             RawExecute, RawLimits, RawRequest, RawRequestBody, RawResponseSpec,
         };
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = RawRouteSpec {
             section: "routes".into(),
             category: None,
@@ -482,7 +498,7 @@ mod tests {
 
     #[test]
     fn compile_rejects_undeclared_capture() {
-        let mode = JsonMode;
+        let mode = api_mode();
         let raw = make_raw(
             "/threads/{thread_id}",
             Some("service:threads/get"),

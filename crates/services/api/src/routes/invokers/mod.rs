@@ -113,7 +113,20 @@ fn compile_service_invoker_inner(
     route_id: &str,
     _parsed: &crate::routes::parsed_ref::ParsedItemRef,
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-    let descriptor = crate::handlers::ALL
+    compile_service_invoker_from(source_ref, route_id, crate::handlers::ALL)
+}
+
+/// Compile a `service:` ref using a provided descriptor set.
+///
+/// This is the composition-root variant: the daemon passes the full
+/// composed descriptor table (API + UI), while API-only tests can pass
+/// `handlers::ALL` directly.
+pub fn compile_service_invoker_from(
+    source_ref: &str,
+    route_id: &str,
+    descriptors: &[crate::registry::ServiceDescriptor],
+) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+    let descriptor = descriptors
         .iter()
         .find(|d| d.service_ref == source_ref)
         .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
@@ -122,7 +135,7 @@ fn compile_service_invoker_inner(
             reason: format!(
                 "no service descriptor found for ref '{}'; available: [{}]",
                 source_ref,
-                crate::handlers::ALL
+                descriptors
                     .iter()
                     .map(|d| d.service_ref)
                     .collect::<Vec<_>>()
@@ -149,6 +162,42 @@ fn compile_service_invoker_inner(
             .map(|s| s.to_string())
             .collect(),
     }))
+}
+
+/// Compile an invoker from any canonical ref using a provided service
+/// descriptor set.
+///
+/// Like `compile_canonical_ref_invoker` but the `service:` ref lookup
+/// uses the provided descriptors instead of the API-only `handlers::ALL`.
+pub fn compile_canonical_ref_invoker_with_descriptors(
+    source_ref: &str,
+    route_id: &str,
+    descriptors: &[crate::registry::ServiceDescriptor],
+) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+    let parsed = crate::routes::parsed_ref::ParsedItemRef::parse(source_ref).map_err(|e| {
+        RouteConfigError::InvalidSourceConfig {
+            id: route_id.into(),
+            src: source_ref.into(),
+            reason: format!("source '{source_ref}' is not a valid canonical ref: {e}"),
+        }
+    })?;
+
+    match parsed.kind() {
+        "service" => compile_service_invoker_from(source_ref, route_id, descriptors),
+        "tool" | "directive" | "graph" => {
+            Ok(Arc::new(dispatch_invocation::CompiledDispatchInvoker {
+                item_ref: source_ref.to_string(),
+            }))
+        }
+        other => Err(RouteConfigError::InvalidSourceConfig {
+            id: route_id.into(),
+            src: source_ref.into(),
+            reason: format!(
+                "unsupported source kind '{}' in '{}'; expected service/tool/directive/graph",
+                other, source_ref
+            ),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +327,107 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(msg.contains("no service descriptor found"), "got: {msg}");
+    }
+
+    // ── compile_canonical_ref_invoker_with_descriptors tests ─────────
+
+    #[test]
+    fn with_descriptors_accepts_known_service() {
+        let invoker = compile_canonical_ref_invoker_with_descriptors(
+            "service:threads/get",
+            "r1",
+            crate::handlers::ALL,
+        )
+        .unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
+    }
+
+    #[test]
+    fn with_descriptors_rejects_unknown_service() {
+        let result = compile_canonical_ref_invoker_with_descriptors(
+            "service:nonexistent/handler",
+            "r1",
+            crate::handlers::ALL,
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("no service descriptor found"), "got: {msg}");
+    }
+
+    #[test]
+    fn with_descriptors_accepts_extension_service() {
+        // Verify that a non-API service compiles when its descriptor is
+        // included in the provided set.
+        use crate::registry::ServiceDescriptor;
+        use ryeos_executor::executor::ServiceAvailability;
+
+        fn fake_handler(
+            _params: serde_json::Value,
+            _ctx: ryeos_app::handler_context::HandlerContext,
+            _state: std::sync::Arc<ryeos_app::state::AppState>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send>,
+        > {
+            unreachable!("test-only descriptor")
+        }
+
+        let ext_descriptor = ServiceDescriptor {
+            service_ref: "service:ui/session/current",
+            endpoint: "ui.session.current",
+            availability: ServiceAvailability::Both,
+            required_caps: &[],
+            handler: fake_handler,
+        };
+        let descriptors = &[ext_descriptor];
+        let invoker = compile_canonical_ref_invoker_with_descriptors(
+            "service:ui/session/current",
+            "r1",
+            descriptors,
+        )
+        .unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
+    }
+
+    #[test]
+    fn with_descriptors_rejects_extension_service_when_not_provided() {
+        // Same ref, empty descriptor set → must fail.
+        let result = compile_canonical_ref_invoker_with_descriptors(
+            "service:ui/session/current",
+            "r1",
+            &[],
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("no service descriptor found"), "got: {msg}");
+    }
+
+    #[test]
+    fn with_descriptors_accepts_tool_kind() {
+        // Non-service refs work the same regardless of descriptor set.
+        let invoker = compile_canonical_ref_invoker_with_descriptors(
+            "tool:ryeos/core/execute",
+            "r1",
+            &[],
+        )
+        .unwrap();
+        let contract = invoker.contract();
+        assert!(matches!(
+            contract.output,
+            crate::routes::invocation::RouteInvocationOutput::Json
+        ));
     }
 }
