@@ -1,4 +1,3 @@
-# ryeos:signed:2026-05-23T14:17:34Z:d3d06c8718af3e32637fb447e99137ded05504473b0768bb1c0360028c42f2a6:im6ZM4GwkMD53RW4RiJd58vFk9GYOPZXp2T1Y2OJcgZEC+tIY9JLjKbjt+u5vryMtsJC6LszzotahwpqGzCvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: routes
 section: routes
 id: ui/events/session
@@ -12,7 +11,7 @@ limits:
   concurrent_max: 256
 response:
   mode: event_stream
-  source: thread_events
+  source: session_events
   source_config:
-    thread_id: "${path.session_id}"
+    session_id: "${path.session_id}"
     keep_alive_secs: 15

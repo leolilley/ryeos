@@ -14,6 +14,7 @@ pub mod launch_invocation;
 pub mod none_invocation;
 pub mod ryeos_signed_invocation;
 pub mod service_invocation;
+pub mod session_events_invocation;
 pub mod stream_helpers;
 pub mod subscription_stream_invocation;
 
