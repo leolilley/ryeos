@@ -116,9 +116,10 @@ fn map_engine_error(e: EngineError) -> HandlerError {
         EngineError::ComposedValueContractViolation { canonical_ref, report } => {
             let error_count = report.errors.len();
             let warn_count = report.warnings.len();
+            let error_suffix = if error_count == 1 { "" } else { "s" };
+            let warning_suffix = if warn_count == 1 { "" } else { "s" };
             let summary = format!(
-                "contract_violation: `{canonical_ref}` ({error_count} error{s}, {warn_count} warning{s})",
-                s = if error_count == 1 { "" } else { "s" },
+                "contract_violation: `{canonical_ref}` ({error_count} error{error_suffix}, {warn_count} warning{warning_suffix})",
             );
 
             let violations_to_json = |violations: &[ryeos_engine::contracts::InstanceViolation]| {

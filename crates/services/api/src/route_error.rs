@@ -79,17 +79,19 @@ pub enum RouteDispatchError {
     #[error("internal: {0}")]
     Internal(String),
     /// Structured error with a pre-built JSON body.
-    /// The body is emitted as-is; status is derived from context
-    /// (currently always 400).
-    #[error("structured error")]
-    Structured(serde_json::Value),
+    /// The stable code is carried through the route boundary for
+    /// dispatchers/observability; the body is emitted as-is and should
+    /// include the public `error_code` field. Status is derived from
+    /// context (currently always 400).
+    #[error("structured error: {code}")]
+    Structured { code: String, body: serde_json::Value },
 }
 
 impl axum::response::IntoResponse for RouteDispatchError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
         match self {
-            Self::Structured(body) => {
+            Self::Structured { body, .. } => {
                 // The body is a pre-built JSON object (always an object,
                 // never a bare string). Emit it as 400 Bad Request.
                 (StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
@@ -113,5 +115,43 @@ impl axum::response::IntoResponse for RouteDispatchError {
                 (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": msg }))).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    use super::RouteDispatchError;
+
+    #[tokio::test]
+    async fn structured_error_response_emits_body_as_is() {
+        let body = json!({
+            "error": "contract_violation: `surface:test` (1 error, 0 warnings)",
+            "error_code": "contract_violation",
+            "details": {
+                "errors": [{
+                    "path": "launch.mode",
+                    "code": "enum_mismatch",
+                    "expected": "one of [\"cli_exec\", \"daemon_ui\"]",
+                    "found": "\"ladnch_browser\"",
+                }],
+                "warnings": [],
+            },
+        });
+
+        let response = RouteDispatchError::Structured {
+            code: "contract_violation".into(),
+            body: body.clone(),
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(actual, body);
     }
 }
