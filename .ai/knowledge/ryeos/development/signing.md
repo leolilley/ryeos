@@ -1,14 +1,19 @@
+<!-- ryeos:signed:2026-05-25T06:47:54Z:35298a73dd18b8a78cc5ca37a8fb04c4e8adbcd82bb6035e6f127730183bba50:C1401OXVvAXtJWlPYpnOc+EkxEer7wcZ+v1jdQA9N2aP3xIwCbqKvNSkagTVyUCYPpMQYh+x1mXe1o+VWu0qDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
-description: "How signing works in this project, what to sign, what key to use, common pitfalls"
+title: "Signing Rules"
+description: "Short rules for bundle signing, project item signing, keys, and recovery"
+entry_type: reference
+version: "1.1.0"
 ```
 
-# Signing in This Project
+# Signing Rules
 
-## The one rule
+## Bundle rule
 
-**Sign at bundle granularity, not file granularity.** There is no per-file signing CLI.
+Sign bundles as bundles. Do not try to fix one bundle YAML or one staged binary
+by hand.
 
 ```bash
 ./scripts/populate-bundles.sh \
@@ -16,98 +21,86 @@ description: "How signing works in this project, what to sign, what key to use, 
   --owner ryeos-dev
 ```
 
-This builds release binaries, stages them into the bundle `.ai/bin/<triple>/` directories, signs every signable item in both bundles, rebuilds CAS manifests, and emits `PUBLISHER_TRUST.toml` files.
+This builds release binaries, stages them into bundle bin trees, signs all
+signable bundle items, rebuilds CAS manifests, and emits `PUBLISHER_TRUST.toml`.
 
-## When you must re-sign
+Run it after:
 
-- After editing any YAML under `bundles/`
-- After `cargo build` (binaries change, manifest hashes go stale)
-- After a fresh checkout (binaries are `.gitignored`)
-- Before running tests that load the bundle tree
+- editing YAML under `bundles/`;
+- changing Rust that affects bundled binaries;
+- a fresh checkout, because bundle bins/CAS are derived;
+- any `hash mismatch` or stale manifest failure.
 
-## What "signed" means
+## Dev key
 
-Every YAML file under `bundles/<bundle>/.ai/` that loads through `VerifiedLoader` carries an inline `# ryeos:signed:...` header. The header is an Ed25519 signature over the file's content hash, plus a publisher fingerprint. When the runtime loads the file, it:
+Use only the checked-in dev publisher key for dev bundles:
 
-1. Strips the signature line
-2. Hashes the remaining content
-3. Verifies the signature against the fingerprint's pubkey from the trust store
-4. Accepts (trusted), warns (unknown signer), or fails (invalid)
+```text
+.dev-keys/PUBLISHER_DEV.pem
+.dev-keys/PUBLISHER_DEV_TRUST.toml
+```
 
-You cannot edit a signed YAML and reuse the existing signature. Any byte change invalidates it.
+Dev fingerprint:
 
-## The dev publisher key
+```text
+741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+```
 
-The keypair lives in `.dev-keys/`:
+Never trust this key in production. Never use old `--seed 42` instructions for
+bundle artifacts; that key is not trusted by the engine test harness.
 
-| File | Purpose |
-|---|---|
-| `PUBLISHER_DEV.pem` | Private Ed25519 key (PKCS#8 PEM) |
-| `PUBLISHER_DEV_TRUST.toml` | Public key + fingerprint + owner label |
+## What invalidates signatures
 
-The dev key fingerprint is `741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea`.
+Any byte change to signed YAML invalidates its `# ryeos:signed:...` header.
+The loader strips the signature line, hashes the body, and verifies the Ed25519
+signature against the trust store. A stale header is not reusable.
 
-Verify after signing:
+Quick check:
+
 ```bash
 head -1 bundles/standard/.ai/config/ryeos-runtime/model-providers/zen.yaml
-# Trailing fingerprint should be 741a8bc...
+# trailing fingerprint should begin 741a8bc...
 ```
 
-## Common mistakes
+## Recovery playbook
 
-### Using `--seed 42`
-
-Older docs may reference `--seed 42`. **Do not use it for bundle artifacts.** The seed-42 key is NOT in the engine test trust store. It breaks ~130 tests with "signature not in trust store."
-
-Recovery:
-```bash
-git checkout bundles/
-rm -rf bundles/core/.ai/objects/blobs/*/
-```
-Then rebuild with `--key .dev-keys/PUBLISHER_DEV.pem`.
-
-### Trying to sign individual files
-
-No `--file` or `--single` flag exists. Use `populate-bundles.sh` (or `ryeos-core-tools build` after binaries are already staged) at bundle granularity.
-
-### Stale bundle binaries or manifests after a merge/build
-
-Bundle publishing packages the binaries already present under `bundles/{core,standard}/.ai/bin/<triple>/`. The publish step does **not** compile Rust or magically refresh those binaries. After source merges or Rust changes, stale bundle binaries can show up as hash mismatches or as parser/schema errors such as `unknown variant ... expected ...` when a new descriptor term landed with the merge.
-
-Fix with the canonical rebuild + republish path:
-```bash
-./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
-```
-
-Then reinstall the refreshed bundle tree into the system space you use:
+For stale signatures, stale bundle binaries, stale CAS, or wrong-key signing:
 
 ```bash
-target/release/ryeos init \
-  --source bundles \
-  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+./scripts/gate.sh --no-tests
 
-# Or for the repo-local dev system space:
-target/release/ryeos init \
-  --system-space-dir .local/ryeos \
-  --source bundles \
-  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
-```
-
-Do not manually copy `target/release/ryeos-core-tools` or any other single binary into a bundle as the fix. That leaves manifests, CAS sidecars, and signatures out of sync.
-
-When verifying the source tree during recovery, make dependency roots explicit:
-
-```bash
 target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core
 target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core
 ```
 
-## Signing project-level items
+Then reinitialize the system space you are actually using:
 
-For items in a project's `.ai/` (directives, tools, knowledge in a user's project — not this repo's bundles), use `ryeos sign`:
+```bash
+target/release/ryeos init \
+  --source bundles \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+```
+
+If that system space has a running daemon, restart it around init.
+
+## Project item signing
+
+Project `.ai/` items are different from bundle items. They are signed with the
+operator/user key, not the publisher key.
 
 ```bash
 ryeos sign .ai/knowledge/my/entry.md
 ```
 
-This is different from bundle signing. Project items are signed with the operator's user key, not the publisher key.
+Use this for project knowledge/directive/tool files. Use `populate-bundles.sh`
+for `bundles/`.
+
+## Do not do these
+
+- Do not manually copy `target/release/ryeos-core-tools` or another binary into
+  `bundles/*/.ai/bin/<triple>/` as a fix.
+- Do not edit signed YAML and leave the old signature header.
+- Do not add hardcoded trust bypasses, raw YAML fallbacks, or registry shortcuts
+  to avoid signing errors.
+- Do not verify source bundles without `--registry-root`; installed
+  registrations may point at stale bundle copies.

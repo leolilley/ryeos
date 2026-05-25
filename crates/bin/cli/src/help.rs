@@ -2,14 +2,18 @@
 //!
 //! `ryeos help` prints lifecycle verbs (always available) and discovers
 //! the rest from installed bundle descriptors on disk. No daemon required.
-//! `ryeos help <verb>` queries the daemon for alias info via the same
-//! token dispatch path with `validate_only: true`.
+//! `ryeos help <verb>` uses installed descriptors first and only queries the
+//! daemon when no local descriptor help is available.
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::CliError;
+use anyhow::Context;
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::engine::{EffectiveItemRequest, Engine};
+use serde_json::Value;
 
 /// Print top-level help. Best-effort: includes dynamic alias discovery
 /// from the system space if accessible, no daemon required.
@@ -56,7 +60,9 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
 
     // ── Dynamic alias discovery from installed bundles ──
     let system_space_dir = discover_system_space_dir();
-    let discovered = discover_aliases_from_disk(&system_space_dir);
+    let bundle_roots = help_bundle_roots(&system_space_dir);
+    let engine = build_help_engine(&system_space_dir, ".", &bundle_roots).ok();
+    let discovered = discover_aliases_from_disk(&bundle_roots, engine.as_ref(), ".");
 
     if !discovered.is_empty() {
         let mut offline_cmds: Vec<(&str, &str)> = Vec::new();
@@ -93,102 +99,17 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Check whether the service descriptor backing an alias declares
-/// `availability: offline`. Tries: verb execute ref → service, then
-/// direct service lookup by verb name.
-fn check_service_offline(system_space_dir: &Path, alias_tokens: &[String]) -> bool {
-    let verb_name = alias_tokens.join("-");
-
-    // Try 1: verb → execute service ref → service descriptor
-    if let Some(offline) = check_via_verb_execute_ref(system_space_dir, &verb_name) {
-        return offline;
-    }
-
-    // Try 2: direct service descriptor by verb name (e.g. services/sign.yaml)
-    check_via_service_name(system_space_dir, &verb_name)
-}
-
-fn check_via_verb_execute_ref(system_space_dir: &Path, verb_name: &str) -> Option<bool> {
-    let verb = read_verb_help(system_space_dir, verb_name)?;
-    let service_rel = verb.execute.strip_prefix("service:")?;
-    let path = find_service_path(system_space_dir, service_rel)?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    Some(read_availability(&content))
-}
-
-fn check_via_service_name(system_space_dir: &Path, name: &str) -> bool {
-    let path = match find_service_path(system_space_dir, name) {
-        Some(p) => p,
-        None => return false,
-    };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    read_availability(&content)
-}
-
-fn read_availability(content: &str) -> bool {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("# ryeos:signed:") {
-            continue;
-        }
-        if let Some(val) = trimmed.strip_prefix("availability:") {
-            let val = val.trim();
-            return val == "offline" || val == "both";
-        }
-    }
-    false
-}
-
-/// Find a service descriptor file by relative path.
-/// Appends `.yaml` extension if not already present.
-fn find_service_path(system_space_dir: &Path, service_rel: &str) -> Option<std::path::PathBuf> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
-    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
-        return None;
-    };
-    // Service names may or may not include .yaml extension
-    let file_name = if service_rel.ends_with(".yaml") || service_rel.ends_with(".yml") {
-        service_rel.to_string()
-    } else {
-        format!("{}.yaml", service_rel)
-    };
-    for entry in entries.flatten() {
-        let path = entry.path().join(".ai").join("services").join(&file_name);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    None
-}
-
 /// Scan installed bundles on disk for alias definitions.
 /// Returns (token_string, description, is_offline) tuples.
-fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String, String, bool)> {
+fn discover_aliases_from_disk(
+    bundle_roots: &[PathBuf],
+    engine: Option<&Engine>,
+    project_path: &str,
+) -> Vec<(String, String, bool)> {
     let mut results = Vec::new();
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
 
-    if !bundles_dir.is_dir() {
-        return results;
-    }
-
-    let Ok(bundle_entries) = std::fs::read_dir(&bundles_dir) else {
-        return results;
-    };
-
-    for bundle_entry in bundle_entries.flatten() {
-        let name = bundle_entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Skip non-bundle artifacts: hidden dirs (e.g. .staging),
-        // backup dirs (e.g. core.backup.prev), and staging dirs.
-        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
-            continue;
-        }
-
-        let aliases_dir = bundle_entry.path().join(".ai").join("node").join("aliases");
+    for bundle_root in bundle_roots {
+        let aliases_dir = bundle_root.join(".ai").join("node").join("aliases");
         if !aliases_dir.is_dir() {
             continue;
         }
@@ -207,60 +128,31 @@ fn discover_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<(String
             let Ok(content) = std::fs::read_to_string(&path) else {
                 continue;
             };
+            let Ok(alias) = serde_yaml::from_str::<AliasHelpRecord>(&content) else {
+                continue;
+            };
 
-            // Parse tokens and description from the YAML.
-            // Simple line-by-line extraction — avoids pulling in a YAML parser.
-            let mut tokens: Option<Vec<String>> = None;
-            let mut description = String::new();
-
-            for line in content.lines() {
-                let trimmed = line.trim();
-                // Skip signed envelope header
-                if trimmed.starts_with("# ryeos:signed:") {
-                    continue;
-                }
-                if let Some(val) = trimmed.strip_prefix("tokens:") {
-                    // tokens: ["remote", "exec"]  or tokens: ["status"]
-                    let val = val.trim();
-                    if val.starts_with('[') {
-                        let parsed = parse_yaml_string_array(val);
-                        if !parsed.is_empty() {
-                            tokens = Some(parsed);
-                        }
-                    }
-                } else if let Some(val) = trimmed.strip_prefix("description:") {
-                    let val = val.trim().trim_matches('"');
-                    description = val.to_string();
-                }
+            if alias.tokens == ["status"] {
+                continue;
+            }
+            // Skip short aliases (s, f) — they're abbreviations.
+            if alias.tokens.len() == 1 && alias.tokens[0].len() <= 1 {
+                continue;
             }
 
-            if let Some(tokens) = tokens {
-                if tokens == ["status"] {
-                    continue;
-                }
-                // Skip short aliases (s, f) — they're abbreviations
-                if tokens.len() == 1 && tokens[0].len() <= 1 {
-                    continue;
-                }
-
-                // Check if the corresponding service declares offline availability
-                let is_offline = check_service_offline(system_space_dir, &tokens);
-                results.push((tokens.join(" "), description, is_offline));
-            }
+            let metadata = read_verb_help_from_roots(bundle_roots, &alias.verb).and_then(|verb| {
+                engine
+                    .and_then(|engine| resolve_effective_help(engine, &verb.execute, project_path))
+            });
+            let is_offline = metadata
+                .as_ref()
+                .is_some_and(ItemHelpMetadata::is_offline_dispatch);
+            results.push((alias.tokens.join(" "), alias.description, is_offline));
         }
     }
 
     results.sort_by(|a, b| a.0.cmp(&b.0));
     results
-}
-
-/// Very small YAML string-array parser for `["a", "b", "c"]`.
-fn parse_yaml_string_array(s: &str) -> Vec<String> {
-    let s = s.trim_start_matches('[').trim_end_matches(']');
-    s.split(',')
-        .map(|item| item.trim().trim_matches('"').trim_matches('\'').to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 /// Print verb-specific help by querying the daemon with validate_only.
@@ -273,6 +165,13 @@ pub async fn print_verb_help(
     system_space_dir: &std::path::Path,
     project_path: &str,
 ) -> Result<(), CliError> {
+    // Prefer installed descriptor help. This keeps help kind-agnostic in the
+    // CLI: aliases/verbs are node config, and the help renderer does not need
+    // to classify the execute ref before deciding whether it can print usage.
+    if print_installed_verb_help(verb_tokens, system_space_dir, project_path)? {
+        return Ok(());
+    }
+
     // Try to reach the daemon. If unavailable, fall back to a helpful
     // message rather than a raw connection error.
     let daemon_url = match crate::transport::http::resolve_daemon_url(system_space_dir).await {
@@ -282,7 +181,7 @@ pub async fn print_verb_help(
             eprintln!("note: daemon not reachable, showing limited help");
             eprintln!("  detail: {e:#}");
             eprintln!();
-            if !print_installed_verb_help(verb_tokens, system_space_dir)? {
+            if !print_installed_verb_help(verb_tokens, system_space_dir, project_path)? {
                 print_local_verb_help(verb_tokens)?;
             }
             return Ok(());
@@ -295,7 +194,7 @@ pub async fn print_verb_help(
             eprintln!("note: cannot sign help request (user key not found)");
             eprintln!("  detail: {e:#}");
             eprintln!();
-            if !print_installed_verb_help(verb_tokens, system_space_dir)? {
+            if !print_installed_verb_help(verb_tokens, system_space_dir, project_path)? {
                 print_local_verb_help(verb_tokens)?;
             }
             return Ok(());
@@ -346,7 +245,7 @@ struct VerbHelpRecord {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ServiceHelpRecord {
+struct ItemHelpMetadata {
     #[serde(default)]
     description: String,
     #[serde(default)]
@@ -355,24 +254,98 @@ struct ServiceHelpRecord {
     schema: BTreeMap<String, String>,
     #[serde(default)]
     availability: Option<String>,
+    #[serde(default)]
+    has_launch_binary_ref: bool,
+    #[serde(default)]
+    has_tool_command: bool,
+    #[serde(default)]
+    has_offline_execute: bool,
+}
+
+impl ItemHelpMetadata {
+    fn from_composed(value: &Value) -> Self {
+        Self {
+            description: value
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            required_caps: value
+                .get("required_caps")
+                .and_then(Value::as_array)
+                .map(|caps| {
+                    caps.iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            schema: value
+                .get("schema")
+                .and_then(Value::as_object)
+                .map(|schema| {
+                    schema
+                        .iter()
+                        .map(|(field, ty)| {
+                            (
+                                field.clone(),
+                                ty.as_str()
+                                    .map(ToString::to_string)
+                                    .unwrap_or_else(|| ty.to_string()),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            availability: value
+                .get("availability")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            has_launch_binary_ref: value
+                .get("launch")
+                .and_then(|launch| launch.get("binary_ref"))
+                .and_then(Value::as_str)
+                .is_some(),
+            has_tool_command: value
+                .get("config")
+                .and_then(|config| config.get("command"))
+                .and_then(Value::as_str)
+                .is_some(),
+            has_offline_execute: value
+                .get("offline_execute")
+                .and_then(Value::as_str)
+                .is_some(),
+        }
+    }
+
+    fn is_offline_dispatch(&self) -> bool {
+        matches!(self.availability.as_deref(), Some("offline" | "both"))
+            || self.has_launch_binary_ref
+            || self.has_tool_command
+            || self.has_offline_execute
+    }
 }
 
 fn print_installed_verb_help(
     verb_tokens: &[String],
     system_space_dir: &std::path::Path,
+    project_path: &str,
 ) -> std::io::Result<bool> {
-    let Some(alias) = find_alias_help(verb_tokens, system_space_dir) else {
+    let bundle_roots = help_bundle_roots(system_space_dir);
+    let Some(alias) = find_alias_help_from_roots(verb_tokens, &bundle_roots) else {
         return Ok(false);
     };
-    let verb = read_verb_help(system_space_dir, &alias.verb);
-    let service = verb
-        .as_ref()
-        .and_then(|v| service_ref_to_path(system_space_dir, &v.execute))
-        .and_then(|path| read_yaml::<ServiceHelpRecord>(&path));
+    let verb = read_verb_help_from_roots(&bundle_roots, &alias.verb);
+    let engine = build_help_engine(system_space_dir, project_path, &bundle_roots).ok();
+    let item = verb.as_ref().and_then(|v| {
+        engine
+            .as_ref()
+            .and_then(|engine| resolve_effective_help(engine, &v.execute, project_path))
+    });
 
     let mut out = std::io::stdout();
     let command = alias.tokens.join(" ");
-    let description = service
+    let description = item
         .as_ref()
         .map(|s| s.description.as_str())
         .filter(|s| !s.is_empty())
@@ -385,18 +358,20 @@ fn print_installed_verb_help(
 
     writeln!(out, "ryeos {command} — {description}")?;
     writeln!(out)?;
-    if let Some(service) = &service {
-        let avail = service.availability.as_deref().unwrap_or("daemon");
-        if avail == "offline" || avail == "both" {
+    if let Some(item) = &item {
+        if item.is_offline_dispatch() {
             writeln!(out, "DISPATCH: offline (no daemon required)")?;
             writeln!(out)?;
         }
+    } else if let Some(verb) = &verb {
+        writeln!(out, "EXECUTE: {}", verb.execute)?;
+        writeln!(out)?;
     }
     writeln!(out, "USAGE:")?;
     writeln!(
         out,
         "  ryeos {command}{}",
-        usage_tail(&alias, service.as_ref())
+        usage_tail(&alias, item.as_ref())
     )?;
 
     if alias.project_resolution != ryeos_runtime::ProjectResolution::None {
@@ -414,19 +389,19 @@ fn print_installed_verb_help(
         }
     }
 
-    if let Some(service) = &service {
-        if !service.schema.is_empty() {
+    if let Some(item) = &item {
+        if !item.schema.is_empty() {
             writeln!(out)?;
             writeln!(out, "FIELDS:")?;
-            for (field, ty) in &service.schema {
+            for (field, ty) in &item.schema {
                 let flag = field.replace('_', "-");
                 writeln!(out, "  --{:<20} {}", flag, ty)?;
             }
         }
-        if !service.required_caps.is_empty() {
+        if !item.required_caps.is_empty() {
             writeln!(out)?;
             writeln!(out, "REQUIRED CAPABILITIES:")?;
-            for cap in &service.required_caps {
+            for cap in &item.required_caps {
                 writeln!(out, "  {cap}")?;
             }
         }
@@ -435,7 +410,7 @@ fn print_installed_verb_help(
     Ok(true)
 }
 
-fn usage_tail(alias: &AliasHelpRecord, service: Option<&ServiceHelpRecord>) -> String {
+fn usage_tail(alias: &AliasHelpRecord, item: Option<&ItemHelpMetadata>) -> String {
     let mut parts = Vec::new();
     if !alias.positional_forms.is_empty() {
         for form in &alias.positional_forms {
@@ -453,8 +428,8 @@ fn usage_tail(alias: &AliasHelpRecord, service: Option<&ServiceHelpRecord>) -> S
         parts.push(format!("<{}>", field.replace('_', "-")));
     }
 
-    if let Some(service) = service {
-        for (field, ty) in &service.schema {
+    if let Some(item) = item {
+        for (field, ty) in &item.schema {
             let required = !ty.ends_with('?');
             if field == "project" || parts.iter().any(|p| p.contains(&field.replace('_', "-"))) {
                 continue;
@@ -479,14 +454,12 @@ fn usage_tail(alias: &AliasHelpRecord, service: Option<&ServiceHelpRecord>) -> S
     }
 }
 
-fn find_alias_help(
+fn find_alias_help_from_roots(
     verb_tokens: &[String],
-    system_space_dir: &std::path::Path,
+    bundle_roots: &[PathBuf],
 ) -> Option<AliasHelpRecord> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
-    let bundle_entries = std::fs::read_dir(&bundles_dir).ok()?;
-    for bundle_entry in bundle_entries.flatten() {
-        let aliases_dir = bundle_entry.path().join(".ai/node/aliases");
+    for bundle_root in bundle_roots {
+        let aliases_dir = bundle_root.join(".ai/node/aliases");
         let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
             continue;
         };
@@ -509,12 +482,9 @@ fn find_alias_help(
     None
 }
 
-fn read_verb_help(system_space_dir: &std::path::Path, verb: &str) -> Option<VerbHelpRecord> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
-    let bundle_entries = std::fs::read_dir(&bundles_dir).ok()?;
-    for bundle_entry in bundle_entries.flatten() {
-        let path = bundle_entry
-            .path()
+fn read_verb_help_from_roots(bundle_roots: &[PathBuf], verb: &str) -> Option<VerbHelpRecord> {
+    for bundle_root in bundle_roots {
+        let path = bundle_root
             .join(".ai/node/verbs")
             .join(format!("{verb}.yaml"));
         if let Some(record) = read_yaml::<VerbHelpRecord>(&path) {
@@ -524,28 +494,83 @@ fn read_verb_help(system_space_dir: &std::path::Path, verb: &str) -> Option<Verb
     None
 }
 
-fn service_ref_to_path(
-    system_space_dir: &std::path::Path,
-    service_ref: &str,
-) -> Option<std::path::PathBuf> {
-    let rel = service_ref.strip_prefix("service:")?;
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
-    let bundle_entries = std::fs::read_dir(&bundles_dir).ok()?;
-    for bundle_entry in bundle_entries.flatten() {
-        let path = bundle_entry
-            .path()
-            .join(".ai/services")
-            .join(format!("{rel}.yaml"));
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    None
-}
-
 fn read_yaml<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_yaml::from_str(&content).ok()
+}
+
+fn help_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
+    let user_root = ryeos_engine::roots::user_root().ok();
+    match ryeos_bundle::installed::load_installed_bundle_records(
+        system_space_dir,
+        user_root.as_deref(),
+    ) {
+        Ok(records) if !records.is_empty() => records
+            .into_iter()
+            .map(|record| record.bundle_root)
+            .collect(),
+        _ => discover_bundle_roots_direct(system_space_dir),
+    }
+}
+
+fn discover_bundle_roots_direct(system_space_dir: &Path) -> Vec<PathBuf> {
+    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name.ends_with(".backup.prev") {
+            continue;
+        }
+        let path = entry.path();
+        if path.join(".ai").is_dir() {
+            roots.push(path);
+        }
+    }
+    roots.sort();
+    roots
+}
+
+fn build_help_engine(
+    system_space_dir: &Path,
+    project_path: &str,
+    bundle_roots: &[PathBuf],
+) -> anyhow::Result<Engine> {
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        system_space_dir: Some(system_space_dir.to_path_buf()),
+        ..Default::default()
+    })?;
+    let project_root = (project_path != ".").then(|| PathBuf::from(project_path));
+    let user_root = ryeos_engine::roots::user_root().ok();
+
+    ryeos_app::engine_init::build_engine_for_roots(
+        &config,
+        bundle_roots,
+        project_root.as_deref(),
+        user_root.as_deref(),
+        None,
+    )
+    .context("build help effective-item engine")
+}
+
+fn resolve_effective_help(
+    engine: &Engine,
+    execute_ref: &str,
+    project_path: &str,
+) -> Option<ItemHelpMetadata> {
+    let item_ref = CanonicalRef::parse(execute_ref).ok()?;
+    let project_root = (project_path != ".").then(|| PathBuf::from(project_path));
+    let item = engine
+        .effective_item(EffectiveItemRequest {
+            item_ref,
+            expected_kind: None,
+            project_root,
+        })
+        .ok()?;
+    Some(ItemHelpMetadata::from_composed(&item.composed_value))
 }
 
 /// Print help for local verbs when the daemon is unavailable.
@@ -647,12 +672,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn installed_help_reads_alias_verb_and_service_metadata() {
+    fn installed_help_reads_alias_verb_and_effective_item_metadata() {
         let tmp = tempfile::tempdir().unwrap();
-        let bundle = tmp.path().join(".ai/bundles/core/.ai");
+        let bundle_root = tmp.path().join(".ai/bundles/core");
+        let bundle = bundle_root.join(".ai");
         std::fs::create_dir_all(bundle.join("node/aliases")).unwrap();
         std::fs::create_dir_all(bundle.join("node/verbs")).unwrap();
-        std::fs::create_dir_all(bundle.join("services/remote")).unwrap();
         std::fs::write(
             bundle.join("node/aliases/remote-doctor.yaml"),
             r#"
@@ -675,36 +700,33 @@ category: verbs
 section: verbs
 name: remote-doctor
 description: Diagnose remote setup
-execute: service:remote/doctor
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            bundle.join("services/remote/doctor.yaml"),
-            r#"
-kind: service
-endpoint: remote.doctor
-required_caps: ["ryeos.execute.service.remote.doctor"]
-schema:
-  remote: string?
-  project: string?
-description: Diagnose remote node authorization and project setup
+execute: tool:remote/doctor
 "#,
         )
         .unwrap();
 
         let tokens = vec!["remote".to_string(), "doctor".to_string()];
-        let alias = find_alias_help(&tokens, tmp.path()).unwrap();
+        let roots = vec![bundle_root];
+        let alias = find_alias_help_from_roots(&tokens, &roots).unwrap();
         assert_eq!(alias.verb, "remote-doctor");
         assert_eq!(
             alias.project_resolution,
             ryeos_runtime::ProjectResolution::Optional
         );
-        let verb = read_verb_help(tmp.path(), &alias.verb).unwrap();
-        assert_eq!(verb.execute, "service:remote/doctor");
-        let service_path = service_ref_to_path(tmp.path(), &verb.execute).unwrap();
-        let service: ServiceHelpRecord = read_yaml(&service_path).unwrap();
-        assert_eq!(service.schema.get("project").unwrap(), "string?");
-        assert_eq!(usage_tail(&alias, Some(&service)), " <remote>");
+        let verb = read_verb_help_from_roots(&roots, &alias.verb).unwrap();
+        assert_eq!(verb.execute, "tool:remote/doctor");
+
+        let item = ItemHelpMetadata::from_composed(&serde_json::json!({
+            "required_caps": ["ryeos.execute.tool.remote.doctor"],
+            "schema": {
+                "remote": "string?",
+                "project": "string?"
+            },
+            "description": "Diagnose remote node authorization and project setup",
+            "availability": "offline"
+        }));
+        assert!(item.is_offline_dispatch());
+        assert_eq!(item.schema.get("project").unwrap(), "string?");
+        assert_eq!(usage_tail(&alias, Some(&item)), " <remote>");
     }
 }

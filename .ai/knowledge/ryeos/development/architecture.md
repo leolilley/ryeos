@@ -1,179 +1,100 @@
-<!-- rye:signed:2026-05-24T09:22:21Z:e9e2d3c0656c57573b22e07911ced15f78d93a89e9a4d6c378404f0571c235e5:D-qpD5hgeqNrxTc3r439xbFZGnC8-hdXnIhqi1QeR9XsxqImWygBCSTWMyFrcGI_fk-bpDSj_uu2Ae6q5KFqCw:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-05-25T06:47:53Z:38ce7f7cbeaaf795ac1074b9d68520c7f5de467cce0ee505dfe20d5bf1698a5f:KR2uDoR6ECGP4AnthtdE6qvTKlBQf8ReGWeombYFZKcdTQN/WyZpd8dRgqDFepf8oAOss1jlBaE3RXHahx6IAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
-title: "Architecture"
-description: "Rust crate architecture, workspace structure, and how components connect"
+title: "Architecture Map"
+description: "Short orientation for crates, bundles, execution flow, and trust boundaries"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
-# Architecture
+# Architecture Map
 
-## Workspace crates
+Use this for orientation before changing code. It is intentionally a map, not a
+full design document.
 
-```
-ryeos-next/
-├── crates/kernel/lillux/              # Crypto primitives (Ed25519, X25519, SHA-256)
-├── crates/core/engine/        # Core engine: resolution, verification, plan building
-├── crates/core/state/         # SQLite-backed state store, CAS objects, thread state
-├── crates/core/runtime/       # Shared runtime library (callback client, envelope)
-├── crates/core/handler-protocol/  # Handler subprocess protocol types
-├── crates/tools/handler-bins/  # Parser/composer binary implementations
-├── crates/core/tracing/       # Structured tracing utilities
-├── crates/tools/core-tools/         # CLI action implementations (init, publish, trust, vault)
-├── crates/clients/base/       # Shared TUI model/update/views/frame (platform-agnostic)
-├── crates/clients/terminal/   # Native terminal client (crossterm + braille renderer)
-├── crates/bin/daemon/              # The daemon (HTTP + UDS server)
-├── crates/bin/cli/           # The CLI binary (`ryeos`)
-├── crates/runtimes/directive/  # Directive execution subprocess
-├── crates/runtimes/graph/      # State graph execution subprocess
-├── crates/runtimes/knowledge/  # Knowledge composition subprocess
-├── bundles/       # Bundle source trees (core + standard)
-│   ├── core/            # Kind schemas, parsers, handlers, protocols, tools
-│   └── standard/        # Runtimes, model providers, directives
-├── integrations/mcp/ryeosd/  # Python MCP adapter (wraps CLI binary)
-├── scripts/             # Build/gate/dev scripts
-└── .dev-keys/           # Development publisher keypair
-```
+## Main crate map
 
-## Dependency flow
+| Area | Path | Owns |
+|---|---|---|
+| Crypto | `crates/kernel/lillux/` | Ed25519/X25519/SHA primitives and signatures |
+| Engine | `crates/core/engine/` | item resolution, trust verification, composition, plans |
+| App | `crates/core/app/` | daemon/app config, engine boot, node-config loading |
+| State | `crates/core/state/` | SQLite state, CAS objects, thread state |
+| Runtime shared | `crates/core/runtime/` | callback client, runtime envelopes/types |
+| Tools | `crates/tools/core-tools/` | init, bundle build/verify, trust, vault, sign/fetch actions |
+| CLI | `crates/bin/cli/` | `ryeos` command dispatch and daemon transport |
+| Daemon | `crates/bin/daemon/` | HTTP/UDS server and execution API |
+| Handler bins | `crates/tools/handler-bins/` | parser/composer subprocesses |
+| Runtimes | `crates/runtimes/{directive,graph,knowledge}/` | bundled execution runtimes |
+| TUI model | `crates/clients/base/` | platform-agnostic UI state/update/views |
+| TUI terminal | `crates/clients/terminal/` | `ryeos-tui` binary |
+| MCP adapter | `integrations/mcp/ryeosd/` | Python MCP wrapper around `ryeos` |
 
-```
-lillux (crypto primitives)
-  └── ryeos-engine (resolution, verification, plan building)
-        ├── ryeos-state (SQLite CAS, thread state)
-        ├── ryeos-runtime (callback client, shared runtime types)
-        └── ryeos-handler-protocol (subprocess protocol)
+## Bundle map
 
-ryeos-tools (CLI actions: init, publish, trust, vault)
-  └── ryeos-engine, lillux
+Bundles are signed content trees. Derived bundle state (`.ai/bin`, `.ai/objects`,
+`.ai/refs`) is rebuilt by `scripts/populate-bundles.sh`.
 
-ryeosd (the daemon)
-  └── ryeos-engine, ryeos-state, ryeos-runtime, ryeos-tracing
+| Bundle | Path | Contains |
+|---|---|---|
+| Core | `bundles/core/` | kind schemas, parsers, handlers, protocols, services, core tools, routes, CLI aliases/verbs |
+| Standard | `bundles/standard/` | directive/graph/knowledge runtimes, model provider config, user-facing clients/tools/directives |
 
-ryeos-cli (the CLI binary)
-  └── ryeos-tools, ryeos-engine
+Important bundle subdirs:
 
-ryeos-directive-runtime (subprocess runtime)
-  └── ryeos-runtime, ryeos-engine
-
-ryeos-graph-runtime (subprocess runtime)
-  └── ryeos-runtime
-
-ryeos-knowledge-runtime (subprocess runtime)
-  └── ryeos-runtime
-
-ryeos-handler-bins (parser/composer binaries)
-  └── ryeos-handler-protocol
-
-ryeos-client-base (shared TUI model, Elm architecture)
-  └── (no engine/daemon deps — pure view/update/frame)
-
-ryeos-ui-terminal (native terminal client, ryeos-tui)
-  └── ryeos-client-base, ryeos-cli (transport/signing reuse)
-```
+| Subdir | Meaning |
+|---|---|
+| `.ai/node/engine/kinds/` | kind schemas |
+| `.ai/node/verbs/` | CLI verb descriptors |
+| `.ai/node/aliases/` | CLI alias descriptors |
+| `.ai/services/`, `.ai/tools/`, `.ai/clients/` | executable/composable item descriptors |
+| `.ai/bin/<triple>/` | trusted bundle-owned binaries |
 
 ## Execution flow
 
-```
-CLI: ryeos execute tool:ryeos/core/identity/public_key
-  │
-  ▼  CLI resolves daemon URL from daemon.json
-  │    Signs request with node identity key
-  │
-  ▼  POST /execute to ryeosd (HTTP or UDS)
-  │
-Daemon: receives request
-  │
-  ▼  Engine resolves item through spaces (project → user → system)
-  │    - Looks up kind schema for "tool"
-  │    - Finds matching file via parser descriptors
-  │    - Verifies signature against trust store
-  │
-  ▼  Plan builder creates execution plan
-  │    - Determines handler (e.g., Subprocess)
-  │    - Selects runtime from registry
-  │    - Builds protocol envelope (env vars, callback tokens)
-  │
-  ▼  Dispatch subprocess
-  │    - Spawns runtime binary (e.g., ryeos-core-tools)
-  │    - Injects env vars via protocol descriptor
-  │    - Runtime calls back to daemon for sub-actions
-  │
-  ▼  Collect result, write state transition to CAS chain
-  │
-  ▼  Return result to CLI
+```text
+ryeos CLI
+  -> signs request to ryeosd
+  -> daemon boots engine from registered bundles
+  -> engine resolves project -> user -> system
+  -> engine verifies trust and composes effective item
+  -> plan/handler/protocol selects runtime or tool binary
+  -> subprocess runs and may call back to daemon
+  -> daemon records state and returns result
 ```
 
-## The bundle system
+Local/offline CLI dispatch follows the same principle: load installed bundle
+roots, call `engine.effective_item(... expected_kind: None ...)`, then inspect
+generic composed dispatch fields. Avoid kind-specific CLI descriptor parsing.
 
-Bundles are content-addressed directory trees. Two bundles ship with the system:
+## Trust and signing boundaries
 
-### Core bundle (`bundles/core/`)
+- Bundle items are publisher-signed and verified against trusted publisher keys.
+- Project/user items are operator-signed with the user key.
+- Installed bundles are discovered from signed node bundle registrations, not
+  arbitrary ambient directories.
+- Bundle-owned binaries must be resolved from signed bundle bin trees. Do not
+  install handler/runtime/tool binaries on PATH as a workaround.
 
-Infrastructure that the daemon needs to function:
+## Where to change things
 
-| Directory | Contents |
+| Need | Likely area |
 |---|---|
-| `.ai/node/engine/kinds/` | Kind schemas (directive, tool, knowledge, graph, service, runtime, etc.) |
-| `.ai/node/engine/` | Parser tool descriptors, handler descriptors, protocol descriptors |
-| `.ai/parsers/` | Parser implementations (YAML, markdown, Python AST, JavaScript) |
-| `.ai/handlers/` | Handler implementations (subprocess, identity, extends-chain) |
-| `.ai/protocols/` | Protocol descriptors (runtime_v1, tool_streaming_v1, opaque) |
-| `.ai/services/` | Operational services (fetch, sign, verify, identity, rebuild, events) |
-| `.ai/tools/` | Core tools (sign, verify, fetch, identity, subprocess, verbs, runtimes) |
-| `.ai/config/` | Execution config |
-| `.ai/node/routes/` | HTTP route definitions |
-| `.ai/node/verbs/` | CLI verb definitions |
-| `.ai/node/aliases/` | CLI alias shortcuts |
-| `.ai/bin/<triple>/` | Compiled binaries (ryeos-core-tools, parsers, composers) |
+| Item resolution/composition behavior | `crates/core/engine/src/` |
+| Node-config/bootstrap/bundle root loading | `crates/core/app/src/node_config/` and `crates/core/bundle/src/installed.rs` |
+| CLI command behavior | `crates/bin/cli/src/` plus bundle alias/verb descriptors |
+| Offline command execution | `crates/bin/cli/src/offline_dispatch.rs` |
+| Help output | `crates/bin/cli/src/help.rs` |
+| Init/publish/sign/vault tooling | `crates/tools/core-tools/src/actions/` |
+| Runtime protocol semantics | `crates/core/runtime/`, `crates/runtimes/*`, bundle protocol descriptors |
 
-### Standard bundle (`bundles/standard/`)
+## Guardrails for agents
 
-User-facing runtimes and configuration:
-
-| Directory | Contents |
-|---|---|
-| `.ai/runtimes/` | Runtime definitions (directive, graph, knowledge) |
-| `.ai/config/ryeos-runtime/` | Model providers, model routing, execution config |
-| `.ai/tools/ryeos/agent/providers/` | LLM provider adapter tools (Anthropic, OpenAI, Zen) |
-| `.ai/directives/` | Example directives (hello.md) |
-| `.ai/bin/<triple>/` | Runtime binaries (directive-runtime, graph-runtime, knowledge-runtime) |
-
-## Key subsystems
-
-### Kind schemas
-
-Define item types. Each kind declares:
-- File formats and parsers
-- Execution model (operations, dispatch method)
-- Metadata rules (how name/category are derived from path)
-- Composer (how items are composed/merged)
-
-Located at `<root>/.ai/node/engine/kinds/<name>/<name>.kind-schema.yaml`.
-
-### Handlers
-
-Define how to execute items. The primary handler is `Subprocess` which spawns a binary with a protocol envelope. Other handlers include `Identity` (pass-through) and composition handlers.
-
-### Protocols
-
-Define the wire contract between daemon and subprocess. Specify which env vars to inject, how stdin/stdout are framed, what capabilities are available.
-
-### Verb/alias system
-
-The CLI dispatches through a data-driven verb table:
-- **Verbs** (`node/verbs/*.yaml`): Full verb definitions with parameter binding
-- **Aliases** (`node/aliases/*.yaml`): Shortcuts that map to verb calls
-
-The CLI tries local verbs first (init, publish, trust, vault), then `execute <canonical-ref>`, then token-based dispatch through the verb table.
-
-### Trust store
-
-Three-tier trust model:
-- **Node key**: Daemon's Ed25519 identity, generated at init
-- **User key**: Operator's Ed25519 identity, generated at init
-- **Trusted signers**: Pinned public keys in `~/.ryeos/.ai/config/keys/trusted/*.toml`
-
-At boot, the daemon loads the trust store and verifies every bundle item against it. Untrusted items are rejected.
+- Prefer changing the shared source of truth over adding CLI/app-specific
+  mirrors of descriptor semantics.
+- If descriptor resolution is needed, use engine APIs instead of manually
+  opening kind-specific files.
+- Keep `ryeos-api` generic; daemon composition should wire UI-specific pieces.
+- After bundle or binary changes, refresh/sign bundles before trusting test
+  failures.

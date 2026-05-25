@@ -1,117 +1,99 @@
-<!-- rye:signed:2026-05-24T09:23:01Z:b2c94b7429244e2944277741b06c32721362b2a8cf8138ad41e3aa2451fadaa1:biqPK5WlPV8TaoZgf22_TXdm1jBeDuZqUpBwQLUhlBfa33Sj4UOFGVHcIebmhzvyEAFajql7jrHSAG_6YGKeCQ:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-05-25T06:47:54Z:8a82caf3ef35a380c1f1317369654565106a00b532d27277cd4cc560578cce88:ie23g/dCmoCaEroKfpNLAAeS8J7md5jK4vw+oTYilMqa8xMLSFVUwkaN5czVo1Fz8vNlX7PuDJaqE/bjVusNCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: "ryeos/development"
 name: "dev-workflow"
 title: "Development Workflow"
-description: "Day-to-day development workflow: edit, build, sign, test, iterate"
+description: "Short LLM-facing guide for choosing the right RyeOS dev workflow"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Development Workflow
 
-## The dev loop
+Use this when an agent needs orientation before changing code. For exact build,
+signing, and install commands, prefer `development/build-and-test.md`.
 
-```
-edit code → cargo build → populate bundles → start daemon → test → repeat
-```
+## Pick the loop
 
-### Quick iteration (no bundle changes)
+| Change type | Loop |
+|---|---|
+| Rust-only, compile feedback | `cargo build` or a targeted `cargo test -p <crate>` |
+| Rust that affects bundled binaries | `./scripts/gate.sh --no-tests`, then targeted/full tests |
+| Anything under `bundles/` | `./scripts/gate.sh` unless intentionally skipping tests |
+| Daemon/CLI behavior with installed bundles | `./scripts/dev-up.sh` for repo-local `.local/ryeos` |
+| System packaged-layout repair | `./scripts/pkg/install-local-direct.sh` |
 
-If you only changed Rust code (not bundle YAML):
+Default rule: if a test or runtime loads bundle items, refresh/sign bundles
+first. Stale bundle bin/CAS/signature state is the most common false failure.
 
-```bash
-cargo build
-# Tests that need bundle binaries will fail with hash mismatch.
-# Run just the non-bundle tests:
-cargo nextest run -p ryeos-engine
-```
-
-### Full iteration (bundle changes)
-
-If you changed anything in `bundles/`:
-
-```bash
-./scripts/gate.sh
-```
-
-This rebuilds binaries, re-signs bundles, and runs all tests.
-
-### Daemon iteration
-
-```bash
-# Terminal 1: start daemon
-cargo run --release -p ryeosd
-
-# Terminal 2: test against daemon
-curl http://127.0.0.1:7400/health
-cargo run --release -p ryeos-cli -- execute tool:ryeos/core/identity/public_key
-```
-
-## One-command bootstrap
-
-For a fresh checkout:
+## Fresh checkout
 
 ```bash
 ./scripts/dev-up.sh
 ```
 
-This runs:
-1. `populate-bundles.sh` (build + sign)
-2. `ryeos init` (create node identity, install bundles)
-3. Starts the daemon
+This populates bundles, initializes `.local/ryeos`, and starts a daemon against
+that isolated system space. It does not touch the normal user/system install.
 
-Note: `dev-up.sh` uses `--system-space-dir .local/ryeos` for isolation from any system install.
+## Day-to-day examples
 
-## Key file locations
-
-| What | Where |
-|---|---|
-| Daemon source | `crates/bin/daemon/src/` |
-| CLI source | `crates/bin/cli/src/` |
-| Engine core | `crates/core/engine/src/` |
-| TUI shared model | `crates/clients/base/src/` |
-| TUI terminal client | `crates/clients/terminal/src/` |
-| Test support | `crates/core/engine/src/test_support.rs` |
-| CLI actions | `crates/tools/core-tools/src/actions/` |
-| Core bundle items | `bundles/core/.ai/` |
-| Standard bundle items | `bundles/standard/.ai/` |
-| Surface specs | `bundles/standard/.ai/surfaces/ryeos/cockpit/` |
-| Dev publisher key | `.dev-keys/PUBLISHER_DEV.pem` |
-| Gate script | `scripts/gate.sh` |
-| Bundle populator | `scripts/populate-bundles.sh` |
-
-## Testing patterns
-
-### Unit tests
-
-Most crates have unit tests. Run individually:
+Targeted Rust edit:
 
 ```bash
-cargo nextest run -p ryeos-engine
-cargo nextest run -p ryeosd
+cargo build
+cargo test -p ryeos-engine
 ```
 
-### Integration tests with live daemon
+Bundle-aware edit:
 
-Tests in `tests/` spin up a real daemon process. These require:
-- Built binaries (`cargo build --release`)
-- Populated bundles (`populate-bundles.sh`)
-- `HOSTNAME` env var set
+```bash
+./scripts/gate.sh --no-tests
+cargo test -p ryeos-cli
+```
 
-### Test support
+Full confidence:
 
-`ryeos_engine::test_support::live_trust_store()` provides a trust store that trusts only the dev publisher key. Use this in tests that load bundle items.
+```bash
+./scripts/gate.sh
+```
 
-## Git workflow
+## Key locations
 
-- `bundles/{core,standard}/.ai/bin/` — `.gitignored` (derived, rebuilt by scripts)
-- `bundles/{core,standard}/.ai/objects/` — `.gitignored` (CAS objects, regenerated)
-- `bundles/{core,standard}/.ai/refs/` — `.gitignored` (CAS refs, regenerated)
-- `bundles/{core,standard}/PUBLISHER_TRUST.toml` — committed (deterministic from key)
-- `bundles/{core,standard}/.ai/**/*.yaml` — committed (signed bundle items)
-- `target/` — `.gitignored`
+| Area | Path |
+|---|---|
+| CLI | `crates/bin/cli/src/` |
+| Daemon | `crates/bin/daemon/src/` |
+| Engine | `crates/core/engine/src/` |
+| Core tools/actions | `crates/tools/core-tools/src/actions/` |
+| TUI shared model | `crates/clients/base/src/` |
+| TUI terminal client | `crates/clients/terminal/src/` |
+| Core bundle | `bundles/core/.ai/` |
+| Standard bundle | `bundles/standard/.ai/` |
+| Dev publisher key | `.dev-keys/PUBLISHER_DEV.pem` |
+| Main runbook | `.ai/knowledge/ryeos/development/build-and-test.md` |
 
-## CI
+## Git/derived state
 
-The canonical gate is `./scripts/gate.sh`. CI should invoke it directly. It auto-syncs manifests and runs the full workspace test suite.
+Derived and safe to regenerate:
+
+- `bundles/{core,standard}/.ai/bin/`
+- `bundles/{core,standard}/.ai/objects/`
+- `bundles/{core,standard}/.ai/refs/`
+- `target/`
+
+Committed and meaningful:
+
+- `bundles/{core,standard}/PUBLISHER_TRUST.toml`
+- signed YAML under `bundles/{core,standard}/.ai/`
+- Rust source and scripts
+
+## Guardrails for agents
+
+- Prefer smallest code changes; do not paper over stale bundle state with code.
+- Do not add raw YAML fallback parsers or hardcoded registries to pass tests.
+- Do not copy bundle-owned binaries to `/usr/bin`; bundle resolution must go
+  through signed bundle bin trees.
+- If a daemon is running while bundles are reinitialized, restart it so the
+  in-memory engine matches disk.
+- If unsure which command to run, use `./scripts/gate.sh --no-tests` before
+  targeted tests.

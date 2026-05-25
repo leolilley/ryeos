@@ -1,64 +1,50 @@
-<!-- rye:signed:2026-05-24T09:22:40Z:c532c0344b69f7788864a32ad7fcd65fffbc8561fd8228c5dccc791f0ee175c0:obUYk-W9NeV6fQXhifV5QImy0gxtj4WfNl_7HlQbpk-nUnUg9ZbpgwLcy8ecxhHs-rl_NBAuBYg61pw-D6FoAA:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-05-25T06:47:54Z:2881261b9ae61e6939f41fc669bbf22521bb06cf7fd4f1553bb2ee35b9c72bba:Gn9VT4M8S9/u+rUo2PZAu7U38ufVNX6zGZfdVUy40P5wfLTZAS6DXr0Nh2CI6WSnTv5tt4ucBOLRlNfVbaDhBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
-title: "Build and Test"
-description: "Build the Rust workspace, populate bundles, run the test gate"
+title: "Build, Test, and Local Install Runbook"
+description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
-# Build and Test
+# Build, Test, and Local Install Runbook
 
-## Prerequisites
+Use this as the first operational reference when an agent needs to build,
+test, refresh bundles, or install this checkout locally.
 
-- Rust stable (1.80+)
-- `cargo-nextest` installed (`cargo install cargo-nextest`)
-- Linux (x86_64 or aarch64)
-- `HOSTNAME` env var set (most desktops set this automatically)
+## Command matrix
 
-## One-command gate
+| Goal | Command |
+|---|---|
+| Full gate | `./scripts/gate.sh` |
+| Rebuild/sign bundles only | `./scripts/gate.sh --no-tests` |
+| Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
+| Fresh repo-local daemon | `./scripts/dev-up.sh` |
+| Fast packaged-layout install | `./scripts/pkg/install-local-direct.sh` |
+| Verify source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
+
+Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
+
+## Canonical gate
 
 ```bash
 ./scripts/gate.sh
 ```
 
-This is the canonical gate. It does three things:
-1. Populates bundles (build binaries + sign + rebuild CAS manifest)
-2. Runs `cargo nextest run --workspace --no-fail-fast`
+`gate.sh` is the CI/human default. It runs `scripts/populate-bundles.sh`, then
+`cargo nextest run --workspace --no-fail-fast`.
 
-Skip tests with `--no-tests`:
+Use `--no-tests` when you only need bundle bin/CAS/signature state refreshed:
+
 ```bash
 ./scripts/gate.sh --no-tests
 ```
 
-Forward nextest args:
-```bash
-./scripts/gate.sh -p ryeosd
-```
+## Bundle refresh rules
 
-## Step by step
-
-### 1. Build release binaries
-
-```bash
-cargo build --release
-```
-
-Produces these binaries in `target/release/`:
-
-| Binary | Purpose |
-|---|---|
-| `ryeosd` | The daemon |
-| `ryeos` | The CLI |
-| `ryeos-tui` | Native terminal TUI client |
-| `ryeos-directive-runtime` | Directive execution runtime |
-| `ryeos-graph-runtime` | State graph execution runtime |
-| `ryeos-knowledge-runtime` | Knowledge composition runtime |
-| `ryeos-core-tools` | Core tools binary (sign, verify, identity, fetch) |
-| Parser/composer binaries | `rye-parser-*`, `rye-composer-*` |
-
-### 2. Populate bundles
+Run `scripts/populate-bundles.sh` through `gate.sh` unless you have a reason to
+call it directly:
 
 ```bash
 ./scripts/populate-bundles.sh \
@@ -66,74 +52,102 @@ Produces these binaries in `target/release/`:
   --owner ryeos-dev
 ```
 
-This stages binaries into `bundles/{core,standard}/.ai/bin/<triple>/`, then runs `ryeos-core-tools build` on both bundles to sign all items, rebuild CAS manifests, and emit publisher trust docs.
+It does all of this as one atomic authoring refresh:
 
-**Idempotent.** Safe to re-run. Required after any `cargo build` that changes binary hashes.
+1. builds release binaries owned by bundles;
+2. deletes derived bundle state: `.ai/bin`, `.ai/objects`, `.ai/refs`, stale
+   `PUBLISHER_TRUST.toml`;
+3. stages binaries into `bundles/{core,standard}/.ai/bin/<triple>/`;
+4. runs `ryeos-core-tools build` for core and standard, which signs items and
+   rebuilds CAS manifests.
 
-What it actually does:
+Hard rules:
 
-1. Builds the release binaries that bundles own.
-2. Wipes derived bundle state: `.ai/bin/`, `.ai/objects/`, `.ai/refs/`, and stale `PUBLISHER_TRUST.toml`.
-3. Installs fresh release binaries into `bundles/core/.ai/bin/<triple>/` and `bundles/standard/.ai/bin/<triple>/`.
-4. Runs the offline publisher binary directly:
-   - `target/release/ryeos-core-tools build bundles/core --registry-root bundles/core --owner <owner>`
-   - `target/release/ryeos-core-tools build bundles/standard --registry-root bundles/core --owner <owner>`
+- Do not manually copy one binary into a bundle as a fix.
+- Do not edit signed bundle YAML and leave the old signature.
+- Do not verify source bundles without `--registry-root`; installed bundle
+  registrations may be stale while you are repairing the source tree.
+- Use `.dev-keys/PUBLISHER_DEV.pem` for dev bundles. Do not use old `--seed 42`
+  docs or ad-hoc keys.
 
-`ryeos-core-tools build` signs and publishes an already-staged bundle tree; it does **not** compile Rust binaries. Do not manually copy a single binary into a bundle as a recovery step — that bypasses manifest/CAS/signature regeneration.
+## Init/reinit after bundle changes
 
-After a source merge that changes bundle schemas, parsers, composers, or bundled binaries, use the full refresh + init sequence:
+After a merge or bundle/binary refresh, install the refreshed source bundles
+into the system space actually used by the CLI/daemon.
+
+Default user system space:
 
 ```bash
-./scripts/populate-bundles.sh \
-  --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev
-
-target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core
-target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core
-
-# Use the same system space your daemon/CLI actually uses.
 target/release/ryeos init \
   --source bundles \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+```
 
-# Repo-local dev install, matching scripts/dev-up.sh:
+Repo-local dev system space, matching `scripts/dev-up.sh`:
+
+```bash
 target/release/ryeos init \
   --system-space-dir .local/ryeos \
   --source bundles \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
-For source-tree verification, pass `--registry-root` explicitly. Omitting it lets verification consult installed bundle registrations, which may be stale when you are repairing the bundle source tree.
-
-### 3. Run tests
+If a daemon is running against that system space, stop it before init and start
+it after. A running daemon keeps the old in-memory engine/registries.
 
 ```bash
-cargo nextest run --workspace --no-fail-fast
+target/release/ryeos stop --force || true
+target/release/ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+target/release/ryeos start
 ```
 
-Or use `gate.sh` which auto-syncs manifests first.
+## Local packaged-layout install
 
-## Common build failures
+Use this to install the current checkout into the same layout as a package,
+without running `makepkg`/`yay`:
+
+```bash
+./scripts/pkg/install-local-direct.sh
+```
+
+It populates bundles, stops a running daemon before replacing files, installs
+`ryeos`/`ryeosd` to `/usr/bin`, installs bundle sources under
+`/usr/share/ryeos/{core,standard}`, runs `ryeos init`, verifies the initialized
+bundle state, and restarts the daemon if it was running before.
+
+Important: bundle-owned binaries (`ryeos-core-tools`, parsers, composers,
+runtimes, `ryeos-tui`, etc.) belong inside signed bundle bin trees under
+`/usr/share/ryeos/<bundle>/.ai/bin/<triple>/`; they should not be installed on
+PATH.
+
+Post-install smoke:
+
+```bash
+command -v ryeos                 # should be /usr/bin/ryeos
+ryeos status
+ryeos execute tool:ryeos/core/identity/public_key
+script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
+```
+
+If `ryeos tui` works but `ryeos help tui` fails, fix the CLI help path. Do not
+work around it by adding kind-specific CLI dispatch logic.
+
+## Common failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `hash mismatch` in tests | Binary changed but manifest is stale | Run `populate-bundles.sh` or `gate.sh --no-tests` |
-| `no kind schema roots found` | Missing core bundle in system space | Run `ryeos init` |
-| `signature from fingerprint X not in trust store` | Signed with wrong key | Use `.dev-keys/PUBLISHER_DEV.pem`, never `--seed 42` |
-| `failed to acquire state lock` | Another daemon instance running | Stop it first |
-| `unknown variant ... expected ...` while publishing/verifying a new kind schema | The merged bundle descriptor language is newer than the built binaries, or the source code lacks support for the new descriptor term | Fix/build the Rust support first, then rerun `populate-bundles.sh`; do not add raw YAML fallbacks or hardcoded registries |
+| `hash mismatch` | Bundle binary/CAS manifest stale | `./scripts/gate.sh --no-tests` |
+| `no kind schema roots found` | Core bundle not initialized in active system space | `ryeos init --source bundles ...` |
+| `signature ... not in trust store` | Wrong signing key or missing trust file | Repopulate with `.dev-keys/PUBLISHER_DEV.pem`, init with `PUBLISHER_DEV_TRUST.toml` |
+| `failed to acquire state lock` | Another daemon owns state | `ryeos stop --force`, then retry |
+| `unknown variant ... expected ...` during publish/verify | New descriptor language but old binaries, or missing Rust support | Build/fix Rust first, then repopulate; do not add YAML fallbacks |
 
-## Debug builds
+## Script intent
 
-`cargo build` (without `--release`) produces debug binaries. These work but:
-- Bundle `.ai/bin/<triple>/` contents are release binaries staged by `populate-bundles.sh`, not automatically refreshed by debug builds
-- The bundle manifest will be stale until `populate-bundles.sh` runs after any binary change that should be packaged
-- Tests that verify binary hashes will fail
-
-For development iteration, use `cargo build` for compile speed, then run `gate.sh --no-tests` before testing.
-
-## The dev key
-
-`.dev-keys/PUBLISHER_DEV.pem` is the development publisher key. It is intentionally checked into version control. **Never trust this key in production.**
-
-The engine test harness trusts exactly one key: the official publisher fingerprint (`OFFICIAL_PUBLISHER_FP` in `crates/tools/core-tools/src/actions/init.rs`). For dev bundles, that's the dev key's fingerprint.
+| Script | Use it for | Notes |
+|---|---|---|
+| `scripts/gate.sh` | canonical validation | builds/signs bundles, then nextest |
+| `scripts/populate-bundles.sh` | bundle authoring refresh | derived state only; safe to rerun |
+| `scripts/dev-up.sh` | isolated repo-local daemon | uses `.local/ryeos` system space |
+| `scripts/pkg/install-local-direct.sh` | fast local packaged install | uses `/usr/bin` + `/usr/share/ryeos` |
+| `scripts/smoke-execute-stream.sh` | signed `/execute/stream` SSE smoke | needs URL, key, audience |

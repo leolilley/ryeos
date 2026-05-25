@@ -24,6 +24,7 @@ Fast-install the current checkout using the packaged RyeOS layout:
 Options:
   --skip-populate       Do not run scripts/populate-bundles.sh first
   --no-init             Install files but do not run ryeos init
+  --no-daemon-restart   Do not stop/restart an already-running daemon
   --keep-shadows        Do not move /usr/local/bin or ~/.local/bin RyeOS shadows
   --key PATH            Publisher key for populate-bundles.sh
                         (default: .dev-keys/PUBLISHER_DEV.pem)
@@ -32,8 +33,9 @@ Options:
   -h, --help            Show this help
 
 Default behavior is safe and complete: populate bundles, install files,
-move stale PATH shadows aside, then run ryeos init with the installed
-PUBLISHER_TRUST.toml files.
+stop any already-running daemon, move stale PATH shadows aside, run
+ryeos init with the installed PUBLISHER_TRUST.toml files, then restart
+the daemon if it was running before the install.
 EOF
 }
 
@@ -47,6 +49,7 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 
 run_populate=1
 run_init=1
+restart_daemon=1
 cleanup_shadows=1
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
@@ -59,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-init)
             run_init=0
+            shift
+            ;;
+        --no-daemon-restart)
+            restart_daemon=0
             shift
             ;;
         --keep-shadows)
@@ -109,6 +116,16 @@ if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
     echo "[install-local-direct] populating bundles"
     "$repo_root/scripts/populate-bundles.sh" --key "$key" --owner "$owner"
+fi
+
+daemon_was_running=0
+if [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then
+    status_out="$(ryeos status 2>/dev/null || true)"
+    if grep -qx "running" <<<"$status_out"; then
+        daemon_was_running=1
+        echo "[install-local-direct] stopping running daemon before replacing binaries"
+        ryeos stop --force >/dev/null || die "failed to stop running daemon before install"
+    fi
 fi
 
 for b in "${required_bins[@]}"; do
@@ -205,6 +222,21 @@ if [[ $run_init -eq 1 ]]; then
         trust_args+=(--trust-file "$trust_file")
     done
     ryeos init "${trust_args[@]}"
+
+    echo "[install-local-direct] verifying initialized bundle state"
+    test -d "$HOME/.local/share/ryeos/.ai/bundles/core/.ai" || \
+        die "initialized core bundle missing from ~/.local/share/ryeos"
+    test -d "$HOME/.local/share/ryeos/.ai/bundles/standard/.ai" || \
+        die "initialized standard bundle missing from ~/.local/share/ryeos"
+    grep -q '^execute: client:ryeos/tui$' \
+        "$HOME/.local/share/ryeos/.ai/bundles/standard/.ai/node/verbs/tui.yaml" || \
+        die "initialized tui verb is stale or not client-backed"
+fi
+
+if [[ $daemon_was_running -eq 1 ]]; then
+    echo "[install-local-direct] restarting daemon"
+    ryeos start >/dev/null
+    ryeos status | grep -qx "running" || die "daemon did not restart cleanly"
 fi
 
 echo
@@ -212,3 +244,6 @@ echo "[install-local-direct] complete"
 echo "  ryeos:        $(command -v ryeos)"
 echo "  bundle src:   $share_dir/{core,standard}"
 echo "  local state:  $HOME/.local/share/ryeos"
+if [[ $daemon_was_running -eq 1 ]]; then
+    echo "  daemon:       restarted"
+fi

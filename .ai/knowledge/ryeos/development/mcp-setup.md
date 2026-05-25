@@ -1,27 +1,30 @@
+<!-- ryeos:signed:2026-05-25T06:47:54Z:5398860bad2ef054084a3781888ada3827337b9258da43b2e7039c4b18ab6a41:NWTP1aISZmhCY2bcYrKOPA1yLLtlc0ZdKFg6IaHcLBdw4fAgtyQaMIyhkBhvdyIBaOFH4luiGXisIAGC+AUZCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: "ryeos/development"
 name: "mcp-setup"
-description: "MCP setup for opencode and amp"
+title: "MCP Setup"
+description: "Short setup and verification guide for the RyeOS MCP adapter"
+entry_type: reference
+version: "1.1.0"
 ---
 
 # MCP Setup
 
-The RyeOS MCP adapter lives at `integrations/mcp/ryeosd`. It exposes a
-single MCP tool named `cli` that runs the `ryeos` CLI binary in a
-subprocess.
+The MCP adapter is `integrations/mcp/ryeosd`. It exposes one MCP tool named
+`cli`, which shells out to the `ryeos` binary.
 
-## Architecture
+## Contract
 
-| Component | Value |
+| Field | Value |
 |---|---|
-| MCP package | `ryeosd-mcp` |
-| Python module | `ryeosd_mcp.server` |
-| Tool name | `cli` |
+| Package | `ryeosd-mcp` |
+| Module | `ryeosd_mcp.server` |
+| Tool | `cli` |
 | Wrapped binary | `ryeos` |
-| Binary override env | `RYE_BIN` |
-| Required daemon | `ryeosd` for daemon-backed commands |
+| Binary override | `RYE_BIN` |
+| Daemon needed | yes for daemon-backed commands; no for CLI-offline commands |
 
-The MCP tool accepts:
+Tool input shape:
 
 ```json
 {
@@ -31,27 +34,20 @@ The MCP tool accepts:
 }
 ```
 
-Do not include `ryeos` as the first argument; the MCP server prepends
-the binary path.
+Do not include `ryeos` in `args`; the adapter prepends the binary.
 
-## Setup steps
-
-### 1. Build the ryeos CLI binary
+## Setup
 
 ```bash
 cargo build --release -p ryeos-cli --bin ryeos
-```
 
-### 2. Create a venv for ryeosd-mcp
-
-```bash
 cd integrations/mcp/ryeosd
 uv venv .venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
 
-### 3. Run the MCP server
+Run manually:
 
 ```bash
 RYE_BIN=/home/leo/projects/ryeos-next/target/release/ryeos \
@@ -60,12 +56,10 @@ RYE_BIN=/home/leo/projects/ryeos-next/target/release/ryeos \
 
 If `RYE_BIN` is unset, the adapter resolves `ryeos` from `PATH`.
 
-## opencode / amp configuration
+## Client config pattern
 
-Configure an MCP server entry that launches `ryeosd-mcp` and sets
-`RYE_BIN` when the release binary is not on `PATH`.
-
-Example command payload:
+Configure your MCP client to launch the `ryeosd-mcp` executable and set
+`RYE_BIN` when the release binary is not on PATH.
 
 ```json
 {
@@ -76,11 +70,11 @@ Example command payload:
 }
 ```
 
-## Verification
+## Verify
 
 ```bash
 cd integrations/mcp/ryeosd
 uv run pytest tests
 ```
 
-The test suite builds `ryeos` unless `RYE_BIN` is already set.
+The tests build `ryeos` unless `RYE_BIN` already points at a usable binary.
