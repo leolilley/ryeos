@@ -82,7 +82,7 @@ echo "[populate-bundles] building all release binaries (workspace)…"
   -p ryeos-cli \
   -p ryeos-tools \
   -p ryeos-ui-terminal \
-  -p ryeos-ui-web --bin web
+  -p ryeos-ui-web
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 
