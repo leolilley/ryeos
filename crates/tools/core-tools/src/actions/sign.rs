@@ -92,8 +92,7 @@ pub fn run_sign(
     project_path: Option<&Path>,
     source: SignSource,
 ) -> Result<BatchReport> {
-    let canonical = CanonicalRef::parse(item_ref)
-        .map_err(|e| anyhow!("malformed canonical ref `{item_ref}`: {e}"))?;
+    let target = parse_sign_target(item_ref)?;
 
     let user_root = roots::user_root().ok();
     let system_roots = {
@@ -120,12 +119,9 @@ pub fn run_sign(
             .with_context(|| "load trust store")?;
 
     let kinds = build_kind_registry(&system_roots, &trust_store)?;
-    let kind_schema = kinds.get(&canonical.kind).ok_or_else(|| {
-        anyhow!(
-            "unknown kind `{}` — no kind schema registered",
-            canonical.kind
-        )
-    })?;
+    let kind_schema = kinds
+        .get(&target.kind)
+        .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
 
     let parsers =
         build_parser_dispatcher(&system_roots, user_root.as_deref(), &kinds, &trust_store)?;
@@ -133,15 +129,15 @@ pub fn run_sign(
     let kind_dir = source_kind_dir(kind_schema, source, project_path, user_root.as_deref())?;
     let ai_root = source_ai_root(source, project_path, user_root.as_deref())?;
 
-    let targets = if is_glob(&canonical.bare_id) {
-        glob_match_items(&kind_dir, kind_schema, &canonical.bare_id)?
+    let targets = if is_glob(&target.bare_id) {
+        glob_match_items(&kind_dir, kind_schema, &target.bare_id)?
     } else {
         // Single-item: the bare_id resolves to exactly one file (or
         // nothing). Mirror Python: try each declared extension in
         // order, first match wins.
         let mut found = None;
         for spec in &kind_schema.extensions {
-            let candidate = kind_dir.join(format!("{}{}", canonical.bare_id, spec.ext));
+            let candidate = kind_dir.join(format!("{}{}", target.bare_id, spec.ext));
             if candidate.is_file() {
                 found = Some(candidate);
                 break;
@@ -151,8 +147,8 @@ pub fn run_sign(
             Some(p) => vec![p],
             None => bail!(
                 "item `{}:{}` not found in {} (searched {} with extensions {:?})",
-                canonical.kind,
-                canonical.bare_id,
+                target.kind,
+                target.bare_id,
                 source.label(),
                 kind_dir.display(),
                 kind_schema.extension_strs()
@@ -163,8 +159,8 @@ pub fn run_sign(
     if targets.is_empty() {
         bail!(
             "no items matched `{}:{}` in {} (searched {})",
-            canonical.kind,
-            canonical.bare_id,
+            target.kind,
+            target.bare_id,
             source.label(),
             kind_dir.display()
         );
@@ -179,7 +175,7 @@ pub fn run_sign(
     for file_path in targets {
         let bare_id = derive_bare_id(&file_path, &kind_dir, kind_schema)
             .unwrap_or_else(|| file_path.display().to_string());
-        let display_ref = format!("{}:{}", canonical.kind, bare_id);
+        let display_ref = format!("{}:{}", target.kind, bare_id);
 
         match sign_one(&file_path, kind_schema, &ai_root, &parsers) {
             Ok(SignOutcome::Signed(sig)) => report.signed.push(ItemOutcome {
@@ -260,6 +256,67 @@ fn sign_one(
     })?;
 
     sign_in_place(file_path, &content, &source_format.signature)
+}
+
+#[derive(Debug)]
+struct SignTarget {
+    kind: String,
+    bare_id: String,
+}
+
+fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
+    if !is_glob_ref(item_ref) {
+        let canonical = CanonicalRef::parse(item_ref)
+            .map_err(|e| anyhow!("malformed canonical ref `{item_ref}`: {e}"))?;
+        return Ok(SignTarget {
+            kind: canonical.kind,
+            bare_id: canonical.bare_id,
+        });
+    }
+
+    let colon_pos = item_ref
+        .find(':')
+        .ok_or_else(|| anyhow!("malformed canonical ref `{item_ref}`: bare refs are rejected"))?;
+    let kind = &item_ref[..colon_pos];
+    let bare_id = &item_ref[colon_pos + 1..];
+
+    if kind.is_empty()
+        || !kind
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        bail!("malformed canonical ref `{item_ref}`: invalid kind `{kind}`");
+    }
+    if bare_id.is_empty() {
+        bail!("malformed canonical ref `{item_ref}`: empty bare_id after kind");
+    }
+    if bare_id.contains('@') {
+        bail!("malformed canonical ref `{item_ref}`: glob refs do not support suffixes");
+    }
+    if bare_id.starts_with('/')
+        || bare_id.ends_with('/')
+        || bare_id.contains("//")
+        || bare_id
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        bail!("malformed canonical ref `{item_ref}`: unsafe glob bare_id `{bare_id}`");
+    }
+    if !bare_id
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | '*' | '?'))
+    {
+        bail!("malformed canonical ref `{item_ref}`: glob bare_id contains invalid characters: {bare_id}");
+    }
+
+    Ok(SignTarget {
+        kind: kind.to_string(),
+        bare_id: bare_id.to_string(),
+    })
+}
+
+fn is_glob_ref(s: &str) -> bool {
+    s.contains('*') || s.contains('?')
 }
 
 fn is_glob(s: &str) -> bool {
@@ -647,6 +704,26 @@ mod tests {
             err.to_string().contains("malformed canonical ref"),
             "expected malformed-ref error, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_sign_target_accepts_globs() {
+        let target = parse_sign_target("knowledge:smoke/*").unwrap();
+        assert_eq!(target.kind, "knowledge");
+        assert_eq!(target.bare_id, "smoke/*");
+
+        let target = parse_sign_target("directive:agent/**/*").unwrap();
+        assert_eq!(target.kind, "directive");
+        assert_eq!(target.bare_id, "agent/**/*");
+    }
+
+    #[test]
+    fn parse_sign_target_rejects_unsafe_globs() {
+        let err = parse_sign_target("knowledge:../*").unwrap_err();
+        assert!(err.to_string().contains("unsafe glob bare_id"));
+
+        let err = parse_sign_target("knowledge:smoke/[abc]").unwrap_err();
+        assert!(err.to_string().contains("invalid characters"));
     }
 
     #[test]
