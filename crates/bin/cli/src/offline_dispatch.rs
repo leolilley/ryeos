@@ -164,6 +164,13 @@ pub fn try_offline_dispatch(
         obj.insert("_verb".to_string(), Value::String(alias.def.verb.clone()));
     }
 
+    // Strip internal routing fields before passing to the subprocess tool.
+    // These are injected by the dispatch layer for daemon use but not
+    // consumed by offline tools (which use strict serde structs).
+    if let Some(obj) = params.as_object_mut() {
+        obj.retain(|key, _| !key.starts_with('_'));
+    }
+
     let result = execute_offline_tool(&catalog, &offline_execute, params, project_path)
         .map_err(local_err)?;
 
@@ -255,8 +262,13 @@ fn bind_params_shared(
 
     // Reject unknown flags. Typos like `--regstry-root` would otherwise
     // silently pass through as an extra parameter.
+    // Internal routing fields (prefixed with `_`) are excluded — they are
+    // injected by the dispatch layer, not by the user.
     if let Some(obj) = params.as_object() {
         for key in obj.keys() {
+            if key.starts_with('_') {
+                continue;
+            }
             let normalized_key = key.replace('_', "-");
             if !service.schema.contains_key(key.as_str())
                 && !service.schema.contains_key(&normalized_key)

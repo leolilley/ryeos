@@ -84,6 +84,7 @@ fn run_identity_verb(argv: &[String]) -> Result<()> {
             system_space_dir: args
                 .system_space_dir
                 .map(|p| p.to_string_lossy().into_owned()),
+            project_path: None,
         },
     )
     .context("ryeos identity failed")?;

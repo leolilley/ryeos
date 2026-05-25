@@ -91,20 +91,13 @@ bin_dir="/usr/bin"
 share_dir="/usr/share/ryeos"
 target_dir="$repo_root/target/release"
 
+# Only user-facing binaries go in /usr/bin/.
+# All handler/runtime/tool binaries live inside bundles under
+# /usr/share/ryeos/<name>/.ai/bin/<triple>/ and are resolved
+# via bin: references at dispatch time.
 required_bins=(
     ryeosd
     ryeos
-    ryeos-core-tools
-    ryeos-directive-runtime
-    ryeos-graph-runtime
-    ryeos-knowledge-runtime
-    ryeos-tui
-    rye-parser-yaml-document
-    rye-parser-yaml-header-document
-    rye-parser-regex-kv
-    rye-composer-extends-chain
-    rye-composer-graph-permissions
-    rye-composer-identity
 )
 
 # PKGBUILD installs lillux when a full package build has produced it, but
@@ -120,6 +113,29 @@ fi
 
 for b in "${required_bins[@]}"; do
     [[ -x "$target_dir/$b" ]] || die "missing required release binary: $target_dir/$b"
+done
+
+# Clean up stale bundle binaries from /usr/bin/.
+# Previous installs placed handler/runtime/tool binaries there;
+# they now live exclusively inside bundles under /usr/share/ryeos/.
+stale_bins=(
+    ryeos-core-tools
+    ryeos-tui
+    ryeos-directive-runtime
+    ryeos-graph-runtime
+    ryeos-knowledge-runtime
+    rye-parser-yaml-document
+    rye-parser-yaml-header-document
+    rye-parser-regex-kv
+    rye-composer-extends-chain
+    rye-composer-graph-permissions
+    rye-composer-identity
+)
+for b in "${stale_bins[@]}"; do
+    if [[ -e "$bin_dir/$b" ]]; then
+        echo "[install-local-direct] removing stale bundle binary: $bin_dir/$b"
+        sudo rm -f "$bin_dir/$b"
+    fi
 done
 
 [[ -d "$repo_root/bundles/core/.ai" ]] || die "missing bundles/core/.ai"

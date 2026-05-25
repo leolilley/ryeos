@@ -9,6 +9,8 @@ use serde_json::Value;
 pub struct IdentityParams {
     #[serde(default)]
     pub system_space_dir: Option<String>,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 pub fn run_identity(params: IdentityParams) -> Result<Value> {

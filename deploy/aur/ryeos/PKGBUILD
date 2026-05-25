@@ -39,27 +39,14 @@ check() {
 package() {
     cd "ryeos-${pkgver}"
 
-    # ── Primary user-facing binaries ────────────────────────
+    # ── User-facing binaries ──────────────────────────────────
+    # Only the primary entry points go in /usr/bin/.
+    # All handler/runtime/tool binaries live inside bundles
+    # under /usr/share/ryeos/<name>/.ai/bin/<triple>/ and are
+    # resolved via bin: references at dispatch time.
     install -Dm755 target/release/ryeosd                "$pkgdir/usr/bin/ryeosd"
     install -Dm755 target/release/ryeos                 "$pkgdir/usr/bin/ryeos"
-    install -Dm755 target/release/ryeos-tui             "$pkgdir/usr/bin/ryeos-tui"
     install -Dm755 target/release/lillux                "$pkgdir/usr/bin/lillux"
-
-    # ── Core tools ──────────────────────────────────────────
-    install -Dm755 target/release/ryeos-core-tools      "$pkgdir/usr/bin/ryeos-core-tools"
-
-    # ── Runtime binaries (spawned by ryeosd) ────────────────
-    install -Dm755 target/release/ryeos-directive-runtime  "$pkgdir/usr/bin/ryeos-directive-runtime"
-    install -Dm755 target/release/ryeos-graph-runtime      "$pkgdir/usr/bin/ryeos-graph-runtime"
-    install -Dm755 target/release/ryeos-knowledge-runtime   "$pkgdir/usr/bin/ryeos-knowledge-runtime"
-
-    # ── Handler parser/composer binaries ────────────────────
-    install -Dm755 target/release/rye-parser-yaml-document         "$pkgdir/usr/bin/rye-parser-yaml-document"
-    install -Dm755 target/release/rye-parser-yaml-header-document  "$pkgdir/usr/bin/rye-parser-yaml-header-document"
-    install -Dm755 target/release/rye-parser-regex-kv              "$pkgdir/usr/bin/rye-parser-regex-kv"
-    install -Dm755 target/release/rye-composer-extends-chain        "$pkgdir/usr/bin/rye-composer-extends-chain"
-    install -Dm755 target/release/rye-composer-graph-permissions    "$pkgdir/usr/bin/rye-composer-graph-permissions"
-    install -Dm755 target/release/rye-composer-identity             "$pkgdir/usr/bin/rye-composer-identity"
 
     # ── Bundle YAML data ────────────────────────────────────
     # Ship each bundle under /usr/share/ryeos/<name>/.ai/.
