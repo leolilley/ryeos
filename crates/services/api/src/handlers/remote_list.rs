@@ -1,5 +1,6 @@
 //! `remote/list` — list configured remote nodes.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,10 +13,27 @@ use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct Request {}
+pub struct Request {
+    /// Optional local project path. When supplied, project-level
+    /// remotes from `<project>/.ai/config/remotes/remotes.yaml` are
+    /// merged on top of user-level remotes (project wins on name
+    /// collision). The CLI injects this automatically via the
+    /// alias's `project_resolution: optional` field.
+    #[serde(default, alias = "project")]
+    pub project_path: Option<PathBuf>,
+    /// Pass-through for the CLI's `--no-project` flag. Ignored here;
+    /// project layering is opt-in via `project_path`.
+    #[serde(default)]
+    pub no_project: bool,
+}
 
-pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
-    let remotes = config::load_remotes(&state.config.system_space_dir)?;
+pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    let project = if req.no_project {
+        None
+    } else {
+        req.project_path.as_deref()
+    };
+    let remotes = config::load_remotes_layered(&state.config.system_space_dir, project)?;
 
     let mut entries: Vec<Value> = remotes
         .values()

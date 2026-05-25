@@ -17,8 +17,9 @@ pub struct ProjectSnapshot {
     /// Hash of the user-level manifest (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_manifest_hash: Option<String>,
-    /// Declared scope of the project manifest. Missing in older CAS
-    /// objects defaults to `full_project` during manual deserialization.
+    /// Declared scope of the project manifest. When absent on the
+    /// wire (only possible for objects written before this field
+    /// existed), falls back to [`ProjectSyncScope::default`].
     #[serde(default)]
     pub project_sync_scope: ProjectSyncScope,
     /// Parent snapshot hashes (DAG structure for versioning).
@@ -133,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_project_sync_scope_defaults_to_full_project() {
+    fn missing_project_sync_scope_uses_default_scope() {
         let value = json!({
             "kind": "project_snapshot",
             "schema": 2,
@@ -143,7 +144,7 @@ mod tests {
             "source": "legacy_push",
         });
         let restored = ProjectSnapshot::from_value(&value).unwrap();
-        assert_eq!(restored.project_sync_scope, ProjectSyncScope::FullProject);
+        assert_eq!(restored.project_sync_scope, ProjectSyncScope::default());
     }
 
     #[test]

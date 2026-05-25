@@ -509,9 +509,17 @@ impl CompiledResponseMode for CompiledExecuteMode {
             && request.operation.is_none()
             && request.inputs.is_none();
         let remotes = if remote_target_requested && request_can_need_remote_config {
+            let project_for_layering: Option<&std::path::Path> = if no_project_requested {
+                None
+            } else {
+                Some(project_ctx.effective_path.as_ref())
+            };
             Some(
-                crate::remote::config::load_remotes(&state.config.system_space_dir)
-                    .map_err(|e| RouteDispatchError::Internal(format!("load remotes: {e:#}")))?,
+                crate::remote::config::load_remotes_layered(
+                    &state.config.system_space_dir,
+                    project_for_layering,
+                )
+                .map_err(|e| RouteDispatchError::Internal(format!("load remotes: {e:#}")))?,
             )
         } else {
             None

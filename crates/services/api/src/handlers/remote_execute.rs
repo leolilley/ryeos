@@ -56,7 +56,7 @@ fn default_remote() -> String {
 pub use ryeos_executor::execution::project_source::NO_PROJECT_SENTINEL;
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote)
+    let client = RemoteClient::from_named_remote(&state, &req.remote, req.project.as_deref())
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
 
     // Build the project spec from the two flat CLI fields.
@@ -102,8 +102,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     };
 
     // Load remote config for project binding and ignore rules.
-    let remotes = config::load_remotes(&state.config.system_space_dir)
-        .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+    let remotes =
+        config::load_remotes_layered(&state.config.system_space_dir, abs_project_path.as_deref())
+            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
 
     // Resolve project binding if present.

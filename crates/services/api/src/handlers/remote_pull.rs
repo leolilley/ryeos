@@ -39,7 +39,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         anyhow::bail!("hashes must not be empty");
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
     let resp = client.objects_get(&req.hashes).await?;
 
     let mut fetched = 0usize;

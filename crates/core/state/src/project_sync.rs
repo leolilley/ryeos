@@ -11,11 +11,15 @@ use crate::objects::SourceManifest;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectSyncScope {
-    /// Full project snapshot used by existing push/execute flows.
-    #[default]
-    FullProject,
     /// Project `.ai` allow-list only, safe for live remote AI deployment.
+    /// Default: most local projects also contain large codebases or
+    /// asset trees that should never be shipped to a remote node, so
+    /// we sync only the curated `.ai/` subtree unless the operator
+    /// explicitly opts into `full_project`.
+    #[default]
     AiOnly,
+    /// Full project snapshot used by existing push/execute flows.
+    FullProject,
 }
 
 /// Managed project `.ai` roots that AI-only project sync may deploy.

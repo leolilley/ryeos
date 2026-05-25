@@ -14,8 +14,7 @@ async fn call_effective(
     state: &ryeos_app::state::AppState,
     req_json: serde_json::Value,
 ) -> Result<serde_json::Value, anyhow::Error> {
-    let req: ryeos_api::handlers::items_effective::Request =
-        serde_json::from_value(req_json)?;
+    let req: ryeos_api::handlers::items_effective::Request = serde_json::from_value(req_json)?;
     let ctx = HandlerContext::anonymous();
     ryeos_api::handlers::items_effective::handle(req, ctx, Arc::new(state.clone())).await
 }
@@ -32,10 +31,7 @@ async fn nonexistent_ref_returns_not_found() {
     .await;
     let err = result.expect_err("should fail for nonexistent ref");
     let msg = format!("{err:#}");
-    assert!(
-        msg.contains("not found"),
-        "expected not_found, got: {msg}"
-    );
+    assert!(msg.contains("not found"), "expected not_found, got: {msg}");
 }
 
 #[tokio::test]

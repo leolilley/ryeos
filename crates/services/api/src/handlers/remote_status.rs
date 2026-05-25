@@ -1,5 +1,6 @@
 //! `remote/status` — check a remote node's status and public key.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -18,6 +19,14 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
+    /// Optional local project path. When supplied, project-level
+    /// remotes are layered over user-level so a project can override
+    /// or define its own named remote.
+    #[serde(default, alias = "project")]
+    pub project_path: Option<PathBuf>,
+    /// Pass-through for the CLI's `--no-project` flag.
+    #[serde(default)]
+    pub no_project: bool,
 }
 
 fn default_remote() -> String {
@@ -25,9 +34,14 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
-    let remotes = config::load_remotes(&state.config.system_space_dir)?;
+    let project = if req.no_project {
+        None
+    } else {
+        req.project_path.as_deref()
+    };
+    let remotes = config::load_remotes_layered(&state.config.system_space_dir, project)?;
     let remote_cfg = config::get_remote(&remotes, &req.remote)?;
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     let health = client.get_health().await?;
     let pubkey = client.get_public_key().await?;
     let local_public_key = format!(

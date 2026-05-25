@@ -44,14 +44,27 @@ impl RemoteClient {
     }
 
     /// Build a client from a named remote config + app state.
-    pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
-        let remotes = super::config::load_remotes(&state.config.system_space_dir)?;
+    ///
+    /// Looks up `remote_name` in the layered remotes config
+    /// (project overrides user). Pass `Some(project_path)` when
+    /// the caller is acting in the context of a local project so
+    /// project-level remote definitions are honored.
+    pub fn from_named_remote(
+        state: &AppState,
+        remote_name: &str,
+        project_path: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        let remotes =
+            super::config::load_remotes_layered(&state.config.system_space_dir, project_path)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
-        Ok(Self::new(
-            &remote.url,
-            &remote.principal_id,
-            state.identity.clone(),
-        ))
+        Ok(Self::from_remote_cfg(state, &remote))
+    }
+
+    /// Build a client from an already-resolved [`RemoteConfig`].
+    /// Callers that need project layering should resolve via
+    /// [`super::config::load_remotes_layered`] first.
+    pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {
+        Self::new(&remote.url, &remote.principal_id, state.identity.clone())
     }
 
     /// GET /public-key (no auth required).

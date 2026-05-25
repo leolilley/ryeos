@@ -10,10 +10,11 @@ use serde_json::Value;
 use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
-use crate::remote::push::push_project;
+use crate::remote::push::{push_project, push_project_ai_only};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,7 +33,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote, Some(&req.project))?;
 
     let path = &req.project;
     if !path.is_absolute() {
@@ -53,74 +54,98 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut project_path_for_ref = canonical_abs.to_string_lossy().to_string();
     let abs_project_path = canonical_abs;
 
-    // Load remote's cached ignore rules (required — remote configure always
-    // populates them). Inline fetch on cache miss, persisting for future use.
-    let remotes = config::load_remotes(&state.config.system_space_dir)?;
+    // Resolve scope and remote-path-for-ref from any configured binding.
+    // Default scope is `AiOnly` (see `ProjectSyncScope::default`) so an
+    // unbound `remote push` ships only the `.ai/` subtree, never the
+    // surrounding codebase or asset trees.
+    let remotes = config::load_remotes_layered(&state.config.system_space_dir, Some(&req.project))?;
     let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
+    let mut scope = ProjectSyncScope::default();
     if let Some(cfg) = remote_cfg.as_ref() {
         if let Some(binding) = cfg.project_bindings.get(&project_path_for_ref) {
-            match binding.sync_scope {
-                ryeos_state::project_sync::ProjectSyncScope::AiOnly => {
-                    anyhow::bail!(
-                        "remote push is a full-project staging command and refuses ai_only binding '{}' -> '{}'; use `ryeos remote sync-project-ai`",
-                        project_path_for_ref,
-                        binding.remote_project_path
-                    );
-                }
-                ryeos_state::project_sync::ProjectSyncScope::FullProject => {
-                    config::validate_remote_project_path(&binding.remote_project_path)?;
-                    project_path_for_ref = binding.remote_project_path.clone();
-                }
-            }
+            scope = binding.sync_scope;
+            config::validate_remote_project_path(&binding.remote_project_path)?;
+            project_path_for_ref = binding.remote_project_path.clone();
         }
     }
-    let remote_ignore = match remote_cfg {
-        Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
-        None => {
-            // No config at all — fetch inline and persist.
-            let fetched = client.get_ingest_ignore().await.map_err(|e| {
-                anyhow::anyhow!(
-                    "no remote config for '{}' and inline fetch failed: {e:#} \
-                     — run `ryeos remote configure --remote {}` first",
-                    req.remote,
-                    req.remote
-                )
-            })?;
-            let _ = (|| -> Result<()> {
-                let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
-                remotes.insert(
-                    req.remote.clone(),
-                    config::RemoteConfig {
-                        name: req.remote.clone(),
-                        url: client.base_url().to_string(),
-                        principal_id: String::new(), // partial — user should reconfigure
-                        site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
-                        vault_fingerprint: String::new(),
-                        ingest_ignore: fetched.clone(),
-                        project_bindings: HashMap::new(),
-                    },
-                );
-                config::save_remotes(&state.config.system_space_dir, &remotes)
-            })();
-            IgnoreMatcher::from_config(&fetched)?
+
+    match scope {
+        ProjectSyncScope::AiOnly => {
+            // Apply remote ignore rules client-side so `.pyc`,
+            // `__pycache__/`, etc. are dropped before we POST a
+            // manifest the remote would reject.
+            let remote_ignore = match remote_cfg.as_ref() {
+                Some(cfg) => Some(IgnoreMatcher::from_config(&cfg.ingest_ignore)?),
+                None => None,
+            };
+            let result = push_project_ai_only(
+                &client,
+                &state,
+                &abs_project_path,
+                &project_path_for_ref,
+                remote_ignore.as_ref(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "scope": "ai_only",
+                "remote_project_path": project_path_for_ref,
+                "snapshot_hash": result.snapshot_hash,
+                "manifest_entries": result.manifest_entries,
+                "blobs_uploaded": result.blobs_uploaded,
+                "blobs_skipped": result.blobs_skipped,
+            }))
         }
-    };
-
-    let result = push_project(
-        &client,
-        &state,
-        &abs_project_path,
-        &project_path_for_ref,
-        &remote_ignore,
-    )
-    .await?;
-
-    Ok(serde_json::json!({
-        "snapshot_hash": result.snapshot_hash,
-        "manifest_entries": result.manifest_entries,
-        "blobs_uploaded": result.blobs_uploaded,
-        "blobs_skipped": result.blobs_skipped,
-    }))
+        ProjectSyncScope::FullProject => {
+            // Full-project push requires the remote's ingest ignore rules.
+            // Fetch + cache inline on miss.
+            let remote_ignore = match remote_cfg {
+                Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
+                None => {
+                    let fetched = client.get_ingest_ignore().await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "no remote config for '{}' and inline fetch failed: {e:#} \
+                             — run `ryeos remote configure --remote {}` first",
+                            req.remote,
+                            req.remote
+                        )
+                    })?;
+                    let _ = (|| -> Result<()> {
+                        let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
+                        remotes.insert(
+                            req.remote.clone(),
+                            config::RemoteConfig {
+                                name: req.remote.clone(),
+                                url: client.base_url().to_string(),
+                                principal_id: String::new(),
+                                site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
+                                vault_fingerprint: String::new(),
+                                ingest_ignore: fetched.clone(),
+                                project_bindings: HashMap::new(),
+                            },
+                        );
+                        config::save_remotes(&state.config.system_space_dir, &remotes)
+                    })();
+                    IgnoreMatcher::from_config(&fetched)?
+                }
+            };
+            let result = push_project(
+                &client,
+                &state,
+                &abs_project_path,
+                &project_path_for_ref,
+                &remote_ignore,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "scope": "full_project",
+                "remote_project_path": project_path_for_ref,
+                "snapshot_hash": result.snapshot_hash,
+                "manifest_entries": result.manifest_entries,
+                "blobs_uploaded": result.blobs_uploaded,
+                "blobs_skipped": result.blobs_skipped,
+            }))
+        }
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

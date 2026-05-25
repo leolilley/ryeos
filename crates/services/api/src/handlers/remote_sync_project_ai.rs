@@ -30,7 +30,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let remotes = config::load_remotes(&state.config.system_space_dir)?;
+    let remotes = config::load_remotes_layered(&state.config.system_space_dir, Some(&req.project))?;
     let remote_cfg = config::get_remote(&remotes, &req.remote)?;
     let binding = config::resolve_project_binding(&remote_cfg, &req.project)?;
     if binding.sync_scope != ProjectSyncScope::AiOnly {
@@ -41,7 +41,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     let expected_deployed_hash = if req.force || req.expected_deployed_hash.is_some() {
         req.expected_deployed_hash.clone()
     } else {
@@ -65,11 +65,16 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             Some(String::new())
         }
     };
+    // Apply the remote's ingest ignore rules client-side so files the
+    // remote would later reject (e.g. `__pycache__/`, `*.pyc`) are
+    // dropped before we POST the manifest.
+    let remote_ignore = ryeos_app::ignore::IgnoreMatcher::from_config(&remote_cfg.ingest_ignore)?;
     let push = push_project_ai_only(
         &client,
         &state,
         &binding.local_project_path,
         &binding.remote_project_path,
+        Some(&remote_ignore),
     )
     .await?;
 

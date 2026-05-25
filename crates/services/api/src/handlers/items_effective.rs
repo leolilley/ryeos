@@ -73,8 +73,12 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let item_ref = CanonicalRef::parse(&req.canonical_ref)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid canonical ref '{}': {e}", req.canonical_ref)))?;
+    let item_ref = CanonicalRef::parse(&req.canonical_ref).map_err(|e| {
+        HandlerError::BadRequest(format!(
+            "invalid canonical ref '{}': {e}",
+            req.canonical_ref
+        ))
+    })?;
 
     let effective = state
         .engine
@@ -113,7 +117,10 @@ fn map_engine_error(e: EngineError) -> HandlerError {
         EngineError::EffectiveItemParseFailed { reason, .. } => {
             HandlerError::BadRequest(format!("parse_failed: {reason}"))
         }
-        EngineError::ComposedValueContractViolation { canonical_ref, report } => {
+        EngineError::ComposedValueContractViolation {
+            canonical_ref,
+            report,
+        } => {
             let error_count = report.errors.len();
             let warn_count = report.warnings.len();
             let error_suffix = if error_count == 1 { "" } else { "s" };
@@ -122,19 +129,20 @@ fn map_engine_error(e: EngineError) -> HandlerError {
                 "contract_violation: `{canonical_ref}` ({error_count} error{error_suffix}, {warn_count} warning{warning_suffix})",
             );
 
-            let violations_to_json = |violations: &[ryeos_engine::contracts::InstanceViolation]| {
-                violations
-                    .iter()
-                    .map(|v| {
-                        serde_json::json!({
-                            "path": v.path,
-                            "code": v.code.to_string(),
-                            "expected": v.expected,
-                            "found": v.found,
+            let violations_to_json =
+                |violations: &[ryeos_engine::contracts::InstanceViolation]| {
+                    violations
+                        .iter()
+                        .map(|v| {
+                            serde_json::json!({
+                                "path": v.path,
+                                "code": v.code.to_string(),
+                                "expected": v.expected,
+                                "found": v.found,
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>()
-            };
+                        .collect::<Vec<_>>()
+                };
 
             let body = serde_json::json!({
                 "error": summary,
@@ -169,12 +177,19 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use ryeos_engine::contracts::{InstanceValidationReport, InstanceViolation, InstanceViolationCode};
+    use ryeos_engine::contracts::{
+        InstanceValidationReport, InstanceViolation, InstanceViolationCode,
+    };
     use ryeos_engine::error::EngineError;
 
     use super::map_engine_error;
 
-    fn violation(path: &str, code: InstanceViolationCode, expected: &str, found: &str) -> InstanceViolation {
+    fn violation(
+        path: &str,
+        code: InstanceViolationCode,
+        expected: &str,
+        found: &str,
+    ) -> InstanceViolation {
         InstanceViolation {
             path: path.to_string(),
             code,
@@ -187,12 +202,25 @@ mod tests {
     fn contract_violation_maps_to_structured_error() {
         let report = InstanceValidationReport {
             errors: vec![
-                violation("launch.mode", InstanceViolationCode::EnumMismatch, "one of [\"managed\", \"edge\"]", "\"local\""),
-                violation("name", InstanceViolationCode::TypeMismatch, "string", "null"),
+                violation(
+                    "launch.mode",
+                    InstanceViolationCode::EnumMismatch,
+                    "one of [\"managed\", \"edge\"]",
+                    "\"local\"",
+                ),
+                violation(
+                    "name",
+                    InstanceViolationCode::TypeMismatch,
+                    "string",
+                    "null",
+                ),
             ],
-            warnings: vec![
-                violation("affordances", InstanceViolationCode::UnexpectedField, "no field", "present"),
-            ],
+            warnings: vec![violation(
+                "affordances",
+                InstanceViolationCode::UnexpectedField,
+                "no field",
+                "present",
+            )],
         };
 
         let err = EngineError::ComposedValueContractViolation {
@@ -234,7 +262,12 @@ mod tests {
     #[test]
     fn contract_violation_with_single_error_uses_singular() {
         let report = InstanceValidationReport {
-            errors: vec![violation("name", InstanceViolationCode::TypeMismatch, "string", "null")],
+            errors: vec![violation(
+                "name",
+                InstanceViolationCode::TypeMismatch,
+                "string",
+                "null",
+            )],
             warnings: vec![],
         };
 
@@ -248,8 +281,14 @@ mod tests {
             crate::handler_error::HandlerError::Structured { body, .. } => {
                 let msg = body["error"].as_str().unwrap();
                 // Singular: "1 error", not "1 errors"
-                assert!(msg.contains("1 error"), "message should use singular: {msg}");
-                assert!(msg.contains("0 warnings"), "message should use plural for 0: {msg}");
+                assert!(
+                    msg.contains("1 error"),
+                    "message should use singular: {msg}"
+                );
+                assert!(
+                    msg.contains("0 warnings"),
+                    "message should use plural for 0: {msg}"
+                );
             }
             other => panic!("expected Structured, got {other:?}"),
         }

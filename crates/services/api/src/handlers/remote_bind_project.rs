@@ -31,7 +31,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let local = config::canonical_local_project_path(&req.project)?;
     let local_key = local.to_string_lossy().to_string();
 
-    let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
+    // Mutate the remote where it actually lives (project or user).
+    let scope = config::locate_remote_scope(
+        &state.config.system_space_dir,
+        Some(&req.project),
+        &req.remote,
+    )?;
+    let mut remotes = config::load_remotes_at(&config::remotes_config_path(&scope))?;
     let remote = remotes
         .get_mut(&req.remote)
         .ok_or_else(|| anyhow::anyhow!("remote '{}' not found in config", req.remote))?;
@@ -42,7 +48,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             sync_scope: req.sync_scope,
         },
     );
-    config::save_remotes(&state.config.system_space_dir, &remotes)?;
+    config::save_remotes(&scope, &remotes)?;
 
     Ok(serde_json::json!({
         "remote": req.remote,

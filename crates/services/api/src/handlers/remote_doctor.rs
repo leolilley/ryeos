@@ -37,7 +37,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
 
     let mut checks = Vec::new();
     let mut next_steps = Vec::new();
-    let remotes = config::load_remotes(&state.config.system_space_dir)?;
+    let remotes =
+        config::load_remotes_layered(&state.config.system_space_dir, req.project.as_deref())?;
     let Some(remote_cfg) = remotes.get(&req.remote).cloned() else {
         checks.push(serde_json::json!({
             "name": "remote_configured",

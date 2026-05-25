@@ -24,6 +24,11 @@ pub struct RemoteProjectBinding {
 }
 
 /// Named remote configuration.
+///
+/// Authored by `ryeos remote configure`, which contacts the remote's
+/// `/public-key` endpoint and populates every field. Hand-edited
+/// stubs that omit fields will be rejected at load time with a
+/// per-entry warning (the rest of the file still loads).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
@@ -59,27 +64,116 @@ pub struct ResolvedProjectBinding {
     pub sync_scope: ProjectSyncScope,
 }
 
-/// Full remotes file.
+/// Full remotes file. Top-level structure tolerates extra fields so
+/// older or richer (e.g. project-level) configs keep loading; only the
+/// `remotes` map is consumed here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RemotesFile {
-    remotes: HashMap<String, RemoteConfig>,
+    #[serde(default)]
+    remotes: HashMap<String, serde_yaml::Value>,
 }
 
-/// Path to the remotes config relative to system space dir.
-const REMOTES_CONFIG_RELATIVE: &str = ".ai/config/remotes/remotes.yaml";
+/// Path under [`ryeos_engine::AI_DIR`] where the remotes config lives.
+pub const REMOTES_CONFIG_SUBPATH: &[&str] = &["config", "remotes", "remotes.yaml"];
+
+/// Resolve the absolute path to a remotes config file given a
+/// space/project root.
+pub fn remotes_config_path(root: &Path) -> PathBuf {
+    let mut p = root.join(ryeos_engine::AI_DIR);
+    for seg in REMOTES_CONFIG_SUBPATH {
+        p = p.join(seg);
+    }
+    p
+}
 
 /// Load remotes config from disk. Returns empty map if file doesn't exist.
+///
+/// Resilience: a single malformed entry (e.g. missing required
+/// `site_id` from an older config) is skipped with a warning to
+/// stderr rather than failing the whole file load. Operators are
+/// guided to repair such entries via `ryeos remote configure`, but
+/// stale entries must not block listing or using other valid remotes,
+/// including project-level overrides layered on top.
 pub fn load_remotes(system_space_dir: &Path) -> Result<HashMap<String, RemoteConfig>> {
-    let path = system_space_dir.join(REMOTES_CONFIG_RELATIVE);
+    let path = remotes_config_path(system_space_dir);
+    load_remotes_at(&path)
+}
+
+/// Load a remotes file from an explicit absolute path. Same per-entry
+/// resilience as [`load_remotes`].
+pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
     let file: RemotesFile = serde_yaml::from_str(&content)
         .with_context(|| format!("invalid remotes config: {}", path.display()))?;
-    Ok(file.remotes)
+    let mut out = HashMap::with_capacity(file.remotes.len());
+    for (name, raw) in file.remotes {
+        match serde_yaml::from_value::<RemoteConfig>(raw) {
+            Ok(cfg) => {
+                out.insert(name, cfg);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "ryeos_api::remote::config",
+                    config_path = %path.display(),
+                    remote = %name,
+                    error = %e,
+                    "skipping malformed remote entry; run `ryeos remote configure --remote {}` to repair or remove the entry from {}",
+                    name,
+                    path.display(),
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Locate the scope (file root) that owns a given remote name.
+///
+/// Checks project-level first (project wins on collision, matching
+/// [`load_remotes_layered`]), then user-level. Returns the root
+/// directory whose `<root>/.ai/config/remotes/remotes.yaml` defines
+/// the remote, suitable for passing back to [`save_remotes`].
+pub fn locate_remote_scope(
+    system_space_dir: &Path,
+    project_path: Option<&Path>,
+    remote_name: &str,
+) -> Result<PathBuf> {
+    if let Some(project) = project_path {
+        let project_remotes = load_remotes_at(&remotes_config_path(project))?;
+        if project_remotes.contains_key(remote_name) {
+            return Ok(project.to_path_buf());
+        }
+    }
+    let user_remotes = load_remotes(system_space_dir)?;
+    if user_remotes.contains_key(remote_name) {
+        return Ok(system_space_dir.to_path_buf());
+    }
+    anyhow::bail!("remote '{remote_name}' not found in config")
+}
+
+/// Load remotes layered project-over-user.
+///
+/// Loads the user-level remotes file from `system_space_dir`, then if
+/// `project_path` is provided, loads project-level remotes from
+/// `<project>/.ai/config/remotes/remotes.yaml` and merges them on top
+/// (project entries win on name collision). Either side missing or
+/// individually malformed does not prevent the other from being used.
+pub fn load_remotes_layered(
+    system_space_dir: &Path,
+    project_path: Option<&Path>,
+) -> Result<HashMap<String, RemoteConfig>> {
+    let mut merged = load_remotes(system_space_dir)?;
+    if let Some(project) = project_path {
+        let project_remotes = load_remotes_at(&remotes_config_path(project))?;
+        for (name, cfg) in project_remotes {
+            merged.insert(name, cfg);
+        }
+    }
+    Ok(merged)
 }
 
 /// Save remotes config to disk.
@@ -87,14 +181,11 @@ pub fn save_remotes(
     system_space_dir: &Path,
     remotes: &HashMap<String, RemoteConfig>,
 ) -> Result<()> {
-    let path = system_space_dir.join(REMOTES_CONFIG_RELATIVE);
+    let path = remotes_config_path(system_space_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = RemotesFile {
-        remotes: remotes.clone(),
-    };
-    let content = serde_yaml::to_string(&file)?;
+    let content = serde_yaml::to_string(&serde_json::json!({ "remotes": remotes }))?;
     std::fs::write(&path, content)
         .with_context(|| format!("failed to write remotes config: {}", path.display()))?;
     Ok(())
@@ -463,9 +554,9 @@ mod tests {
     }
 
     #[test]
-    fn config_without_site_id_fails_to_parse() {
+    fn config_without_site_id_is_skipped_not_fatal() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let path = tmpdir.path().join(".ai/config/remotes/remotes.yaml");
+        let path = remotes_config_path(tmpdir.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -478,13 +569,146 @@ remotes:
     vault_fingerprint: sha256:legacy
     ingest_ignore:
       patterns: []
+  good:
+    name: good
+    url: https://good.example.com
+    principal_id: fp:good
+    site_id: site:good
+    vault_fingerprint: sha256:good
+    ingest_ignore:
+      patterns: []
 "#,
         )
         .unwrap();
-        let result = load_remotes(tmpdir.path());
+        let loaded = load_remotes(tmpdir.path()).expect(
+            "load_remotes must not fail when one entry is malformed: \
+             stale entries must not block listing other valid remotes",
+        );
         assert!(
-            result.is_err(),
-            "missing site_id must not be accepted as a compatibility mode: {result:?}"
+            !loaded.contains_key("legacy"),
+            "malformed entry must be skipped, got: {loaded:?}"
+        );
+        assert!(
+            loaded.contains_key("good"),
+            "valid entry must remain loadable, got: {loaded:?}"
+        );
+    }
+
+    #[test]
+    fn load_remotes_layered_merges_project_over_user() {
+        let user_root = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+
+        let user_path = remotes_config_path(user_root.path());
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_path,
+            r#"
+remotes:
+  v2:
+    name: v2
+    url: https://user-level.example.com
+    principal_id: fp:user
+    site_id: site:user
+    vault_fingerprint: sha256:user
+    ingest_ignore:
+      patterns: []
+  user-only:
+    name: user-only
+    url: https://user-only.example.com
+    principal_id: fp:user-only
+    site_id: site:user-only
+    vault_fingerprint: sha256:user-only
+    ingest_ignore:
+      patterns: []
+"#,
+        )
+        .unwrap();
+
+        let project_path = remotes_config_path(project_root.path());
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+remotes:
+  v2:
+    name: v2
+    url: https://project-level.example.com
+    principal_id: fp:project
+    site_id: site:project
+    vault_fingerprint: sha256:project
+    ingest_ignore:
+      patterns: []
+  project-only:
+    name: project-only
+    url: https://project-only.example.com
+    principal_id: fp:project-only
+    site_id: site:project-only
+    vault_fingerprint: sha256:project-only
+    ingest_ignore:
+      patterns: []
+"#,
+        )
+        .unwrap();
+
+        let merged = load_remotes_layered(user_root.path(), Some(project_root.path())).unwrap();
+        assert_eq!(
+            merged["v2"].url, "https://project-level.example.com",
+            "project-level remotes must win on name collision"
+        );
+        assert!(merged.contains_key("user-only"));
+        assert!(merged.contains_key("project-only"));
+    }
+
+    #[test]
+    fn load_remotes_layered_survives_broken_user_config() {
+        let user_root = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+
+        let user_path = remotes_config_path(user_root.path());
+        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_path,
+            r#"
+remotes:
+  broken:
+    name: broken
+    url: https://broken.example.com
+    principal_id: fp:broken
+    vault_fingerprint: sha256:broken
+    ingest_ignore:
+      patterns: []
+"#,
+        )
+        .unwrap();
+
+        let project_path = remotes_config_path(project_root.path());
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+remotes:
+  v2:
+    name: v2
+    url: https://project-level.example.com
+    principal_id: fp:project
+    site_id: site:project
+    vault_fingerprint: sha256:project
+    ingest_ignore:
+      patterns: []
+"#,
+        )
+        .unwrap();
+
+        let merged = load_remotes_layered(user_root.path(), Some(project_root.path()))
+            .expect("layered load must not fail when only user-level config has a malformed entry");
+        assert!(
+            merged.contains_key("v2"),
+            "valid project-level remote must remain usable even when user-level entry is malformed: {merged:?}"
+        );
+        assert!(
+            !merged.contains_key("broken"),
+            "malformed user-level entry must be skipped"
         );
     }
 }

@@ -127,9 +127,8 @@ impl RouteInvocationResult {
 /// The SSE transport layer in `event_stream_mode` converts envelopes to SSE frames.
 pub struct RouteEventStream {
     /// Envelope stream producing `RouteStreamEnvelope` items.
-    pub events: Pin<
-        Box<dyn Stream<Item = Result<RouteStreamEnvelope, std::convert::Infallible>> + Send>,
-    >,
+    pub events:
+        Pin<Box<dyn Stream<Item = Result<RouteStreamEnvelope, std::convert::Infallible>> + Send>>,
     /// Keep-alive interval in seconds.
     pub keep_alive_secs: u64,
 }

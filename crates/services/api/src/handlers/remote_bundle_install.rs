@@ -50,7 +50,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
 
     // 1. Call bundle_export on the remote.
     let export_resp = client.bundle_export(&req.bundle_name).await?;

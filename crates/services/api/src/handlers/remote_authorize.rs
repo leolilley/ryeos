@@ -32,7 +32,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
     let resp = client
         .authorize_key(&req.public_key, &req.label, &req.scopes)
         .await?;

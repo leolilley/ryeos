@@ -1,6 +1,7 @@
-# ryeos:signed:2026-05-23T12:06:25Z:f609428d3f10a292a892ad0ec913c87f80eec0eedc20a1af33ace40dafc382f9:fc7tmQYzABvL7H9Mu4lumsB0NGssE/eEJ/U7SO4JAusUPxaQQok61Hk5vZgCD0V2YUxAU2ErRTqTGl2+DRVkAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-25T07:57:17Z:30edb678b5594557af0d95e3e53a7dacfb6ddf1d95a1efdc5d22ebb81cc710dd:3qMs1DdHgV+ncsctLIf0yu9nA5tTMW7zcEDt426R3ujJPtsZF/TdelV6BFm5fL8rbScJAZWFTFGp/0cD8KoIAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "aliases"
 section: aliases
 tokens: ["remote", "list"]
 verb: remote-list
 description: "List configured remote nodes"
+project_resolution: optional

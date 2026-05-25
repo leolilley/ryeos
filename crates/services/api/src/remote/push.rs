@@ -42,11 +42,17 @@ pub struct PushResult {
 ///
 /// Unlike [`push_project`], this is allow-list based and project-only:
 /// it does not ingest app files and never includes a user manifest.
+///
+/// `remote_ignore`, when supplied, is applied to every candidate path
+/// under the allow-list so files the remote would later reject (e.g.
+/// `__pycache__/`, `*.pyc`) are dropped client-side instead of
+/// blowing up at `/push-head`.
 pub async fn push_project_ai_only(
     client: &RemoteClient,
     state: &Arc<AppState>,
     local_project_path: &Path,
     remote_project_path_for_ref: &str,
+    remote_ignore: Option<&IgnoreMatcher>,
 ) -> Result<PushResult> {
     let system_space_dir = &state.config.system_space_dir;
     refuse_walking_root(local_project_path, system_space_dir)?;
@@ -58,7 +64,7 @@ pub async fn push_project_ai_only(
     let local_cas = CasStore::new(local_cas_root);
 
     let mut items: HashMap<String, String> = HashMap::new();
-    ingest_project_ai_for_push(&local_cas, local_project_path, &mut items)?;
+    ingest_project_ai_for_push(&local_cas, local_project_path, &mut items, remote_ignore)?;
 
     let manifest = SourceManifest {
         item_source_hashes: items,
@@ -433,6 +439,7 @@ fn ingest_project_ai_for_push(
     cas: &CasStore,
     project_root: &Path,
     items: &mut HashMap<String, String>,
+    remote_ignore: Option<&IgnoreMatcher>,
 ) -> Result<()> {
     for dir in PROJECT_AI_SYNC_DIRS {
         let abs = project_root.join(dir);
@@ -442,7 +449,7 @@ fn ingest_project_ai_for_push(
                 continue;
             }
             Ok(md) if md.is_dir() => {
-                ingest_project_ai_dir_for_push(cas, project_root, &abs, items)?
+                ingest_project_ai_dir_for_push(cas, project_root, &abs, items, remote_ignore)?
             }
             _ => continue,
         }
@@ -455,6 +462,7 @@ fn ingest_project_ai_dir_for_push(
     project_root: &Path,
     dir: &Path,
     items: &mut HashMap<String, String>,
+    remote_ignore: Option<&IgnoreMatcher>,
 ) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -469,13 +477,28 @@ fn ingest_project_ai_dir_for_push(
         }
         let path = entry.path();
         if ft.is_dir() {
-            ingest_project_ai_dir_for_push(cas, project_root, &path, items)?;
+            if let Some(matcher) = remote_ignore {
+                let rel_dir = path
+                    .strip_prefix(project_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if matcher.is_ignored(&rel_dir) {
+                    continue;
+                }
+            }
+            ingest_project_ai_dir_for_push(cas, project_root, &path, items, remote_ignore)?;
         } else if ft.is_file() {
             let rel = path
                 .strip_prefix(project_root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
+            if let Some(matcher) = remote_ignore {
+                if matcher.is_ignored(&rel) {
+                    continue;
+                }
+            }
             let bytes = std::fs::read(&path)?;
             let blob_hash = cas.store_blob(&bytes)?;
             let integrity = sha256_hex(&bytes);
@@ -961,7 +984,7 @@ mod ingest_symlink_tests {
         std::fs::write(project.path().join("src/index.ts"), "app").unwrap();
 
         let mut items = HashMap::new();
-        ingest_project_ai_for_push(&cas, project.path(), &mut items).unwrap();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items, None).unwrap();
 
         assert!(items.contains_key(".ai/directives/ok.md"));
         assert!(
@@ -997,7 +1020,7 @@ mod ingest_symlink_tests {
         std::os::unix::fs::symlink(outside.path().join("secret"), tools.join("leak.sh")).unwrap();
 
         let mut items = HashMap::new();
-        ingest_project_ai_for_push(&cas, project.path(), &mut items).unwrap();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items, None).unwrap();
         assert!(items.contains_key(".ai/tools/run.sh"));
         assert!(!items.contains_key(".ai/tools/leak.sh"));
 

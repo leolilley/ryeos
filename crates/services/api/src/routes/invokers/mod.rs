@@ -60,7 +60,9 @@ impl AuthVerifierFactory for RyeosSignedAuthFactory {
         _auth_config: Option<&Value>,
         _route_id: &str,
     ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-        Ok(Arc::new(ryeos_signed_invocation::CompiledRyeosSignedVerifier))
+        Ok(Arc::new(
+            ryeos_signed_invocation::CompiledRyeosSignedVerifier,
+        ))
     }
 }
 
@@ -117,7 +119,12 @@ pub fn compile_auth_invoker(
     auth_config: Option<&Value>,
     route_id: &str,
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
-    compile_auth_invoker_with_registry(auth_key, auth_config, route_id, &AuthInvokerRegistry::with_api_builtins())
+    compile_auth_invoker_with_registry(
+        auth_key,
+        auth_config,
+        route_id,
+        &AuthInvokerRegistry::with_api_builtins(),
+    )
 }
 
 pub fn compile_auth_invoker_with_registry(
@@ -473,11 +480,8 @@ mod tests {
     #[test]
     fn with_descriptors_rejects_extension_service_when_not_provided() {
         // Same ref, empty descriptor set → must fail.
-        let result = compile_canonical_ref_invoker_with_descriptors(
-            "service:ui/session/current",
-            "r1",
-            &[],
-        );
+        let result =
+            compile_canonical_ref_invoker_with_descriptors("service:ui/session/current", "r1", &[]);
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected error"),
@@ -489,12 +493,9 @@ mod tests {
     #[test]
     fn with_descriptors_accepts_tool_kind() {
         // Non-service refs work the same regardless of descriptor set.
-        let invoker = compile_canonical_ref_invoker_with_descriptors(
-            "tool:ryeos/core/execute",
-            "r1",
-            &[],
-        )
-        .unwrap();
+        let invoker =
+            compile_canonical_ref_invoker_with_descriptors("tool:ryeos/core/execute", "r1", &[])
+                .unwrap();
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,

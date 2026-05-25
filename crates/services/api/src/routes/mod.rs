@@ -19,9 +19,9 @@ use axum::http::Method;
 
 use crate::route_error::RouteConfigError;
 use compile::CompiledRoute;
+use invokers::AuthInvokerRegistry;
 use matcher::PathMatcher;
 use response_modes::ResponseModeRegistry;
-use invokers::AuthInvokerRegistry;
 use ryeos_app::route_raw::RawRouteSpec;
 
 #[derive(Clone)]
@@ -76,7 +76,11 @@ pub fn build_route_table(
     raw_routes: &[RawRouteSpec],
     mode_registry: &ResponseModeRegistry,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
-    build_route_table_with_extensions(raw_routes, mode_registry, &RouteExtensionRegistry::default())
+    build_route_table_with_extensions(
+        raw_routes,
+        mode_registry,
+        &RouteExtensionRegistry::default(),
+    )
 }
 
 pub fn build_route_table_with_extensions(
@@ -133,14 +137,18 @@ pub fn build_route_table_with_extensions(
         // reservation is needed.
 
         // Compile auth invoker (no registry lookup).
-        let auth_invoker =
-            match invokers::compile_auth_invoker_with_registry(&raw.auth, raw.auth_config.as_ref(), &raw.id, &extensions.auth) {
-                Ok(a) => a,
-                Err(e) => {
-                    errors.push(e);
-                    continue;
-                }
-            };
+        let auth_invoker = match invokers::compile_auth_invoker_with_registry(
+            &raw.auth,
+            raw.auth_config.as_ref(),
+            &raw.id,
+            &extensions.auth,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
 
         let mode = match mode_registry.get(&raw.response.mode) {
             Some(m) => m,
@@ -210,7 +218,7 @@ pub fn build_route_table_with_extensions(
     })
 }
 
-    pub fn build_route_table_from_snapshot(
+pub fn build_route_table_from_snapshot(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> Result<RouteTable, Vec<RouteConfigError>> {
     let mode_registry = ResponseModeRegistry::with_builtins();

@@ -70,7 +70,17 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         Vec::new(),
     );
 
-    build_app_state(tmpdir, config, identity, state_store, engine, threads, events, commands, write_barrier)
+    build_app_state(
+        tmpdir,
+        config,
+        identity,
+        state_store,
+        engine,
+        threads,
+        events,
+        commands,
+        write_barrier,
+    )
 }
 
 fn build_app_state(
@@ -90,9 +100,7 @@ fn build_app_state(
         verbs: vec![],
         aliases: vec![],
     };
-    let test_vr = Arc::new(
-        ryeos_runtime::verb_registry::VerbRegistry::from_records(&[]).unwrap(),
-    );
+    let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[]).unwrap());
     let test_ar =
         Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
