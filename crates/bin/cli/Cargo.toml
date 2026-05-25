@@ -28,6 +28,7 @@ tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 lillux         = { path = "../../kernel/lillux" }
+ryeos-app      = { path = "../../core/app" }
 ryeos-bundle   = { path = "../../core/bundle" }
 ryeos-engine   = { path = "../../core/engine" }
 ryeos-node     = { path = "../../core/node" }

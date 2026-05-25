@@ -121,12 +121,14 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 6. Descriptor-driven offline dispatch.
     //    For commands whose service descriptor declares availability: offline,
     //    run the in-process handler. Returns None to fall through to daemon.
-    if let Some(result) = crate::offline_dispatch::try_offline_dispatch(
+    if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(
         &cli.rest,
         &system_space_dir,
         &body_project_path,
     )? {
-        print_result(result);
+        if let crate::offline_dispatch::OfflineDispatchOutcome::Json(result) = outcome {
+            print_result(result);
+        }
         return Ok(());
     }
 

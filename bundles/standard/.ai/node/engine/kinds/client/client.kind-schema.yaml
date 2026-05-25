@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-24T11:43:17Z:85d41da19899653eba5393c36f6506b60f1deb2364c7d6c7806e05a9762bcfef:iHTsDbiKyEE1wN2e7l6EhGX5kN3rObqZHBXa2WsXcXDNuRZafvYlQMwN1/m3MYYqLnKEhX+rcF5fNIR9RxUxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-25T06:09:08Z:dbfb32f24e168c325dc0b8cb66460a372095fd8349b2c49e8a13ee974e6da92b:LxqbNS3fWyIOjUIpsQsEjPEm7rSUAAf8G3KTR4AdhpZrn3ZV4lKDlyosIE1MpF/M3ZqF42fzsqOT1QdWZjXXDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "engine/kinds/client"
 version: "1.0.0"
 location:
@@ -7,6 +7,15 @@ location:
 effective_trust:
   include_references: false
 resolution: []
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/cli_exec
+  thread_profile:
+    name: client_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

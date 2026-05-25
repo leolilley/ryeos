@@ -2474,6 +2474,7 @@ dependencies = [
  "hyper-util",
  "lillux",
  "rand 0.8.5",
+ "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-node",

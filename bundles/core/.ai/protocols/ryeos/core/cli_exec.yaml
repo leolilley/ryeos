@@ -1,0 +1,21 @@
+# ryeos:signed:2026-05-25T06:08:22Z:5921560bf1a233028e13c8141dc6c6bf4216715223b2ea4486924d070f3726ee:XAG7/+UFz6oxbCWH5Ct0xkQk1yrJ9wttjJOYRmCDdcylKvEHNNIam07hm7m929wXNQv6epYkm+78gQVd5zBOBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: protocol
+name: cli_exec
+category: ryeos/core
+abi_version: v1
+description: Direct exec with argv flags and inherited stdio. No stdin envelope, no callback channel. Used by client binaries (TUI, web) that replace or attach to the caller's TTY.
+
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections:
+  - { name: RYEOS_PROJECT_PATH, source: project_path }
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: none
