@@ -20,8 +20,10 @@ pub struct FetchParams {
     pub with_content: bool,
     #[serde(default)]
     pub verify: bool,
-    #[serde(default)]
+    #[serde(default, alias = "project")]
     pub project_path: Option<String>,
+    #[serde(default)]
+    pub no_project: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,7 +48,11 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
     let canonical_ref = CanonicalRef::parse(&params.item_ref)
         .map_err(|e| anyhow!("failed to parse item ref `{}`: {e}", params.item_ref))?;
 
-    let project_path = params.project_path.as_deref().map(Path::new);
+    let project_path = if params.no_project {
+        None
+    } else {
+        params.project_path.as_deref().map(Path::new)
+    };
 
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {

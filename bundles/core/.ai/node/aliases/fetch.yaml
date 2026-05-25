@@ -1,7 +1,8 @@
-# ryeos:signed:2026-05-23T12:06:25Z:c821882873c320fad09295218cb35998241970785a2f876fc45d602c86cfa72b:W4bX8kHPPuKnhKsXaZOR2IdoAv9AqFQZpzftuxegRfkBjqj0ZEUBzfO0qKS/eOMPYO4OK47UyD7TkQVw2aFnCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-25T07:00:32Z:fdbce9ca66e8700ca1c85871ad40343f1fe65119fed1e12f9cda38ef1d039985:pcQtyKDlO42hQxs/z+TPMjfnTHg4cM9SX3BQ3lw+aXHemUHMVv2fpzm29AhWIK+kX/yc/fLGmXIgMHQa8tJCCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "aliases"
 section: aliases
 tokens: ["fetch"]
 verb: fetch
 description: "Fetch a resource from the daemon"
 positional_field: item_ref
+project_resolution: optional
