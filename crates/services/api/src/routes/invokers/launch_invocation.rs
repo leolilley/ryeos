@@ -94,6 +94,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             principal_id.clone(),
             principal_scopes,
             thread_id.clone(),
+            Default::default(), // launch options: use all defaults
         );
 
         // Detached watcher: await the handle and log outcome.

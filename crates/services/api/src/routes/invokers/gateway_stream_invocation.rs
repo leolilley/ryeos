@@ -23,12 +23,62 @@ pub struct CompiledGatewayStreamInvocation {
 }
 
 /// Typed body shape for gateway launch requests.
+///
+/// Mirrors the subset of [`ExecuteRequest`] fields relevant to streaming
+/// dispatch launch. All optional fields have serde defaults matching the
+/// existing hard-coded behavior, so existing callers that omit them see
+/// no change.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LaunchRequest {
+    /// Canonical item ref to execute (e.g. "directive:my/agent").
     pub(crate) item_ref: String,
+    /// Project root path for three-tier resolution.
     pub(crate) project_path: String,
+    #[serde(default)]
     pub(crate) parameters: Value,
+    /// Launch mode. Defaults to "inline".
+    #[serde(default = "default_launch_mode")]
+    pub(crate) launch_mode: String,
+    /// Target site id for remote execution forwarding.
+    /// v1: non-local target_site_id returns a stream_error.
+    #[serde(default)]
+    pub(crate) target_site_id: Option<String>,
+    /// Whether to validate descriptor composition only, without execution.
+    #[serde(default)]
+    pub(crate) validate_only: bool,
+    /// Optional operation name for multi-op items.
+    #[serde(default)]
+    pub(crate) operation: Option<String>,
+    /// Optional op-specific inputs.
+    #[serde(default)]
+    pub(crate) inputs: Option<Value>,
+}
+
+fn default_launch_mode() -> String {
+    "inline".to_string()
+}
+
+fn pre_spawn_stream_error(
+    thread_id: String,
+    keep_alive_secs: u64,
+    code: &'static str,
+    message: String,
+) -> RouteInvocationResult {
+    let stream = async_stream::stream! {
+        yield Ok(
+            RouteStreamEnvelope::new(
+                "stream_started",
+                serde_json::json!({"thread_id": thread_id}),
+            )
+        );
+        yield Ok(error_envelope(code, &message));
+    };
+
+    RouteInvocationResult::Stream(RouteEventStream {
+        events: Box::pin(stream),
+        keep_alive_secs,
+    })
 }
 
 static GATEWAY_CONTRACT: RouteInvocationContract = RouteInvocationContract {
@@ -98,7 +148,138 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path)
                 .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
+        // ── Phase 0: preflight composition validation ───────────────
+        // Run the resolution pipeline for the root item before spawning
+        // the background dispatch task. If composition validation fails,
+        // the error is caught here and emitted as a structured
+        // `stream_error` SSE event rather than crashing the background
+        // task with an unstructured internal error.
+        {
+            let engine = &ctx.state.engine;
+            let effective_parsers = engine
+                .effective_parser_dispatcher(Some(project_path.as_path()))
+                .map_err(|e| RouteDispatchError::BadRequest(format!("parser dispatcher: {e}")))?;
+            let engine_roots = engine.resolution_roots(Some(project_path.as_path().to_path_buf()));
+
+            let root_canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(
+                req.item_ref.as_str(),
+            )
+            .map_err(|e| RouteDispatchError::BadRequest(format!("invalid item_ref: {e}")))?;
+
+            if let Err(
+                ryeos_engine::resolution::ResolutionError::ComposedValueContractViolation {
+                    item_ref,
+                    report,
+                    ..
+                },
+            ) = ryeos_engine::resolution::run_resolution_pipeline(
+                &root_canonical,
+                &engine.kinds,
+                &effective_parsers,
+                &engine_roots,
+                &engine.trust_store,
+                &engine.composers,
+            ) {
+                // Return a "pre-spawn" stream error via the
+                // error_envelope helper. This is NOT a background task
+                // failure — it's a synchronous preflight rejection.
+                // The SSE stream will emit a single stream_error event.
+                use ryeos_executor::dispatch_error::ContractViolationDetails;
+                let details = ContractViolationDetails::from_report(&report);
+                let error_count = report.errors.len();
+                let warning_count = report.warnings.len();
+                let mut payload = serde_json::to_value(
+                    ryeos_executor::structured_error::StructuredErrorPayload::contract_violation(
+                        format!(
+                            "contract violation: `{item_ref}` ({error_count} error(s), {warning_count} warning(s))"
+                        ),
+                        details,
+                    ),
+                )
+                .expect("payload serializes");
+                // Remove code/error so error_envelope_with adds them.
+                if let Some(map) = payload.as_object_mut() {
+                    map.remove("code");
+                    map.remove("error");
+                }
+
+                let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+                let stream = async_stream::stream! {
+                    yield Ok(
+                        RouteStreamEnvelope::new(
+                            "stream_started",
+                            serde_json::json!({"thread_id": thread_id}),
+                        )
+                    );
+                    yield Ok(error_envelope_with(
+                        "contract_violation",
+                        &format!(
+                            "contract violation: `{item_ref}` ({error_count} error(s), {warning_count} warning(s))"
+                        ),
+                        Some(payload),
+                    ));
+                };
+
+                return Ok(RouteInvocationResult::Stream(RouteEventStream {
+                    events: Box::pin(stream),
+                    keep_alive_secs: self.keep_alive_secs,
+                }));
+            }
+        }
+
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+
+        // The dispatch-launch stream is a fire-and-tail-until-terminal
+        // contract. Non-inline launches can return before the thread is
+        // terminal, and validate-only dispatch can complete without a
+        // lifecycle thread at all. Reject both before spawning work so they
+        // don't degrade into misleading `thread_not_terminal` stream errors.
+        if req.launch_mode != "inline" {
+            return Ok(pre_spawn_stream_error(
+                thread_id,
+                self.keep_alive_secs,
+                "stream_launch_mode_unsupported",
+                format!(
+                    "/execute/stream supports launch_mode='inline' only; got '{}'",
+                    req.launch_mode
+                ),
+            ));
+        }
+
+        if req.validate_only {
+            return Ok(pre_spawn_stream_error(
+                thread_id,
+                self.keep_alive_secs,
+                "stream_validate_only_unsupported",
+                "validate_only is not supported on /execute/stream; use POST /execute for validation".to_string(),
+            ));
+        }
+
+        // ── Target-site guard ───────────────────────────────────────
+        // v1: streaming target-site forwarding is not yet implemented.
+        // Non-local target_site_id returns a clear stream_error so
+        // callers know the feature is coming but not ready.
+        if let Some(ref target_site_id) = req.target_site_id {
+            let current_site_id = ctx.state.threads.site_id();
+            if target_site_id != current_site_id {
+                let tsid = target_site_id.clone();
+                return Ok(pre_spawn_stream_error(
+                    thread_id,
+                    self.keep_alive_secs,
+                    "target_site_stream_unsupported",
+                    format!(
+                        "target-site streaming is not yet supported on /execute/stream \
+                         (target_site_id: '{tsid}'); unary target-site forwarding is currently \
+                         inline-only via POST /execute"
+                    ),
+                ));
+            }
+            // Self-target: normalize to local (fall through).
+            tracing::debug!(
+                target_site_id = %target_site_id,
+                "target_site_id equals current site; normalizing to local streaming"
+            );
+        }
 
         let principal_id = ctx
             .principal
@@ -124,6 +305,14 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         let hub = ctx.state.event_streams.clone();
         let mut rx = hub.subscribe(&thread_id);
 
+        let options = crate::routes::launch::DispatchLaunchOptions {
+            launch_mode: req.launch_mode,
+            target_site_id: req.target_site_id,
+            validate_only: req.validate_only,
+            operation: req.operation,
+            inputs: req.inputs,
+        };
+
         let mut launch_handle = crate::routes::launch::spawn_dispatch_launch(
             &ctx.state,
             item_ref,
@@ -132,6 +321,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             principal_id,
             principal_scopes,
             thread_id.clone(),
+            options,
         );
 
         let events_svc = ctx.state.events.clone();
@@ -315,5 +505,84 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             events: Box::pin(stream),
             keep_alive_secs,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_request_minimal_fields_deserialize() {
+        let json = serde_json::json!({
+            "item_ref": "directive:foo/bar",
+            "project_path": "/tmp/project",
+            "parameters": {}
+        });
+        let req: LaunchRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.item_ref, "directive:foo/bar");
+        assert_eq!(req.project_path, "/tmp/project");
+        assert_eq!(req.launch_mode, "inline");
+        assert_eq!(req.target_site_id, None);
+        assert_eq!(req.validate_only, false);
+        assert_eq!(req.operation, None);
+        assert_eq!(req.inputs, None);
+    }
+
+    #[test]
+    fn launch_request_all_fields_deserialize() {
+        let json = serde_json::json!({
+            "item_ref": "tool:x/y",
+            "project_path": "/home/me/project",
+            "parameters": {"key": "val"},
+            "launch_mode": "detached",
+            "target_site_id": "site:remote",
+            "validate_only": true,
+            "operation": "run",
+            "inputs": {"arg": 42}
+        });
+        let req: LaunchRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.item_ref, "tool:x/y");
+        assert_eq!(req.launch_mode, "detached");
+        assert_eq!(req.target_site_id.as_deref(), Some("site:remote"));
+        assert!(req.validate_only);
+        assert_eq!(req.operation.as_deref(), Some("run"));
+        assert_eq!(req.inputs.as_ref().unwrap()["arg"], 42);
+    }
+
+    #[test]
+    fn launch_request_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "item_ref": "directive:x",
+            "project_path": "/tmp/p",
+            "parameters": {},
+            "bogus_field": true
+        });
+        let result = serde_json::from_value::<LaunchRequest>(json);
+        assert!(
+            result.is_err(),
+            "expected deny_unknown_fields to reject bogus_field"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("bogus_field"),
+            "error should mention the unknown field: {msg}"
+        );
+    }
+
+    #[test]
+    fn launch_request_defaults_match_previous_hardcoded_behavior() {
+        let json = serde_json::json!({
+            "item_ref": "directive:x",
+            "project_path": "/tmp/p",
+            "parameters": {}
+        });
+        let req: LaunchRequest = serde_json::from_value(json).unwrap();
+        // Verify defaults match what was previously hard-coded in launch.rs
+        assert_eq!(req.launch_mode, "inline");
+        assert_eq!(req.target_site_id, None);
+        assert!(!req.validate_only);
+        assert_eq!(req.operation, None);
+        assert_eq!(req.inputs, None);
     }
 }

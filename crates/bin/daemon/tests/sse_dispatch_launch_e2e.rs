@@ -224,6 +224,67 @@ fn parse_sse_bytes(raw: &[u8]) -> Vec<SseEvent> {
     events
 }
 
+async fn post_execute_stream(
+    h: &DaemonHarness,
+    signing_key: &SigningKey,
+    node_fp: &str,
+    body_obj: serde_json::Value,
+    timeout_secs: u64,
+) -> reqwest::Response {
+    let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
+    let path = "/execute/stream";
+    let audience = format!("fp:{node_fp}");
+    let headers =
+        build_ryeos_signed_auth_headers(signing_key, "POST", path, &body_bytes, &audience);
+
+    let url = format!("http://{}{}", h.bind, path);
+    let client = reqwest::Client::new();
+    let mut req = client.post(&url).body(body_bytes);
+    req = req.header("content-type", "application/json");
+    for (k, v) in &headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    tokio::time::timeout(Duration::from_secs(timeout_secs), req.send())
+        .await
+        .expect("POST /execute/stream timed out")
+        .expect("POST /execute/stream send failed")
+}
+
+async fn assert_execute_stream_error_code(resp: reqwest::Response, expected_code: &str) {
+    assert!(
+        resp.status().is_success(),
+        "POST /execute/stream returned {}",
+        resp.status()
+    );
+
+    let bytes = tokio::time::timeout(Duration::from_secs(10), resp.bytes())
+        .await
+        .expect("read SSE body timed out")
+        .expect("read SSE body failed");
+
+    let events = parse_sse_bytes(&bytes);
+    assert!(!events.is_empty(), "no SSE events received");
+    assert_eq!(events[0].event, "stream_started");
+
+    let err = events
+        .iter()
+        .find(|e| e.event == "stream_error")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected stream_error event; got events: {:#?}",
+                events
+                    .iter()
+                    .map(|e| (&e.event, &e.data))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&err.data).expect("stream_error data is JSON");
+    assert_eq!(payload["code"], expected_code);
+}
+
 async fn boot_daemon() -> (DaemonHarness, SigningKey, String, String) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
@@ -414,6 +475,78 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
         resp.status()
     );
 
+    drop(project);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
+    let (h, user_sk, _user_fp, node_fp) = boot_daemon().await;
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+
+    let resp = post_execute_stream(
+        &h,
+        &user_sk,
+        &node_fp,
+        serde_json::json!({
+            "item_ref": "directive:test/launch_e2e",
+            "project_path": project_path,
+            "parameters": {"name": "World"},
+            "launch_mode": "detached"
+        }),
+        10,
+    )
+    .await;
+
+    assert_execute_stream_error_code(resp, "stream_launch_mode_unsupported").await;
+    drop(project);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
+    let (h, user_sk, _user_fp, node_fp) = boot_daemon().await;
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+
+    let resp = post_execute_stream(
+        &h,
+        &user_sk,
+        &node_fp,
+        serde_json::json!({
+            "item_ref": "directive:test/launch_e2e",
+            "project_path": project_path,
+            "parameters": {"name": "World"},
+            "validate_only": true
+        }),
+        10,
+    )
+    .await;
+
+    assert_execute_stream_error_code(resp, "stream_validate_only_unsupported").await;
+    drop(project);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
+    let (h, user_sk, _user_fp, node_fp) = boot_daemon().await;
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+
+    let resp = post_execute_stream(
+        &h,
+        &user_sk,
+        &node_fp,
+        serde_json::json!({
+            "item_ref": "directive:test/launch_e2e",
+            "project_path": project_path,
+            "parameters": {"name": "World"},
+            "target_site_id": "site:not-local"
+        }),
+        10,
+    )
+    .await;
+
+    assert_execute_stream_error_code(resp, "target_site_stream_unsupported").await;
     drop(project);
 }
 

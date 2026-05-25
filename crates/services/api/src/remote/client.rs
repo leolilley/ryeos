@@ -84,6 +84,10 @@ impl RemoteClient {
                 .as_str()
                 .context("missing vault_fingerprint in /public-key response")?
                 .to_string(),
+            site_id: body["site_id"]
+                .as_str()
+                .context("missing site_id in /public-key response; re-run remote configure against an updated remote daemon")?
+                .to_string(),
         })
     }
 
@@ -293,6 +297,41 @@ impl RemoteClient {
             "parameters": parameters,
             "project_source": { "kind": project_source },
         });
+        self.signed_post("/execute", &body).await
+    }
+
+    /// POST /execute with full request options (operation, inputs).
+    ///
+    /// This is the extended variant used by target-site forwarding
+    /// which needs to forward operation and inputs fields that the
+    /// basic `execute()` method does not support.
+    /// POST /execute with optional operation/inputs overrides.
+    ///
+    /// Used by the shared unary forward helper. Note: `target_site_id`
+    /// is intentionally **not** forwarded to prevent forwarding loops —
+    /// if site A forwards to site B, B should execute locally, not
+    /// attempt to forward again.
+    pub async fn execute_with_options(
+        &self,
+        item_ref: &str,
+        project_path: &str,
+        parameters: &Value,
+        project_source: &str,
+        operation: Option<&str>,
+        inputs: Option<&Value>,
+    ) -> Result<Value> {
+        let mut body = serde_json::json!({
+            "item_ref": item_ref,
+            "project_path": project_path,
+            "parameters": parameters,
+            "project_source": { "kind": project_source },
+        });
+        if let Some(op) = operation {
+            body["operation"] = Value::String(op.to_string());
+        }
+        if let Some(inputs) = inputs {
+            body["inputs"] = inputs.clone();
+        }
         self.signed_post("/execute", &body).await
     }
 
@@ -557,6 +596,9 @@ pub struct PublicKeyResponse {
     pub principal_id: String,
     pub fingerprint: String,
     pub vault_fingerprint: String,
+    /// Daemon site identity (e.g. `"site:my-hostname"`).
+    /// Discovered from the remote's `/public-key` response.
+    pub site_id: String,
 }
 
 #[derive(Debug, Clone)]
