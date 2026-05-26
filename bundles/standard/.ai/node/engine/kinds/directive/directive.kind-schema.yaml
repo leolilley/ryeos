@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:26Z:ca7339183becf5afaddb605106811f3eda9631e2afbb1b76c483c1e038314290:AYyvB4NzkPpc2WRT1zvCK5UEMDYG8oE8ByMi1U9The0IhxVjMfG+p7pxKWytpinAbTgqmBKyqrtPkUZIh5s0DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-26T05:25:37Z:e6623417fa42354f0e0024059818dffc325079749fd5e88bd7f6c3c00be2c7fa:TJG1WHZAkP+ewxyRlVz//xTtI03I+j6CCSyKxLIYSs9JxMKhOGYzk1AMuzjxR5D92FZ2iv69bfHOs4ktHzKlCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -61,6 +61,16 @@ composer_config:
       expect_value_type: mapping
       derive_as: composed_context
       derived_dict_string_seq: true
+    - name: model
+      strategy: replace_root_last
+      expect_value_type: mapping
+    - name: limits
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: inputs
+      strategy: keyed_seq_merge_root_last
+      key: name
+      expect_value_type: sequence
   policy_facts:
     - name: effective_caps
       path: [permissions, execute]
@@ -81,6 +91,15 @@ composed_value_contract:
     context:
       type: single
       prim: mapping
+    model:
+      type: single
+      prim: mapping
+    limits:
+      type: single
+      prim: mapping
+    inputs:
+      type: single
+      prim: sequence
 metadata:
   rules:
     name:

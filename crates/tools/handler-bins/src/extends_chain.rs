@@ -712,6 +712,22 @@ mod tests {
                     "expect_value_type": "mapping",
                     "derive_as": "composed_context",
                     "derived_dict_string_seq": true
+                },
+                {
+                    "name": "model",
+                    "strategy": "replace_root_last",
+                    "expect_value_type": "mapping"
+                },
+                {
+                    "name": "limits",
+                    "strategy": "dict_merge_root_last",
+                    "expect_value_type": "mapping"
+                },
+                {
+                    "name": "inputs",
+                    "strategy": "keyed_seq_merge_root_last",
+                    "key": "name",
+                    "expect_value_type": "sequence"
                 }
             ],
             "policy_facts": [
@@ -863,6 +879,115 @@ mod tests {
             before,
             &vec!["knowledge:p1".to_string(), "knowledge:c1".to_string()]
         );
+    }
+
+    #[test]
+    fn directive_model_replaces_root_last() {
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "model": {
+                "provider": "openrouter",
+                "name": "anthropic/claude-sonnet",
+                "context_window": 200000
+            },
+            "body": "child body"
+        });
+        let p = json!({
+            "name": "parent",
+            "model": {
+                "provider": "openrouter",
+                "name": "deepseek/deepseek-v4-pro",
+                "context_window": 128000
+            },
+            "body": "parent body"
+        });
+
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+
+        assert_eq!(view.composed["model"]["name"], "anthropic/claude-sonnet");
+        assert_eq!(view.composed["model"]["context_window"], 200000);
+        assert_eq!(derived_string(&view, "body").unwrap(), "child body");
+    }
+
+    #[test]
+    fn directive_model_is_inherited_when_child_omits_it() {
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "body": "child body"
+        });
+        let p = json!({
+            "name": "parent",
+            "model": {
+                "provider": "openrouter",
+                "name": "deepseek/deepseek-v4-pro",
+                "context_window": 128000
+            },
+            "body": "parent body"
+        });
+
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+
+        assert_eq!(view.composed["model"]["name"], "deepseek/deepseek-v4-pro");
+        assert_eq!(derived_string(&view, "body").unwrap(), "child body");
+    }
+
+    #[test]
+    fn directive_limits_merge_root_last() {
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "limits": { "spend_usd": 0.2 },
+            "body": "child body"
+        });
+        let p = json!({
+            "name": "parent",
+            "limits": {
+                "turns": 8,
+                "tokens": 65536,
+                "spend_usd": 0.1,
+                "duration_seconds": 60
+            },
+            "body": "parent body"
+        });
+
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+
+        assert_eq!(view.composed["limits"]["turns"], 8);
+        assert_eq!(view.composed["limits"]["tokens"], 65536);
+        assert_eq!(view.composed["limits"]["spend_usd"], 0.2);
+        assert_eq!(view.composed["limits"]["duration_seconds"], 60);
+    }
+
+    #[test]
+    fn directive_inputs_merge_by_name_root_last() {
+        let r = json!({
+            "name": "child",
+            "extends": "parent",
+            "inputs": [
+                { "name": "history", "type": "string", "required": true },
+                { "name": "workspace_state", "type": "string", "required": false }
+            ],
+            "body": "child body"
+        });
+        let p = json!({
+            "name": "parent",
+            "inputs": [
+                { "name": "message", "type": "string", "required": true },
+                { "name": "history", "type": "string", "required": false }
+            ],
+            "body": "parent body"
+        });
+
+        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
+        let inputs = view.composed["inputs"].as_array().unwrap();
+
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[0]["name"], "message");
+        assert_eq!(inputs[1]["name"], "history");
+        assert_eq!(inputs[1]["required"], true);
+        assert_eq!(inputs[2]["name"], "workspace_state");
     }
 
     #[test]
