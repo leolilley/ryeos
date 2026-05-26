@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY . .
 
-# Build all binaries, stage into bundle trees, publish both bundles.
+# Build all binaries, stage into bundle trees, publish bundles.
 # The publisher key is injected via BuildKit secret mount — the build
 # fails if the secret is missing or empty.
 RUN --mount=type=secret,id=publisher-key \
@@ -45,6 +45,7 @@ COPY --from=builder /build/target/release/ryeos-core-tools   /usr/local/bin/ryeo
 # Bundles with rebuilt CAS, baked into /opt (read-only template).
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
 COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
+COPY --from=builder /build/bundles/web       /opt/ryeos/web
 
 # Entrypoint runs ryeos init every boot (idempotent) then starts daemon.
 # Both /data/core (system) and /data/user (operator) persist across redeploys.

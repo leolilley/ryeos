@@ -1,0 +1,8 @@
+# ryeos:signed:2026-05-26T06:36:57Z:5c2b44f222beee257760034bd1be413a46adeb1fa94a9390970cb8139501b891:DDivbfvoOJUrruSi0rPKiQQkbBe5VsaEiiTZ/b3T8gX5Zo0nWeHGURwn/3Bh/xalhPjQAgpHrv5i8Hx+27wrBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: web
+version: 0.5.0
+description: Optional web access tools for agents
+provides_kinds: []
+requires_kinds:
+- tool
+uses_kinds: []

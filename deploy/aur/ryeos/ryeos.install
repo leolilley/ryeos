@@ -11,7 +11,8 @@ post_install() {
     echo "Initialize with:"
     echo "  ryeos init \\"
     echo "    --trust-file /usr/share/ryeos/core/PUBLISHER_TRUST.toml \\"
-    echo "    --trust-file /usr/share/ryeos/standard/PUBLISHER_TRUST.toml"
+    echo "    --trust-file /usr/share/ryeos/standard/PUBLISHER_TRUST.toml \\"
+    echo "    --trust-file /usr/share/ryeos/web/PUBLISHER_TRUST.toml"
     echo
     echo "(The --trust-file flags pin the packaged bundle signers."
     echo " Production installs may omit them once bundles are signed"

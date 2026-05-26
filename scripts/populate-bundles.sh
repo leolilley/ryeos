@@ -53,6 +53,7 @@ echo "[populate-bundles] target dir: $TARGET"
 
 CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
+WEB="$ROOT/bundles/web"
 
 # ── Clean derived state from all bundles ────────────────────────────
 # Wipe everything that will be regenerated so stale artifacts (old
@@ -67,8 +68,9 @@ done
 
 CORE_BIN="$CORE/.ai/bin/$TRIPLE"
 STD_BIN="$STD/.ai/bin/$TRIPLE"
+WEB_BIN="$WEB/.ai/bin/$TRIPLE"
 
-mkdir -p "$CORE_BIN" "$STD_BIN"
+mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN"
 
 # ── Build ────────────────────────────────────────────────────────────
 
@@ -81,6 +83,7 @@ echo "[populate-bundles] building all release binaries (workspace)…"
   -p ryeos-handler-bins \
   -p ryeos-cli \
   -p ryeos-tools \
+  -p ryeos-web-tools \
   -p ryeos-ui-terminal \
   -p ryeos-ui-web
 
@@ -106,6 +109,11 @@ install -m 0755 \
   "$TARGET/release/rye-composer-graph-permissions" \
   "$STD_BIN/"
 
+echo "[populate-bundles] installing web bundle binaries → $WEB_BIN"
+install -m 0755 \
+  "$TARGET/release/ryeos-web-tools" \
+  "$WEB_BIN/"
+
 # ── Publish ──────────────────────────────────────────────────────────
 
 # Bundle publishing is an offline authoring operation. Use the maintainer
@@ -127,6 +135,11 @@ echo "[populate-bundles] publishing standard bundle…"
 # Standard contains its own kind schemas (directive, graph, knowledge) now.
 # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
 USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$STD" \
+  --registry-root "$CORE" \
+  --owner "$OWNER" >/dev/null
+
+echo "[populate-bundles] publishing web bundle…"
+USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$WEB" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 

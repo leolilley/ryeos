@@ -4,7 +4,7 @@
 # This intentionally skips yay/makepkg but installs the same runtime layout
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
-#   - bundle sources -> /usr/share/ryeos/{core,standard}
+#   - bundle sources -> /usr/share/ryeos/{core,standard,web}
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -18,8 +18,8 @@ Usage: scripts/pkg/install-local-direct.sh [options]
 
 Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
-  /usr/share/ryeos/{core,standard}/.ai
-  ~/.local/share/ryeos/.ai/bundles/{core,standard}  (after init)
+  /usr/share/ryeos/{core,standard,web}/.ai
+  ~/.local/share/ryeos/.ai/bundles/{core,standard,web}  (after init)
 
 Options:
   --skip-populate       Do not run scripts/populate-bundles.sh first
@@ -157,8 +157,10 @@ done
 
 [[ -d "$repo_root/bundles/core/.ai" ]] || die "missing bundles/core/.ai"
 [[ -d "$repo_root/bundles/standard/.ai" ]] || die "missing bundles/standard/.ai"
+[[ -d "$repo_root/bundles/web/.ai" ]] || die "missing bundles/web/.ai"
 [[ -f "$repo_root/bundles/core/PUBLISHER_TRUST.toml" ]] || die "missing bundles/core/PUBLISHER_TRUST.toml"
 [[ -f "$repo_root/bundles/standard/PUBLISHER_TRUST.toml" ]] || die "missing bundles/standard/PUBLISHER_TRUST.toml"
+[[ -f "$repo_root/bundles/web/PUBLISHER_TRUST.toml" ]] || die "missing bundles/web/PUBLISHER_TRUST.toml"
 
 echo "[install-local-direct] installing binaries -> $bin_dir"
 for b in "${required_bins[@]}"; do
@@ -228,6 +230,8 @@ if [[ $run_init -eq 1 ]]; then
         die "initialized core bundle missing from ~/.local/share/ryeos"
     test -d "$HOME/.local/share/ryeos/.ai/bundles/standard/.ai" || \
         die "initialized standard bundle missing from ~/.local/share/ryeos"
+    test -d "$HOME/.local/share/ryeos/.ai/bundles/web/.ai" || \
+        die "initialized web bundle missing from ~/.local/share/ryeos"
     grep -q '^execute: client:ryeos/tui$' \
         "$HOME/.local/share/ryeos/.ai/bundles/standard/.ai/node/verbs/tui.yaml" || \
         die "initialized tui verb is stale or not client-backed"
@@ -242,7 +246,7 @@ fi
 echo
 echo "[install-local-direct] complete"
 echo "  ryeos:        $(command -v ryeos)"
-echo "  bundle src:   $share_dir/{core,standard}"
+echo "  bundle src:   $share_dir/{core,standard,web}"
 echo "  local state:  $HOME/.local/share/ryeos"
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "  daemon:       restarted"

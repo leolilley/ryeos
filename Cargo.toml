@@ -22,6 +22,7 @@ members = [
     "crates/core/scheduler",
     "crates/core/state",
     "crates/tools/core-tools",
+    "crates/tools/web-tools",
     "crates/core/tracing",
     "crates/core/vault",
 ]
