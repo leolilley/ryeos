@@ -146,7 +146,15 @@ fn search_bing_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<Search
 
     let xml = client
         .get("https://www.bing.com/search")
-        .query(&[("format", "rss"), ("q", query)])
+        // Bing RSS can return unrelated results from Railway when `format=rss`
+        // is placed before `q`. Keep the query first, then constrain language
+        // and adult filtering for a safer fallback result set.
+        .query(&[
+            ("q", query),
+            ("format", "rss"),
+            ("setlang", "en-US"),
+            ("adlt", "strict"),
+        ])
         .send()
         .context("Bing RSS request failed")?
         .error_for_status()
