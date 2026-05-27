@@ -104,12 +104,10 @@ fn read_search_params() -> anyhow::Result<SearchParams> {
 fn search_web(query: &str, num_results: usize) -> anyhow::Result<(String, Vec<SearchResult>)> {
     match search_duckduckgo(query, num_results) {
         Ok(results) if !results.is_empty() => Ok(("duckduckgo".to_string(), results)),
-        Ok(_) => search_bing_rss(query, num_results)
-            .map(|results| ("bing_rss".to_string(), results))
-            .context("DuckDuckGo returned no results and Bing RSS fallback failed"),
-        Err(ddg_err) => search_bing_rss(query, num_results)
-            .map(|results| ("bing_rss".to_string(), results))
-            .with_context(|| format!("DuckDuckGo failed ({ddg_err:#}) and Bing RSS fallback failed")),
+        Ok(_) => search_rss_fallback(query, num_results)
+            .context("DuckDuckGo returned no results and RSS fallback failed"),
+        Err(ddg_err) => search_rss_fallback(query, num_results)
+            .with_context(|| format!("DuckDuckGo failed ({ddg_err:#}) and RSS fallback failed")),
     }
 }
 
@@ -137,7 +135,24 @@ fn search_duckduckgo(query: &str, num_results: usize) -> anyhow::Result<Vec<Sear
     Ok(parse_duckduckgo_html(&html, num_results))
 }
 
-fn search_bing_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
+fn search_rss_fallback(
+    query: &str,
+    num_results: usize,
+) -> anyhow::Result<(String, Vec<SearchResult>)> {
+    match search_google_news_rss(query, num_results) {
+        Ok(results) if !results.is_empty() => Ok(("google_news_rss".to_string(), results)),
+        Ok(_) => search_bing_news_rss(query, num_results)
+            .map(|results| ("bing_news_rss".to_string(), results))
+            .context("Google News RSS returned no results and Bing News RSS fallback failed"),
+        Err(google_err) => search_bing_news_rss(query, num_results)
+            .map(|results| ("bing_news_rss".to_string(), results))
+            .with_context(|| {
+                format!("Google News RSS failed ({google_err:#}) and Bing News RSS fallback failed")
+            }),
+    }
+}
+
+fn search_google_news_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
         .user_agent("Mozilla/5.0 (compatible; RyeOS/1.0; +https://ryeos.dev)")
@@ -145,10 +160,36 @@ fn search_bing_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<Search
         .context("build HTTP client")?;
 
     let xml = client
-        .get("https://www.bing.com/search")
-        // Bing RSS can return unrelated results from Railway when `format=rss`
-        // is placed before `q`. Keep the query first, then constrain language
-        // and adult filtering for a safer fallback result set.
+        .get("https://news.google.com/rss/search")
+        .query(&[
+            ("q", query),
+            ("hl", "en-US"),
+            ("gl", "US"),
+            ("ceid", "US:en"),
+        ])
+        .send()
+        .context("Google News RSS request failed")?
+        .error_for_status()
+        .context("Google News RSS returned an error status")?
+        .text()
+        .context("read Google News RSS response body")?;
+
+    let results = parse_rss(&xml, num_results);
+    if results.is_empty() {
+        anyhow::bail!("Google News RSS returned no parseable results");
+    }
+    Ok(results)
+}
+
+fn search_bing_news_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (compatible; RyeOS/1.0; +https://ryeos.dev)")
+        .build()
+        .context("build HTTP client")?;
+
+    let xml = client
+        .get("https://www.bing.com/news/search")
         .query(&[
             ("q", query),
             ("format", "rss"),
@@ -156,15 +197,15 @@ fn search_bing_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<Search
             ("adlt", "strict"),
         ])
         .send()
-        .context("Bing RSS request failed")?
+        .context("Bing News RSS request failed")?
         .error_for_status()
-        .context("Bing RSS returned an error status")?
+        .context("Bing News RSS returned an error status")?
         .text()
-        .context("read Bing RSS response body")?;
+        .context("read Bing News RSS response body")?;
 
-    let results = parse_bing_rss(&xml, num_results);
+    let results = parse_rss(&xml, num_results);
     if results.is_empty() {
-        anyhow::bail!("Bing RSS returned no parseable results");
+        anyhow::bail!("Bing News RSS returned no parseable results");
     }
     Ok(results)
 }
@@ -200,12 +241,12 @@ fn parse_duckduckgo_html(html: &str, num_results: usize) -> Vec<SearchResult> {
         .collect()
 }
 
-fn parse_bing_rss(xml: &str, num_results: usize) -> Vec<SearchResult> {
+fn parse_rss(xml: &str, num_results: usize) -> Vec<SearchResult> {
     let item_re = Regex::new(r#"(?is)<item\b[^>]*>(.*?)</item>"#).expect("valid item regex");
     let title_re = Regex::new(r#"(?is)<title>(.*?)</title>"#).expect("valid title regex");
     let link_re = Regex::new(r#"(?is)<link>(.*?)</link>"#).expect("valid link regex");
-    let description_re = Regex::new(r#"(?is)<description>(.*?)</description>"#)
-        .expect("valid description regex");
+    let description_re =
+        Regex::new(r#"(?is)<description>(.*?)</description>"#).expect("valid description regex");
 
     item_re
         .captures_iter(xml)
@@ -368,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_bing_rss_items() {
+    fn parses_rss_items() {
         let xml = r#"
           <rss><channel>
             <item>
@@ -379,7 +420,7 @@ mod tests {
           </channel></rss>
         "#;
 
-        let results = parse_bing_rss(xml, 5);
+        let results = parse_rss(xml, 5);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "TVB & Hong Kong TV");
         assert_eq!(results[0].url, "https://www.tvb.com/");
