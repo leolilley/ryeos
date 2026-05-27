@@ -118,7 +118,17 @@ fn search_duckduckgo(query: &str, num_results: usize) -> anyhow::Result<Vec<Sear
         .text()
         .context("read DuckDuckGo response body")?;
 
+    if is_duckduckgo_challenge(&html) {
+        return Err(anyhow!("DuckDuckGo returned an anti-bot challenge"));
+    }
+
     Ok(parse_duckduckgo_html(&html, num_results))
+}
+
+fn is_duckduckgo_challenge(html: &str) -> bool {
+    html.contains("anomaly-modal")
+        || html.contains("anomaly-modal__image")
+        || html.contains("/assets/anomaly/images/challenge/")
 }
 
 fn parse_duckduckgo_html(html: &str, num_results: usize) -> Vec<SearchResult> {
@@ -254,5 +264,16 @@ mod tests {
     #[test]
     fn percent_decode_handles_utf8() {
         assert_eq!(percent_decode("hello+%E2%9C%93"), "hello ✓");
+    }
+
+    #[test]
+    fn detects_duckduckgo_anomaly_challenge() {
+        let html = r#"
+          <div class="anomaly-modal__box">
+            <img src="../assets/anomaly/images/challenge/example.jpg">
+          </div>
+        "#;
+
+        assert!(is_duckduckgo_challenge(html));
     }
 }
