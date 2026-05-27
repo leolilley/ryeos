@@ -297,10 +297,10 @@ async fn discover_audience(daemon_url: &str) -> Result<String> {
     }
 
     let v: serde_json::Value = resp.json().await.context("parse public-key response")?;
-    v.get("fingerprint")
+    v.get("principal_id")
         .and_then(|f| f.as_str())
         .map(|s| s.to_string())
-        .context("public-key response missing 'fingerprint'")
+        .context("public-key response missing 'principal_id'")
 }
 
 // ── Browser launch ─────────────────────────────────────────────────────

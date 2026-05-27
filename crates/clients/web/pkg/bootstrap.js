@@ -2,8 +2,9 @@
 //
 // 1. GET /ui/api/session/current
 // 2. POST /items/effective for session.surface_ref
-// 3. EventSource(session.events_url)
-// 4. Render placeholder status
+// 3. GET /ui/api/graph/topology
+// 4. EventSource(session.events_url)
+// 5. Render the topology graph when available, otherwise status
 
 (function () {
   "use strict";
@@ -32,19 +33,54 @@
       return resp.json();
     })
     .then(function (session) {
-      // Resolve effective surface.
+      var state = {
+        session: session,
+        surface: null,
+        connected: false,
+        topology: null,
+      };
+
+      function render() {
+        if (state.topology && window.RyeGraphView) {
+          window.RyeGraphView.render(app, state.topology, {
+            session: state.session,
+            surface: state.surface,
+            connected: state.connected,
+          });
+        } else {
+          renderStatus(state.session, state.surface, state.connected);
+        }
+      }
+
+      // Resolve effective surface. This is best-effort; the graph can render
+      // from topology data even if surface resolution is unavailable.
       var surface = null;
       fetch("/items/effective", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ item_ref: session.surface_ref }),
+        body: JSON.stringify({ canonical_ref: session.surface_ref }),
       })
         .then(function (r) {
           return r.ok ? r.json() : null;
         })
         .then(function (s) {
-          surface = s;
-          renderStatus(session, surface, false);
+          state.surface = s;
+          render();
+        });
+
+      fetch("/ui/api/graph/topology")
+        .then(function (r) {
+          if (!r.ok) {
+            throw new Error("topology request failed: " + r.status);
+          }
+          return r.json();
+        })
+        .then(function (topology) {
+          state.topology = topology;
+          render();
+        })
+        .catch(function () {
+          render();
         });
 
       // Open session event stream.
@@ -52,7 +88,8 @@
       var es = new EventSource(eventsUrl);
 
       es.onopen = function () {
-        renderStatus(session, surface, true);
+        state.connected = true;
+        render();
       };
 
       es.addEventListener("snapshot_required", function () {
@@ -60,10 +97,11 @@
       });
 
       es.onerror = function () {
-        renderStatus(session, surface, false);
+        state.connected = false;
+        render();
       };
 
-      renderStatus(session, null, false);
+      render();
     })
     .catch(function (err) {
       if (

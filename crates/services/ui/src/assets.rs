@@ -45,6 +45,8 @@ fn compute_etag(bytes: &[u8]) -> String {
 
 static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html");
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
+static GRAPH_VIEW_JS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.js");
+static GRAPH_VIEW_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.css");
 
 /// Web UI static asset provider — owns the embedded web client assets.
 pub struct WebAssetProvider;
@@ -55,6 +57,8 @@ impl StaticAssetProvider for WebAssetProvider {
         let (bytes, cache_control) = match trimmed {
             "index.html" | "ui/index.html" => (INDEX_HTML, "no-cache"),
             "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
+            "graph-view.js" | "ui/assets/graph-view.js" => (GRAPH_VIEW_JS, "no-cache"),
+            "graph-view.css" | "ui/assets/graph-view.css" => (GRAPH_VIEW_CSS, "no-cache"),
             _ => return None,
         };
         Some(StaticAsset {
@@ -85,6 +89,18 @@ mod tests {
         let asset = provider.get("bootstrap.js").expect("bootstrap.js must be embedded");
         assert!(asset.bytes.len() > 0);
         assert!(asset.content_type.contains("javascript"));
+    }
+
+    #[test]
+    fn get_graph_assets() {
+        let provider = WebAssetProvider;
+        let js = provider.get("graph-view.js").expect("graph-view.js must be embedded");
+        assert!(js.bytes.len() > 0);
+        assert!(js.content_type.contains("javascript"));
+
+        let css = provider.get("graph-view.css").expect("graph-view.css must be embedded");
+        assert!(css.bytes.len() > 0);
+        assert!(css.content_type.contains("css"));
     }
 
     #[test]

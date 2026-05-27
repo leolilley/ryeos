@@ -12,9 +12,11 @@ lillux = { path = "../../kernel/lillux" }
 rand = "0.8"
 ryeos-api = { path = "../api" }
 ryeos-app = { path = "../../core/app" }
+ryeos-engine = { path = "../../core/engine" }
 ryeos-executor = { path = "../../core/executor" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1.18"

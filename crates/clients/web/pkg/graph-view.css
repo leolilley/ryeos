@@ -1,0 +1,171 @@
+html, body {
+  background: #070a12;
+  color: #e7ecff;
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  min-height: 100%;
+}
+
+#app {
+  box-sizing: border-box;
+  min-height: 100vh;
+  padding: 1rem;
+}
+
+.status {
+  color: #9aa9d8;
+}
+
+.error {
+  color: #ff7d8f;
+}
+
+.rye-graph-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22rem;
+  gap: 1rem;
+  min-height: calc(100vh - 2rem);
+}
+
+.rye-graph-main,
+.rye-graph-details {
+  background: rgba(15, 21, 39, 0.88);
+  border: 1px solid rgba(132, 160, 255, 0.22);
+  border-radius: 16px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.rye-graph-header,
+.rye-graph-details-header {
+  align-items: center;
+  border-bottom: 1px solid rgba(132, 160, 255, 0.16);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 0.85rem 1rem;
+}
+
+.rye-graph-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: flex-end;
+}
+
+.rye-graph-controls input[type="search"],
+.rye-graph-controls select {
+  background: rgba(7, 10, 18, 0.72);
+  border: 1px solid rgba(132, 160, 255, 0.28);
+  border-radius: 999px;
+  color: #e7ecff;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.38rem 0.65rem;
+}
+
+.rye-graph-controls input[type="search"] {
+  min-width: 12rem;
+}
+
+.rye-graph-controls label {
+  align-items: center;
+  color: #cbd6ff;
+  display: inline-flex;
+  font-size: 0.78rem;
+  gap: 0.25rem;
+}
+
+.rye-graph-title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.rye-graph-meta {
+  color: #9aa9d8;
+  font-size: 0.78rem;
+}
+
+.rye-graph-canvas {
+  display: block;
+  height: calc(100vh - 7rem);
+  min-height: 32rem;
+  width: 100%;
+}
+
+.rye-edge {
+  stroke: rgba(119, 151, 255, 0.24);
+  stroke-width: 1.2;
+}
+
+.rye-edge.active {
+  stroke: rgba(125, 236, 255, 0.85);
+  stroke-width: 2.2;
+}
+
+.rye-node {
+  cursor: pointer;
+}
+
+.rye-node circle {
+  stroke: rgba(255, 255, 255, 0.64);
+  stroke-width: 1.2;
+}
+
+.rye-node text {
+  fill: #e7ecff;
+  font-size: 11px;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: #070a12;
+  stroke-width: 3px;
+}
+
+.rye-node.active circle {
+  stroke: #7decff;
+  stroke-width: 3;
+}
+
+.rye-graph-details {
+  padding-bottom: 1rem;
+}
+
+.rye-detail-body {
+  padding: 1rem;
+}
+
+.rye-detail-kv {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.rye-detail-kv dt {
+  color: #9aa9d8;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rye-detail-kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.rye-edge-list {
+  color: #cbd6ff;
+  font-size: 0.85rem;
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+}
+
+@media (max-width: 900px) {
+  .rye-graph-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .rye-graph-canvas {
+    height: 32rem;
+  }
+}
