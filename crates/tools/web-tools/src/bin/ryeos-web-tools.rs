@@ -27,7 +27,7 @@ struct SearchResult {
 #[derive(Debug, Serialize)]
 struct SearchEnvelope {
     success: bool,
-    provider: &'static str,
+    provider: String,
     query: String,
     count: usize,
     results: Vec<SearchResult>,
@@ -82,10 +82,10 @@ fn run() -> anyhow::Result<()> {
         .unwrap_or(DEFAULT_NUM_RESULTS)
         .clamp(1, MAX_RESULTS);
 
-    let results = search_duckduckgo(query, num_results)?;
+    let (provider, results) = search_web(query, num_results)?;
     let envelope = SearchEnvelope {
         success: true,
-        provider: "duckduckgo",
+        provider,
         query: query.to_string(),
         count: results.len(),
         output: format_results(&results),
@@ -99,6 +99,18 @@ fn read_search_params() -> anyhow::Result<SearchParams> {
     let mut raw = String::new();
     io::stdin().read_to_string(&mut raw).context("read stdin")?;
     serde_json::from_str(&raw).context("parse search params JSON")
+}
+
+fn search_web(query: &str, num_results: usize) -> anyhow::Result<(String, Vec<SearchResult>)> {
+    match search_duckduckgo(query, num_results) {
+        Ok(results) if !results.is_empty() => Ok(("duckduckgo".to_string(), results)),
+        Ok(_) => search_bing_rss(query, num_results)
+            .map(|results| ("bing_rss".to_string(), results))
+            .context("DuckDuckGo returned no results and Bing RSS fallback failed"),
+        Err(ddg_err) => search_bing_rss(query, num_results)
+            .map(|results| ("bing_rss".to_string(), results))
+            .with_context(|| format!("DuckDuckGo failed ({ddg_err:#}) and Bing RSS fallback failed")),
+    }
 }
 
 fn search_duckduckgo(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
@@ -123,6 +135,30 @@ fn search_duckduckgo(query: &str, num_results: usize) -> anyhow::Result<Vec<Sear
     }
 
     Ok(parse_duckduckgo_html(&html, num_results))
+}
+
+fn search_bing_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (compatible; RyeOS/1.0; +https://ryeos.dev)")
+        .build()
+        .context("build HTTP client")?;
+
+    let xml = client
+        .get("https://www.bing.com/search")
+        .query(&[("format", "rss"), ("q", query)])
+        .send()
+        .context("Bing RSS request failed")?
+        .error_for_status()
+        .context("Bing RSS returned an error status")?
+        .text()
+        .context("read Bing RSS response body")?;
+
+    let results = parse_bing_rss(&xml, num_results);
+    if results.is_empty() {
+        anyhow::bail!("Bing RSS returned no parseable results");
+    }
+    Ok(results)
 }
 
 fn is_duckduckgo_challenge(html: &str) -> bool {
@@ -153,6 +189,42 @@ fn parse_duckduckgo_html(html: &str, num_results: usize) -> Vec<SearchResult> {
             url: normalize_duckduckgo_url(&cap[1]),
             snippet: snippets.get(index).cloned().unwrap_or_default(),
         })
+        .collect()
+}
+
+fn parse_bing_rss(xml: &str, num_results: usize) -> Vec<SearchResult> {
+    let item_re = Regex::new(r#"(?is)<item\b[^>]*>(.*?)</item>"#).expect("valid item regex");
+    let title_re = Regex::new(r#"(?is)<title>(.*?)</title>"#).expect("valid title regex");
+    let link_re = Regex::new(r#"(?is)<link>(.*?)</link>"#).expect("valid link regex");
+    let description_re = Regex::new(r#"(?is)<description>(.*?)</description>"#)
+        .expect("valid description regex");
+
+    item_re
+        .captures_iter(xml)
+        .filter_map(|item| {
+            let body = &item[1];
+            let title = title_re
+                .captures(body)
+                .map(|cap| clean_xml_text(&cap[1]))
+                .unwrap_or_default();
+            let url = link_re
+                .captures(body)
+                .map(|cap| clean_xml_text(&cap[1]))
+                .unwrap_or_default();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            let snippet = description_re
+                .captures(body)
+                .map(|cap| clean_html_fragment(&clean_xml_text(&cap[1])))
+                .unwrap_or_default();
+            Some(SearchResult {
+                title,
+                url,
+                snippet,
+            })
+        })
+        .take(num_results)
         .collect()
 }
 
@@ -188,10 +260,20 @@ fn html_unescape(value: &str) -> String {
     value
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
+        .replace("&apos;", "'")
         .replace("&#x27;", "'")
         .replace("&#39;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+}
+
+fn clean_xml_text(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_cdata = trimmed
+        .strip_prefix("<![CDATA[")
+        .and_then(|value| value.strip_suffix("]]>").map(str::trim))
+        .unwrap_or(trimmed);
+    html_unescape(without_cdata)
 }
 
 fn percent_decode(value: &str) -> String {
@@ -275,5 +357,24 @@ mod tests {
         "#;
 
         assert!(is_duckduckgo_challenge(html));
+    }
+
+    #[test]
+    fn parses_bing_rss_items() {
+        let xml = r#"
+          <rss><channel>
+            <item>
+              <title>TVB &amp; Hong Kong TV</title>
+              <link>https://www.tvb.com/</link>
+              <description><![CDATA[Official <b>television</b> site.]]></description>
+            </item>
+          </channel></rss>
+        "#;
+
+        let results = parse_bing_rss(xml, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "TVB & Hong Kong TV");
+        assert_eq!(results[0].url, "https://www.tvb.com/");
+        assert_eq!(results[0].snippet, "Official television site.");
     }
 }
