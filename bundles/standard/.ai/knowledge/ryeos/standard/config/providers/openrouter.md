@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-26T03:41:08Z:2d091b29cfff55a36f94982357cdf5d9e7e75bcb794bf99ab597bdbb61374675:DdNl9Lp1tOqJSRYrKSQOsiw3hSuxof/MXps2/BGFIcyIM9JylHUZuGEhiVrwndQKYzNPRE/vIUMBbg6bAijiCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-27T06:45:50Z:2d091b29cfff55a36f94982357cdf5d9e7e75bcb794bf99ab597bdbb61374675:G+DJmuC3i0OIJ1ubVDYRf60X3zA9rvp/Bgi2Q7ADu6i5KbLuJWmvC1HafLHGE9D8fW7SXSOIelLL6HmruiCXDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/config/providers
 tags: [provider, openrouter, gateway, models]
