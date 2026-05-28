@@ -604,7 +604,7 @@ pub async fn build_and_launch(
         Some(id) => state.threads.create_root_thread_with_id(id, resolved)?,
         None => state.threads.create_root_thread(resolved)?,
     };
-    let thread_id = &thread.thread_id;
+    let thread_id = thread.thread_id.clone();
 
     // 2. Compute limits (root execution: depth = 0)
     let limits_config = load_limits_config(project_path).with_context(|| {
@@ -796,7 +796,7 @@ pub async fn build_and_launch(
     let ttl = compute_ttl(Some(hard_limits.duration_seconds));
     let child_provenance = provenance.clone_for_borrowed_child();
     let cap = state.callback_tokens.generate(
-        thread_id,
+        &thread_id,
         project_path.to_path_buf(),
         ttl,
         effective_caps.clone(),
@@ -895,7 +895,7 @@ pub async fn build_and_launch(
         effective_trust_class: Some(effective_trust_class),
     };
     let identity = &state.identity;
-    super::thread_meta::write_thread_meta(project_path, thread_id, &meta, identity)?;
+    super::thread_meta::write_thread_meta(project_path, &thread_id, &meta, identity)?;
 
     // 9. Spawn runtime (env vars + stdin envelope)
     //
@@ -926,7 +926,7 @@ pub async fn build_and_launch(
         .collect();
 
     let thread_auth = state.thread_auth.mint(
-        thread_id,
+        &thread_id,
         acting_principal.to_string(),
         vec!["execute".to_string()],
         ttl,
@@ -951,9 +951,9 @@ pub async fn build_and_launch(
 
     // 10. ALWAYS invalidate callback token (cleanup guard)
     state.callback_tokens.invalidate(&cap.token);
-    state.callback_tokens.invalidate_for_thread(thread_id);
+    state.callback_tokens.invalidate_for_thread(&thread_id);
     state.thread_auth.invalidate(&thread_auth.token);
-    state.thread_auth.invalidate_for_thread(thread_id);
+    state.thread_auth.invalidate_for_thread(&thread_id);
 
     // Prune stale capabilities from other completed threads
     let pruned = state.callback_tokens.prune_expired();
@@ -985,7 +985,7 @@ pub async fn build_and_launch(
             };
             let _ = super::thread_meta::write_thread_meta(
                 project_path,
-                thread_id,
+                &thread_id,
                 &failed_meta,
                 identity,
             );
@@ -993,8 +993,53 @@ pub async fn build_and_launch(
         }
     };
 
-    // 12. Build response from DB thread (runtime already finalized via callback)
-    let thread_detail = state.threads.get_thread(thread_id)?.unwrap_or(thread);
+    // 12. Build response from DB thread. Normally the runtime already
+    // finalized via callback. If the subprocess exits before it can do that
+    // (for example a hard timeout/SIGKILL), fail closed by finalizing here;
+    // otherwise streaming callers tailing until terminal degrade into a
+    // misleading `thread_not_terminal` error.
+    let mut thread_detail = state
+        .threads
+        .get_thread(&thread_id)?
+        .unwrap_or(thread);
+    if !is_runtime_terminal_status(&thread_detail.status) {
+        let terminal_status = normalize_runtime_terminal_status(&runtime_result.status);
+        let terminal_error = if terminal_status == "completed" {
+            None
+        } else {
+            Some(json!({
+                "reason": "runtime_exited_without_callback_finalization",
+                "runtime_status": runtime_result.status.clone(),
+                "result": runtime_result.result.clone(),
+            }))
+        };
+        let final_cost = runtime_result.cost.as_ref().map(|cost| {
+            ryeos_engine::contracts::FinalCost {
+                turns: 0,
+                input_tokens: cost.input_tokens as i64,
+                output_tokens: cost.output_tokens as i64,
+                spend: cost.total_usd,
+                provider: None,
+                metadata: None,
+            }
+        });
+        let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
+            thread_id: thread_id.clone(),
+            status: terminal_status.to_string(),
+            outcome_code: if terminal_status == "completed" {
+                None
+            } else {
+                Some(terminal_status.to_string())
+            },
+            result: runtime_result.result.clone(),
+            error: terminal_error,
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost,
+            summary_json: None,
+        })?;
+        thread_detail = finalized;
+    }
 
     // The runtime returns terminal text in `result` (Option<String>) and any
     // non-fatal callback drift in `warnings`. Both must be visible to the
@@ -1093,7 +1138,11 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
     if !result.success {
         return Ok(RuntimeResult {
             success: false,
-            status: "failed".to_string(),
+            status: if result.timed_out {
+                "timed_out".to_string()
+            } else {
+                "failed".to_string()
+            },
             thread_id: String::new(),
             result: Some(json!(result.stderr.clone())),
             outputs: Value::Null,
@@ -1109,6 +1158,27 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
             &result.stdout[..result.stdout.len().min(500)]
         )
     })
+}
+
+fn is_runtime_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+    )
+}
+
+fn normalize_runtime_terminal_status(status: &str) -> &'static str {
+    match status {
+        "completed" => "completed",
+        "cancelled" => "cancelled",
+        "killed" => "killed",
+        "timed_out" => "timed_out",
+        "continued" => "continued",
+        // RuntimeResult historically used "errored" internally. The thread
+        // lifecycle vocabulary uses "failed" for that terminal state.
+        "failed" | "errored" => "failed",
+        _ => "failed",
+    }
 }
 
 #[cfg(test)]
@@ -1288,5 +1358,23 @@ mod tests {
         let err = BuildAndLaunchError::from(io_err);
         let msg = format!("{err}");
         assert!(msg.contains("file gone"));
+    }
+
+    #[test]
+    fn runtime_terminal_status_normalization_matches_thread_vocabulary() {
+        assert_eq!(normalize_runtime_terminal_status("completed"), "completed");
+        assert_eq!(normalize_runtime_terminal_status("timed_out"), "timed_out");
+        assert_eq!(normalize_runtime_terminal_status("cancelled"), "cancelled");
+        assert_eq!(normalize_runtime_terminal_status("errored"), "failed");
+        assert_eq!(normalize_runtime_terminal_status("unexpected"), "failed");
+    }
+
+    #[test]
+    fn runtime_terminal_status_detection_rejects_running_states() {
+        assert!(is_runtime_terminal_status("completed"));
+        assert!(is_runtime_terminal_status("failed"));
+        assert!(is_runtime_terminal_status("timed_out"));
+        assert!(!is_runtime_terminal_status("created"));
+        assert!(!is_runtime_terminal_status("running"));
     }
 }
