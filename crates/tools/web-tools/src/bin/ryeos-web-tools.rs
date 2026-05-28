@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_NUM_RESULTS: usize = 10;
 const MAX_RESULTS: usize = 20;
+const PRIMARY_TIMEOUT_SECS: u64 = 10;
+const DUCKDUCKGO_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Deserialize)]
 struct SearchParams {
@@ -102,6 +104,53 @@ fn read_search_params() -> anyhow::Result<SearchParams> {
 }
 
 fn search_web(query: &str, num_results: usize) -> anyhow::Result<(String, Vec<SearchResult>)> {
+    match search_bing_web_rss(query, num_results) {
+        Ok(results) if !results.is_empty() => Ok(("bing_web_rss".to_string(), results)),
+        Ok(_) => search_secondary_fallback(query, num_results)
+            .context("Bing Web RSS returned no results and secondary fallback failed"),
+        Err(bing_err) => search_secondary_fallback(query, num_results).with_context(|| {
+            format!("Bing Web RSS failed ({bing_err:#}) and secondary fallback failed")
+        }),
+    }
+}
+
+fn http_client(timeout_secs: u64) -> anyhow::Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .user_agent("Mozilla/5.0 (compatible; RyeOS/1.0; +https://ryeos.dev)")
+        .build()
+        .context("build HTTP client")
+}
+
+fn search_bing_web_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
+    let client = http_client(PRIMARY_TIMEOUT_SECS)?;
+
+    let xml = client
+        .get("https://www.bing.com/search")
+        .query(&[
+            ("q", query),
+            ("format", "rss"),
+            ("setlang", "en-US"),
+            ("adlt", "strict"),
+        ])
+        .send()
+        .context("Bing Web RSS request failed")?
+        .error_for_status()
+        .context("Bing Web RSS returned an error status")?
+        .text()
+        .context("read Bing Web RSS response body")?;
+
+    let results = parse_rss(&xml, num_results);
+    if results.is_empty() {
+        anyhow::bail!("Bing Web RSS returned no parseable results");
+    }
+    Ok(results)
+}
+
+fn search_secondary_fallback(
+    query: &str,
+    num_results: usize,
+) -> anyhow::Result<(String, Vec<SearchResult>)> {
     match search_duckduckgo(query, num_results) {
         Ok(results) if !results.is_empty() => Ok(("duckduckgo".to_string(), results)),
         Ok(_) => search_rss_fallback(query, num_results)
@@ -112,11 +161,7 @@ fn search_web(query: &str, num_results: usize) -> anyhow::Result<(String, Vec<Se
 }
 
 fn search_duckduckgo(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (compatible; RyeOS/1.0; +https://ryeos.dev)")
-        .build()
-        .context("build HTTP client")?;
+    let client = http_client(DUCKDUCKGO_TIMEOUT_SECS)?;
 
     let html = client
         .get("https://html.duckduckgo.com/html/")
@@ -153,11 +198,7 @@ fn search_rss_fallback(
 }
 
 fn search_google_news_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (compatible; RyeOS/1.0; +https://ryeos.dev)")
-        .build()
-        .context("build HTTP client")?;
+    let client = http_client(PRIMARY_TIMEOUT_SECS)?;
 
     let xml = client
         .get("https://news.google.com/rss/search")
@@ -182,11 +223,7 @@ fn search_google_news_rss(query: &str, num_results: usize) -> anyhow::Result<Vec
 }
 
 fn search_bing_news_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (compatible; RyeOS/1.0; +https://ryeos.dev)")
-        .build()
-        .context("build HTTP client")?;
+    let client = http_client(PRIMARY_TIMEOUT_SECS)?;
 
     let xml = client
         .get("https://www.bing.com/news/search")
