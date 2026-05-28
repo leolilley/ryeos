@@ -376,13 +376,19 @@ impl CallbackClient {
             "result_size_bytes": result_size_bytes,
         });
         if let Some(body_str) = body {
-            let parsed = serde_json::from_str::<serde_json::Value>(body_str).unwrap_or_else(|e| {
-                panic!(
-                    "emit_tool_result: body for call_id {call_id} is not valid JSON \
-                     (this is a programmer error — all callers produce JSON): {e}"
-                )
-            });
-            data["result"] = parsed;
+            match serde_json::from_str::<serde_json::Value>(body_str) {
+                Ok(parsed) => data["result"] = parsed,
+                Err(e) => {
+                    tracing::warn!(
+                        call_id,
+                        tool,
+                        error = %e,
+                        "emit_tool_result received non-JSON body; preserving as result_text"
+                    );
+                    data["result_text"] = serde_json::json!(body_str);
+                    data["result_parse_error"] = serde_json::json!(e.to_string());
+                }
+            }
         }
         if let Some(reason) = truncated_reason {
             data["truncated_reason"] = serde_json::json!(reason);
@@ -676,6 +682,30 @@ mod tests {
             evt.get("result_text").is_none(),
             "result_text must never appear — all callers produce JSON"
         );
+    }
+
+    #[tokio::test]
+    async fn emit_tool_result_preserves_invalid_json_body_without_panicking() {
+        let (cb, recorder) = make_recorder_client();
+        let body = "[truncated json";
+        cb.emit_tool_result(
+            "call_bad_json",
+            "test/search",
+            Some(body),
+            true,
+            Some("result_guard"),
+            body.len() as u64,
+        )
+        .await
+        .unwrap();
+
+        let evt = recorder.last("tool_call_result").unwrap();
+        assert_eq!(evt["call_id"], "call_bad_json");
+        assert_eq!(evt["truncated"], true);
+        assert_eq!(evt["truncated_reason"], "result_guard");
+        assert_eq!(evt["result_text"], body);
+        assert!(evt.get("result").is_none());
+        assert!(!evt["result_parse_error"].as_str().unwrap().is_empty());
     }
 
     // ── Existing tests ───────────────────────────────────────────────
