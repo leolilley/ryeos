@@ -132,7 +132,7 @@ name: {stem}
 category: "{dir_relative}"
 description: "Knowledge context rendering e2e fixture"
 inputs:
-  name:
+  - name: name
     type: string
     required: true
 model:

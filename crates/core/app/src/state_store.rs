@@ -263,6 +263,24 @@ fn persisted_from_append(
         .collect()
 }
 
+fn ephemeral_record(
+    chain_root_id: &str,
+    thread_id: &str,
+    event: &NewEventRecord,
+) -> PersistedEventRecord {
+    PersistedEventRecord {
+        event_id: 0,
+        chain_root_id: chain_root_id.to_string(),
+        chain_seq: 0,
+        thread_id: thread_id.to_string(),
+        thread_seq: 0,
+        event_type: event.event_type.clone(),
+        storage_class: event.storage_class.clone(),
+        ts: lillux::time::iso8601_now(),
+        payload: event.payload.clone(),
+    }
+}
+
 impl StateStore {
     pub fn new(
         state_root: PathBuf,
@@ -1132,13 +1150,49 @@ impl StateStore {
         thread_id: &str,
         events: &[NewEventRecord],
     ) -> Result<Vec<PersistedEventRecord>> {
-        let _permit = self.acquire_write_permit()?;
+        let has_cas_events = events
+            .iter()
+            .any(|event| event.storage_class != "ephemeral");
+        let _permit = if has_cas_events {
+            Some(self.acquire_write_permit()?)
+        } else {
+            None
+        };
         let g = self.lock()?;
-        let te = convert_events(events, chain_root_id, thread_id);
-        let result =
-            g.state_db
-                .append_events(chain_root_id, thread_id, te, vec![], g.signer.as_ref())?;
-        Ok(persisted_from_append(&result, events))
+        let mut records: Vec<Option<PersistedEventRecord>> = vec![None; events.len()];
+        let mut durable_events = Vec::new();
+        let mut durable_indices = Vec::new();
+
+        for (idx, event) in events.iter().enumerate() {
+            if event.storage_class == "ephemeral" {
+                records[idx] = Some(ephemeral_record(chain_root_id, thread_id, event));
+            } else {
+                durable_indices.push(idx);
+                durable_events.push(event.clone());
+            }
+        }
+
+        if !durable_events.is_empty() {
+            let te = convert_events(&durable_events, chain_root_id, thread_id);
+            let result = g.state_db.append_events(
+                chain_root_id,
+                thread_id,
+                te,
+                vec![],
+                g.signer.as_ref(),
+            )?;
+            for (idx, record) in durable_indices
+                .into_iter()
+                .zip(persisted_from_append(&result, &durable_events))
+            {
+                records[idx] = Some(record);
+            }
+        }
+
+        records
+            .into_iter()
+            .map(|record| record.ok_or_else(|| anyhow!("append event record missing")))
+            .collect()
     }
 
     pub fn replay_events(

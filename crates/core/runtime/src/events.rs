@@ -7,10 +7,11 @@
 //! either side. Adding a new event variant is a single-edit change
 //! that both sides see at compile time.
 //!
-//! `StorageClass::for(event)` is the canonical mapping from event type
-//! to durable-store strategy. High-frequency progressive events
-//! (token deltas, reasoning chunks, foreach progress) go to
-//! `journal_only`; everything else is an `indexed` milestone.
+//! `RuntimeEventType::storage_class()` is the canonical mapping from
+//! event type to durable-store strategy. High-frequency progressive
+//! events (token deltas, reasoning chunks, foreach progress) are
+//! ephemeral live-stream events; everything else is an `indexed`
+//! milestone unless a caller deliberately requests `journal_only`.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,13 @@ pub enum StorageClass {
     /// retained for the life of the chain.
     Indexed,
     /// Append to the per-thread journal only; not indexed for query,
-    /// pruneable, used for high-frequency progressive UI events.
+    /// retained in CAS for audit/replay flows that do not need SQL
+    /// projection.
     JournalOnly,
+    /// Publish to live subscribers only. Not written to CAS or the
+    /// SQL projection. Used for high-frequency progressive UI events
+    /// that would otherwise create one immutable object per token.
+    Ephemeral,
 }
 
 impl StorageClass {
@@ -35,6 +41,7 @@ impl StorageClass {
         match self {
             Self::Indexed => "indexed",
             Self::JournalOnly => "journal_only",
+            Self::Ephemeral => "ephemeral",
         }
     }
 
@@ -42,6 +49,7 @@ impl StorageClass {
         match s {
             "indexed" => Ok(Self::Indexed),
             "journal_only" => Ok(Self::JournalOnly),
+            "ephemeral" => Ok(Self::Ephemeral),
             other if other.trim().is_empty() => bail!("storage_class must not be empty"),
             other => bail!("invalid storage_class: {other}"),
         }
@@ -202,7 +210,7 @@ impl RuntimeEventType {
     /// Canonical storage class for this event type.
     ///
     /// High-frequency progressive events (token deltas, reasoning
-    /// chunks, foreach progress) go to `journal_only`; everything
+    /// chunks, foreach progress) are live-only `ephemeral`; everything
     /// else is an indexed milestone. The mapping is intentionally
     /// `match`-exhaustive so adding a new variant requires deciding
     /// its storage class up front.
@@ -211,7 +219,7 @@ impl RuntimeEventType {
             Self::TokenDelta
             | Self::StreamSnapshot
             | Self::CognitionReasoning
-            | Self::GraphForeachIteration => StorageClass::JournalOnly,
+            | Self::GraphForeachIteration => StorageClass::Ephemeral,
             // Everything else: thread lifecycle, edges, commands,
             // cognition turn boundaries, tool dispatch, graph
             // lifecycle/step/branch milestones — indexed.
@@ -313,10 +321,10 @@ mod tests {
     }
 
     #[test]
-    fn journal_only_set_is_exactly_the_progressive_events() {
+    fn ephemeral_set_is_exactly_the_progressive_events() {
         // Tightening this list belongs in a deliberate change — the
         // assertion guards against silent storage-class drift.
-        let journal_only: Vec<&'static str> = [
+        let ephemeral: Vec<&'static str> = [
             RuntimeEventType::TokenDelta,
             RuntimeEventType::StreamSnapshot,
             RuntimeEventType::CognitionReasoning,
@@ -324,10 +332,11 @@ mod tests {
         ]
         .iter()
         .copied()
+        .filter(|v| v.storage_class() == StorageClass::Ephemeral)
         .map(|v| v.as_str())
         .collect();
         assert_eq!(
-            journal_only,
+            ephemeral,
             vec![
                 "token_delta",
                 "stream_snapshot",
@@ -341,6 +350,7 @@ mod tests {
     fn storage_class_round_trip() {
         assert_eq!(StorageClass::Indexed.as_str(), "indexed");
         assert_eq!(StorageClass::JournalOnly.as_str(), "journal_only");
+        assert_eq!(StorageClass::Ephemeral.as_str(), "ephemeral");
         assert_eq!(
             StorageClass::parse("indexed").unwrap(),
             StorageClass::Indexed
@@ -348,6 +358,10 @@ mod tests {
         assert_eq!(
             StorageClass::parse("journal_only").unwrap(),
             StorageClass::JournalOnly
+        );
+        assert_eq!(
+            StorageClass::parse("ephemeral").unwrap(),
+            StorageClass::Ephemeral
         );
         assert!(StorageClass::parse("").is_err());
         assert!(StorageClass::parse("nope").is_err());

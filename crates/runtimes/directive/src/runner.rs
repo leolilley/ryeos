@@ -423,6 +423,17 @@ impl Runner {
                                     .report(usage.input_tokens, usage.output_tokens, usd);
                             }
                             self.messages.push(resp.message.clone());
+                            let assistant_message = match serde_json::to_value(&resp.message) {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    state = State::Errored {
+                                        error: format!(
+                                            "serialize assistant message for turn completion: {e}"
+                                        ),
+                                    };
+                                    continue;
+                                }
+                            };
                             if let Err(e) = self
                                 .callback
                                 .emit_turn_complete(
@@ -430,6 +441,7 @@ impl Runner {
                                     resp.usage
                                         .as_ref()
                                         .map(|u| (u.input_tokens, u.output_tokens)),
+                                    Some(assistant_message),
                                 )
                                 .await
                             {

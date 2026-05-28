@@ -85,7 +85,7 @@ name: {stem}
 category: "{dir_relative}"
 description: "SSE e2e test fixture"
 inputs:
-  name:
+  - name: name
     type: string
     required: true
 model:

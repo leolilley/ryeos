@@ -23,6 +23,16 @@ pub fn storage_class_for(event_type: &str) -> &'static str {
     }
 }
 
+fn storage_class_for_payload(event_type: &str, payload: &Value) -> &'static str {
+    if event_type == "cognition_out"
+        && (payload.get("delta").is_some() || payload.get("tool_use_partial").is_some())
+    {
+        return StorageClass::Ephemeral.as_str();
+    }
+
+    storage_class_for(event_type)
+}
+
 /// Inline cap for tool result bodies in `tool_call_result` SSE
 /// payloads. Bodies up to this size are serialized into the event
 /// directly; larger bodies are persisted in the transcript and the
@@ -141,7 +151,7 @@ impl CallbackClient {
 
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn append_event(&self, event_type: &str, payload: Value) -> Result<()> {
-        let storage_class = storage_class_for(event_type);
+        let storage_class = storage_class_for_payload(event_type, &payload);
         let is_transcript = matches!(
             event_type,
             "cognition_in" | "cognition_out" | "tool_call_start" | "tool_call_result"
@@ -173,7 +183,7 @@ impl CallbackClient {
         event_type: RuntimeEventType,
         payload: Value,
     ) -> Result<()> {
-        let storage_class = event_type.storage_class().as_str();
+        let storage_class = storage_class_for_payload(event_type.as_str(), &payload);
         match &self.inner {
             Some(client) => {
                 client
@@ -301,8 +311,20 @@ impl CallbackClient {
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to the validator-accepted `cognition_out` event.
-    pub async fn emit_turn_complete(&self, turn: u32, tokens: Option<(u64, u64)>) -> Result<()> {
+    pub async fn emit_turn_complete(
+        &self,
+        turn: u32,
+        tokens: Option<(u64, u64)>,
+        assistant_message: Option<Value>,
+    ) -> Result<()> {
         let mut data = serde_json::json!({"turn": turn});
+        if let Some(Value::Object(message)) = assistant_message {
+            for key in ["content", "tool_calls", "reasoning_content"] {
+                if let Some(value) = message.get(key) {
+                    data[key] = value.clone();
+                }
+            }
+        }
         if let Some((input, output)) = tokens {
             data["input_tokens"] = serde_json::json!(input);
             data["output_tokens"] = serde_json::json!(output);
@@ -834,7 +856,7 @@ mod tests {
             "graph_foreach_iteration",
             "thread_usage",
         ];
-        const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only"];
+        const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only", "ephemeral"];
 
         // Every event the runtime can emit, post-P2.2:
         let runtime_emits: &[&str] = &[
@@ -867,5 +889,50 @@ mod tests {
                  the daemon's accepted set"
             );
         }
+    }
+
+    #[test]
+    fn cognition_out_progressive_payloads_are_ephemeral() {
+        assert_eq!(
+            storage_class_for_payload("cognition_out", &json!({"turn": 1, "delta": "hi"})),
+            "ephemeral"
+        );
+        assert_eq!(
+            storage_class_for_payload(
+                "cognition_out",
+                &json!({"turn": 1, "tool_use_partial": {"id": "c", "delta": "{}"}}),
+            ),
+            "ephemeral"
+        );
+        assert_eq!(
+            storage_class_for_payload("cognition_out", &json!({"turn": 1})),
+            "indexed"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_turn_complete_persists_final_assistant_summary() {
+        let (cb, recorder) = make_recorder_client();
+        cb.emit_turn_complete(
+            1,
+            Some((10, 5)),
+            Some(json!({
+                "content": "final answer",
+                "tool_calls": [{"id": "c1", "name": "search", "arguments": {"q": "x"}}],
+                "reasoning_content": "hidden",
+                "delta": "must not be copied",
+            })),
+        )
+        .await
+        .unwrap();
+
+        let evt = recorder.last("cognition_out").unwrap();
+        assert_eq!(evt["turn"], 1);
+        assert_eq!(evt["content"], "final answer");
+        assert_eq!(evt["tool_calls"][0]["name"], "search");
+        assert_eq!(evt["reasoning_content"], "hidden");
+        assert_eq!(evt["input_tokens"], 10);
+        assert_eq!(evt["output_tokens"], 5);
+        assert!(evt.get("delta").is_none());
     }
 }

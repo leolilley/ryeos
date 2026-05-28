@@ -115,7 +115,7 @@ name: {stem}
 category: "{dir_relative}"
 description: "P3b directive-runtime e2e fixture"
 inputs:
-  name:
+  - name: name
     type: string
     required: true
 model:

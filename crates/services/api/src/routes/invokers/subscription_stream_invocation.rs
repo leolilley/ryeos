@@ -158,6 +158,10 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                     loop {
                         match rx.recv().await {
                             Ok(ev) => {
+                                if is_ephemeral(&ev) {
+                                    yield Ok(envelope_for_persisted(&ev));
+                                    continue;
+                                }
                                 if ev.chain_seq <= current_max {
                                     continue;
                                 }

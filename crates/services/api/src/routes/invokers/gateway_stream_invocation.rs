@@ -347,6 +347,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                         match recv_result {
                             Ok(ev) => {
                                 let event_type = ev.event_type.clone();
+                                if is_ephemeral(&ev) {
+                                    yield Ok(envelope_for_persisted(&ev));
+                                    continue;
+                                }
                                 if ev.chain_seq > current_max {
                                     current_max = ev.chain_seq;
                                     yield Ok(envelope_for_persisted(&ev));
@@ -420,6 +424,27 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                     join_result = &mut launch_handle => {
                         match join_result {
                             Ok(Ok(())) => {
+                                loop {
+                                    match rx.try_recv() {
+                                        Ok(ev) => {
+                                            if is_ephemeral(&ev) {
+                                                yield Ok(envelope_for_persisted(&ev));
+                                                continue;
+                                            }
+                                            if ev.chain_seq > current_max {
+                                                current_max = ev.chain_seq;
+                                                yield Ok(envelope_for_persisted(&ev));
+                                            }
+                                            if is_terminal(&ev.event_type) {
+                                                return;
+                                            }
+                                        }
+                                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => break,
+                                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return,
+                                    }
+                                }
+
                                 // Post-launch drain: replay any events the broadcast
                                 // didn't deliver from the durable store.
                                 let mut next_after: Option<i64> =

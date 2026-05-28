@@ -112,7 +112,7 @@ name: {stem}
 category: "{dir_relative}"
 description: "Narrow provider-secret e2e fixture"
 inputs:
-  name:
+  - name: name
     type: string
     required: true
 model:

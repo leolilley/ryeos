@@ -62,9 +62,47 @@ pub fn error_envelope_with(
 }
 
 pub fn envelope_for_persisted(ev: &PersistedEventRecord) -> RouteStreamEnvelope {
-    RouteStreamEnvelope::with_id(
-        ev.chain_seq.to_string(),
-        ev.event_type.clone(),
-        serde_json::to_value(ev).expect("PersistedEventRecord serializes"),
-    )
+    let payload = serde_json::to_value(ev).expect("PersistedEventRecord serializes");
+    if ev.storage_class == "ephemeral" {
+        RouteStreamEnvelope::new(ev.event_type.clone(), payload)
+    } else {
+        RouteStreamEnvelope::with_id(ev.chain_seq.to_string(), ev.event_type.clone(), payload)
+    }
+}
+
+pub fn is_ephemeral(ev: &PersistedEventRecord) -> bool {
+    ev.storage_class == "ephemeral"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn record(storage_class: &str, chain_seq: i64) -> PersistedEventRecord {
+        PersistedEventRecord {
+            event_id: chain_seq,
+            chain_root_id: "T-root".into(),
+            chain_seq,
+            thread_id: "T-root".into(),
+            thread_seq: chain_seq,
+            event_type: "cognition_out".into(),
+            storage_class: storage_class.into(),
+            ts: "2026-05-28T00:00:00Z".into(),
+            payload: json!({"delta": "hello"}),
+        }
+    }
+
+    #[test]
+    fn ephemeral_envelope_has_no_replay_id() {
+        let env = envelope_for_persisted(&record("ephemeral", 0));
+        assert_eq!(env.event_type, "cognition_out");
+        assert!(env.id.is_none());
+    }
+
+    #[test]
+    fn durable_envelope_has_chain_seq_id() {
+        let env = envelope_for_persisted(&record("indexed", 42));
+        assert_eq!(env.id.as_deref(), Some("42"));
+    }
 }

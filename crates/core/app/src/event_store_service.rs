@@ -100,6 +100,11 @@ impl EventStoreService {
             .map(|event| {
                 validate_event_type(&event.event_type)?;
                 validate_storage_class(&event.storage_class)?;
+                validate_event_storage_class(
+                    &event.event_type,
+                    &event.storage_class,
+                    &event.payload,
+                )?;
                 Ok(NewEventRecord {
                     event_type: event.event_type.clone(),
                     storage_class: event.storage_class.clone(),
@@ -170,4 +175,29 @@ fn validate_event_type(event_type: &str) -> Result<()> {
 
 fn validate_storage_class(storage_class: &str) -> Result<()> {
     ryeos_runtime::StorageClass::parse(storage_class).map(|_| ())
+}
+
+fn validate_event_storage_class(
+    event_type: &str,
+    storage_class: &str,
+    payload: &Value,
+) -> Result<()> {
+    if ryeos_runtime::StorageClass::parse(storage_class)? != ryeos_runtime::StorageClass::Ephemeral
+    {
+        return Ok(());
+    }
+
+    if is_ephemeral_allowed(event_type, payload) {
+        Ok(())
+    } else {
+        bail!("event_type {event_type} cannot use ephemeral storage_class")
+    }
+}
+
+fn is_ephemeral_allowed(event_type: &str, payload: &Value) -> bool {
+    matches!(
+        event_type,
+        "token_delta" | "stream_snapshot" | "cognition_reasoning" | "graph_foreach_iteration"
+    ) || (event_type == "cognition_out"
+        && (payload.get("delta").is_some() || payload.get("tool_use_partial").is_some()))
 }

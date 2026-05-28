@@ -145,6 +145,10 @@ impl StateDb {
         snapshot_updates: Vec<SnapshotUpdate>,
         signer: &dyn Signer,
     ) -> anyhow::Result<AppendResult> {
+        if events.iter().any(|event| !event.durability.is_cas_stored()) {
+            anyhow::bail!("StateDb::append_events cannot persist ephemeral events");
+        }
+
         let result = {
             let mut cache = self.head_cache.lock().expect("head_cache lock");
             chain::append_events(
@@ -162,9 +166,11 @@ impl StateDb {
         };
 
         for event in &result.events {
-            projection::project_event(&self.projection, event).with_context(|| {
-                format!("projection failed for event chain_seq={}", event.chain_seq)
-            })?;
+            if event.durability.is_projection_indexed() {
+                projection::project_event(&self.projection, event).with_context(|| {
+                    format!("projection failed for event chain_seq={}", event.chain_seq)
+                })?;
+            }
         }
 
         for update in &snapshot_updates {
@@ -449,6 +455,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn append_events_rejects_ephemeral_events() {
+        let (_dir, db) = open_temp();
+        let signer = TestSigner::default();
+
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+
+        db.create_chain("T-root", snapshot, &signer).unwrap();
+
+        let event = crate::objects::thread_event::NewEvent::new("T-root", "T-root", "test_event")
+            .durability(crate::objects::EventDurability::Ephemeral)
+            .payload(serde_json::json!({"key": "value"}))
+            .build();
+
+        let err = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("cannot persist ephemeral events"),
+            "got: {err}"
+        );
     }
 
     #[test]

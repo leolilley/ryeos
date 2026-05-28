@@ -513,7 +513,7 @@ mod tests {
         ThreadCreateParams {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
-            kind: "directive_run".to_string(),
+            kind: "system_task".to_string(),
             item_ref: "test/directive".to_string(),
             executor_ref: "test/executor".to_string(),
             launch_mode: "inline".to_string(),
@@ -812,6 +812,108 @@ mod tests {
         assert_eq!(live.event_type, "stream_opened");
         assert_eq!(live.thread_id, "T-stream-1");
         assert_eq!(live.payload, json!({"turn": 1}));
+    }
+
+    #[tokio::test]
+    async fn ephemeral_append_event_bridges_without_replay_persistence() {
+        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate(
+            "T-ephemeral-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+        );
+        state
+            .threads
+            .create_thread(&make_create_params("T-ephemeral-1", "T-ephemeral-1"))
+            .unwrap();
+        let mut rx = state.event_streams.subscribe("T-ephemeral-1");
+
+        let resp = dispatch(
+            rpc(
+                "runtime.append_event",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-ephemeral-1",
+                    "event": {
+                        "event_type": "cognition_out",
+                        "storage_class": "ephemeral",
+                        "payload": {"turn": 1, "delta": "hello"},
+                    },
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "append_event failed: {:?}",
+            resp.error
+        );
+
+        let live = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("hub did not deliver event in time")
+            .expect("hub channel closed");
+        assert_eq!(live.event_type, "cognition_out");
+        assert_eq!(live.storage_class, "ephemeral");
+        assert_eq!(live.chain_seq, 0);
+        assert_eq!(live.payload, json!({"turn": 1, "delta": "hello"}));
+
+        let replay = state
+            .events
+            .replay(&EventReplayParams {
+                chain_root_id: None,
+                thread_id: Some("T-ephemeral-1".to_string()),
+                after_chain_seq: None,
+                limit: 100,
+            })
+            .unwrap();
+        assert!(!replay
+            .events
+            .iter()
+            .any(|event| event.event_type == "cognition_out"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_event_cannot_be_ephemeral() {
+        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate(
+            "T-ephemeral-bad",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+        );
+        state
+            .threads
+            .create_thread(&make_create_params("T-ephemeral-bad", "T-ephemeral-bad"))
+            .unwrap();
+
+        let resp = dispatch(
+            rpc(
+                "runtime.append_event",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-ephemeral-bad",
+                    "event": {
+                        "event_type": "thread_completed",
+                        "storage_class": "ephemeral",
+                        "payload": {},
+                    },
+                }),
+            ),
+            &state,
+        )
+        .await;
+
+        let err = rpc_err(&resp);
+        assert!(
+            err.message.contains("cannot use ephemeral"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[tokio::test]

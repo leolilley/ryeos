@@ -411,7 +411,7 @@ async fn e2e_directive_via_registry_does_not_require_runtime_execute() {
 name: flow
 category: "e2e_b1"
 description: "B1 indirect-alias e2e"
-inputs: {}
+inputs: []
 ---
 # E2E B1
 "#;
@@ -497,7 +497,7 @@ async fn e2e_directive_via_registry_reaches_strip_binary_ref_prefix() {
 name: flow
 category: "p15"
 description: "P1.5 reach-past-B1 e2e"
-inputs: {}
+inputs: []
 ---
 # P1.5
 "#;
@@ -582,7 +582,7 @@ async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
 name: flow
 category: "p16"
 description: "P1.6 root/runtime split pin"
-inputs: {}
+inputs: []
 ---
 # P1.6
 "#;
