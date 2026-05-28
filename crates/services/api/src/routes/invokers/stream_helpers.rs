@@ -16,6 +16,7 @@ pub const TERMINAL_EVENT_TYPES: &[&str] = &[
     "thread_cancelled",
     "thread_killed",
     "thread_timed_out",
+    "thread_continued",
 ];
 
 pub fn is_terminal(event_type: &str) -> bool {
@@ -25,7 +26,7 @@ pub fn is_terminal(event_type: &str) -> bool {
 pub fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out"
+        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
     )
 }
 
@@ -104,5 +105,13 @@ mod tests {
     fn durable_envelope_has_chain_seq_id() {
         let env = envelope_for_persisted(&record("indexed", 42));
         assert_eq!(env.id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn terminal_helpers_include_continuation() {
+        assert!(is_terminal("thread_continued"));
+        assert!(is_terminal_status("continued"));
+        assert!(!is_terminal("continuation_requested"));
+        assert!(!is_terminal_status("running"));
     }
 }

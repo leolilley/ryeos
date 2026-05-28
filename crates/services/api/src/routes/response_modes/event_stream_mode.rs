@@ -886,6 +886,7 @@ mod tests {
         assert!(is_terminal_status("cancelled"));
         assert!(is_terminal_status("killed"));
         assert!(is_terminal_status("timed_out"));
+        assert!(is_terminal_status("continued"));
         assert!(!is_terminal_status("running"));
         assert!(!is_terminal_status("pending"));
     }
