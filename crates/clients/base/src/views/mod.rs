@@ -168,25 +168,55 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 ("Rye OS TUI — Keybindings".into(), false),
                 ("".into(), false),
                 ("  Global:".into(), true),
-                (format!("  {:<14}Submit / open item", bind("nav.open")), false),
-                (format!("  {:<14}Focus next tile", bind("focus.next")), false),
-                (format!("  {:<14}Focus previous tile", bind("focus.prev")), false),
-                (format!("  {:<14}Quit / clear input", bind("app.quit")), false),
+                (
+                    format!("  {:<14}Submit / open item", bind("nav.open")),
+                    false,
+                ),
+                (
+                    format!("  {:<14}Focus next tile", bind("focus.next")),
+                    false,
+                ),
+                (
+                    format!("  {:<14}Focus previous tile", bind("focus.prev")),
+                    false,
+                ),
+                (
+                    format!("  {:<14}Quit / clear input", bind("app.quit")),
+                    false,
+                ),
                 (format!("  {:<14}New session", bind("session.new")), false),
                 (format!("  {:<14}Command palette", bind("palette")), false),
                 (format!("  {:<14}This help", bind("help")), false),
                 ("".into(), false),
                 ("  Tile management:".into(), true),
-                (format!("  {:<14}Split horizontal", bind("layout.split_h")), false),
-                (format!("  {:<14}Split vertical", bind("layout.split_v")), false),
-                (format!("  {:<14}Close focused tile", bind("layout.close")), false),
+                (
+                    format!("  {:<14}Split horizontal", bind("layout.split_h")),
+                    false,
+                ),
+                (
+                    format!("  {:<14}Split vertical", bind("layout.split_v")),
+                    false,
+                ),
+                (
+                    format!("  {:<14}Close focused tile", bind("layout.close")),
+                    false,
+                ),
                 (format!("  {:<14}Reset layout", bind("layout.reset")), false),
                 ("".into(), false),
                 ("  Navigation:".into(), true),
                 (format!("  {:<14}Cursor up", bind("nav.up")), false),
                 (format!("  {:<14}Cursor down", bind("nav.down")), false),
-                (format!("  {:<14}Expand / collapse", bind("nav.toggle_expand")), false),
-                (format!("  {:<14}Scroll by page", bind("nav.page_up") + "/" + &bind("nav.page_down")), false),
+                (
+                    format!("  {:<14}Expand / collapse", bind("nav.toggle_expand")),
+                    false,
+                ),
+                (
+                    format!(
+                        "  {:<14}Scroll by page",
+                        bind("nav.page_up") + "/" + &bind("nav.page_down")
+                    ),
+                    false,
+                ),
                 ("".into(), false),
                 ("  Input editing (hardcoded):".into(), true),
                 ("  ←/→          Move cursor".into(), false),
@@ -260,7 +290,12 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                 0
             };
 
-            for (i, aff) in matches.iter().skip(scroll_offset).take(max_visible).enumerate() {
+            for (i, aff) in matches
+                .iter()
+                .skip(scroll_offset)
+                .take(max_visible)
+                .enumerate()
+            {
                 let is_selected = scroll_offset + i == *selected;
                 let bg = if is_selected {
                     theme::ACCENT

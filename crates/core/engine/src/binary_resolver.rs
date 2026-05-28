@@ -149,16 +149,18 @@ pub fn resolve_bundle_binary_ref(
 
     // --- Confinement: resolved path must be under the canonical bin dir ---
 
-    let canonical_bin_dir = bin_dir
-        .canonicalize()
-        .map_err(|e| EngineError::Internal(format!(
-            "failed to canonicalize bin dir {}: {e}", bin_dir.display()
-        )))?;
-    let canonical_resolved = bin_path
-        .canonicalize()
-        .map_err(|e| EngineError::Internal(format!(
-            "failed to canonicalize resolved path {}: {e}", bin_path.display()
-        )))?;
+    let canonical_bin_dir = bin_dir.canonicalize().map_err(|e| {
+        EngineError::Internal(format!(
+            "failed to canonicalize bin dir {}: {e}",
+            bin_dir.display()
+        ))
+    })?;
+    let canonical_resolved = bin_path.canonicalize().map_err(|e| {
+        EngineError::Internal(format!(
+            "failed to canonicalize resolved path {}: {e}",
+            bin_path.display()
+        ))
+    })?;
 
     // Verify the canonical resolved path starts with the canonical bin dir.
     if !canonical_resolved.starts_with(&canonical_bin_dir) {
@@ -497,13 +499,9 @@ mod tests {
         let bundle = tmp.path().join("bundle");
         let fp = write_resolver_fixture(&bundle, "demo");
 
-        let short = resolve_bundle_binary_ref(
-            "bin:demo",
-            &bundle,
-            |f| f == fp,
-            TrustClass::TrustedSystem,
-        )
-        .expect("short form must resolve");
+        let short =
+            resolve_bundle_binary_ref("bin:demo", &bundle, |f| f == fp, TrustClass::TrustedSystem)
+                .expect("short form must resolve");
         let placeholder = resolve_bundle_binary_ref(
             "bin/{triple}/demo",
             &bundle,
@@ -604,7 +602,11 @@ mod tests {
             }
         });
         let manifest_hash = cas.store_object(&manifest).unwrap();
-        let ref_path = bundle.join(crate::AI_DIR).join("refs").join("bundles").join("manifest");
+        let ref_path = bundle
+            .join(crate::AI_DIR)
+            .join("refs")
+            .join("bundles")
+            .join("manifest");
         std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
         std::fs::write(&ref_path, manifest_hash).unwrap();
 

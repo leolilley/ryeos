@@ -19,7 +19,11 @@ impl Vec3 {
     }
 
     pub fn zero() -> Self {
-        Self { x: 0.0, y: 0.0, z: 0.0 }
+        Self {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        }
     }
 
     pub fn length(&self) -> f32 {
@@ -389,16 +393,20 @@ impl Scene3D {
         for _ in 0..cfg.stars.count {
             let theta = rand_simple() * std::f32::consts::TAU;
             let phi = (2.0 * rand_simple() - 1.0).acos();
-            let r = cfg.stars.min_radius + rand_simple() * (cfg.stars.max_radius - cfg.stars.min_radius);
+            let r = cfg.stars.min_radius
+                + rand_simple() * (cfg.stars.max_radius - cfg.stars.min_radius);
             scene.stars.push(Star {
                 pos: Vec3::new(
                     r * phi.sin() * theta.cos(),
                     r * phi.sin() * theta.sin(),
                     r * phi.cos(),
                 ),
-                base_size: cfg.stars.min_size + rand_simple() * (cfg.stars.max_size - cfg.stars.min_size),
-                size: cfg.stars.min_size + rand_simple() * (cfg.stars.max_size - cfg.stars.min_size),
-                freq: cfg.stars.twinkle_min + rand_simple() * (cfg.stars.twinkle_max - cfg.stars.twinkle_min),
+                base_size: cfg.stars.min_size
+                    + rand_simple() * (cfg.stars.max_size - cfg.stars.min_size),
+                size: cfg.stars.min_size
+                    + rand_simple() * (cfg.stars.max_size - cfg.stars.min_size),
+                freq: cfg.stars.twinkle_min
+                    + rand_simple() * (cfg.stars.twinkle_max - cfg.stars.twinkle_min),
                 phase: rand_simple() * std::f32::consts::TAU,
             });
         }
@@ -456,7 +464,8 @@ impl Scene3D {
 
         // Shard rotation and bob (configurable)
         self.shard_rotation_y = t * c.scene.shard.shard_rotation_hz;
-        self.shard_bob_y = (t * c.scene.shard.shard_bob_hz).sin() * c.scene.shard.shard_bob_amplitude;
+        self.shard_bob_y =
+            (t * c.scene.shard.shard_bob_hz).sin() * c.scene.shard.shard_bob_amplitude;
 
         // Spinners (configurable multiplier)
         let mult = c.scene.spinner.speed_multiplier;
@@ -492,7 +501,9 @@ fn rand_simple() -> f32 {
     }
     SEED.with(|s| {
         let mut seed = s.get();
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         s.set(seed);
         (seed >> 33) as f32 / (1u64 << 31) as f32
     })

@@ -108,7 +108,9 @@ pub fn build_frame(model: &mut AppModel) -> Frame {
         viewport.x,
         viewport.y,
         viewport.w,
-        viewport.h.saturating_sub(STATUS_BAR_HEIGHT + INPUT_BAR_HEIGHT),
+        viewport
+            .h
+            .saturating_sub(STATUS_BAR_HEIGHT + INPUT_BAR_HEIGHT),
     );
     let tile_rects = layout_rects(&model.workspace.layout, workspace_viewport);
 
@@ -127,7 +129,9 @@ pub fn build_frame(model: &mut AppModel) -> Frame {
         .collect();
 
     // 4. Build status bar
-    let status_bar_y = viewport.h.saturating_sub(STATUS_BAR_HEIGHT + INPUT_BAR_HEIGHT);
+    let status_bar_y = viewport
+        .h
+        .saturating_sub(STATUS_BAR_HEIGHT + INPUT_BAR_HEIGHT);
     let status_bar_rect = Rect::new(0, status_bar_y, viewport.w, STATUS_BAR_HEIGHT);
     let status_bar = build_status_bar(model, status_bar_rect);
 
@@ -199,7 +203,10 @@ fn build_status_bar(model: &AppModel, rect: Rect) -> StatusBarSurface {
     right_parts.push(model.surface.source_label.to_string());
     if let Some(id) = &model.store.identity {
         if id.has_signing_key {
-            right_parts.push(format!("🔑 {}", &id.fingerprint[..8.min(id.fingerprint.len())]));
+            right_parts.push(format!(
+                "🔑 {}",
+                &id.fingerprint[..8.min(id.fingerprint.len())]
+            ));
         } else {
             right_parts.push("⚠ no key".into());
         }
@@ -237,10 +244,7 @@ mod tests {
         model.runtime.viewport = Rect::new(0, 0, 200, 60);
         let frame = build_frame(&mut model);
 
-        assert!(
-            !frame.background.is_empty(),
-            "should have scene primitives"
-        );
+        assert!(!frame.background.is_empty(), "should have scene primitives");
     }
 
     #[test]
@@ -250,7 +254,11 @@ mod tests {
         model.runtime.viewport = Rect::new(0, 0, 200, 60);
         let frame = build_frame(&mut model);
 
-        assert_eq!(frame.tiles.len(), 3, "default workspace should have 3 tiles");
+        assert_eq!(
+            frame.tiles.len(),
+            3,
+            "default workspace should have 3 tiles"
+        );
     }
 
     #[test]

@@ -14,9 +14,9 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
+use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -36,20 +36,20 @@ pub struct Response {
 /// The browser_session invoker sets `id` to `session:<session_id>`.
 fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     if ctx.fingerprint.starts_with("session:") {
-        Some(ctx.fingerprint.strip_prefix("session:").unwrap().to_string())
+        Some(
+            ctx.fingerprint
+                .strip_prefix("session:")
+                .unwrap()
+                .to_string(),
+        )
     } else {
         None
     }
 }
 
-pub async fn handle(
-    _params: Value,
-    ctx: HandlerContext,
-    state: Arc<AppState>,
-) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx).ok_or_else(|| {
-        HandlerError::Forbidden("no browser session".into())
-    })?;
+pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let session_id = session_id_from_context(&ctx)
+        .ok_or_else(|| HandlerError::Forbidden("no browser session".into()))?;
 
     let session = get_ui_state(&state)
         .expect("UiState not set")
@@ -73,9 +73,5 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "ui.session.current",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move {
-            handle(params, ctx, state).await
-        })
-    },
+    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };

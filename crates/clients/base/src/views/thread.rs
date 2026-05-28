@@ -77,9 +77,7 @@ fn build_thread_content(
         .tiles
         .get(&model.workspace.focused_tile)
         .and_then(|t| match &t.local {
-            crate::workspace::ViewLocalState::Thread(state) => {
-                Some(state.expanded_turns.clone())
-            }
+            crate::workspace::ViewLocalState::Thread(state) => Some(state.expanded_turns.clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -193,8 +191,7 @@ fn build_thread_content(
                 let expand_marker = if is_expanded { "▾" } else { "▸" };
 
                 if is_expanded && !part.text.is_empty() {
-                    let wrapped =
-                        crate::widgets::text::word_wrap(&part.text, w.saturating_sub(8));
+                    let wrapped = crate::widgets::text::word_wrap(&part.text, w.saturating_sub(8));
                     lines.push((format!("  {} ⚒ {}", expand_marker, name), yellow));
                     for line in &wrapped {
                         lines.push((format!("      {}", line), dim));
@@ -211,7 +208,10 @@ fn build_thread_content(
                             )
                         )
                     };
-                    lines.push((format!("  {} ⚒ {}{}", expand_marker, name, args_preview), yellow));
+                    lines.push((
+                        format!("  {} ⚒ {}{}", expand_marker, name, args_preview),
+                        yellow,
+                    ));
                 }
                 turn_idx += 1;
             }
@@ -223,8 +223,7 @@ fn build_thread_content(
                     .unwrap_or_default();
 
                 if is_expanded && !part.text.is_empty() {
-                    let wrapped =
-                        crate::widgets::text::word_wrap(&part.text, w.saturating_sub(6));
+                    let wrapped = crate::widgets::text::word_wrap(&part.text, w.saturating_sub(6));
                     lines.push((format!("  ✓ {} {}", name, dur), green));
                     for line in &wrapped {
                         lines.push((format!("    {}", line), dim));
@@ -258,8 +257,7 @@ fn build_thread_content(
 
     // Streaming text (append)
     if !thread.streaming_text.is_empty() && thread.status == ThreadStatus::Running {
-        let wrapped =
-            crate::widgets::text::word_wrap(&thread.streaming_text, w.saturating_sub(2));
+        let wrapped = crate::widgets::text::word_wrap(&thread.streaming_text, w.saturating_sub(2));
         for line in &wrapped {
             lines.push((format!("  {}", line), fg));
         }
@@ -303,5 +301,3 @@ fn build_thread_content(
         }
     }
 }
-
-

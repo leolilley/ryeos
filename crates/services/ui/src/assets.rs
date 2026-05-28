@@ -38,7 +38,7 @@ fn compute_etag(bytes: &[u8]) -> String {
     hasher.update(bytes);
     let hash = hasher.finalize();
     // Use first 32 hex chars (128 bits) — sufficient for ETag uniqueness.
-    format!("\"{:x}", hash)
+    format!("\"{:x}\"", hash)
 }
 
 // ── Compile-time embedded bytes ─────────────────────────────────────────
@@ -47,6 +47,10 @@ static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html")
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
 static GRAPH_VIEW_JS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.js");
 static GRAPH_VIEW_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.css");
+static FORCE_GRAPH_3D_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/vendor/3d-force-graph.min.js");
+static FORCE_GRAPH_3D_META: &[u8] =
+    include_bytes!("../../../clients/web/pkg/vendor/3d-force-graph.min.js.meta");
 
 /// Web UI static asset provider — owns the embedded web client assets.
 pub struct WebAssetProvider;
@@ -59,6 +63,25 @@ impl StaticAssetProvider for WebAssetProvider {
             "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
             "graph-view.js" | "ui/assets/graph-view.js" => (GRAPH_VIEW_JS, "no-cache"),
             "graph-view.css" | "ui/assets/graph-view.css" => (GRAPH_VIEW_CSS, "no-cache"),
+            "3d-force-graph.v1.73.0.min.js" | "ui/assets/3d-force-graph.v1.73.0.min.js" => {
+                (FORCE_GRAPH_3D_JS, "public, max-age=31536000, immutable")
+            }
+            "vendor/3d-force-graph.v1.73.0.min.js"
+            | "ui/assets/vendor/3d-force-graph.v1.73.0.min.js" => {
+                (FORCE_GRAPH_3D_JS, "public, max-age=31536000, immutable")
+            }
+            "3d-force-graph.min.js" | "ui/assets/3d-force-graph.min.js" => {
+                (FORCE_GRAPH_3D_JS, "no-cache")
+            }
+            "vendor/3d-force-graph.min.js" | "ui/assets/vendor/3d-force-graph.min.js" => {
+                (FORCE_GRAPH_3D_JS, "no-cache")
+            }
+            "3d-force-graph.min.js.meta" | "ui/assets/3d-force-graph.min.js.meta" => {
+                (FORCE_GRAPH_3D_META, "no-cache")
+            }
+            "vendor/3d-force-graph.min.js.meta" | "ui/assets/vendor/3d-force-graph.min.js.meta" => {
+                (FORCE_GRAPH_3D_META, "no-cache")
+            }
             _ => return None,
         };
         Some(StaticAsset {
@@ -77,16 +100,21 @@ mod tests {
     #[test]
     fn get_index_html() {
         let provider = WebAssetProvider;
-        let asset = provider.get("index.html").expect("index.html must be embedded");
+        let asset = provider
+            .get("index.html")
+            .expect("index.html must be embedded");
         assert!(asset.bytes.len() > 0);
         assert!(asset.content_type.contains("text/html"));
         assert!(asset.etag.starts_with('"'));
+        assert!(asset.etag.ends_with('"'));
     }
 
     #[test]
     fn get_bootstrap_js() {
         let provider = WebAssetProvider;
-        let asset = provider.get("bootstrap.js").expect("bootstrap.js must be embedded");
+        let asset = provider
+            .get("bootstrap.js")
+            .expect("bootstrap.js must be embedded");
         assert!(asset.bytes.len() > 0);
         assert!(asset.content_type.contains("javascript"));
     }
@@ -94,13 +122,40 @@ mod tests {
     #[test]
     fn get_graph_assets() {
         let provider = WebAssetProvider;
-        let js = provider.get("graph-view.js").expect("graph-view.js must be embedded");
+        let js = provider
+            .get("graph-view.js")
+            .expect("graph-view.js must be embedded");
         assert!(js.bytes.len() > 0);
         assert!(js.content_type.contains("javascript"));
 
-        let css = provider.get("graph-view.css").expect("graph-view.css must be embedded");
+        let css = provider
+            .get("graph-view.css")
+            .expect("graph-view.css must be embedded");
         assert!(css.bytes.len() > 0);
         assert!(css.content_type.contains("css"));
+    }
+
+    #[test]
+    fn get_vendor_graph_renderer_asset() {
+        let provider = WebAssetProvider;
+        let asset = provider
+            .get("ui/assets/3d-force-graph.v1.73.0.min.js")
+            .expect("3d-force-graph vendor asset must be embedded");
+        assert!(asset.bytes.len() > 0);
+        assert!(asset.content_type.contains("javascript"));
+        assert!(asset.cache_control.contains("immutable"));
+
+        let unversioned = provider
+            .get("ui/assets/3d-force-graph.min.js")
+            .expect("unversioned 3d-force-graph alias must be embedded");
+        assert_eq!(unversioned.cache_control, "no-cache");
+
+        let meta = provider
+            .get("ui/assets/3d-force-graph.min.js.meta")
+            .expect("3d-force-graph vendor metadata must be embedded");
+        assert!(std::str::from_utf8(meta.bytes)
+            .unwrap()
+            .contains("License: MIT"));
     }
 
     #[test]

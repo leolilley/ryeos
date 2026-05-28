@@ -22,26 +22,18 @@ pub struct Request {
     pub token: String,
 }
 
-pub const DESCRIPTOR: ryeos_api::registry::ServiceDescriptor = ryeos_api::registry::ServiceDescriptor {
-    service_ref: "service:ui/launch",
-    endpoint: "ui.launch",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move {
-            handle(params, ctx, state).await
-        })
-    },
-};
+pub const DESCRIPTOR: ryeos_api::registry::ServiceDescriptor =
+    ryeos_api::registry::ServiceDescriptor {
+        service_ref: "service:ui/launch",
+        endpoint: "ui.launch",
+        availability: ServiceAvailability::DaemonOnly,
+        required_caps: &[],
+        handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
+    };
 
-pub async fn handle(
-    input: Value,
-    _ctx: HandlerContext,
-    state: Arc<AppState>,
-) -> Result<Value> {
-    let req: Request = serde_json::from_value(input).map_err(|e| {
-        anyhow::anyhow!("invalid ui.launch request: {e}")
-    })?;
+pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let req: Request = serde_json::from_value(input)
+        .map_err(|e| anyhow::anyhow!("invalid ui.launch request: {e}"))?;
 
     // Consume the launch token (one-shot).
     let session_id = get_ui_state(&state)

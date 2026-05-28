@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
+use serde_json::Value;
 use tokio::sync::broadcast;
 
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
@@ -81,7 +81,10 @@ impl SessionBus {
         let mut inner = self.inner.lock().unwrap();
 
         // Store in replay ring.
-        let ring = inner.rings.entry(session_id.to_string()).or_insert_with(Vec::new);
+        let ring = inner
+            .rings
+            .entry(session_id.to_string())
+            .or_insert_with(Vec::new);
         ring.push(RingEntry {
             id: id.clone(),
             envelope: envelope.clone(),
@@ -98,7 +101,11 @@ impl SessionBus {
 
     /// Replay events after the given last event ID. Returns `None` if the
     /// gap exceeds ring capacity (caller should emit `snapshot_required`).
-    pub fn replay_after(&self, session_id: &str, last_id: &str) -> Option<Vec<RouteStreamEnvelope>> {
+    pub fn replay_after(
+        &self,
+        session_id: &str,
+        last_id: &str,
+    ) -> Option<Vec<RouteStreamEnvelope>> {
         let inner = self.inner.lock().unwrap();
         let ring = inner.rings.get(session_id)?;
 
@@ -133,13 +140,10 @@ mod tests {
 
         bus.publish("session-1", "thread.upsert", json!({"id": "t1"}));
 
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv(),
-        )
-        .await
-        .expect("timeout")
-        .expect("recv error");
+        let event = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv error");
 
         assert_eq!(event.event_type, "thread.upsert");
         assert_eq!(event.payload["id"], "t1");

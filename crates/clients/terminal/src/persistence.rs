@@ -196,9 +196,8 @@ pub fn load_config() -> TuiConfig {
 /// If no key is available, writes unsigned YAML (still valid, just not signed).
 #[allow(dead_code)]
 pub fn save_config(config: &TuiConfig) -> std::io::Result<()> {
-    let dir = config_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
-    })?;
+    let dir = config_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory"))?;
     std::fs::create_dir_all(&dir)?;
 
     let yaml = serde_yaml::to_string(config)
@@ -216,15 +215,21 @@ pub fn save_config(config: &TuiConfig) -> std::io::Result<()> {
 /// Try to sign YAML content with the user's default signing key.
 /// Returns `None` if no key is available.
 fn try_sign(yaml_body: &str) -> Option<String> {
-    let key_path = dirs::home_dir()?.join(".ai").join("keys").join("default.key");
+    let key_path = dirs::home_dir()?
+        .join(".ai")
+        .join("keys")
+        .join("default.key");
     if !key_path.exists() {
         return None;
     }
     let key_bytes = std::fs::read(&key_path).ok()?;
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(
-        key_bytes.as_slice().try_into().ok()?,
-    );
-    Some(lillux::signature::sign_content(yaml_body, &signing_key, "#", None))
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(key_bytes.as_slice().try_into().ok()?);
+    Some(lillux::signature::sign_content(
+        yaml_body,
+        &signing_key,
+        "#",
+        None,
+    ))
 }
 
 /// Load a signed YAML file from any path, stripping signature before parsing.
@@ -233,8 +238,7 @@ fn try_sign(yaml_body: &str) -> Option<String> {
 pub fn load_signed_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<T> {
     let raw = std::fs::read_to_string(path)?;
     let body = strip_signature(&raw);
-    serde_yaml::from_str(&body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_yaml::from_str(&body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// Save session to disk.
@@ -243,9 +247,8 @@ pub fn save_session(
     tiles: &HashMap<TileId, TileState>,
     focused: TileId,
 ) -> std::io::Result<()> {
-    let dir = config_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
-    })?;
+    let dir = config_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory"))?;
     std::fs::create_dir_all(&dir)?;
 
     let session = TuiSession {
@@ -342,7 +345,10 @@ mod tests {
 
         assert_eq!(loaded.animation_enabled, false);
         assert_eq!(loaded.content_max_width, 120);
-        assert_eq!(loaded.keybindings.get("palette"), Some(&"ctrl+k".to_string()));
+        assert_eq!(
+            loaded.keybindings.get("palette"),
+            Some(&"ctrl+k".to_string())
+        );
     }
 
     #[test]

@@ -19,7 +19,9 @@ fn surface_diagnostic_message(diag: &ryeos_client_base::surface::SurfaceDiagnost
     match diag {
         ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message }
         | ryeos_client_base::surface::SurfaceDiagnostic::Info { message }
-        | ryeos_client_base::surface::SurfaceDiagnostic::UnsupportedField { message, .. } => message,
+        | ryeos_client_base::surface::SurfaceDiagnostic::UnsupportedField { message, .. } => {
+            message
+        }
     }
 }
 

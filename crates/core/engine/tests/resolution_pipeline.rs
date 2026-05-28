@@ -13,7 +13,9 @@ use lillux::crypto::SigningKey;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
+use ryeos_engine::contracts::{InstanceViolationCode, ItemSpace};
 use ryeos_engine::handlers::HandlerRegistry;
+use ryeos_engine::item_resolution::ResolutionRoots;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::ParserRegistry;
 use ryeos_engine::parsers::{ParserDescriptor, ParserDispatcher};
@@ -22,8 +24,6 @@ use ryeos_engine::resolution::{
 };
 use ryeos_engine::test_support::load_live_handler_registry;
 use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
-use ryeos_engine::contracts::{InstanceViolationCode, ItemSpace};
-use ryeos_engine::item_resolution::ResolutionRoots;
 
 fn dispatcher_for_yaml_and_markdown_directive() -> ParserDispatcher {
     use serde_json::json;
@@ -404,7 +404,10 @@ fn composition_violation_returns_typed_resolution_error() {
         ResolutionError::ComposedValueContractViolation { kind, report, .. } => {
             assert_eq!(kind, "tool");
             assert_eq!(report.errors.len(), 1);
-            assert_eq!(report.errors[0].code, InstanceViolationCode::MissingRequiredField);
+            assert_eq!(
+                report.errors[0].code,
+                InstanceViolationCode::MissingRequiredField
+            );
             assert!(report.errors[0].path.contains("mode"));
         }
         other => panic!("expected ComposedValueContractViolation, got: {other}"),
@@ -485,7 +488,11 @@ fn valid_composition_passes_through() {
 
     // Item has all required fields with valid values.
     let tools_dir = project_dir.join(".ai").join("tools");
-    write_tool_item(&tools_dir, "ok_tool", "name: ok_tool\nmode: cli_exec\ntimeout: 30\n");
+    write_tool_item(
+        &tools_dir,
+        "ok_tool",
+        "name: ok_tool\nmode: cli_exec\ntimeout: 30\n",
+    );
 
     let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
     let parsers = dispatcher_for_yaml_and_markdown_directive();

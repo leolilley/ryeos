@@ -29,11 +29,15 @@ pub struct AnimationConfig {
     pub tick_ms: u64,
 }
 
-fn default_tick_ms() -> u64 { 66 }
+fn default_tick_ms() -> u64 {
+    66
+}
 
 impl Default for AnimationConfig {
     fn default() -> Self {
-        Self { tick_ms: default_tick_ms() }
+        Self {
+            tick_ms: default_tick_ms(),
+        }
     }
 }
 
@@ -63,11 +67,21 @@ pub struct ShardConfig {
     pub shard_size: f32,
 }
 
-fn default_speed() -> f32 { 1.0 }
-fn default_shard_rot() -> f32 { 0.04 }
-fn default_shard_bob_hz() -> f32 { 0.3 }
-fn default_shard_bob_amp() -> f32 { 0.5 }
-fn default_shard_size() -> f32 { 0.015 }
+fn default_speed() -> f32 {
+    1.0
+}
+fn default_shard_rot() -> f32 {
+    0.04
+}
+fn default_shard_bob_hz() -> f32 {
+    0.3
+}
+fn default_shard_bob_amp() -> f32 {
+    0.5
+}
+fn default_shard_size() -> f32 {
+    0.015
+}
 
 impl Default for SceneParams {
     fn default() -> Self {
@@ -102,9 +116,15 @@ pub struct RootConfig {
     pub rotation_hz: f32,
 }
 
-fn default_breathe_hz() -> f32 { 0.05 }
-fn default_breathe_amp() -> f32 { 0.15 }
-fn default_root_rot() -> f32 { 0.001 }
+fn default_breathe_hz() -> f32 {
+    0.05
+}
+fn default_breathe_amp() -> f32 {
+    0.15
+}
+fn default_root_rot() -> f32 {
+    0.001
+}
 
 impl Default for RootConfig {
     fn default() -> Self {
@@ -122,11 +142,15 @@ pub struct SpinnerConfig {
     pub speed_multiplier: f32,
 }
 
-fn default_spinner_mult() -> f32 { 10.0 }
+fn default_spinner_mult() -> f32 {
+    10.0
+}
 
 impl Default for SpinnerConfig {
     fn default() -> Self {
-        Self { speed_multiplier: default_spinner_mult() }
+        Self {
+            speed_multiplier: default_spinner_mult(),
+        }
     }
 }
 
@@ -136,10 +160,16 @@ pub struct StreamConfig {
     pub speed: f32,
 }
 
-fn default_stream_speed() -> f32 { 0.08 }
+fn default_stream_speed() -> f32 {
+    0.08
+}
 
 impl Default for StreamConfig {
-    fn default() -> Self { Self { speed: default_stream_speed() } }
+    fn default() -> Self {
+        Self {
+            speed: default_stream_speed(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,9 +184,15 @@ pub struct CameraConfig {
     pub fov_degrees: f32,
 }
 
-fn default_phi() -> f32 { std::f32::consts::PI / 2.2 }
-fn default_radius() -> f32 { 45.0 }
-fn default_fov() -> f32 { 55.0 }
+fn default_phi() -> f32 {
+    std::f32::consts::PI / 2.2
+}
+fn default_radius() -> f32 {
+    45.0
+}
+fn default_fov() -> f32 {
+    55.0
+}
 
 impl Default for CameraConfig {
     fn default() -> Self {
@@ -191,15 +227,33 @@ pub struct ColorConfig {
     pub fog: [u8; 3],
 }
 
-fn default_bg() -> [u8; 3] { [0x1d, 0x20, 0x21] }
-fn default_inner() -> [u8; 3] { [0xfe, 0x80, 0x19] }
-fn default_mid() -> [u8; 3] { [0x83, 0xa5, 0x98] }
-fn default_outer() -> [u8; 3] { [0xd3, 0x86, 0x9b] }
-fn default_shard_col() -> [u8; 3] { [0xfe, 0x80, 0x19] }
-fn default_star_col() -> [u8; 3] { [0xeb, 0xdb, 0xb2] }
-fn default_stream_col() -> [u8; 3] { [0xfa, 0xbd, 0x2f] }
-fn default_frag_col() -> [u8; 3] { [0xfe, 0x80, 0x19] }
-fn default_fog_col() -> [u8; 3] { [0x25, 0x28, 0x29] }
+fn default_bg() -> [u8; 3] {
+    [0x1d, 0x20, 0x21]
+}
+fn default_inner() -> [u8; 3] {
+    [0xfe, 0x80, 0x19]
+}
+fn default_mid() -> [u8; 3] {
+    [0x83, 0xa5, 0x98]
+}
+fn default_outer() -> [u8; 3] {
+    [0xd3, 0x86, 0x9b]
+}
+fn default_shard_col() -> [u8; 3] {
+    [0xfe, 0x80, 0x19]
+}
+fn default_star_col() -> [u8; 3] {
+    [0xeb, 0xdb, 0xb2]
+}
+fn default_stream_col() -> [u8; 3] {
+    [0xfa, 0xbd, 0x2f]
+}
+fn default_frag_col() -> [u8; 3] {
+    [0xfe, 0x80, 0x19]
+}
+fn default_fog_col() -> [u8; 3] {
+    [0x25, 0x28, 0x29]
+}
 
 impl Default for ColorConfig {
     fn default() -> Self {
@@ -223,10 +277,16 @@ pub struct FogConfig {
     pub strength: f32,
 }
 
-fn default_fog_strength() -> f32 { 0.7 }
+fn default_fog_strength() -> f32 {
+    0.7
+}
 
 impl Default for FogConfig {
-    fn default() -> Self { Self { strength: default_fog_strength() } }
+    fn default() -> Self {
+        Self {
+            strength: default_fog_strength(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,13 +307,27 @@ pub struct StarConfig {
     pub twinkle_max: f32,
 }
 
-fn default_star_count() -> usize { 2200 }
-fn default_star_min_r() -> f32 { 60.0 }
-fn default_star_max_r() -> f32 { 380.0 }
-fn default_star_min_s() -> f32 { 0.4 }
-fn default_star_max_s() -> f32 { 2.6 }
-fn default_twinkle_min() -> f32 { 0.3 }
-fn default_twinkle_max() -> f32 { 2.5 }
+fn default_star_count() -> usize {
+    2200
+}
+fn default_star_min_r() -> f32 {
+    60.0
+}
+fn default_star_max_r() -> f32 {
+    380.0
+}
+fn default_star_min_s() -> f32 {
+    0.4
+}
+fn default_star_max_s() -> f32 {
+    2.6
+}
+fn default_twinkle_min() -> f32 {
+    0.3
+}
+fn default_twinkle_max() -> f32 {
+    2.5
+}
 
 impl Default for StarConfig {
     fn default() -> Self {
@@ -283,23 +357,127 @@ impl Default for RingsConfig {
     fn default() -> Self {
         Self {
             inner: vec![
-                RingDef { rotation_x: 0.4, rotation_z: 0.3, radius: 4.5, segments: 90, is_polygon: false, speed: 0.024, bob_strength: 1.4 },
-                RingDef { rotation_x: 1.1, rotation_z: -0.2, radius: 6.0, segments: 60, is_polygon: false, speed: -0.018, bob_strength: 0.8 },
-                RingDef { rotation_x: 0.8, rotation_z: 0.9, radius: 5.0, segments: 6, is_polygon: true, speed: 0.015, bob_strength: 0.3 },
-                RingDef { rotation_x: 1.5, rotation_z: 0.1, radius: 7.0, segments: 100, is_polygon: false, speed: -0.012, bob_strength: 1.2 },
+                RingDef {
+                    rotation_x: 0.4,
+                    rotation_z: 0.3,
+                    radius: 4.5,
+                    segments: 90,
+                    is_polygon: false,
+                    speed: 0.024,
+                    bob_strength: 1.4,
+                },
+                RingDef {
+                    rotation_x: 1.1,
+                    rotation_z: -0.2,
+                    radius: 6.0,
+                    segments: 60,
+                    is_polygon: false,
+                    speed: -0.018,
+                    bob_strength: 0.8,
+                },
+                RingDef {
+                    rotation_x: 0.8,
+                    rotation_z: 0.9,
+                    radius: 5.0,
+                    segments: 6,
+                    is_polygon: true,
+                    speed: 0.015,
+                    bob_strength: 0.3,
+                },
+                RingDef {
+                    rotation_x: 1.5,
+                    rotation_z: 0.1,
+                    radius: 7.0,
+                    segments: 100,
+                    is_polygon: false,
+                    speed: -0.012,
+                    bob_strength: 1.2,
+                },
             ],
             mid: vec![
-                RingDef { rotation_x: 0.15, rotation_z: 0.0, radius: 12.0, segments: 110, is_polygon: false, speed: 0.008, bob_strength: 0.5 },
-                RingDef { rotation_x: 1.45, rotation_z: 0.3, radius: 14.0, segments: 110, is_polygon: false, speed: -0.007, bob_strength: 1.6 },
-                RingDef { rotation_x: 0.7, rotation_z: -0.6, radius: 11.0, segments: 8, is_polygon: true, speed: 0.006, bob_strength: 0.2 },
-                RingDef { rotation_x: 1.1, rotation_z: 1.0, radius: 13.0, segments: 110, is_polygon: false, speed: -0.005, bob_strength: 1.1 },
+                RingDef {
+                    rotation_x: 0.15,
+                    rotation_z: 0.0,
+                    radius: 12.0,
+                    segments: 110,
+                    is_polygon: false,
+                    speed: 0.008,
+                    bob_strength: 0.5,
+                },
+                RingDef {
+                    rotation_x: 1.45,
+                    rotation_z: 0.3,
+                    radius: 14.0,
+                    segments: 110,
+                    is_polygon: false,
+                    speed: -0.007,
+                    bob_strength: 1.6,
+                },
+                RingDef {
+                    rotation_x: 0.7,
+                    rotation_z: -0.6,
+                    radius: 11.0,
+                    segments: 8,
+                    is_polygon: true,
+                    speed: 0.006,
+                    bob_strength: 0.2,
+                },
+                RingDef {
+                    rotation_x: 1.1,
+                    rotation_z: 1.0,
+                    radius: 13.0,
+                    segments: 110,
+                    is_polygon: false,
+                    speed: -0.005,
+                    bob_strength: 1.1,
+                },
             ],
             outer: vec![
-                RingDef { rotation_x: 0.2, rotation_z: 0.0, radius: 22.0, segments: 140, is_polygon: false, speed: 0.003, bob_strength: 0.7 },
-                RingDef { rotation_x: 0.9, rotation_z: 0.5, radius: 28.0, segments: 8, is_polygon: true, speed: -0.0025, bob_strength: 1.3 },
-                RingDef { rotation_x: 1.4, rotation_z: -0.3, radius: 25.0, segments: 90, is_polygon: false, speed: 0.002, bob_strength: 0.4 },
-                RingDef { rotation_x: 0.4, rotation_z: 1.2, radius: 35.0, segments: 160, is_polygon: false, speed: -0.0015, bob_strength: 1.0 },
-                RingDef { rotation_x: 1.2, rotation_z: 0.8, radius: 42.0, segments: 12, is_polygon: true, speed: 0.001, bob_strength: 0.15 },
+                RingDef {
+                    rotation_x: 0.2,
+                    rotation_z: 0.0,
+                    radius: 22.0,
+                    segments: 140,
+                    is_polygon: false,
+                    speed: 0.003,
+                    bob_strength: 0.7,
+                },
+                RingDef {
+                    rotation_x: 0.9,
+                    rotation_z: 0.5,
+                    radius: 28.0,
+                    segments: 8,
+                    is_polygon: true,
+                    speed: -0.0025,
+                    bob_strength: 1.3,
+                },
+                RingDef {
+                    rotation_x: 1.4,
+                    rotation_z: -0.3,
+                    radius: 25.0,
+                    segments: 90,
+                    is_polygon: false,
+                    speed: 0.002,
+                    bob_strength: 0.4,
+                },
+                RingDef {
+                    rotation_x: 0.4,
+                    rotation_z: 1.2,
+                    radius: 35.0,
+                    segments: 160,
+                    is_polygon: false,
+                    speed: -0.0015,
+                    bob_strength: 1.0,
+                },
+                RingDef {
+                    rotation_x: 1.2,
+                    rotation_z: 0.8,
+                    radius: 42.0,
+                    segments: 12,
+                    is_polygon: true,
+                    speed: 0.001,
+                    bob_strength: 0.15,
+                },
             ],
         }
     }
@@ -359,7 +537,11 @@ impl SceneConfig {
     pub fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
-                eprintln!("warn: failed to parse {}: {}, using defaults", path.display(), e);
+                eprintln!(
+                    "warn: failed to parse {}: {}, using defaults",
+                    path.display(),
+                    e
+                );
                 Self::default()
             }),
             Err(_) => Self::default(),
@@ -368,10 +550,7 @@ impl SceneConfig {
 
     /// Find config file: check CWD, then ~/.config/ryeos/scene.toml
     pub fn find() -> Self {
-        let candidates: Vec<PathBuf> = vec![
-            PathBuf::from("scene.toml"),
-            dirs().join("scene.toml"),
-        ];
+        let candidates: Vec<PathBuf> = vec![PathBuf::from("scene.toml"), dirs().join("scene.toml")];
         for path in &candidates {
             if path.exists() {
                 return Self::load(path);

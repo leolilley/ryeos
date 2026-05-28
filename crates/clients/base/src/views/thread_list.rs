@@ -1,7 +1,7 @@
 //! Thread list view — recent threads from the store.
 
-use crate::model::AppModel;
 use crate::ids::TileId;
+use crate::model::AppModel;
 use crate::store::ThreadStatus;
 use crate::text_surface::Style;
 use crate::text_surface::TextSurface;
@@ -24,9 +24,7 @@ pub fn build(model: &AppModel, tile_id: TileId, w: usize, h: usize) -> TextSurfa
         .tiles
         .get(&tile_id)
         .and_then(|t| match &t.local {
-            ViewLocalState::ThreadList { filter, cursor } => {
-                Some((filter.clone(), *cursor))
-            }
+            ViewLocalState::ThreadList { filter, cursor } => Some((filter.clone(), *cursor)),
             _ => None,
         })
         .unwrap_or_default();

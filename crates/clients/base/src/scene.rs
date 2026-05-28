@@ -132,7 +132,11 @@ pub fn rasterize_to_rgba(primitives: &[ScenePrimitive], buf: &mut [u8]) {
     for prim in primitives {
         match prim {
             ScenePrimitive::Point {
-                pos, color, size, opacity, z,
+                pos,
+                color,
+                size,
+                opacity,
+                z,
             } => {
                 let fogged = apply_fog(color, *z);
                 let cx = pos.x * w;
@@ -156,18 +160,31 @@ pub fn rasterize_to_rgba(primitives: &[ScenePrimitive], buf: &mut [u8]) {
                 }
             }
             ScenePrimitive::Line {
-                from, to, color, opacity, z, ..
+                from,
+                to,
+                color,
+                opacity,
+                z,
+                ..
             } => {
                 let fogged = apply_fog(color, *z);
                 draw_line_wu(
                     buf,
-                    from.x * w, from.y * h,
-                    to.x * w, to.y * h,
-                    &fogged, *opacity,
+                    from.x * w,
+                    from.y * h,
+                    to.x * w,
+                    to.y * h,
+                    &fogged,
+                    *opacity,
                 );
             }
             ScenePrimitive::Ring {
-                center, radius, tilt, rotation, color, opacity,
+                center,
+                radius,
+                tilt,
+                rotation,
+                color,
+                opacity,
             } => {
                 let cx = center.x * w;
                 let cy = center.y * h;
@@ -180,14 +197,21 @@ pub fn rasterize_to_rgba(primitives: &[ScenePrimitive], buf: &mut [u8]) {
                     let a2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU + rotation;
                     draw_line_wu(
                         buf,
-                        cx + a1.cos() * rx, cy + a1.sin() * ry,
-                        cx + a2.cos() * rx, cy + a2.sin() * ry,
-                        color, *opacity,
+                        cx + a1.cos() * rx,
+                        cy + a1.sin() * ry,
+                        cx + a2.cos() * rx,
+                        cy + a2.sin() * ry,
+                        color,
+                        *opacity,
                     );
                 }
             }
             ScenePrimitive::Polygon {
-                vertices, color, opacity, z, ..
+                vertices,
+                color,
+                opacity,
+                z,
+                ..
             } => {
                 if vertices.len() < 2 {
                     continue;
@@ -196,12 +220,7 @@ pub fn rasterize_to_rgba(primitives: &[ScenePrimitive], buf: &mut [u8]) {
                 for i in 0..vertices.len() {
                     let a = &vertices[i];
                     let b = &vertices[(i + 1) % vertices.len()];
-                    draw_line_wu(
-                        buf,
-                        a.x * w, a.y * h,
-                        b.x * w, b.y * h,
-                        &fogged, *opacity,
-                    );
+                    draw_line_wu(buf, a.x * w, a.y * h, b.x * w, b.y * h, &fogged, *opacity);
                 }
             }
         }
@@ -224,11 +243,7 @@ fn apply_fog(color: &Rgb, z: f32) -> Rgb {
 // ---------------------------------------------------------------------------
 
 /// Draw an antialiased line using Wu's algorithm.
-fn draw_line_wu(
-    buf: &mut [u8],
-    x0: f32, y0: f32, x1: f32, y1: f32,
-    color: &Rgb, opacity: f32,
-) {
+fn draw_line_wu(buf: &mut [u8], x0: f32, y0: f32, x1: f32, y1: f32, color: &Rgb, opacity: f32) {
     let mut x0 = x0;
     let mut y0 = y0;
     let x1 = x1;
@@ -249,9 +264,17 @@ fn draw_line_wu(
 
     // Re-do properly: just implement Wu directly
     let steep = (y1 - y0).abs() > (x1 - x0).abs();
-    let (ax, ay, bx, by) = if steep { (y0, x0, y1, x1) } else { (x0, y0, x1, y1) };
+    let (ax, ay, bx, by) = if steep {
+        (y0, x0, y1, x1)
+    } else {
+        (x0, y0, x1, y1)
+    };
 
-    let (ax, ay, bx, by) = if ax > bx { (bx, by, ax, ay) } else { (ax, ay, bx, by) };
+    let (ax, ay, bx, by) = if ax > bx {
+        (bx, by, ax, ay)
+    } else {
+        (ax, ay, bx, by)
+    };
 
     let dx = bx - ax;
     let dy = by - ay;
@@ -403,7 +426,11 @@ mod tests {
         rasterize_to_rgba(&prims, &mut buf);
         // Center pixel should be orange
         let idx = (RENDER_H / 2 * RENDER_W + RENDER_W / 2) * 4;
-        assert!(buf[idx] > 200, "red channel should be high, got {}", buf[idx]);
+        assert!(
+            buf[idx] > 200,
+            "red channel should be high, got {}",
+            buf[idx]
+        );
     }
 
     #[test]

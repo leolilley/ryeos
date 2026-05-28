@@ -93,16 +93,16 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
         );
         row += 1;
 
-        let summary = format!("  ✓ {} signed · ○ {} unsigned", signed_count, unsigned_count);
+        let summary = format!(
+            "  ✓ {} signed · ○ {} unsigned",
+            signed_count, unsigned_count
+        );
         surface.draw_text(1, row, &summary, dim_style);
         row += 1;
 
         // Per-space breakdown
         if row < h {
-            let spaces = format!(
-                "  project: {} items · user: - · system: -",
-                total_items
-            );
+            let spaces = format!("  project: {} items · user: - · system: -", total_items);
             surface.draw_text(1, row, &spaces, muted_style);
         }
     }

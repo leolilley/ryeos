@@ -7,8 +7,8 @@
 pub mod animation;
 pub mod command_registry;
 pub mod commands;
-pub mod effects;
 pub mod effective_surface;
+pub mod effects;
 pub mod frame;
 pub mod ids;
 pub mod input;

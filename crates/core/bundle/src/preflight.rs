@@ -133,11 +133,8 @@ pub fn preflight_verify_bundle_in_context(
     dependency_bundle_roots: &[PathBuf],
     user_root: Option<&Path>,
 ) -> Result<()> {
-    let _report = preflight_verify_bundle_report_in_context(
-        source_path,
-        dependency_bundle_roots,
-        user_root,
-    )?;
+    let _report =
+        preflight_verify_bundle_report_in_context(source_path, dependency_bundle_roots, user_root)?;
     Ok(())
 }
 
@@ -154,11 +151,7 @@ pub fn preflight_verify_bundle_report_in_context(
     // The core logic below populates `failures` (blocking) and
     // `warnings` (non-blocking). We lift the loop into this function
     // so both public APIs share a single implementation.
-    preflight_verify_bundle_in_context_inner(
-        source_path,
-        dependency_bundle_roots,
-        user_root,
-    )
+    preflight_verify_bundle_in_context_inner(source_path, dependency_bundle_roots, user_root)
 }
 
 /// Core preflight logic shared by both public entry points.
@@ -377,11 +370,7 @@ fn preflight_verify_bundle_in_context_inner(
             // the kind's `composed_value_contract`. Extends-based kinds
             // are validated post-composition in the resolution pipeline
             // (Slice 2), so we skip them here.
-            for issue in collect_identity_contract_issues(
-                rel,
-                kind_schema,
-                &parsed,
-            ) {
+            for issue in collect_identity_contract_issues(rel, kind_schema, &parsed) {
                 match issue.severity {
                     PreflightIssueSeverity::Error => {
                         failures.push(format_preflight_issue(&issue));
@@ -615,7 +604,8 @@ mod tests {
         fn add_test_parser_kind_schema(&self) {
             self.add_signed_kind_schema(
                 "parser",
-                &format!(r##"location:
+                &format!(
+                    r##"location:
   directory: parsers
 formats:
   - extensions: [".yaml", ".yml"]
@@ -629,7 +619,8 @@ composer: {IDENTITY_COMPOSER}
 composed_value_contract:
   root_type: mapping
   required: {{}}
-"##),
+"##
+                ),
             );
         }
 
@@ -709,9 +700,8 @@ description: "fixed parser handler for preflight tests"
             let cas = lillux::cas::CasStore::new(self.ai_dir.join("objects"));
             let bytes = fs::read(bin_path).unwrap();
             let blob_hash = cas.store_blob(&bytes).unwrap();
-            let fingerprint = ryeos_engine::trust::compute_fingerprint(
-                &self.signing_key.verifying_key(),
-            );
+            let fingerprint =
+                ryeos_engine::trust::compute_fingerprint(&self.signing_key.verifying_key());
             let item_source = serde_json::json!({
                 "item_ref": item_ref,
                 "content_blob_hash": blob_hash,
@@ -901,15 +891,15 @@ optional: {}
             serde_json::json!({ "mode": "web_server" }),
         );
 
-        let err = preflight_verify_bundle_report_in_context(
-            &layout.source,
-            &[],
-            Some(&layout.user_root),
-        )
-        .unwrap_err();
+        let err =
+            preflight_verify_bundle_report_in_context(&layout.source, &[], Some(&layout.user_root))
+                .unwrap_err();
         let msg = err.to_string();
 
-        assert!(msg.contains("contract violation [enum_mismatch]"), "error: {msg}");
+        assert!(
+            msg.contains("contract violation [enum_mismatch]"),
+            "error: {msg}"
+        );
         assert!(msg.contains("items/demo.yaml"), "item path: {msg}");
         assert!(msg.contains("mode"), "field path: {msg}");
     }
@@ -930,12 +920,9 @@ optional: {}
             serde_json::json!({ "other": "stuff" }),
         );
 
-        let report = preflight_verify_bundle_report_in_context(
-            &layout.source,
-            &[],
-            Some(&layout.user_root),
-        )
-        .expect("non-identity composer should skip pre-composition contract validation");
+        let report =
+            preflight_verify_bundle_report_in_context(&layout.source, &[], Some(&layout.user_root))
+                .expect("non-identity composer should skip pre-composition contract validation");
 
         assert!(report.is_clean(), "no warnings expected: {report:?}");
     }
@@ -957,16 +944,16 @@ strict_fields: warn
             serde_json::json!({ "body": "hello", "extra": "field" }),
         );
 
-        let report = preflight_verify_bundle_report_in_context(
-            &layout.source,
-            &[],
-            Some(&layout.user_root),
-        )
-        .expect("warnings should not fail preflight");
+        let report =
+            preflight_verify_bundle_report_in_context(&layout.source, &[], Some(&layout.user_root))
+                .expect("warnings should not fail preflight");
 
         assert_eq!(report.warnings.len(), 1);
         assert_eq!(report.warnings[0].severity, PreflightIssueSeverity::Warning);
-        assert_eq!(report.warnings[0].code, InstanceViolationCode::UnexpectedField);
+        assert_eq!(
+            report.warnings[0].code,
+            InstanceViolationCode::UnexpectedField
+        );
         assert_eq!(report.warnings[0].item_path, "items/demo.yaml");
         assert_eq!(report.warnings[0].path, "extra");
     }
@@ -1088,7 +1075,10 @@ optional: {}
             &value,
         );
 
-        assert!(issues.is_empty(), "non-identity composer should produce no issues");
+        assert!(
+            issues.is_empty(),
+            "non-identity composer should produce no issues"
+        );
     }
 
     #[test]
@@ -1141,7 +1131,10 @@ strict_fields: warn
             &value,
         );
 
-        assert!(issues.is_empty(), "valid descriptor should produce no issues");
+        assert!(
+            issues.is_empty(),
+            "valid descriptor should produce no issues"
+        );
     }
 
     // ── Tests for format_preflight_issue ─────────────────────────────
@@ -1157,8 +1150,14 @@ strict_fields: warn
             found: "web_server".to_string(),
         };
         let formatted = format_preflight_issue(&issue);
-        assert!(formatted.contains("tools/my_tool.py"), "item_path: {formatted}");
-        assert!(formatted.contains("contract violation"), "label: {formatted}");
+        assert!(
+            formatted.contains("tools/my_tool.py"),
+            "item_path: {formatted}"
+        );
+        assert!(
+            formatted.contains("contract violation"),
+            "label: {formatted}"
+        );
         assert!(formatted.contains("enum_mismatch"), "code: {formatted}");
         assert!(formatted.contains("launch.mode"), "path: {formatted}");
         assert!(formatted.contains("cli_exec"), "expected: {formatted}");
@@ -1176,8 +1175,14 @@ strict_fields: warn
             found: "string".to_string(),
         };
         let formatted = format_preflight_issue(&issue);
-        assert!(formatted.contains("contract warning"), "should use warning label: {formatted}");
-        assert!(!formatted.contains("contract violation"), "should not use error label: {formatted}");
+        assert!(
+            formatted.contains("contract warning"),
+            "should use warning label: {formatted}"
+        );
+        assert!(
+            !formatted.contains("contract violation"),
+            "should not use error label: {formatted}"
+        );
     }
 
     // ── Tests for PreflightReport ────────────────────────────────────

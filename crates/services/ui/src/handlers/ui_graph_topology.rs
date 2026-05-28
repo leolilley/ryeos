@@ -18,8 +18,12 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
-use ryeos_engine::item_resolution::{enumerate_kind_refs, resolve_item_full};
+use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
+use ryeos_engine::item_resolution::{
+    enumerate_kind_refs, parse_signature_header, resolve_item_full,
+};
 use ryeos_engine::kind_registry::{DelegationVia, KindSchema};
+use ryeos_engine::trust::verify_item_signature;
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::state::get_ui_state;
@@ -60,16 +64,32 @@ pub struct TopologyNode {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    #[serde(rename = "virtual")]
+    pub virtual_: bool,
+    pub missing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<NodeStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust: Option<TrustSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeStatus {
     pub resolved: bool,
-    pub composed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composed: Option<bool>,
     pub executable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustSummary {
+    /// "trusted", "untrusted", "unsigned", or "unknown".
+    pub class: String,
+    /// Ed25519 signer fingerprint (SHA-256 hex of verifying key), if signed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,17 +167,60 @@ impl GraphBuilder {
             split_ref(ref_).unwrap_or_else(|| (fallback_kind.to_owned(), ref_.to_owned()));
         self.add_node(TopologyNode {
             id: ref_.to_owned(),
-            kind,
+            kind: if ref_.starts_with("kind:") {
+                "kind_schema".to_owned()
+            } else {
+                kind
+            },
             label: label_for_bare_id(&bare),
             ref_: ref_.to_owned(),
             space: None,
             path: None,
             namespace: namespace_for_bare_id(&bare),
+            virtual_: true,
+            missing: true,
             status: None,
+            trust: None,
         });
     }
 
     fn add_virtual_node(
+        &mut self,
+        id: impl Into<String>,
+        kind: impl Into<String>,
+        label: impl Into<String>,
+        namespace: Option<String>,
+    ) {
+        let id = id.into();
+        let kind = kind.into();
+        let label = label.into();
+        if let Some(existing) = self.nodes.get_mut(&id) {
+            if existing.virtual_ && existing.missing {
+                existing.kind = kind;
+                existing.label = label;
+                existing.namespace = namespace;
+                existing.missing = false;
+                existing.status = None;
+                self.kinds.insert(existing.kind.clone());
+            }
+            return;
+        }
+        self.add_node(TopologyNode {
+            id: id.clone(),
+            kind,
+            label,
+            ref_: id,
+            space: None,
+            path: None,
+            namespace,
+            virtual_: true,
+            missing: false,
+            status: None,
+            trust: None,
+        });
+    }
+
+    fn add_missing_virtual_node(
         &mut self,
         id: impl Into<String>,
         kind: impl Into<String>,
@@ -176,7 +239,14 @@ impl GraphBuilder {
             space: None,
             path: None,
             namespace,
-            status: None,
+            virtual_: true,
+            missing: true,
+            status: Some(NodeStatus {
+                resolved: false,
+                composed: None,
+                executable: false,
+            }),
+            trust: None,
         });
     }
 
@@ -187,6 +257,7 @@ impl GraphBuilder {
         type_: impl Into<String>,
         label: impl Into<String>,
         source: Option<EdgeSource>,
+        confidence: impl Into<String>,
     ) {
         let from = from.into();
         let to = to.into();
@@ -200,11 +271,14 @@ impl GraphBuilder {
             type_,
             label: label.into(),
             source,
-            confidence: "structural".into(),
+            confidence: confidence.into(),
         });
     }
 
     fn finish(self, metadata: TopologyMetadata) -> TopologyGraph {
+        debug_assert!(self.edges.values().all(|edge| {
+            self.nodes.contains_key(&edge.from) && self.nodes.contains_key(&edge.to)
+        }));
         TopologyGraph {
             version: "1.0.0".into(),
             kind: "topology_graph".into(),
@@ -279,11 +353,20 @@ fn build_topology(
                 space: Some(space_to_string(resolution.winner_space)),
                 path: Some(resolution.winner_path.display().to_string()),
                 namespace: namespace_for_bare_id(&item_ref.bare_id),
+                virtual_: false,
+                missing: false,
                 status: Some(NodeStatus {
                     resolved: true,
-                    composed: false,
+                    composed: None,
                     executable: schema.is_executable(),
                 }),
+                trust: classify_trust(
+                    &resolution.winner_path,
+                    schema
+                        .spec_for(&resolution.matched_ext)
+                        .map(|spec| &spec.signature),
+                    &state.engine.trust_store,
+                ),
             });
 
             add_item_edges(&mut builder, &canonical, &resolution.winner_path);
@@ -319,11 +402,14 @@ fn add_kind_schema_node_and_edges(
         space: Some("system".into()),
         path: None,
         namespace: Some("node/engine/kinds".into()),
+        virtual_: true,
+        missing: false,
         status: Some(NodeStatus {
             resolved: true,
-            composed: true,
+            composed: Some(true),
             executable: schema.is_executable(),
         }),
+        trust: None,
     });
 
     for ext in &schema.extensions {
@@ -337,6 +423,7 @@ fn add_kind_schema_node_and_edges(
                 field: Some("formats[].parser".into()),
                 path: None,
             }),
+            "structural",
         );
     }
 
@@ -350,6 +437,7 @@ fn add_kind_schema_node_and_edges(
             field: Some("composer".into()),
             path: None,
         }),
+        "structural",
     );
 
     if let Some(exec) = schema.execution() {
@@ -368,6 +456,7 @@ fn add_kind_schema_node_and_edges(
                         field: Some("execution.delegate".into()),
                         path: None,
                     }),
+                    "structural",
                 );
             }
         }
@@ -395,6 +484,7 @@ fn add_item_edges(builder: &mut GraphBuilder, item_ref: &str, path: &std::path::
                 field: Some("extends".into()),
                 path: Some(path.display().to_string()),
             }),
+            "structural",
         );
     }
 
@@ -431,6 +521,7 @@ fn add_client_edges(
             field: Some("serves.kind".into()),
             path: Some(path.display().to_string()),
         }),
+        "structural",
     );
 }
 
@@ -467,6 +558,7 @@ fn add_context_edges(
                 field: Some("context".into()),
                 path: Some(path.display().to_string()),
             }),
+            "structural",
         );
     }
     for knowledge_ref in suppressed_refs {
@@ -480,6 +572,7 @@ fn add_context_edges(
                 field: Some("context.suppress".into()),
                 path: Some(path.display().to_string()),
             }),
+            "structural",
         );
     }
 }
@@ -515,6 +608,7 @@ fn add_executable_graph_edges(
                 field: Some(format!("config.nodes.{node_name}")),
                 path: Some(path.display().to_string()),
             }),
+            "structural",
         );
 
         if let Some(action_ref) = graph_action_ref(node_value) {
@@ -533,19 +627,30 @@ fn add_executable_graph_edges(
                     field: Some(format!("config.nodes.{node_name}.action")),
                     path: Some(path.display().to_string()),
                 }),
+                "structural",
             );
         }
 
         for target in graph_next_targets(node_value) {
+            let target_ref = format!("{item_ref}#node:{target}");
+            if !builder.nodes.contains_key(&target_ref) {
+                builder.add_missing_virtual_node(
+                    &target_ref,
+                    "graph_node",
+                    &target,
+                    Some(item_ref.to_owned()),
+                );
+            }
             builder.add_edge(
                 graph_node_ref.clone(),
-                format!("{item_ref}#node:{target}"),
+                target_ref,
                 "flows_to",
                 "next",
                 Some(EdgeSource {
                     field: Some(format!("config.nodes.{node_name}.next")),
                     path: Some(path.display().to_string()),
                 }),
+                "structural",
             );
         }
     }
@@ -574,6 +679,7 @@ fn add_execute_reference_edges(
                 field: Some("body".into()),
                 path: Some(path.display().to_string()),
             }),
+            "heuristic",
         );
     }
 }
@@ -704,6 +810,40 @@ fn space_to_string(space: ItemSpace) -> String {
     space.as_str().to_owned()
 }
 
+fn classify_trust(
+    path: &std::path::Path,
+    envelope: Option<&SignatureEnvelope>,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Option<TrustSummary> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let Some(envelope) = envelope else {
+        return Some(TrustSummary {
+            class: "unknown".into(),
+            signer: None,
+        });
+    };
+
+    let Some(header) = parse_signature_header(&raw, envelope) else {
+        return Some(TrustSummary {
+            class: "unsigned".into(),
+            signer: None,
+        });
+    };
+
+    let signer = Some(header.signer_fingerprint.clone());
+    let class = match verify_item_signature(&raw, &header, envelope, trust_store) {
+        Ok((TrustClass::Trusted, _)) => "trusted",
+        Ok((TrustClass::Untrusted, _)) => "untrusted",
+        Ok((TrustClass::Unsigned, _)) => "unsigned",
+        Err(_) => "untrusted",
+    };
+
+    Some(TrustSummary {
+        class: class.into(),
+        signer,
+    })
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/graph/topology",
     endpoint: "ui.graph.topology",
@@ -715,6 +855,8 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lillux::crypto::SigningKey;
+    use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
     #[test]
     fn label_and_namespace_split_bare_ids() {
@@ -797,6 +939,14 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         assert!(builder.edges.contains_key(
             "directive:rye/code/quality/build--spawns--directive:rye/code/quality/review"
         ));
+        assert_eq!(
+            builder
+                .edges
+                .get("directive:rye/code/quality/build--calls_tool--tool:rye/code/git/git")
+                .unwrap()
+                .confidence,
+            "heuristic"
+        );
     }
 
     #[test]
@@ -837,5 +987,110 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         assert!(builder.edges.contains_key(
             "graph:rye/code/build#node:gate--calls_tool--tool:rye/code/quality/gate"
         ));
+    }
+
+    #[test]
+    fn missing_graph_flow_target_becomes_missing_virtual_item() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_path = tmp.path().join("build.yaml");
+        std::fs::write(
+            &graph_path,
+            r#"config:
+  nodes:
+    review:
+      next:
+        to: missing_gate
+"#,
+        )
+        .unwrap();
+
+        let mut builder = GraphBuilder::new();
+        builder.add_ref_node("graph:rye/code/build", "graph");
+        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
+
+        let missing = builder
+            .nodes
+            .get("graph:rye/code/build#node:missing_gate")
+            .expect("missing flow target should be represented");
+        assert!(missing.virtual_);
+        assert!(missing.missing);
+        for edge in builder.edges.values() {
+            assert!(builder.nodes.contains_key(&edge.from));
+            assert!(builder.nodes.contains_key(&edge.to));
+        }
+    }
+
+    #[test]
+    fn defined_graph_flow_target_seen_later_is_not_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_path = tmp.path().join("build.yaml");
+        std::fs::write(
+            &graph_path,
+            r#"config:
+  nodes:
+    alpha:
+      next:
+        to: zeta
+    zeta:
+      action:
+        item_ref: tool:rye/code/quality/gate
+"#,
+        )
+        .unwrap();
+
+        let mut builder = GraphBuilder::new();
+        builder.add_ref_node("graph:rye/code/build", "graph");
+        add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
+
+        let zeta = builder
+            .nodes
+            .get("graph:rye/code/build#node:zeta")
+            .expect("defined flow target should exist");
+        assert!(zeta.virtual_);
+        assert!(
+            !zeta.missing,
+            "defined graph node must not be shown as missing"
+        );
+    }
+
+    #[test]
+    fn classify_trust_does_not_trust_tampered_signed_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let item_path = tmp.path().join("item.yaml");
+        let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let fingerprint = compute_fingerprint(&verifying_key);
+        let trust_store = TrustStore::from_signers(vec![TrustedSigner {
+            fingerprint: fingerprint.clone(),
+            verifying_key,
+            label: Some("test".into()),
+        }]);
+        let envelope = SignatureEnvelope {
+            prefix: "#".into(),
+            suffix: None,
+            after_shebang: false,
+        };
+
+        let body = "name: trusted\n";
+        let signed = lillux::signature::sign_content_at(
+            body,
+            &signing_key,
+            "#",
+            None,
+            "2026-05-27T00:00:00Z",
+        );
+        std::fs::write(&item_path, signed).unwrap();
+        let trusted = classify_trust(&item_path, Some(&envelope), &trust_store)
+            .expect("signed item should classify");
+        assert_eq!(trusted.class, "trusted");
+        assert_eq!(trusted.signer.as_deref(), Some(fingerprint.as_str()));
+
+        let tampered = std::fs::read_to_string(&item_path)
+            .unwrap()
+            .replace(body, "name: tampered\n");
+        std::fs::write(&item_path, tampered).unwrap();
+        let tampered = classify_trust(&item_path, Some(&envelope), &trust_store)
+            .expect("tampered signed item should classify");
+        assert_ne!(tampered.class, "trusted");
     }
 }

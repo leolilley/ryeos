@@ -210,10 +210,9 @@ impl<'a> ResolutionContext<'a> {
             .kinds
             .get(kind)
             .expect("kind schema must exist: pipeline already resolved this kind");
-        let report =
-            kind_schema
-                .composed_value_contract
-                .validate_instance(&composed.composed);
+        let report = kind_schema
+            .composed_value_contract
+            .validate_instance(&composed.composed);
         if !report.is_ok() {
             return Err(ResolutionError::ComposedValueContractViolation {
                 kind: kind.to_string(),

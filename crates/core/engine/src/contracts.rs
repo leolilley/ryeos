@@ -146,7 +146,9 @@ pub enum FieldType {
         #[serde(default, skip_serializing_if = "Option::is_none", rename = "elements")]
         element_type: Option<Box<FieldType>>,
     },
-    Union { prims: Vec<PrimType> },
+    Union {
+        prims: Vec<PrimType>,
+    },
 }
 
 impl Default for FieldType {
@@ -175,7 +177,9 @@ enum FieldTypeRaw {
         #[serde(default)]
         elements: Option<Box<FieldTypeRaw>>,
     },
-    Union { prims: Vec<PrimType> },
+    Union {
+        prims: Vec<PrimType>,
+    },
 }
 
 impl TryFrom<FieldTypeRaw> for FieldType {
@@ -373,10 +377,18 @@ impl std::fmt::Display for InstanceValidationReport {
             self.warnings.len()
         )?;
         for v in &self.errors {
-            write!(f, "\n  [{}] {}: expected {}, found {}", v.code, v.path, v.expected, v.found)?;
+            write!(
+                f,
+                "\n  [{}] {}: expected {}, found {}",
+                v.code, v.path, v.expected, v.found
+            )?;
         }
         for v in &self.warnings {
-            write!(f, "\n  [{}] {}: expected {}, found {}", v.code, v.path, v.expected, v.found)?;
+            write!(
+                f,
+                "\n  [{}] {}: expected {}, found {}",
+                v.code, v.path, v.expected, v.found
+            )?;
         }
         Ok(())
     }
@@ -402,7 +414,11 @@ fn is_json_integer(value: &serde_json::Value) -> bool {
 fn format_enum_values(values: &[String]) -> String {
     format!(
         "one of [{}]",
-        values.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ")
+        values
+            .iter()
+            .map(|v| format!("{:?}", v))
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 
@@ -729,8 +745,7 @@ fn validate_value(
                 report.errors.push(InstanceViolation {
                     path: path.join("."),
                     code: InstanceViolationCode::RootTypeMismatch,
-                    expected: "scalar (string, number, boolean, null)"
-                        .to_string(),
+                    expected: "scalar (string, number, boolean, null)".to_string(),
                     found: json_type_name(value).to_string(),
                 });
             }
@@ -836,7 +851,11 @@ fn validate_field(
                     code: InstanceViolationCode::TypeMismatch,
                     expected: format!(
                         "one of [{}]",
-                        prims.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>().join(", ")
+                        prims
+                            .iter()
+                            .map(|p| format!("{:?}", p))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                     found: json_type_name(value).to_string(),
                 });
@@ -1204,11 +1223,7 @@ mod value_shape_tests {
     #[test]
     fn all_violations_returned_not_bailing_on_first() {
         let consumer = shape_mapping(
-            &[
-                ("a", ft_string()),
-                ("b", ft_string()),
-                ("c", ft_string()),
-            ],
+            &[("a", ft_string()), ("b", ft_string()), ("c", ft_string())],
             &[],
         );
         let producer = ValueShape {
@@ -1335,7 +1350,13 @@ required:
 ";
         let shape: ValueShape = serde_yaml::from_str(yaml).expect("nested mapping parses");
         let launch = shape.required.get("launch").unwrap();
-        assert!(matches!(launch, FieldType::Single { prim: PrimType::Mapping, .. }));
+        assert!(matches!(
+            launch,
+            FieldType::Single {
+                prim: PrimType::Mapping,
+                ..
+            }
+        ));
         if let FieldType::Single {
             nested_contract: Some(contract),
             ..
@@ -1409,7 +1430,8 @@ strict_fields: warn
 root_type: mapping
 required: {}
 ";
-        let shape: ValueShape = serde_yaml::from_str(yaml).expect("shape without strict_fields parses");
+        let shape: ValueShape =
+            serde_yaml::from_str(yaml).expect("shape without strict_fields parses");
         assert_eq!(shape.strict_fields, None);
     }
 
@@ -1536,18 +1558,10 @@ required: {}
     #[test]
     fn subset_semantics_with_enum_values() {
         // Consumer declares enum → producer must be a subset.
-        let consumer = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
-        let producer_subset = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec"]))],
-            &[],
-        );
-        let producer_same = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
+        let consumer = shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
+        let producer_subset = shape_mapping(&[("mode", ft_string_enum(&["cli_exec"]))], &[]);
+        let producer_same =
+            shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
         let producer_wider = shape_mapping(
             &[("mode", ft_string_enum(&["cli_exec", "daemon_ui", "web"]))],
             &[],
@@ -1555,38 +1569,48 @@ required: {}
         // Producer without enum but consumer with enum → unsound.
         let producer_no_enum = shape_mapping(&[("mode", ft_string())], &[]);
 
-        assert!(consumer.is_satisfied_by(&producer_subset).is_empty(), "subset should pass");
-        assert!(consumer.is_satisfied_by(&producer_same).is_empty(), "same should pass");
-        assert!(!consumer.is_satisfied_by(&producer_wider).is_empty(), "wider should fail");
-        assert!(!consumer.is_satisfied_by(&producer_no_enum).is_empty(), "no-enum should fail");
+        assert!(
+            consumer.is_satisfied_by(&producer_subset).is_empty(),
+            "subset should pass"
+        );
+        assert!(
+            consumer.is_satisfied_by(&producer_same).is_empty(),
+            "same should pass"
+        );
+        assert!(
+            !consumer.is_satisfied_by(&producer_wider).is_empty(),
+            "wider should fail"
+        );
+        assert!(
+            !consumer.is_satisfied_by(&producer_no_enum).is_empty(),
+            "no-enum should fail"
+        );
     }
 
     #[test]
     fn subset_semantics_with_nested_contracts() {
-        let nested_consumer = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
-        let nested_producer = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec"]))],
-            &[],
-        );
-        let consumer = shape_mapping(
-            &[("launch", ft_mapping_with(nested_consumer))],
-            &[],
-        );
-        let producer_ok = shape_mapping(
-            &[("launch", ft_mapping_with(nested_producer))],
-            &[],
-        );
+        let nested_consumer =
+            shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
+        let nested_producer = shape_mapping(&[("mode", ft_string_enum(&["cli_exec"]))], &[]);
+        let consumer = shape_mapping(&[("launch", ft_mapping_with(nested_consumer))], &[]);
+        let producer_ok = shape_mapping(&[("launch", ft_mapping_with(nested_producer))], &[]);
         // Producer with plain mapping (no nested contract) → unsound.
         let producer_plain = shape_mapping(&[("launch", ft_mapping())], &[]);
         // Producer missing launch entirely.
         let producer_missing = shape_mapping(&[], &[]);
 
-        assert!(consumer.is_satisfied_by(&producer_ok).is_empty(), "nested subset should pass");
-        assert!(!consumer.is_satisfied_by(&producer_plain).is_empty(), "plain mapping should fail");
-        assert!(!consumer.is_satisfied_by(&producer_missing).is_empty(), "missing field should fail");
+        assert!(
+            consumer.is_satisfied_by(&producer_ok).is_empty(),
+            "nested subset should pass"
+        );
+        assert!(
+            !consumer.is_satisfied_by(&producer_plain).is_empty(),
+            "plain mapping should fail"
+        );
+        assert!(
+            !consumer.is_satisfied_by(&producer_missing).is_empty(),
+            "missing field should fail"
+        );
     }
 
     #[test]
@@ -1594,28 +1618,16 @@ required: {}
         // is_satisfied_by only checks required fields, so put the
         // sequence field in required to test element-type subset
         // semantics.
-        let consumer = shape_mapping(
-            &[("tags", ft_sequence_of(ft_string()))],
-            &[],
-        );
-        let producer_same = shape_mapping(
-            &[("tags", ft_sequence_of(ft_string()))],
-            &[],
-        );
-        let producer_wider_elem = shape_mapping(
-            &[("tags", ft_sequence_of(ft_any()))],
-            &[],
-        );
-        let producer_plain_seq = shape_mapping(
-            &[("tags", ft_sequence())],
-            &[],
-        );
-        let producer_wrong_elem = shape_mapping(
-            &[("tags", ft_sequence_of(ft_integer()))],
-            &[],
-        );
+        let consumer = shape_mapping(&[("tags", ft_sequence_of(ft_string()))], &[]);
+        let producer_same = shape_mapping(&[("tags", ft_sequence_of(ft_string()))], &[]);
+        let producer_wider_elem = shape_mapping(&[("tags", ft_sequence_of(ft_any()))], &[]);
+        let producer_plain_seq = shape_mapping(&[("tags", ft_sequence())], &[]);
+        let producer_wrong_elem = shape_mapping(&[("tags", ft_sequence_of(ft_integer()))], &[]);
 
-        assert!(consumer.is_satisfied_by(&producer_same).is_empty(), "same element type should pass");
+        assert!(
+            consumer.is_satisfied_by(&producer_same).is_empty(),
+            "same element type should pass"
+        );
         assert!(
             !consumer.is_satisfied_by(&producer_wider_elem).is_empty(),
             "any element type should fail (producer makes no claim)"
@@ -1632,10 +1644,7 @@ required: {}
 
     #[test]
     fn constrained_enum_consumer_rejects_union_producer() {
-        let consumer = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
+        let consumer = shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
         let producer_union = shape_mapping(&[("mode", ft_union(&[PrimType::String]))], &[]);
 
         assert!(
@@ -1647,10 +1656,7 @@ required: {}
     #[test]
     fn constrained_nested_contract_consumer_rejects_union_producer() {
         let nested_consumer = shape_mapping(&[("mode", ft_string())], &[]);
-        let consumer = shape_mapping(
-            &[("launch", ft_mapping_with(nested_consumer))],
-            &[],
-        );
+        let consumer = shape_mapping(&[("launch", ft_mapping_with(nested_consumer))], &[]);
         let producer_union = shape_mapping(&[("launch", ft_union(&[PrimType::Mapping]))], &[]);
 
         assert!(
@@ -1661,10 +1667,7 @@ required: {}
 
     #[test]
     fn constrained_element_type_consumer_rejects_union_producer() {
-        let consumer = shape_mapping(
-            &[("tags", ft_sequence_of(ft_string()))],
-            &[],
-        );
+        let consumer = shape_mapping(&[("tags", ft_sequence_of(ft_string()))], &[]);
         let producer_union = shape_mapping(&[("tags", ft_union(&[PrimType::Sequence]))], &[]);
 
         assert!(
@@ -1717,10 +1720,7 @@ required:
         } = launch
         {
             let mode = contract.required.get("mode").unwrap();
-            assert_eq!(
-                mode,
-                &ft_string_enum(&["cli_exec", "daemon_ui"])
-            );
+            assert_eq!(mode, &ft_string_enum(&["cli_exec", "daemon_ui"]));
 
             // config is optional with its own nested contract.
             let config = contract.optional.get("config").unwrap();
@@ -1867,10 +1867,7 @@ required:
 
     #[test]
     fn mapping_root_rejects_missing_required() {
-        let shape = shape_mapping(
-            &[("body", ft_string())],
-            &[],
-        );
+        let shape = shape_mapping(&[("body", ft_string())], &[]);
         let value = serde_json::json!({});
         let report = validate(&shape, &value);
         assert!(!report.is_ok());
@@ -1884,23 +1881,26 @@ required:
 
     #[test]
     fn mapping_root_allows_missing_optional() {
-        let shape = shape_mapping(
-            &[],
-            &[("extra", ft_string())],
-        );
+        let shape = shape_mapping(&[], &[("extra", ft_string())]);
         let value = serde_json::json!({});
         let report = validate(&shape, &value);
-        assert!(report.is_ok(), "missing optional should not error: {report:?}");
+        assert!(
+            report.is_ok(),
+            "missing optional should not error: {report:?}"
+        );
     }
 
     #[test]
     fn nested_mapping_reports_dotted_path() {
         let shape = shape_mapping(
             &[],
-            &[("launch", ft_mapping_with(shape_mapping(
-                &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-                &[],
-            )))],
+            &[(
+                "launch",
+                ft_mapping_with(shape_mapping(
+                    &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
+                    &[],
+                )),
+            )],
         );
         let value = serde_json::json!({
             "launch": { "mode": "invalid_value" }
@@ -1917,10 +1917,10 @@ required:
     fn nested_mapping_missing_inner_required() {
         let shape = shape_mapping(
             &[],
-            &[("config", ft_mapping_with(shape_mapping(
-                &[("name", ft_string())],
-                &[],
-            )))],
+            &[(
+                "config",
+                ft_mapping_with(shape_mapping(&[("name", ft_string())], &[])),
+            )],
         );
         let value = serde_json::json!({
             "config": {}
@@ -1928,15 +1928,15 @@ required:
         let report = validate(&shape, &value);
         assert!(!report.is_ok());
         assert_eq!(report.errors[0].path, "config.name");
-        assert_eq!(report.errors[0].code, InstanceViolationCode::MissingRequiredField);
+        assert_eq!(
+            report.errors[0].code,
+            InstanceViolationCode::MissingRequiredField
+        );
     }
 
     #[test]
     fn enum_accepts_valid_value() {
-        let shape = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
+        let shape = shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
         let value = serde_json::json!({ "mode": "cli_exec" });
         let report = validate(&shape, &value);
         assert!(report.is_ok(), "valid enum should pass: {report:?}");
@@ -1944,26 +1944,17 @@ required:
 
     #[test]
     fn enum_rejects_invalid_value_with_code() {
-        let shape = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
+        let shape = shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
         let value = serde_json::json!({ "mode": "web" });
         let report = validate(&shape, &value);
         assert!(!report.is_ok());
         assert_eq!(report.errors.len(), 1);
-        assert_eq!(
-            report.errors[0].code,
-            InstanceViolationCode::EnumMismatch
-        );
+        assert_eq!(report.errors[0].code, InstanceViolationCode::EnumMismatch);
     }
 
     #[test]
     fn enum_rejects_wrong_type() {
-        let shape = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
+        let shape = shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
         let value = serde_json::json!({ "mode": 42 });
         let report = validate(&shape, &value);
         assert!(!report.is_ok());
@@ -1972,10 +1963,7 @@ required:
 
     #[test]
     fn enum_on_non_string_value_reports_type_mismatch() {
-        let shape = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
+        let shape = shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
         let value = serde_json::json!({ "mode": [1, 2] });
         let report = validate(&shape, &value);
         assert!(!report.is_ok());
@@ -1984,10 +1972,7 @@ required:
 
     #[test]
     fn integer_rejects_fractional_number() {
-        let shape = shape_mapping(
-            &[("count", ft_integer())],
-            &[],
-        );
+        let shape = shape_mapping(&[("count", ft_integer())], &[]);
         let report = validate(&shape, &serde_json::json!({ "count": 1.5 }));
 
         assert!(!report.is_ok());
@@ -1998,10 +1983,7 @@ required:
 
     #[test]
     fn sequence_element_index_in_path() {
-        let shape = shape_mapping(
-            &[],
-            &[("items", ft_sequence_of(ft_string()))],
-        );
+        let shape = shape_mapping(&[], &[("items", ft_sequence_of(ft_string()))]);
         let value = serde_json::json!({
             "items": ["ok", 42, null]
         });
@@ -2018,10 +2000,10 @@ required:
     fn sequence_element_mapping_contract_reports_indexed_path() {
         let shape = shape_mapping(
             &[],
-            &[("items", ft_sequence_of(ft_mapping_with(shape_mapping(
-                &[("id", ft_string())],
-                &[],
-            ))))],
+            &[(
+                "items",
+                ft_sequence_of(ft_mapping_with(shape_mapping(&[("id", ft_string())], &[]))),
+            )],
         );
         let value = serde_json::json!({
             "items": [
@@ -2038,10 +2020,7 @@ required:
 
     #[test]
     fn sequence_allows_empty() {
-        let shape = shape_mapping(
-            &[],
-            &[("items", ft_sequence_of(ft_string()))],
-        );
+        let shape = shape_mapping(&[], &[("items", ft_sequence_of(ft_string()))]);
         let value = serde_json::json!({ "items": [] });
         let report = validate(&shape, &value);
         assert!(report.is_ok(), "empty sequence should pass: {report:?}");
@@ -2059,10 +2038,16 @@ required:
             )],
         );
         let report_str = validate(&shape, &serde_json::json!({"extends": "hello"}));
-        assert!(report_str.is_ok(), "string variant should pass: {report_str:?}");
+        assert!(
+            report_str.is_ok(),
+            "string variant should pass: {report_str:?}"
+        );
 
         let report_null = validate(&shape, &serde_json::json!({"extends": null}));
-        assert!(report_null.is_ok(), "null variant should pass: {report_null:?}");
+        assert!(
+            report_null.is_ok(),
+            "null variant should pass: {report_null:?}"
+        );
     }
 
     #[test]
@@ -2097,10 +2082,7 @@ required:
         );
         let report = validate(&shape, &serde_json::json!({"extends": 42}));
         assert!(!report.is_ok());
-        assert_eq!(
-            report.errors[0].code,
-            InstanceViolationCode::TypeMismatch
-        );
+        assert_eq!(report.errors[0].code, InstanceViolationCode::TypeMismatch);
     }
 
     #[test]
@@ -2144,17 +2126,17 @@ strict_fields: warn
 
     #[test]
     fn strict_fields_none_does_not_warn() {
-        let shape = shape_mapping(
-            &[("body", ft_string())],
-            &[],
-        );
+        let shape = shape_mapping(&[("body", ft_string())], &[]);
         // strict_fields is None (default).
         let value = serde_json::json!({
             "body": "hello",
             "unknown": "field"
         });
         let report = validate(&shape, &value);
-        assert!(report.is_ok(), "unknown field with None strict_fields should not warn");
+        assert!(
+            report.is_ok(),
+            "unknown field with None strict_fields should not warn"
+        );
         assert!(
             report.warnings.is_empty(),
             "unexpected warnings: {:?}",
@@ -2253,27 +2235,22 @@ strict_fields: warn
 
     #[test]
     fn human_readable_expected_and_found_are_useful() {
-        let shape = shape_mapping(
-            &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))],
-            &[],
-        );
+        let shape = shape_mapping(&[("mode", ft_string_enum(&["cli_exec", "daemon_ui"]))], &[]);
         let value = serde_json::json!({ "mode": "web" });
         let report = validate(&shape, &value);
         assert_eq!(report.errors.len(), 1);
         let v = &report.errors[0];
-        assert!(v.expected.contains("cli_exec"), "expected: {:?}", v.expected);
+        assert!(
+            v.expected.contains("cli_exec"),
+            "expected: {:?}",
+            v.expected
+        );
         assert!(v.found.contains("web"), "found: {:?}", v.found);
     }
 
     #[test]
     fn multiple_errors_reported() {
-        let shape = shape_mapping(
-            &[
-                ("name", ft_string()),
-                ("count", ft_integer()),
-            ],
-            &[],
-        );
+        let shape = shape_mapping(&[("name", ft_string()), ("count", ft_integer())], &[]);
         let value = serde_json::json!({
             "count": "not a number",
             "extra": "present"
@@ -2320,31 +2297,69 @@ mod kind_contract_regressions {
     }
 
     fn ft_string() -> FieldType {
-        FieldType::Single { prim: PrimType::String, enum_values: None, nested_contract: None, element_type: None }
+        FieldType::Single {
+            prim: PrimType::String,
+            enum_values: None,
+            nested_contract: None,
+            element_type: None,
+        }
     }
     fn ft_string_enum(values: &[&str]) -> FieldType {
-        FieldType::Single { prim: PrimType::String, enum_values: Some(values.iter().map(|s| s.to_string()).collect()), nested_contract: None, element_type: None }
+        FieldType::Single {
+            prim: PrimType::String,
+            enum_values: Some(values.iter().map(|s| s.to_string()).collect()),
+            nested_contract: None,
+            element_type: None,
+        }
     }
     fn ft_mapping() -> FieldType {
-        FieldType::Single { prim: PrimType::Mapping, enum_values: None, nested_contract: None, element_type: None }
+        FieldType::Single {
+            prim: PrimType::Mapping,
+            enum_values: None,
+            nested_contract: None,
+            element_type: None,
+        }
     }
     fn ft_mapping_with(contract: ValueShape) -> FieldType {
-        FieldType::Single { prim: PrimType::Mapping, enum_values: None, nested_contract: Some(Box::new(contract)), element_type: None }
+        FieldType::Single {
+            prim: PrimType::Mapping,
+            enum_values: None,
+            nested_contract: Some(Box::new(contract)),
+            element_type: None,
+        }
     }
     fn ft_sequence_of(element: FieldType) -> FieldType {
-        FieldType::Single { prim: PrimType::Sequence, enum_values: None, nested_contract: None, element_type: Some(Box::new(element)) }
+        FieldType::Single {
+            prim: PrimType::Sequence,
+            enum_values: None,
+            nested_contract: None,
+            element_type: Some(Box::new(element)),
+        }
     }
     fn ft_boolean() -> FieldType {
-        FieldType::Single { prim: PrimType::Boolean, enum_values: None, nested_contract: None, element_type: None }
+        FieldType::Single {
+            prim: PrimType::Boolean,
+            enum_values: None,
+            nested_contract: None,
+            element_type: None,
+        }
     }
     fn ft_union(prims: &[PrimType]) -> FieldType {
-        FieldType::Union { prims: prims.to_vec() }
+        FieldType::Union {
+            prims: prims.to_vec(),
+        }
     }
     fn shape(required: &[(&str, FieldType)], optional: &[(&str, FieldType)]) -> ValueShape {
         ValueShape {
             root_type: ShapeType::Mapping,
-            required: required.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
-            optional: optional.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            required: required
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            optional: optional
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
             strict_fields: None,
         }
     }
@@ -2354,15 +2369,23 @@ mod kind_contract_regressions {
     fn client_shape() -> ValueShape {
         shape(
             &[
-                ("launch", ft_mapping_with(shape(
-                    &[("mode", ft_string_enum(&["cli_exec", "daemon_ui"])),
-                       ("binary_ref", ft_string())],
-                    &[("args", ft_mapping())],
-                ))),
-                ("serves", ft_mapping_with(shape(
-                    &[("kind", ft_string())],
-                    &[("renderer", ft_string())],
-                ))),
+                (
+                    "launch",
+                    ft_mapping_with(shape(
+                        &[
+                            ("mode", ft_string_enum(&["cli_exec", "daemon_ui"])),
+                            ("binary_ref", ft_string()),
+                        ],
+                        &[("args", ft_mapping())],
+                    )),
+                ),
+                (
+                    "serves",
+                    ft_mapping_with(shape(
+                        &[("kind", ft_string())],
+                        &[("renderer", ft_string())],
+                    )),
+                ),
             ],
             &[
                 ("version", ft_string()),
@@ -2397,7 +2420,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "launch.mode" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "launch.mode" && e.code == InstanceViolationCode::EnumMismatch));
     }
 
     #[test]
@@ -2408,7 +2434,8 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "launch.binary_ref" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(report.errors.iter().any(|e| e.path == "launch.binary_ref"
+            && e.code == InstanceViolationCode::MissingRequiredField));
     }
 
     #[test]
@@ -2419,7 +2446,11 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "serves.kind" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "serves.kind"
+                && e.code == InstanceViolationCode::MissingRequiredField));
     }
 
     #[test]
@@ -2429,7 +2460,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "launch" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "launch" && e.code == InstanceViolationCode::MissingRequiredField));
     }
 
     // ── service kind ─────────────────────────────────────────────
@@ -2440,7 +2474,10 @@ mod kind_contract_regressions {
             &[
                 ("name", ft_string()),
                 ("version", ft_string()),
-                ("availability", ft_string_enum(&["both", "daemon_only", "offline"])),
+                (
+                    "availability",
+                    ft_string_enum(&["both", "daemon_only", "offline"]),
+                ),
                 ("offline_execute", ft_string()),
                 ("required_caps", ft_sequence_of(ft_string())),
                 ("description", ft_string()),
@@ -2468,7 +2505,13 @@ mod kind_contract_regressions {
         });
         let report = validate(&service_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "endpoint" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "endpoint"
+                    && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     #[test]
@@ -2479,7 +2522,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&service_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "availability" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "availability" && e.code == InstanceViolationCode::EnumMismatch));
     }
 
     // ── handler kind ─────────────────────────────────────────────
@@ -2529,7 +2575,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&handler_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "serves" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "serves" && e.code == InstanceViolationCode::EnumMismatch));
     }
 
     // ── runtime kind ─────────────────────────────────────────────
@@ -2546,10 +2595,13 @@ mod kind_contract_regressions {
                 ("default", ft_boolean()),
                 ("required_caps", ft_sequence_of(ft_string())),
                 ("description", ft_string()),
-                ("schema", ft_mapping_with(shape(
-                    &[("envelope", ft_string()), ("result", ft_string())],
-                    &[],
-                ))),
+                (
+                    "schema",
+                    ft_mapping_with(shape(
+                        &[("envelope", ft_string()), ("result", ft_string())],
+                        &[],
+                    )),
+                ),
             ],
         )
     }
@@ -2591,7 +2643,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&runtime_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "kind" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "kind" && e.code == InstanceViolationCode::EnumMismatch));
     }
 
     #[test]
@@ -2605,30 +2660,37 @@ mod kind_contract_regressions {
         });
         let report = validate(&runtime_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "schema.result" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "schema.result"
+                && e.code == InstanceViolationCode::MissingRequiredField));
     }
 
     // ── surface kind ─────────────────────────────────────────────
 
     fn surface_shape() -> ValueShape {
         shape(
-            &[("layout", ft_mapping_with(shape(
-                &[("root", ft_string())],
-                &[("nodes", ft_mapping())],
-            )))],
+            &[(
+                "layout",
+                ft_mapping_with(shape(&[("root", ft_string())], &[("nodes", ft_mapping())])),
+            )],
             &[
                 ("extends", ft_union(&[PrimType::String, PrimType::Null])),
                 ("input", ft_mapping()),
                 ("ambient", ft_mapping()),
-                ("affordances", ft_sequence_of(ft_mapping_with(shape(
-                    &[("id", ft_string())],
-                    &[
-                        ("label", ft_string()),
-                        ("category", ft_string()),
-                        ("icon", ft_string()),
-                        ("caps", ft_sequence_of(ft_string())),
-                    ],
-                )))),
+                (
+                    "affordances",
+                    ft_sequence_of(ft_mapping_with(shape(
+                        &[("id", ft_string())],
+                        &[
+                            ("label", ft_string()),
+                            ("category", ft_string()),
+                            ("icon", ft_string()),
+                            ("caps", ft_sequence_of(ft_string())),
+                        ],
+                    ))),
+                ),
                 ("instruments", ft_sequence_of(ft_mapping())),
                 ("capabilities", ft_mapping()),
             ],
@@ -2661,7 +2723,11 @@ mod kind_contract_regressions {
         });
         let report = validate(&surface_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path == "layout.root" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path == "layout.root"
+                && e.code == InstanceViolationCode::MissingRequiredField));
     }
 
     #[test]
@@ -2674,7 +2740,11 @@ mod kind_contract_regressions {
         });
         let report = validate(&surface_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report.errors.iter().any(|e| e.path.starts_with("affordances[") && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.path.starts_with("affordances[")
+                && e.code == InstanceViolationCode::MissingRequiredField));
     }
 
     #[test]

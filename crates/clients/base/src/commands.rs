@@ -131,52 +131,172 @@ pub struct Affordance {
 /// Built-in affordance registry.
 pub fn builtin_affordances() -> Vec<Affordance> {
     vec![
-        affordance("focus.next", "Focus Next", "UI", "Move focus to next tile",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::FocusNext, args: serde_json::Value::Null })),
-        affordance("focus.prev", "Focus Previous", "UI", "Move focus to previous tile",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::FocusPrevious, args: serde_json::Value::Null })),
-        affordance("view.thread_list", "Threads", "View", "Switch focused tile to thread list",
-            ui_switch(ViewKindSpec::ThreadList)),
-        affordance("view.thread", "Thread", "View", "Switch to thread view",
-            ui_switch(ViewKindSpec::Thread)),
-        affordance("view.remotes", "Remotes", "View", "Switch to remotes view",
-            ui_switch(ViewKindSpec::Remotes)),
-        affordance("view.projects", "Projects", "View", "Switch to projects view",
-            ui_switch(ViewKindSpec::Projects)),
-        affordance("view.items", "Items", "View", "Browse items in space",
-            ui_switch(ViewKindSpec::SpaceBrowser)),
-        affordance("view.trust", "Trust", "View", "View trust status",
-            ui_switch(ViewKindSpec::Trust)),
-        affordance("view.graph", "Graph", "View", "View graph topology",
-            ui_switch(ViewKindSpec::Graph)),
-        affordance("view.events", "Events", "View", "Inspect raw events",
-            ui_switch(ViewKindSpec::EventInspector)),
-        affordance("layout.split_h", "Split Horizontal", "Layout", "Split focused tile left/right",
+        affordance(
+            "focus.next",
+            "Focus Next",
+            "UI",
+            "Move focus to next tile",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::FocusNext,
+                args: serde_json::Value::Null,
+            }),
+        ),
+        affordance(
+            "focus.prev",
+            "Focus Previous",
+            "UI",
+            "Move focus to previous tile",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::FocusPrevious,
+                args: serde_json::Value::Null,
+            }),
+        ),
+        affordance(
+            "view.thread_list",
+            "Threads",
+            "View",
+            "Switch focused tile to thread list",
+            ui_switch(ViewKindSpec::ThreadList),
+        ),
+        affordance(
+            "view.thread",
+            "Thread",
+            "View",
+            "Switch to thread view",
+            ui_switch(ViewKindSpec::Thread),
+        ),
+        affordance(
+            "view.remotes",
+            "Remotes",
+            "View",
+            "Switch to remotes view",
+            ui_switch(ViewKindSpec::Remotes),
+        ),
+        affordance(
+            "view.projects",
+            "Projects",
+            "View",
+            "Switch to projects view",
+            ui_switch(ViewKindSpec::Projects),
+        ),
+        affordance(
+            "view.items",
+            "Items",
+            "View",
+            "Browse items in space",
+            ui_switch(ViewKindSpec::SpaceBrowser),
+        ),
+        affordance(
+            "view.trust",
+            "Trust",
+            "View",
+            "View trust status",
+            ui_switch(ViewKindSpec::Trust),
+        ),
+        affordance(
+            "view.graph",
+            "Graph",
+            "View",
+            "View graph topology",
+            ui_switch(ViewKindSpec::Graph),
+        ),
+        affordance(
+            "view.events",
+            "Events",
+            "View",
+            "Inspect raw events",
+            ui_switch(ViewKindSpec::EventInspector),
+        ),
+        affordance(
+            "layout.split_h",
+            "Split Horizontal",
+            "Layout",
+            "Split focused tile left/right",
             InvocationSpec::Ui(UiInvocation {
                 verb: UiVerb::SplitPane,
                 args: serde_json::json!({ "axis": "horizontal", "view": "thread_list" }),
-            })),
-        affordance("layout.split_v", "Split Vertical", "Layout", "Split focused tile top/bottom",
+            }),
+        ),
+        affordance(
+            "layout.split_v",
+            "Split Vertical",
+            "Layout",
+            "Split focused tile top/bottom",
             InvocationSpec::Ui(UiInvocation {
                 verb: UiVerb::SplitPane,
                 args: serde_json::json!({ "axis": "vertical", "view": "event_inspector" }),
-            })),
-        affordance("layout.close", "Close Tile", "Layout", "Close the focused tile",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ClosePane, args: serde_json::Value::Null })),
-        affordance("layout.reset", "Reset Layout", "Layout", "Reset to surface layout",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ResetLayout, args: serde_json::Value::Null })),
-        affordance("session.new", "New Session", "Session", "Clear input and start fresh",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::NewSession, args: serde_json::Value::Null })),
-        affordance("help", "Help", "App", "Show help overlay",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ToggleHelp, args: serde_json::Value::Null })),
-        affordance("palette", "Command Palette", "App", "Open command palette",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::ToggleCommandPalette, args: serde_json::Value::Null })),
-        affordance("app.quit", "Quit", "App", "Exit the TUI",
-            InvocationSpec::Ui(UiInvocation { verb: UiVerb::Quit, args: serde_json::Value::Null })),
+            }),
+        ),
+        affordance(
+            "layout.close",
+            "Close Tile",
+            "Layout",
+            "Close the focused tile",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::ClosePane,
+                args: serde_json::Value::Null,
+            }),
+        ),
+        affordance(
+            "layout.reset",
+            "Reset Layout",
+            "Layout",
+            "Reset to surface layout",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::ResetLayout,
+                args: serde_json::Value::Null,
+            }),
+        ),
+        affordance(
+            "session.new",
+            "New Session",
+            "Session",
+            "Clear input and start fresh",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::NewSession,
+                args: serde_json::Value::Null,
+            }),
+        ),
+        affordance(
+            "help",
+            "Help",
+            "App",
+            "Show help overlay",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::ToggleHelp,
+                args: serde_json::Value::Null,
+            }),
+        ),
+        affordance(
+            "palette",
+            "Command Palette",
+            "App",
+            "Open command palette",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::ToggleCommandPalette,
+                args: serde_json::Value::Null,
+            }),
+        ),
+        affordance(
+            "app.quit",
+            "Quit",
+            "App",
+            "Exit the TUI",
+            InvocationSpec::Ui(UiInvocation {
+                verb: UiVerb::Quit,
+                args: serde_json::Value::Null,
+            }),
+        ),
     ]
 }
 
-fn affordance(id: &str, label: &str, category: &str, desc: &str, invoke: InvocationSpec) -> Affordance {
+fn affordance(
+    id: &str,
+    label: &str,
+    category: &str,
+    desc: &str,
+    invoke: InvocationSpec,
+) -> Affordance {
     Affordance {
         id: id.into(),
         label: label.into(),
@@ -228,7 +348,9 @@ pub fn merge_affordances(
             }
             registry[pos].invoke = invoke;
             if !spec.requires_capabilities.is_empty() {
-                registry[pos].requires_capabilities.clone_from(&spec.requires_capabilities);
+                registry[pos]
+                    .requires_capabilities
+                    .clone_from(&spec.requires_capabilities);
             }
         } else {
             registry.push(Affordance {
@@ -298,7 +420,8 @@ fn dispatch_ui_verb(
             (true, Vec::new())
         }
         UiVerb::SplitPane => {
-            let axis = args.get("axis")
+            let axis = args
+                .get("axis")
                 .and_then(|v| v.as_str())
                 .and_then(|s| match s {
                     "horizontal" => Some(SplitAxis::Horizontal),
@@ -306,11 +429,14 @@ fn dispatch_ui_verb(
                     _ => None,
                 })
                 .unwrap_or(SplitAxis::Horizontal);
-            let view_kind = args.get("view")
+            let view_kind = args
+                .get("view")
                 .and_then(|v| v.as_str())
                 .and_then(|s| parse_view_kind(s))
                 .unwrap_or(ViewKindSpec::ThreadList);
-            model.workspace.split_focused(axis, view_kind.to_view_spec());
+            model
+                .workspace
+                .split_focused(axis, view_kind.to_view_spec());
             model.mark_dirty();
             (true, vec![Effect::PersistSession])
         }
@@ -363,7 +489,10 @@ fn dispatch_ui_verb(
                     });
                 }
                 "confirm" => {
-                    let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("Confirm?");
+                    let message = args
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Confirm?");
                     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
                     model.overlay = Some(crate::model::OverlayState::Confirm {
                         message: message.to_string(),
@@ -407,27 +536,36 @@ fn dispatch_rye_invocation(
         // Build an execute request with the alias as the item_ref.
         // The daemon resolves the alias according to its own rules.
         let project_path = std::path::PathBuf::from("/tmp/ryeos");
-        return (true, vec![Effect::Execute {
-            project_path,
-            item_ref: alias.clone(),
-            parameters: invocation.args.clone(),
-        }]);
+        return (
+            true,
+            vec![Effect::Execute {
+                project_path,
+                item_ref: alias.clone(),
+                parameters: invocation.args.clone(),
+            }],
+        );
     }
 
     // If the invocation has an item_ref + operation/verb, send to daemon.
     if let Some(item_ref) = &invocation.item_ref {
         // Resolve target selector if present
-        let _resolved = invocation.target.as_ref().map(|sel| resolve_selector(sel, model));
+        let _resolved = invocation
+            .target
+            .as_ref()
+            .map(|sel| resolve_selector(sel, model));
 
         // For now, construct an execute effect. When daemon supports
         // targeted verb/operation APIs, this will use the appropriate
         // request type instead of generic execute.
         let project_path = std::path::PathBuf::from("/tmp/ryeos");
-        return (true, vec![Effect::Execute {
-            project_path,
-            item_ref: item_ref.clone(),
-            parameters: invocation.args.clone(),
-        }]);
+        return (
+            true,
+            vec![Effect::Execute {
+                project_path,
+                item_ref: item_ref.clone(),
+                parameters: invocation.args.clone(),
+            }],
+        );
     }
 
     // If the invocation has a target + verb (e.g. cancel focused thread),
@@ -436,10 +574,13 @@ fn dispatch_rye_invocation(
         let resolved = resolve_selector(target, model);
         match resolved {
             ResolvedTarget::Thread { thread_id } => {
-                return (true, vec![Effect::SendThreadCommand {
-                    thread_id,
-                    command: verb_to_thread_command(verb),
-                }]);
+                return (
+                    true,
+                    vec![Effect::SendThreadCommand {
+                        thread_id,
+                        command: verb_to_thread_command(verb),
+                    }],
+                );
             }
             _ => return (false, Vec::new()),
         }
@@ -458,7 +599,10 @@ pub fn resolve_selector(
             // Find the thread tile and check if it has a thread_id
             let focused = model.workspace.focused_tile;
             if let Some(tile) = model.workspace.tiles.get(&focused) {
-                if let crate::workspace::ViewSpec::Thread { thread_id: Some(tid) } = tile.view {
+                if let crate::workspace::ViewSpec::Thread {
+                    thread_id: Some(tid),
+                } = tile.view
+                {
                     return ResolvedTarget::Thread { thread_id: tid };
                 }
             }
@@ -468,10 +612,13 @@ pub fn resolve_selector(
             // Find the thread list tile and check cursor
             for (_tile_id, tile) in &model.workspace.tiles {
                 if let crate::workspace::ViewSpec::ThreadList = tile.view {
-                    if let crate::workspace::ViewLocalState::ThreadList { cursor, .. } = &tile.local {
+                    if let crate::workspace::ViewLocalState::ThreadList { cursor, .. } = &tile.local
+                    {
                         let threads: Vec<_> = model.store.recent_threads();
                         if let Some(selected) = threads.into_iter().nth(*cursor) {
-                            return ResolvedTarget::Thread { thread_id: selected.id };
+                            return ResolvedTarget::Thread {
+                                thread_id: selected.id,
+                            };
                         }
                     }
                     break;
@@ -479,9 +626,9 @@ pub fn resolve_selector(
             }
             ResolvedTarget::None
         }
-        TargetSelector::FocusedPane => {
-            ResolvedTarget::Pane { tile_id: model.workspace.focused_tile }
-        }
+        TargetSelector::FocusedPane => ResolvedTarget::Pane {
+            tile_id: model.workspace.focused_tile,
+        },
         TargetSelector::FocusedPaneItem => ResolvedTarget::None,
         TargetSelector::HoveredNode => ResolvedTarget::None,
     }
@@ -546,25 +693,28 @@ pub fn parse_keybind(config: &str) -> Vec<KeybindCombo> {
         return Vec::new();
     }
 
-    config.split(',').map(|part| {
-        let mut combo = KeybindCombo {
-            key: String::new(),
-            ctrl: false,
-            alt: false,
-            shift: false,
-            meta: false,
-        };
-        for token in part.trim().to_lowercase().split('+') {
-            match token {
-                "ctrl" | "control" => combo.ctrl = true,
-                "alt" | "option" => combo.alt = true,
-                "shift" => combo.shift = true,
-                "meta" | "cmd" | "command" => combo.meta = true,
-                _ => combo.key = token.to_string(),
+    config
+        .split(',')
+        .map(|part| {
+            let mut combo = KeybindCombo {
+                key: String::new(),
+                ctrl: false,
+                alt: false,
+                shift: false,
+                meta: false,
+            };
+            for token in part.trim().to_lowercase().split('+') {
+                match token {
+                    "ctrl" | "control" => combo.ctrl = true,
+                    "alt" | "option" => combo.alt = true,
+                    "shift" => combo.shift = true,
+                    "meta" | "cmd" | "command" => combo.meta = true,
+                    _ => combo.key = token.to_string(),
+                }
             }
-        }
-        combo
-    }).collect()
+            combo
+        })
+        .collect()
 }
 
 /// Try to match a `Key` event against a keybind combo.
@@ -591,21 +741,51 @@ pub fn match_keybind(combo: &KeybindCombo, key: &Key) -> bool {
                 && combo.shift == c.is_uppercase()
                 && combo.key == c.to_lowercase().to_string()
         }
-        Key::ArrowUp => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowup",
-        Key::ArrowDown => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowdown",
-        Key::ArrowLeft => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowleft",
-        Key::ArrowRight => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowright",
-        Key::Home => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "home",
+        Key::ArrowUp => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowup"
+        }
+        Key::ArrowDown => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowdown"
+        }
+        Key::ArrowLeft => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowleft"
+        }
+        Key::ArrowRight => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "arrowright"
+        }
+        Key::Home => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "home"
+        }
         Key::End => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "end",
-        Key::PageUp => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "pageup",
-        Key::PageDown => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "pagedown",
-        Key::Backspace => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "backspace",
-        Key::Delete => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "delete",
+        Key::PageUp => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "pageup"
+        }
+        Key::PageDown => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "pagedown"
+        }
+        Key::Backspace => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "backspace"
+        }
+        Key::Delete => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "delete"
+        }
         Key::Tab => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "tab",
-        Key::ShiftTab => !combo.ctrl && !combo.alt && combo.shift && !combo.meta && combo.key == "tab",
-        Key::Enter => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "enter",
-        Key::Escape => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "escape",
-        Key::F(n) => !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == format!("f{}", n),
+        Key::ShiftTab => {
+            !combo.ctrl && !combo.alt && combo.shift && !combo.meta && combo.key == "tab"
+        }
+        Key::Enter => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "enter"
+        }
+        Key::Escape => {
+            !combo.ctrl && !combo.alt && !combo.shift && !combo.meta && combo.key == "escape"
+        }
+        Key::F(n) => {
+            !combo.ctrl
+                && !combo.alt
+                && !combo.shift
+                && !combo.meta
+                && combo.key == format!("f{}", n)
+        }
         _ => false,
     }
 }
@@ -630,7 +810,7 @@ impl Keymap {
         bindings.insert("session.new".into(), "ctrl+n".into());
         bindings.insert("palette".into(), "ctrl+p".into());
         bindings.insert("help".into(), "shift+slash".into()); // ?
-        // Focus
+                                                              // Focus
         bindings.insert("focus.next".into(), "tab".into());
         bindings.insert("focus.prev".into(), "shift+tab".into());
         // Layout
@@ -737,7 +917,10 @@ mod tests {
     fn builtin_affordances_use_invocation_spec() {
         let affs = builtin_affordances();
         assert!(affs.len() >= 16, "should have at least 16 affordances");
-        let ui_count = affs.iter().filter(|a| matches!(a.invoke, InvocationSpec::Ui(_))).count();
+        let ui_count = affs
+            .iter()
+            .filter(|a| matches!(a.invoke, InvocationSpec::Ui(_)))
+            .count();
         assert!(ui_count >= 15, "most builtins should be UI verbs");
     }
 
@@ -767,7 +950,10 @@ mod tests {
         assert!(handled);
         assert!(effects.is_empty());
         let focused_view = model.workspace.focused_view();
-        assert!(matches!(focused_view, Some(crate::workspace::ViewSpec::Trust)));
+        assert!(matches!(
+            focused_view,
+            Some(crate::workspace::ViewSpec::Trust)
+        ));
     }
 
     #[test]
@@ -787,7 +973,10 @@ mod tests {
     #[test]
     fn dispatch_ui_close_pane() {
         let mut model = crate::model::AppModel::new_default("/tmp/test");
-        model.workspace.split_focused(SplitAxis::Vertical, crate::workspace::ViewSpec::EventInspector);
+        model.workspace.split_focused(
+            SplitAxis::Vertical,
+            crate::workspace::ViewSpec::EventInspector,
+        );
         let tiles_after_split = model.workspace.tiles.len();
         assert!(tiles_after_split > 3);
 
@@ -821,7 +1010,10 @@ mod tests {
         });
         let (handled, _) = dispatch_affordance(&inv, &mut model);
         assert!(handled);
-        assert!(matches!(model.overlay, Some(crate::model::OverlayState::Help)));
+        assert!(matches!(
+            model.overlay,
+            Some(crate::model::OverlayState::Help)
+        ));
         // Toggle off
         let (handled, _) = dispatch_affordance(&inv, &mut model);
         assert!(handled);
@@ -832,7 +1024,9 @@ mod tests {
     fn dispatch_ui_reset_layout_rebuilds_from_surface() {
         let mut model = crate::model::AppModel::new_default("/tmp/test");
         let initial_tiles = model.workspace.tiles.len();
-        model.workspace.split_focused(SplitAxis::Horizontal, crate::workspace::ViewSpec::Remotes);
+        model
+            .workspace
+            .split_focused(SplitAxis::Horizontal, crate::workspace::ViewSpec::Remotes);
         assert!(model.workspace.tiles.len() > initial_tiles);
 
         let inv = InvocationSpec::Ui(UiInvocation {
@@ -858,7 +1052,9 @@ mod tests {
         let (handled, effects) = dispatch_affordance(&inv, &mut model);
         assert!(handled);
         assert_eq!(effects.len(), 1);
-        assert!(matches!(effects[0], Effect::Execute { ref item_ref, .. } if item_ref == "@deploy-prod"));
+        assert!(
+            matches!(effects[0], Effect::Execute { ref item_ref, .. } if item_ref == "@deploy-prod")
+        );
     }
 
     #[test]
@@ -868,7 +1064,9 @@ mod tests {
         // Find the thread tile, set its thread_id, and focus it
         for (tid, tile) in model.workspace.tiles.iter_mut() {
             if matches!(tile.view, crate::workspace::ViewSpec::Thread { .. }) {
-                tile.view = crate::workspace::ViewSpec::Thread { thread_id: Some(thread_id) };
+                tile.view = crate::workspace::ViewSpec::Thread {
+                    thread_id: Some(thread_id),
+                };
                 model.workspace.focused_tile = *tid;
                 break;
             }
@@ -884,7 +1082,13 @@ mod tests {
         });
         let (handled, effects) = dispatch_affordance(&inv, &mut model);
         assert!(handled);
-        assert!(matches!(effects[0], Effect::SendThreadCommand { command: crate::effects::ThreadCommand::Cancel, .. }));
+        assert!(matches!(
+            effects[0],
+            Effect::SendThreadCommand {
+                command: crate::effects::ThreadCommand::Cancel,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -902,7 +1106,9 @@ mod tests {
         // Set the focused tile to Thread view with a thread_id
         for (tid, tile) in model.workspace.tiles.iter_mut() {
             if matches!(tile.view, crate::workspace::ViewSpec::Thread { .. }) {
-                tile.view = crate::workspace::ViewSpec::Thread { thread_id: Some(thread_id) };
+                tile.view = crate::workspace::ViewSpec::Thread {
+                    thread_id: Some(thread_id),
+                };
                 model.workspace.focused_tile = *tid;
                 break;
             }

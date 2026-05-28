@@ -56,9 +56,8 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
         &self,
         ctx: RouteInvocationContext,
     ) -> Result<RouteInvocationResult, RouteDispatchError> {
-        let session_id = extract_session_cookie(&ctx.headers).ok_or_else(|| {
-            RouteDispatchError::Unauthorized
-        })?;
+        let session_id =
+            extract_session_cookie(&ctx.headers).ok_or_else(|| RouteDispatchError::Unauthorized)?;
 
         let session = self
             .ui
@@ -116,7 +115,10 @@ mod tests {
             COOKIE,
             "other=val; ryeos_session=abc-123; foo=bar".parse().unwrap(),
         );
-        assert_eq!(extract_session_cookie(&headers), Some("abc-123".to_string()));
+        assert_eq!(
+            extract_session_cookie(&headers),
+            Some("abc-123".to_string())
+        );
     }
 
     #[test]

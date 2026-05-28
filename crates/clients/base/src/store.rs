@@ -112,15 +112,13 @@ pub struct IdentityModel {
 // Daemon
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum DaemonStatus {
     #[default]
     Connecting,
     Connected,
     Disconnected,
 }
-
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DaemonModel {

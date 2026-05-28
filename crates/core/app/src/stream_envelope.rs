@@ -79,6 +79,9 @@ mod tests {
     fn no_id_serializes_compact() {
         let env = RouteStreamEnvelope::new("heartbeat", json!({}));
         let json_str = serde_json::to_string(&env).unwrap();
-        assert!(!json_str.contains("\"id\""), "id should be omitted when None");
+        assert!(
+            !json_str.contains("\"id\""),
+            "id should be omitted when None"
+        );
     }
 }

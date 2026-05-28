@@ -23,10 +23,17 @@ pub enum AppEvent {
     Daemon(DaemonEvent),
     DaemonBatch(Vec<DaemonEvent>),
     PollSnapshot(PollSnapshot),
-    Resize { width: u16, height: u16 },
-    Tick { now_ms: u64 },
+    Resize {
+        width: u16,
+        height: u16,
+    },
+    Tick {
+        now_ms: u64,
+    },
     /// Surface spec changed (file hot-reload or explicit switch).
-    SurfaceChanged { spec: crate::surface::SurfaceSpec },
+    SurfaceChanged {
+        spec: crate::surface::SurfaceSpec,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -156,7 +163,6 @@ fn handle_input(model: &mut AppModel, event: InputEvent) -> Vec<Effect> {
 }
 
 fn handle_key(model: &mut AppModel, key: Key) -> Vec<Effect> {
-
     // Overlay captures input first
     if model.overlay.is_some() {
         return handle_overlay_input(model, key);
@@ -265,9 +271,7 @@ fn dispatch_keymap_action(model: &mut AppModel, action: &str) -> Vec<Effect> {
             }
             Vec::new()
         }
-        "nav.open" => {
-            handle_enter(model)
-        }
+        "nav.open" => handle_enter(model),
         // Quit with special case: clear input if non-empty
         "app.quit" => {
             if !model.workspace.input_bar.text.is_empty() {
@@ -281,7 +285,10 @@ fn dispatch_keymap_action(model: &mut AppModel, action: &str) -> Vec<Effect> {
         // All other actions: look up affordance and dispatch
         affordance_id => {
             let affordances = model.active_affordances();
-            let invoke = affordances.iter().find(|a| a.id == affordance_id).map(|a| a.invoke.clone());
+            let invoke = affordances
+                .iter()
+                .find(|a| a.id == affordance_id)
+                .map(|a| a.invoke.clone());
             if let Some(inv) = invoke {
                 let (handled, effects) = crate::commands::dispatch_affordance(&inv, model);
                 if handled {
@@ -375,7 +382,10 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
             // Any key dismisses help
             model.mark_dirty();
         }
-        Some(crate::model::OverlayState::CommandPalette { ref query, ref selected }) => {
+        Some(crate::model::OverlayState::CommandPalette {
+            ref query,
+            ref selected,
+        }) => {
             match key {
                 Key::Escape => {
                     model.mark_dirty();
@@ -385,7 +395,8 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
                     let affordances = model.active_affordances();
                     let matches = crate::commands::filter_affordances(&affordances, query);
                     if let Some(aff) = matches.into_iter().nth(*selected) {
-                        let (handled, effects) = crate::commands::dispatch_affordance(&aff.invoke, model);
+                        let (handled, effects) =
+                            crate::commands::dispatch_affordance(&aff.invoke, model);
                         // overlay already taken above
                         if handled {
                             return effects;
@@ -398,37 +409,50 @@ fn handle_overlay_input(model: &mut AppModel, key: Key) -> Vec<Effect> {
                     let matches = crate::commands::filter_affordances(&affordances, query);
                     let max = matches.len().saturating_sub(1);
                     let new_selected = (*selected + 1).min(max);
-                    model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), selected: new_selected });
+                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
+                        query: query.clone(),
+                        selected: new_selected,
+                    });
                     model.mark_dirty();
                 }
                 Key::ArrowUp => {
                     let new_selected = selected.saturating_sub(1);
-                    model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), selected: new_selected });
+                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
+                        query: query.clone(),
+                        selected: new_selected,
+                    });
                     model.mark_dirty();
                 }
                 Key::Char(ch) => {
                     let mut q = query.clone();
                     q.push(ch);
-                    model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: q, selected: 0 });
+                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
+                        query: q,
+                        selected: 0,
+                    });
                     model.mark_dirty();
                 }
                 Key::Backspace => {
                     let mut q = query.clone();
                     q.pop();
-                    model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: q, selected: 0 });
+                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
+                        query: q,
+                        selected: 0,
+                    });
                     model.mark_dirty();
                 }
                 _ => {
-                    model.overlay =
-                        Some(crate::model::OverlayState::CommandPalette { query: query.clone(), selected: *selected });
+                    model.overlay = Some(crate::model::OverlayState::CommandPalette {
+                        query: query.clone(),
+                        selected: *selected,
+                    });
                 }
             }
         }
-        Some(crate::model::OverlayState::Confirm { ref message, ref action }) => {
+        Some(crate::model::OverlayState::Confirm {
+            ref message,
+            ref action,
+        }) => {
             match key {
                 Key::Char('y') | Key::Char('Y') => {
                     // Dispatch the confirmed affordance
@@ -686,7 +710,10 @@ fn handle_list_enter(model: &mut AppModel) -> Vec<Effect> {
                         let f = filter.to_lowercase();
                         item.kind.to_lowercase().contains(&f)
                             || item.name.to_lowercase().contains(&f)
-                            || item.description.as_ref().is_some_and(|d| d.to_lowercase().contains(&f))
+                            || item
+                                .description
+                                .as_ref()
+                                .is_some_and(|d| d.to_lowercase().contains(&f))
                     })
                     .collect();
 
@@ -931,6 +958,9 @@ mod tests {
         let mut model = AppModel::new_default("/tmp/test");
         let initial = model.workspace.focused_tile;
         update(&mut model, AppEvent::Input(InputEvent::Key(Key::Tab)));
-        assert_ne!(model.workspace.focused_tile, initial, "Tab should cycle focus");
+        assert_ne!(
+            model.workspace.focused_tile, initial,
+            "Tab should cycle focus"
+        );
     }
 }

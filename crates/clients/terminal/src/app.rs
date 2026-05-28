@@ -62,7 +62,8 @@ pub async fn run(
     tokio::spawn(event_reader(events, input_tx, resize_tx));
 
     // Spawn surface file watcher (only for --surface-file)
-    if let ryeos_client_base::surface::LoadedSurface::LocalPreview { ref path, .. } = loaded_surface {
+    if let ryeos_client_base::surface::LoadedSurface::LocalPreview { ref path, .. } = loaded_surface
+    {
         let watch_path = path.clone();
         tokio::spawn(surface_file_watcher(watch_path, surface_tx));
     }
@@ -187,7 +188,10 @@ async fn run_effects(
 
                 // Focus the new thread in the thread tile
                 for (tid, t) in model.workspace.tiles.iter_mut() {
-                    if matches!(t.view, ryeos_client_base::workspace::ViewSpec::Thread { .. }) {
+                    if matches!(
+                        t.view,
+                        ryeos_client_base::workspace::ViewSpec::Thread { .. }
+                    ) {
                         t.view = ryeos_client_base::workspace::ViewSpec::Thread {
                             thread_id: Some(fake_thread_id),
                         };
@@ -200,10 +204,7 @@ async fn run_effects(
                 let pp = project_path.to_string_lossy().to_string();
                 let ir = item_ref.clone();
                 let params = parameters.clone();
-                match transport
-                    .execute_stream(&ir, &pp, &params)
-                    .await
-                {
+                match transport.execute_stream(&ir, &pp, &params).await {
                     Ok(Some(mut stream)) => {
                         // Spawn a task that reads SSE events and feeds them
                         // through the daemon channel
@@ -230,15 +231,13 @@ async fn run_effects(
                             thread_id: fake_thread_id,
                             text: response_text,
                         };
-                        let complete =
-                            ryeos_client_base::update::DaemonEvent::ThreadCompleted {
-                                id: fake_thread_id,
-                            };
+                        let complete = ryeos_client_base::update::DaemonEvent::ThreadCompleted {
+                            id: fake_thread_id,
+                        };
                         ryeos_client_base::update::update(
                             model,
                             ryeos_client_base::update::AppEvent::DaemonBatch(vec![
-                                resp_delta,
-                                complete,
+                                resp_delta, complete,
                             ]),
                         );
                     }

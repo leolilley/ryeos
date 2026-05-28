@@ -3,9 +3,7 @@
 //! Core owns the Scene3D state. Terminal rasterizes to Braille/block cells;
 //! web renders to Canvas 2D. Both consume the same ScenePrimitive list.
 
-use crate::math3d::{
-    rotate_x, rotate_y, rotate_z, Scene3D, Vec3,
-};
+use crate::math3d::{rotate_x, rotate_y, rotate_z, Scene3D, Vec3};
 use crate::scene::{Rgb, ScenePrimitive, Vec2};
 use crate::scene_config::SceneConfig;
 use crate::store::Store;
@@ -59,7 +57,9 @@ impl AnimationState {
     /// Hot-reload config from scene.toml if the file has been modified.
     fn check_config_reload(&mut self) {
         let path = std::path::PathBuf::from("scene.toml");
-        if !path.exists() { return; }
+        if !path.exists() {
+            return;
+        }
 
         let mtime = match SceneConfig::mtime(&path) {
             Some(m) => m,
@@ -140,13 +140,51 @@ impl AnimationState {
 
         // --- Colors from config ---
         let cfg = self.config.as_ref();
-        let shard_color = cfg.map(|c| Rgb::new(c.colors.shard[0], c.colors.shard[1], c.colors.shard[2])).unwrap_or(Rgb::new(0xfe, 0x80, 0x19));
-        let inner_color = cfg.map(|c| Rgb::new(c.colors.inner_ring[0], c.colors.inner_ring[1], c.colors.inner_ring[2])).unwrap_or(Rgb::new(0xfe, 0x80, 0x19));
-        let mid_color = cfg.map(|c| Rgb::new(c.colors.mid_ring[0], c.colors.mid_ring[1], c.colors.mid_ring[2])).unwrap_or(Rgb::new(0x83, 0xa5, 0x98));
-        let outer_color = cfg.map(|c| Rgb::new(c.colors.outer_ring[0], c.colors.outer_ring[1], c.colors.outer_ring[2])).unwrap_or(Rgb::new(0xd3, 0x86, 0x9b));
-        let star_color = cfg.map(|c| Rgb::new(c.colors.star[0], c.colors.star[1], c.colors.star[2])).unwrap_or(Rgb::new(0xeb, 0xdb, 0xb2));
-        let stream_color = cfg.map(|c| Rgb::new(c.colors.stream[0], c.colors.stream[1], c.colors.stream[2])).unwrap_or(Rgb::new(0xfa, 0xbd, 0x2f));
-        let frag_color = cfg.map(|c| Rgb::new(c.colors.fragment[0], c.colors.fragment[1], c.colors.fragment[2])).unwrap_or(Rgb::new(0xfe, 0x80, 0x19));
+        let shard_color = cfg
+            .map(|c| Rgb::new(c.colors.shard[0], c.colors.shard[1], c.colors.shard[2]))
+            .unwrap_or(Rgb::new(0xfe, 0x80, 0x19));
+        let inner_color = cfg
+            .map(|c| {
+                Rgb::new(
+                    c.colors.inner_ring[0],
+                    c.colors.inner_ring[1],
+                    c.colors.inner_ring[2],
+                )
+            })
+            .unwrap_or(Rgb::new(0xfe, 0x80, 0x19));
+        let mid_color = cfg
+            .map(|c| {
+                Rgb::new(
+                    c.colors.mid_ring[0],
+                    c.colors.mid_ring[1],
+                    c.colors.mid_ring[2],
+                )
+            })
+            .unwrap_or(Rgb::new(0x83, 0xa5, 0x98));
+        let outer_color = cfg
+            .map(|c| {
+                Rgb::new(
+                    c.colors.outer_ring[0],
+                    c.colors.outer_ring[1],
+                    c.colors.outer_ring[2],
+                )
+            })
+            .unwrap_or(Rgb::new(0xd3, 0x86, 0x9b));
+        let star_color = cfg
+            .map(|c| Rgb::new(c.colors.star[0], c.colors.star[1], c.colors.star[2]))
+            .unwrap_or(Rgb::new(0xeb, 0xdb, 0xb2));
+        let stream_color = cfg
+            .map(|c| Rgb::new(c.colors.stream[0], c.colors.stream[1], c.colors.stream[2]))
+            .unwrap_or(Rgb::new(0xfa, 0xbd, 0x2f));
+        let frag_color = cfg
+            .map(|c| {
+                Rgb::new(
+                    c.colors.fragment[0],
+                    c.colors.fragment[1],
+                    c.colors.fragment[2],
+                )
+            })
+            .unwrap_or(Rgb::new(0xfe, 0x80, 0x19));
 
         // --- Stars ---
         for star in &scene.stars {
@@ -197,7 +235,8 @@ impl AnimationState {
                 (0..=n)
                     .map(|i| {
                         let a = (i as f32 / n as f32) * std::f32::consts::TAU;
-                        let mut p = Vec3::new(a.cos() * spinner.radius, 0.0, a.sin() * spinner.radius);
+                        let mut p =
+                            Vec3::new(a.cos() * spinner.radius, 0.0, a.sin() * spinner.radius);
                         p = rotate_x(&p, spinner.rotation_x);
                         p = rotate_z(&p, spinner.rotation_z);
                         p = rotate_y(&p, spinner.current_angle);
@@ -211,7 +250,8 @@ impl AnimationState {
                 (0..=segments)
                     .map(|i| {
                         let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
-                        let mut p = Vec3::new(a.cos() * spinner.radius, 0.0, a.sin() * spinner.radius);
+                        let mut p =
+                            Vec3::new(a.cos() * spinner.radius, 0.0, a.sin() * spinner.radius);
                         p = rotate_x(&p, spinner.rotation_x);
                         p = rotate_z(&p, spinner.rotation_z);
                         p = rotate_y(&p, spinner.current_angle);
@@ -224,7 +264,8 @@ impl AnimationState {
             };
 
             // Project to 2D
-            let points_2d: Vec<Option<Vec2>> = points_3d.iter().map(|p| scene.camera.project(p)).collect();
+            let points_2d: Vec<Option<Vec2>> =
+                points_3d.iter().map(|p| scene.camera.project(p)).collect();
 
             if spinner.is_polygon {
                 // Draw as a closed polygon
@@ -359,10 +400,25 @@ mod tests {
             anim.tick(16, &Store::new());
         }
         let prims = anim.generate_primitives();
-        let points = prims.iter().filter(|p| matches!(p, ScenePrimitive::Point { .. })).count();
-        let lines = prims.iter().filter(|p| matches!(p, ScenePrimitive::Line { .. })).count();
-        let polys = prims.iter().filter(|p| matches!(p, ScenePrimitive::Polygon { .. })).count();
-        eprintln!("Primitives: total={} points={} lines={} polys={}", prims.len(), points, lines, polys);
+        let points = prims
+            .iter()
+            .filter(|p| matches!(p, ScenePrimitive::Point { .. }))
+            .count();
+        let lines = prims
+            .iter()
+            .filter(|p| matches!(p, ScenePrimitive::Line { .. }))
+            .count();
+        let polys = prims
+            .iter()
+            .filter(|p| matches!(p, ScenePrimitive::Polygon { .. }))
+            .count();
+        eprintln!(
+            "Primitives: total={} points={} lines={} polys={}",
+            prims.len(),
+            points,
+            lines,
+            polys
+        );
         assert!(!prims.is_empty(), "scene should produce primitives");
 
         // Verify JSON roundtrip works (web uses serde_json)

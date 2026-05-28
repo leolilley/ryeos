@@ -67,7 +67,10 @@ impl CommandRegistry {
 
         for aff in &merged {
             // Check capabilities.
-            let caps_met = aff.requires_capabilities.iter().all(|cap| granted_caps.has(cap));
+            let caps_met = aff
+                .requires_capabilities
+                .iter()
+                .all(|cap| granted_caps.has(cap));
             if !caps_met {
                 continue;
             }
@@ -134,7 +137,7 @@ impl CommandRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::{InvocationSpec, UiInvocation, UiVerb, builtin_affordances};
+    use crate::commands::{builtin_affordances, InvocationSpec, UiInvocation, UiVerb};
 
     #[test]
     fn merges_builtin_and_surface_affordances() {

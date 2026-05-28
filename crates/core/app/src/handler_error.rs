@@ -42,7 +42,10 @@ pub enum HandlerError {
     /// payloads (e.g. per-field validation details) without
     /// flattening everything into a plain string.
     #[error("structured error: {code}")]
-    Structured { code: String, body: serde_json::Value },
+    Structured {
+        code: String,
+        body: serde_json::Value,
+    },
 }
 
 /// Convenience alias for handler return types.

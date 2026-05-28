@@ -95,7 +95,9 @@ pub enum EngineError {
     #[error("effective item not found: `{canonical_ref}`")]
     EffectiveItemNotFound { canonical_ref: String },
 
-    #[error("effective item kind mismatch for `{canonical_ref}`: expected `{expected}`, got `{found}`")]
+    #[error(
+        "effective item kind mismatch for `{canonical_ref}`: expected `{expected}`, got `{found}`"
+    )]
     EffectiveItemWrongKind {
         canonical_ref: String,
         expected: String,

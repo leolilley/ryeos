@@ -79,6 +79,17 @@ async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
         })
     };
 
+    let node_ids: std::collections::BTreeSet<_> = nodes
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    for edge in edges {
+        let from = edge["from"].as_str().expect("edge.from string");
+        let to = edge["to"].as_str().expect("edge.to string");
+        assert!(node_ids.contains(from), "missing edge.from item: {from}");
+        assert!(node_ids.contains(to), "missing edge.to item: {to}");
+    }
+
     assert!(has_node("surface:ryeos/cockpit/graph"));
     assert!(has_node("client:ryeos/web"));
     assert!(has_node("kind:surface"));

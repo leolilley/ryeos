@@ -106,10 +106,7 @@ fn render() {
 
         // Build frame, rasterize directly into pixel buffer
         let frame = build_frame(&mut state.model);
-        ryeos_client_base::scene::rasterize_to_rgba(
-            &frame.background,
-            &mut state.pixel_buf,
-        );
+        ryeos_client_base::scene::rasterize_to_rgba(&frame.background, &mut state.pixel_buf);
 
         // Send raw RGBA bytes to JS — zero JSON, fixed resolution.
         setPixels(

@@ -93,7 +93,10 @@ async fn main() -> Result<()> {
     // Send the mint request.
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/ui/api/launch/mint", daemon_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/ui/api/launch/mint",
+            daemon_url.trim_end_matches('/')
+        ))
         .header("Content-Type", "application/json")
         .header("x-ryeos-key-id", &sign_headers.key_id)
         .header("x-ryeos-timestamp", &sign_headers.timestamp)
@@ -110,10 +113,7 @@ async fn main() -> Result<()> {
         bail!("mint request failed: {status} {text}");
     }
 
-    let mint_resp: MintResponse = resp
-        .json()
-        .await
-        .context("parse mint response")?;
+    let mint_resp: MintResponse = resp.json().await.context("parse mint response")?;
 
     // Open the browser at the daemon-returned launch URL.
     eprintln!("Opening browser: {}", mint_resp.launch_url);
@@ -178,7 +178,8 @@ impl WebSigner {
             return Self::load_from(PathBuf::from(p));
         }
 
-        let user_root = ryeos_engine::roots::user_root().context("discover user root for signing key")?;
+        let user_root =
+            ryeos_engine::roots::user_root().context("discover user root for signing key")?;
         let user_key = user_root
             .join(ryeos_engine::AI_DIR)
             .join("config")
@@ -364,7 +365,10 @@ mod tests {
             read_only: true,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert!(!json.contains("project_path"), "should skip_serializing_if None");
+        assert!(
+            !json.contains("project_path"),
+            "should skip_serializing_if None"
+        );
         assert!(json.contains("read_only"));
     }
 
@@ -376,7 +380,10 @@ mod tests {
             "session_id": "sess-456"
         });
         let resp: MintResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(resp.launch_url, "http://localhost:8080/custom/launch/abc-123");
+        assert_eq!(
+            resp.launch_url,
+            "http://localhost:8080/custom/launch/abc-123"
+        );
         assert_eq!(resp.session_id, "sess-456");
     }
 }

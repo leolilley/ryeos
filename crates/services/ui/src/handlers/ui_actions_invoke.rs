@@ -19,9 +19,9 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -42,11 +42,7 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
 }
 
-pub async fn handle(
-    input: Value,
-    ctx: HandlerContext,
-    state: Arc<AppState>,
-) -> Result<Value> {
+pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let req: Request = serde_json::from_value(input)
         .map_err(|e| HandlerError::BadRequest(format!("invalid ui.actions.invoke request: {e}")))?;
 
@@ -96,9 +92,5 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "ui.actions.invoke",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move {
-            handle(params, ctx, state).await
-        })
-    },
+    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };

@@ -40,9 +40,10 @@ fn build_route_table(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     ui: std::sync::Arc<ryeos_ui::UiState>,
 ) -> anyhow::Result<ryeos_api::routes::RouteTable> {
-    let mut mode_registry = ryeos_api::routes::response_modes::ResponseModeRegistry::with_api_builtins_from(
-        service_descriptors(),
-    );
+    let mut mode_registry =
+        ryeos_api::routes::response_modes::ResponseModeRegistry::with_api_builtins_from(
+            service_descriptors(),
+        );
     let mut extensions = ryeos_api::routes::RouteExtensionRegistry {
         auth: ryeos_api::routes::invokers::AuthInvokerRegistry::with_api_builtins(),
     };

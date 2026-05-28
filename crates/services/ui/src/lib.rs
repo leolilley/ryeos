@@ -28,9 +28,7 @@ pub fn register_extensions(
     route_extensions.auth.register(
         "browser_session",
         std::sync::Arc::new(
-            invokers::browser_session_invocation::BrowserSessionAuthFactory {
-                ui: ui.clone(),
-            },
+            invokers::browser_session_invocation::BrowserSessionAuthFactory { ui: ui.clone() },
         ),
     );
 
@@ -38,9 +36,7 @@ pub fn register_extensions(
     response_modes.register_event_stream_source(
         "session_events",
         std::sync::Arc::new(
-            invokers::session_events_invocation::SessionEventsSourceFactory {
-                ui: ui.clone(),
-            },
+            invokers::session_events_invocation::SessionEventsSourceFactory { ui: ui.clone() },
         ),
     );
     response_modes.set_static_asset_provider(

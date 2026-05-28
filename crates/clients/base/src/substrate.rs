@@ -61,7 +61,7 @@ impl Default for SubstrateConfig {
             bg_color: Rgb::new(0x1d, 0x20, 0x21), // Gruvbox dark
             pulse_color: Rgb::new(0xfe, 0x80, 0x19), // Gruvbox orange
             error_color: Rgb::new(0xfb, 0x49, 0x34), // Gruvbox red
-            y_scale: 2.0, // Terminal chars are twice as tall as wide
+            y_scale: 2.0,                         // Terminal chars are twice as tall as wide
         }
     }
 }
@@ -162,8 +162,7 @@ impl SubstrateState {
 
         for y in 0..height {
             for x in 0..width {
-                let dist = (x as f32 + 0.5 - center_x)
-                    .hypot((y as f32 + 0.5 - center_y) * y_scale);
+                let dist = (x as f32 + 0.5 - center_x).hypot((y as f32 + 0.5 - center_y) * y_scale);
                 self.distances.push(dist);
                 let edge = 1.0 - (dist / (self.reach * 0.85)).powi(2);
                 self.edge_falloff.push(edge.max(0.0));
@@ -196,7 +195,11 @@ impl SubstrateState {
                     lerp(bg.b as f32, err.b as f32, pulse * 0.2),
                 )
             }
-            _ => (cfg.bg_color.r as f32, cfg.bg_color.g as f32, cfg.bg_color.b as f32),
+            _ => (
+                cfg.bg_color.r as f32,
+                cfg.bg_color.g as f32,
+                cfg.bg_color.b as f32,
+            ),
         };
 
         let pulse = cfg.pulse_color;

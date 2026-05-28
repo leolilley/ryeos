@@ -122,7 +122,10 @@ impl FrameRenderer {
                 diff_and_write(stdout, prev, &current)?;
             } else {
                 // Viewport resized — full repaint
-                queue!(stdout, crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
+                queue!(
+                    stdout,
+                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+                )?;
                 diff_and_write(stdout, &ScreenBuffer::new(tw, th), &current)?;
             }
         } else {
@@ -155,11 +158,7 @@ fn blit_surface(
             if cell.rune == '\u{0}' {
                 continue;
             }
-            buf.set(
-                offset_x as usize + x,
-                offset_y as usize + y,
-                cell,
-            );
+            buf.set(offset_x as usize + x, offset_y as usize + y, cell);
         }
     }
 }
@@ -219,7 +218,10 @@ fn diff_and_write(
                 if cur.fg == CoreColor::Default {
                     queue!(stdout, SetForegroundColor(crossterm::style::Color::Reset))?;
                 } else {
-                    queue!(stdout, SetForegroundColor(render_text::to_crossterm_color(cur.fg)))?;
+                    queue!(
+                        stdout,
+                        SetForegroundColor(render_text::to_crossterm_color(cur.fg))
+                    )?;
                 }
                 last_fg = Some(cur.fg);
             }
@@ -229,7 +231,10 @@ fn diff_and_write(
                 if cur.bg == CoreColor::Default {
                     queue!(stdout, SetBackgroundColor(crossterm::style::Color::Reset))?;
                 } else {
-                    queue!(stdout, SetBackgroundColor(render_text::to_crossterm_color(cur.bg)))?;
+                    queue!(
+                        stdout,
+                        SetBackgroundColor(render_text::to_crossterm_color(cur.bg))
+                    )?;
                 }
                 last_bg = Some(cur.bg);
             }

@@ -68,10 +68,7 @@ impl EffectiveSurface {
     ///
     /// Fails closed on wrong kind, untrusted, or malformed spec.
     pub fn from_effective_item(value: serde_json::Value) -> Result<Self, EffectiveSurfaceError> {
-        let kind = value
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         if kind != "surface" {
             return Err(EffectiveSurfaceError::WrongKind(kind.to_string()));
         }
