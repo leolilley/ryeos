@@ -138,15 +138,24 @@ fn assign_extracted_field(metadata: &mut ItemMetadata, field: &str, result: Rule
 }
 
 fn extract_string_seq_from_value(parsed: &Value, key: &str) -> Vec<String> {
-    parsed
-        .get(key)
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
+    match parsed.get(key) {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        // Python dunder metadata currently comes from the regex-kv
+        // parser, which emits scalar strings. Let string-sequence
+        // metadata such as `__required_secrets__` use a compact
+        // comma-separated form without requiring a Python-specific
+        // parser feature for list literals.
+        Some(Value::String(s)) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(String::from)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn extract_string_from_value(parsed: &Value, key: &str) -> Option<String> {
@@ -1933,6 +1942,37 @@ mod tests {
     use base64::Engine;
     use lillux::crypto::SigningKey;
     use std::fs;
+
+    #[test]
+    fn string_seq_metadata_accepts_comma_separated_scalar() {
+        let parsed = serde_json::json!({
+            "required_secrets": "SUPABASE_URL, SUPABASE_SERVICE_KEY,, OXYLABS_PASSWORD "
+        });
+
+        assert_eq!(
+            extract_string_seq_from_value(&parsed, "required_secrets"),
+            vec![
+                "SUPABASE_URL".to_string(),
+                "SUPABASE_SERVICE_KEY".to_string(),
+                "OXYLABS_PASSWORD".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn string_seq_metadata_keeps_array_form() {
+        let parsed = serde_json::json!({
+            "required_secrets": ["SUPABASE_URL", "SUPABASE_SERVICE_KEY"]
+        });
+
+        assert_eq!(
+            extract_string_seq_from_value(&parsed, "required_secrets"),
+            vec![
+                "SUPABASE_URL".to_string(),
+                "SUPABASE_SERVICE_KEY".to_string(),
+            ]
+        );
+    }
 
     const TOOL_SCHEMA: &str = "\
 location:
