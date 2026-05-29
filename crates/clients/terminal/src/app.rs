@@ -258,15 +258,32 @@ async fn run_effects(
                     update::update(model, AppEvent::PollSnapshot(snapshot));
                 }
             }
+            Effect::InspectItem { .. }
+            | Effect::InspectThread { .. }
+            | Effect::ListFiles { .. }
+            | Effect::ReadFile { .. } => {
+                // These cockpit effects are handled by the web shell. The
+                // terminal client may still render cockpit views, but it does
+                // not currently expose the HTTP cockpit endpoints directly.
+            }
             Effect::SendThreadCommand {
                 thread_id,
-                command: _,
-            } => {
-                let req = crate::transport::DaemonRequest::CancelThread {
-                    thread_id: *thread_id,
-                };
-                let _ = transport.request(req).await;
-            }
+                command,
+            } => match command {
+                ryeos_client_base::effects::ThreadCommand::Cancel => {
+                    let req = crate::transport::DaemonRequest::CancelThread {
+                        thread_id: *thread_id,
+                    };
+                    let _ = transport.request(req).await;
+                }
+                ryeos_client_base::effects::ThreadCommand::Kill
+                | ryeos_client_base::effects::ThreadCommand::Interrupt => {
+                    tracing::warn!(
+                        "terminal transport does not support thread command: {:?}",
+                        command
+                    );
+                }
+            },
             Effect::PersistSession => {
                 crate::persistence::save_session(
                     &model.workspace.layout,

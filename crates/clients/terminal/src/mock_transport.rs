@@ -10,6 +10,7 @@ pub fn mock_poll_snapshot() -> PollSnapshot {
         threads: vec![
             ThreadSummary {
                 id: ryeos_client_base::ids::ThreadId::new(1),
+                daemon_id: Some("1".into()),
                 status: "completed".into(),
                 item_ref: Some("deploy:production".into()),
                 parent_id: None,
@@ -19,6 +20,7 @@ pub fn mock_poll_snapshot() -> PollSnapshot {
             },
             ThreadSummary {
                 id: ryeos_client_base::ids::ThreadId::new(2),
+                daemon_id: Some("2".into()),
                 status: "running".into(),
                 item_ref: Some("scrape:docs".into()),
                 parent_id: None,
@@ -28,6 +30,7 @@ pub fn mock_poll_snapshot() -> PollSnapshot {
             },
             ThreadSummary {
                 id: ryeos_client_base::ids::ThreadId::new(3),
+                daemon_id: Some("3".into()),
                 status: "failed".into(),
                 item_ref: Some("test:integration".into()),
                 parent_id: Some(ryeos_client_base::ids::ThreadId::new(2)),

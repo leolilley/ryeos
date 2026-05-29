@@ -45,14 +45,9 @@ fn compute_etag(bytes: &[u8]) -> String {
 
 static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html");
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
-static GRAPH_VIEW_JS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.js");
-static GRAPH_VIEW_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.css");
-static COCKPIT_JS: &[u8] = include_bytes!("../../../clients/web/pkg/cockpit.js");
-static COCKPIT_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/cockpit.css");
-static FORCE_GRAPH_3D_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/vendor/3d-force-graph.min.js");
-static FORCE_GRAPH_3D_META: &[u8] =
-    include_bytes!("../../../clients/web/pkg/vendor/3d-force-graph.min.js.meta");
+static WEB_SHELL_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/web-shell.css");
+static RYEOS_WEB_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web.js");
+static RYEOS_WEB_WASM: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web_bg.wasm");
 
 /// Web UI static asset provider — owns the embedded web client assets.
 pub struct WebAssetProvider;
@@ -63,29 +58,9 @@ impl StaticAssetProvider for WebAssetProvider {
         let (bytes, cache_control) = match trimmed {
             "index.html" | "ui/index.html" => (INDEX_HTML, "no-cache"),
             "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
-            "graph-view.js" | "ui/assets/graph-view.js" => (GRAPH_VIEW_JS, "no-cache"),
-            "graph-view.css" | "ui/assets/graph-view.css" => (GRAPH_VIEW_CSS, "no-cache"),
-            "cockpit.js" | "ui/assets/cockpit.js" => (COCKPIT_JS, "no-cache"),
-            "cockpit.css" | "ui/assets/cockpit.css" => (COCKPIT_CSS, "no-cache"),
-            "3d-force-graph.v1.73.0.min.js" | "ui/assets/3d-force-graph.v1.73.0.min.js" => {
-                (FORCE_GRAPH_3D_JS, "public, max-age=31536000, immutable")
-            }
-            "vendor/3d-force-graph.v1.73.0.min.js"
-            | "ui/assets/vendor/3d-force-graph.v1.73.0.min.js" => {
-                (FORCE_GRAPH_3D_JS, "public, max-age=31536000, immutable")
-            }
-            "3d-force-graph.min.js" | "ui/assets/3d-force-graph.min.js" => {
-                (FORCE_GRAPH_3D_JS, "no-cache")
-            }
-            "vendor/3d-force-graph.min.js" | "ui/assets/vendor/3d-force-graph.min.js" => {
-                (FORCE_GRAPH_3D_JS, "no-cache")
-            }
-            "3d-force-graph.min.js.meta" | "ui/assets/3d-force-graph.min.js.meta" => {
-                (FORCE_GRAPH_3D_META, "no-cache")
-            }
-            "vendor/3d-force-graph.min.js.meta" | "ui/assets/vendor/3d-force-graph.min.js.meta" => {
-                (FORCE_GRAPH_3D_META, "no-cache")
-            }
+            "web-shell.css" | "ui/assets/web-shell.css" => (WEB_SHELL_CSS, "no-cache"),
+            "ryeos_web.js" | "ui/assets/ryeos_web.js" => (RYEOS_WEB_JS, "no-cache"),
+            "ryeos_web_bg.wasm" | "ui/assets/ryeos_web_bg.wasm" => (RYEOS_WEB_WASM, "no-cache"),
             _ => return None,
         };
         Some(StaticAsset {
@@ -124,42 +99,25 @@ mod tests {
     }
 
     #[test]
-    fn get_graph_assets() {
+    fn get_web_shell_assets() {
         let provider = WebAssetProvider;
+        let css = provider
+            .get("web-shell.css")
+            .expect("web-shell.css must be embedded");
+        assert!(css.bytes.len() > 0);
+        assert!(css.content_type.contains("css"));
+
         let js = provider
-            .get("graph-view.js")
-            .expect("graph-view.js must be embedded");
+            .get("ui/assets/ryeos_web.js")
+            .expect("ryeos_web.js must be embedded");
         assert!(js.bytes.len() > 0);
         assert!(js.content_type.contains("javascript"));
 
-        let css = provider
-            .get("graph-view.css")
-            .expect("graph-view.css must be embedded");
-        assert!(css.bytes.len() > 0);
-        assert!(css.content_type.contains("css"));
-    }
-
-    #[test]
-    fn get_vendor_graph_renderer_asset() {
-        let provider = WebAssetProvider;
-        let asset = provider
-            .get("ui/assets/3d-force-graph.v1.73.0.min.js")
-            .expect("3d-force-graph vendor asset must be embedded");
-        assert!(asset.bytes.len() > 0);
-        assert!(asset.content_type.contains("javascript"));
-        assert!(asset.cache_control.contains("immutable"));
-
-        let unversioned = provider
-            .get("ui/assets/3d-force-graph.min.js")
-            .expect("unversioned 3d-force-graph alias must be embedded");
-        assert_eq!(unversioned.cache_control, "no-cache");
-
-        let meta = provider
-            .get("ui/assets/3d-force-graph.min.js.meta")
-            .expect("3d-force-graph vendor metadata must be embedded");
-        assert!(std::str::from_utf8(meta.bytes)
-            .unwrap()
-            .contains("License: MIT"));
+        let wasm = provider
+            .get("ui/assets/ryeos_web_bg.wasm")
+            .expect("ryeos_web_bg.wasm must be embedded");
+        assert!(wasm.bytes.len() > 0);
+        assert!(wasm.content_type.contains("wasm"));
     }
 
     #[test]

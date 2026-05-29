@@ -23,6 +23,7 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
+use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::state::get_ui_state;
@@ -65,10 +66,35 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         );
     }
 
-    // TODO (Slice 5 depth): resolve the command_id through CommandRegistry
-    // built from the session's effective surface. For now, acknowledge
-    // with a session-bound invocation_id and publish to the session bus.
     let invocation_id = uuid::Uuid::new_v4().to_string();
+
+    if CanonicalRef::parse(&req.command_id).is_ok() {
+        let project_path = session
+            .project_root
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                ryeos_engine::roots::user_root().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
+        let result = execute_item_ref(&req, &ctx, &state, &project_path).await?;
+
+        ui.session_bus.publish(
+            &session_id,
+            "action.invoked",
+            json!({
+                "command_id": req.command_id,
+                "invocation_id": invocation_id,
+                "status": "executed",
+            }),
+        );
+
+        return Ok(json!({
+            "status": "executed",
+            "command_id": req.command_id,
+            "invocation_id": invocation_id,
+            "result": result,
+        }));
+    }
 
     ui.session_bus.publish(
         &session_id,
@@ -85,6 +111,83 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         "command_id": req.command_id,
         "invocation_id": invocation_id
     }))
+}
+
+async fn execute_item_ref(
+    req: &Request,
+    ctx: &HandlerContext,
+    state: &AppState,
+    project_path: &std::path::Path,
+) -> Result<Value> {
+    let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
+    let checkout_id = format!(
+        "ui-{}-{:08x}",
+        lillux::time::timestamp_millis(),
+        rand::random::<u32>()
+    );
+    let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
+        state,
+        &project_source,
+        project_path,
+        &ctx.fingerprint,
+        &checkout_id,
+    )
+    .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
+
+    let root_canonical = CanonicalRef::parse(&req.command_id)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
+
+    let plan_ctx = ryeos_engine::contracts::PlanContext {
+        requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+            ryeos_engine::contracts::Principal {
+                fingerprint: ctx.fingerprint.clone(),
+                scopes: ctx.scopes.clone(),
+            },
+        ),
+        project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: project_ctx.effective_path.clone(),
+        },
+        current_site_id: state.threads.site_id().to_string(),
+        origin_site_id: state.threads.site_id().to_string(),
+        execution_hints: Default::default(),
+        validate_only: false,
+    };
+
+    let exec_ctx = ryeos_executor::executor::ExecutionContext {
+        principal_fingerprint: ctx.fingerprint.clone(),
+        caller_scopes: ctx.scopes.clone(),
+        engine: project_ctx.request_engine.clone(),
+        plan_ctx,
+        requested_op: None,
+        requested_inputs: None,
+    };
+
+    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+        project_ctx.effective_path.clone(),
+        project_ctx.request_engine.clone(),
+    );
+
+    let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
+        launch_mode: "inline",
+        target_site_id: None,
+        validate_only: false,
+        params: req.args.clone(),
+        acting_principal: ctx.fingerprint.as_str(),
+        project_path: &project_ctx.effective_path,
+        provenance,
+        original_root_kind: root_canonical.kind.as_str(),
+        pre_minted_thread_id: None,
+        operation: None,
+        inputs: None,
+    };
+
+    ryeos_executor::dispatch::dispatch(&req.command_id, &dispatch_req, &exec_ctx, state)
+        .await
+        .map_err(|e| HandlerError::Structured {
+            code: "dispatch_error".into(),
+            body: ryeos_executor::structured_error::StructuredErrorPayload::from(&e).to_value(),
+        })
+        .map_err(Into::into)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

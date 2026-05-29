@@ -25,6 +25,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_cockpit_items::ITEMS_LIST_DESCRIPTOR,
     ui_cockpit_items::ITEM_INSPECT_DESCRIPTOR,
     ui_cockpit_threads::DESCRIPTOR,
+    ui_cockpit_threads::INSPECT_DESCRIPTOR,
     ui_cockpit_schedules::DESCRIPTOR,
     ui_cockpit_gc::DESCRIPTOR,
     ui_cockpit_remotes::REMOTES_LIST_DESCRIPTOR,

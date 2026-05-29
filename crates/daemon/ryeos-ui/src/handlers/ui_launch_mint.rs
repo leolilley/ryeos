@@ -26,8 +26,12 @@ pub struct Request {
     pub surface_ref: String,
     #[serde(default)]
     pub project_path: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_read_only")]
     pub read_only: bool,
+}
+
+fn default_read_only() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -182,5 +186,15 @@ mod tests {
         let err =
             launch_path_from_routes(&routes, "abc-123").expect_err("route mismatch must fail");
         assert!(err.to_string().contains("does not declare token capture"));
+    }
+
+    #[test]
+    fn launch_mint_request_defaults_to_read_only() {
+        let req: Request = serde_json::from_value(serde_json::json!({
+            "surface_ref": "surface:ryeos/cockpit/base"
+        }))
+        .unwrap();
+
+        assert!(req.read_only);
     }
 }

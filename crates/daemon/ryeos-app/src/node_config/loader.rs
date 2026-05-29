@@ -863,5 +863,12 @@ mod tests {
             snapshot.routes.iter().any(|route| route.path == "/ui"),
             "moved cockpit bundle should still provide base UI route"
         );
+        assert!(
+            snapshot
+                .routes
+                .iter()
+                .any(|route| route.path == "/ui/api/items/effective"),
+            "browser-session effective item route should load from nested route directory"
+        );
     }
 }

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-29T12:20:31Z:318139cb666dadbadc32e54ed744294dd4ce7fec3a74d8db6a71684ebef4d8c0:lS7LJBtgvmxJg7RJAG8dJKPX6IjcUo34FbZRMLHVs7AHa+bFoNqRddfL3yNfea5DOZ0dq2EvFs5567P5RIiOAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: cockpit/thread/inspect
+version: "1.0.0"
+description: Inspect one thread for the cockpit — returns detail, result, artifacts, children, facets, and recent events.
+endpoint: ui.cockpit.thread.inspect
+availability: daemon_only

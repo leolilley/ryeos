@@ -407,6 +407,28 @@ pub fn replay_events(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+pub fn latest_thread_events(
+    db: &ProjectionDb,
+    thread_id: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<EventRow>> {
+    let mut stmt = db
+        .connection()
+        .prepare(
+            "SELECT event_id, chain_root_id, chain_seq, thread_id, thread_seq, \
+                event_type, durability, ts, prev_chain_event_hash, \
+                prev_thread_event_hash, payload \
+         FROM events WHERE thread_id = ? ORDER BY chain_seq DESC LIMIT ?",
+        )
+        .context("prepare latest_thread_events")?;
+    let rows = stmt
+        .query_map((thread_id, limit as i64), EventRow::from_row)
+        .context("query latest_thread_events")?;
+    let mut events: Vec<EventRow> = rows.filter_map(|r| r.ok()).collect();
+    events.reverse();
+    Ok(events)
+}
+
 pub fn get_facets(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<FacetRow>> {
     let mut stmt = db
         .connection()
@@ -602,6 +624,25 @@ mod tests {
         let after = replay_events(&db, "chain-A", Some("T-1"), Some(1), 10).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].chain_seq, 2);
+    }
+
+    #[test]
+    fn latest_thread_events_returns_last_n_in_chronological_order() {
+        let db = test_db();
+        let conn = db.connection();
+        for seq in 1..=4 {
+            conn.execute(
+                "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+                 VALUES ('chain-A', ?, 'T-1', ?, 'step', 'durable', '2026-01-01T00:00:00Z', X'00')",
+                (seq, seq),
+            )
+            .unwrap();
+        }
+
+        let latest = latest_thread_events(&db, "T-1", 2).unwrap();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[0].chain_seq, 3);
+        assert_eq!(latest[1].chain_seq, 4);
     }
 
     #[test]

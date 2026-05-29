@@ -2,9 +2,14 @@
 //! a TextSurface from model state.
 
 pub mod event_inspector;
+pub mod files;
 pub mod graph;
+pub mod item_inspector;
+pub mod overview;
 pub mod projects;
 pub mod remotes;
+pub mod schedules;
+pub mod services;
 pub mod space;
 pub mod thread;
 pub mod thread_list;
@@ -73,7 +78,13 @@ pub fn build_tile_view(
     let content = match &tile.view {
         ViewSpec::ThreadList => thread_list::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Thread { .. } => thread::build(model, tile_id, inner_w, inner_h),
+        ViewSpec::Overview => overview::build(model, inner_w, inner_h),
         ViewSpec::Remotes => remotes::build(model, inner_w, inner_h),
+        ViewSpec::Services => services::build(model, inner_w, inner_h),
+        ViewSpec::ItemInspector => item_inspector::build(model, inner_w, inner_h),
+        ViewSpec::Schedules => schedules::build(model, inner_w, inner_h),
+        ViewSpec::GcStatus => schedules::build_gc(model, inner_w, inner_h),
+        ViewSpec::Files => files::build(model, tile_id, inner_w, inner_h),
         ViewSpec::EventInspector => event_inspector::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Projects => projects::build(model, inner_w, inner_h),
         ViewSpec::SpaceBrowser { .. } => space::build(model, tile_id, inner_w, inner_h),

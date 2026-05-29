@@ -13,6 +13,20 @@ pub enum Effect {
         item_ref: String,
         parameters: serde_json::Value,
     },
+    InspectItem {
+        item_ref: String,
+    },
+    InspectThread {
+        thread_id: String,
+    },
+    ListFiles {
+        root: String,
+        path: String,
+    },
+    ReadFile {
+        root: String,
+        path: String,
+    },
     SendThreadCommand {
         thread_id: ThreadId,
         command: ThreadCommand,

@@ -31,6 +31,8 @@ pub struct GcStatusResponse {
 
 /// Max recent events to return from the JSONL log.
 const MAX_RECENT_EVENTS: usize = 10;
+/// Max bytes to read from the tail of the GC JSONL log.
+const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
 
 fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
@@ -78,10 +80,26 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
 
 /// Read the last N lines from the GC event log as JSON values.
 fn read_recent_gc_events(log_path: &std::path::Path, limit: usize) -> Vec<Value> {
-    let content = match std::fs::read_to_string(log_path) {
-        Ok(c) => c,
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(log_path) {
+        Ok(file) => file,
         Err(_) => return Vec::new(),
     };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(MAX_LOG_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_LOG_TAIL_BYTES)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let content = String::from_utf8_lossy(&bytes);
 
     let mut events: Vec<Value> = Vec::new();
     for line in content.lines().rev() {

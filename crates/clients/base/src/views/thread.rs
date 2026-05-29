@@ -25,14 +25,19 @@ pub fn build(model: &AppModel, tile_id: TileId, w: usize, h: usize) -> TextSurfa
     let thread = thread_id.and_then(|id| model.store.threads.get(&id));
 
     match thread {
-        None => build_empty_thread(&mut surface, w, h),
+        None => build_empty_thread(&mut surface, model, w, h),
         Some(t) => build_thread_content(&mut surface, t, model, w, h),
     }
 
     surface
 }
 
-fn build_empty_thread(surface: &mut TextSurface, _w: usize, h: usize) {
+fn build_empty_thread(surface: &mut TextSurface, model: &AppModel, w: usize, h: usize) {
+    if let Some(inspection) = &model.store.thread_inspection {
+        build_thread_inspection(surface, inspection, w, h);
+        return;
+    }
+
     let style = Style::new().fg(theme::FG_MUTED).bg(theme::BG);
     let accent = Style::new().fg(theme::ACCENT).bg(theme::BG);
 
@@ -61,6 +66,14 @@ fn build_thread_content(
     w: usize,
     h: usize,
 ) {
+    if let Some(inspection) = &model.store.thread_inspection {
+        let daemon_id = thread.daemon_id.as_deref().unwrap_or_default();
+        if inspection.thread_id == daemon_id || inspection.thread_id == thread.id.0.to_string() {
+            build_thread_inspection(surface, inspection, w, h);
+            return;
+        }
+    }
+
     let fg = Style::new().fg(theme::FG).bg(theme::BG);
     let dim = Style::new().fg(theme::FG_DIM).bg(theme::BG);
     let accent = Style::new().fg(theme::ACCENT).bg(theme::BG);
@@ -300,4 +313,103 @@ fn build_thread_content(
             surface.draw_text(x, y, msg, muted);
         }
     }
+}
+
+fn build_thread_inspection(
+    surface: &mut TextSurface,
+    inspection: &crate::store::ThreadInspectionModel,
+    w: usize,
+    h: usize,
+) {
+    let header = Style::new().fg(theme::FG).bg(theme::BG).bold();
+    let accent = Style::new().fg(theme::ACCENT).bg(theme::BG).bold();
+    let dim = Style::new().fg(theme::FG_DIM).bg(theme::BG);
+    let muted = Style::new().fg(theme::FG_MUTED).bg(theme::BG);
+
+    let title = format!("{} {}", inspection.status, inspection.thread_id);
+    surface.draw_text(0, 0, &truncate(&title, w), header);
+    let mut row = 2;
+    draw_kv(surface, w, row, "item", &inspection.item_ref, accent);
+    row += 1;
+    draw_kv(surface, w, row, "kind", &inspection.kind, dim);
+    row += 1;
+    draw_kv(surface, w, row, "created", &inspection.created_at, muted);
+    row += 1;
+    if let Some(started) = &inspection.started_at {
+        draw_kv(surface, w, row, "started", started, muted);
+        row += 1;
+    }
+    if let Some(finished) = &inspection.finished_at {
+        draw_kv(surface, w, row, "finished", finished, muted);
+        row += 1;
+    }
+
+    if row < h {
+        row += 1;
+        let summary = format!(
+            "{} children · {} events · {} artifacts",
+            inspection.children.len(),
+            inspection.events.len(),
+            inspection.artifacts.len()
+        );
+        surface.draw_text(0, row, &truncate(&summary, w), accent);
+        row += 2;
+    }
+
+    if row < h {
+        surface.draw_text(0, row, "Recent events", accent);
+        row += 1;
+    }
+    for event in inspection.events.iter().rev().take(h.saturating_sub(row)) {
+        let line = event
+            .get("event_type")
+            .or_else(|| event.get("event"))
+            .or_else(|| event.get("kind"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| event.to_string());
+        surface.draw_text(1, row, &truncate(&line, w.saturating_sub(2)), muted);
+        row += 1;
+    }
+
+    if row + 2 < h {
+        row += 1;
+        surface.draw_text(0, row, "Result", accent);
+        row += 1;
+        let result = inspection
+            .result
+            .as_ref()
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()))
+            .unwrap_or_else(|| "not available".into());
+        for line in result.lines().take(h.saturating_sub(row)) {
+            surface.draw_text(1, row, &truncate(line, w.saturating_sub(2)), dim);
+            row += 1;
+        }
+    }
+}
+
+fn draw_kv(surface: &mut TextSurface, w: usize, row: usize, key: &str, value: &str, style: Style) {
+    let key_style = Style::new().fg(theme::FG_MUTED).bg(theme::BG);
+    let key_display = format!("  {:<8}", key);
+    surface.draw_text(0, row, &truncate(&key_display, w), key_style);
+    if w > key_display.len() {
+        surface.draw_text(
+            key_display.len(),
+            row,
+            &truncate(value, w.saturating_sub(key_display.len())),
+            style,
+        );
+    }
+}
+
+fn truncate(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    if max <= 1 {
+        return "…".repeat(max);
+    }
+    let mut out: String = value.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }

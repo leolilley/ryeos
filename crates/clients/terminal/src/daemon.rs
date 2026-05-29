@@ -439,6 +439,7 @@ fn parse_thread_summaries(value: &serde_json::Value) -> Vec<ThreadSummary> {
         .filter_map(|t| {
             Some(ThreadSummary {
                 id: ryeos_client_base::ids::ThreadId::new(t.get("id")?.as_str()?.parse().ok()?),
+                daemon_id: t.get("id").and_then(|v| v.as_str()).map(String::from),
                 status: t
                     .get("status")
                     .and_then(|v| v.as_str())

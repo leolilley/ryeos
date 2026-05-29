@@ -5,6 +5,142 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// Operational cockpit snapshot
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CockpitSnapshotModel {
+    pub schema_version: String,
+    pub generated_at: String,
+    pub session: SessionModel,
+    pub local_node: LocalNodeModel,
+    pub project: Option<ProjectInfoModel>,
+    pub schedules: ScheduleSummaryModel,
+    pub gc: GcSummaryModel,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduleListModel {
+    pub schedules: Vec<ScheduleModel>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduleModel {
+    pub schedule_id: String,
+    pub item_ref: String,
+    pub schedule_type: String,
+    pub expression: String,
+    pub timezone: Option<String>,
+    pub enabled: bool,
+    pub last_fire_at: Option<i64>,
+    pub last_fire_status: Option<String>,
+    pub total_fires: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GcStatusModel {
+    pub running: bool,
+    pub state: Option<serde_json::Value>,
+    pub recent_events: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileBrowserModel {
+    pub root: String,
+    pub path: String,
+    pub truncated: bool,
+    pub entries: Vec<FileEntryModel>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileEntryModel {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    pub modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileReadModel {
+    pub root: String,
+    pub path: String,
+    pub size: usize,
+    pub truncated: bool,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionModel {
+    pub session_id: String,
+    pub surface_ref: String,
+    pub read_only: bool,
+    pub granted_caps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LocalNodeModel {
+    pub identity: IdentityInfoModel,
+    pub health_status: String,
+    pub operational_services: String,
+    pub missing_services: Vec<String>,
+    pub spaces: Vec<SpaceSummaryModel>,
+    pub bundles: Vec<BundleSummaryModel>,
+    pub services: Vec<ServiceSummaryModel>,
+    pub verbs: Vec<VerbAliasSummaryModel>,
+    pub aliases: Vec<VerbAliasSummaryModel>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IdentityInfoModel {
+    pub principal_id: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SpaceSummaryModel {
+    pub space: String,
+    pub label: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BundleSummaryModel {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServiceSummaryModel {
+    pub endpoint: String,
+    pub service_ref: String,
+    pub availability: String,
+    pub required_caps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VerbAliasSummaryModel {
+    pub name: String,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectInfoModel {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduleSummaryModel {
+    pub total: usize,
+    pub enabled: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GcSummaryModel {
+    pub running: bool,
+    pub recent_event_count: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Thread
 // ---------------------------------------------------------------------------
 
@@ -70,6 +206,7 @@ pub enum ThreadPartKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadModel {
     pub id: ThreadId,
+    pub daemon_id: Option<String>,
     pub status: ThreadStatus,
     pub item_ref: Option<String>,
     pub parent_id: Option<ThreadId>,
@@ -81,10 +218,27 @@ pub struct ThreadModel {
     pub streaming_text: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThreadInspectionModel {
+    pub thread_id: String,
+    pub status: String,
+    pub item_ref: String,
+    pub kind: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub children: Vec<serde_json::Value>,
+    pub events: Vec<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
+    pub artifacts: Vec<serde_json::Value>,
+    pub facets: Option<serde_json::Value>,
+}
+
 impl ThreadModel {
     pub fn new(id: ThreadId) -> Self {
         Self {
             id,
+            daemon_id: None,
             status: ThreadStatus::Created,
             item_ref: None,
             parent_id: None,
@@ -219,6 +373,13 @@ pub struct EventRecord {
 pub struct Store {
     pub identity: Option<IdentityModel>,
     pub daemon: DaemonModel,
+    pub cockpit: Option<CockpitSnapshotModel>,
+    pub schedules: ScheduleListModel,
+    pub gc_status: Option<GcStatusModel>,
+    pub files: Option<FileBrowserModel>,
+    pub file_read: Option<FileReadModel>,
+    pub thread_inspection: Option<ThreadInspectionModel>,
+    pub item_inspection: Option<ItemInspectionModel>,
     pub threads: HashMap<ThreadId, ThreadModel>,
     pub remotes: HashMap<RemoteId, RemoteModel>,
     pub projects: HashMap<ProjectId, ProjectModel>,
@@ -265,6 +426,17 @@ pub struct ItemModel {
     pub category: Option<String>,
     pub description: Option<String>,
     pub signed: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ItemInspectionModel {
+    pub canonical_ref: String,
+    pub item_kind: String,
+    pub source_path: String,
+    pub space: String,
+    pub raw_content: Option<String>,
+    pub raw_truncated: bool,
+    pub effective: Option<serde_json::Value>,
 }
 
 /// Type alias matching spec.

@@ -1,0 +1,116 @@
+:root {
+  --bg: #1d2021;
+  --bg1: #3c3836;
+  --bg2: #504945;
+  --fg: #ebdbb2;
+  --fg2: #d5c4a1;
+  --fg4: #a89984;
+  --orange: #fe8019;
+  --yellow: #fabd2f;
+  --aqua: #8ec07c;
+  --red: #fb4934;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin: 0;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.status {
+  color: var(--fg4);
+  display: inline-block;
+  padding: 1rem;
+}
+
+.rye-frame {
+  background:
+    linear-gradient(90deg, rgba(254, 128, 25, 0.05) 1px, transparent 1px),
+    linear-gradient(rgba(254, 128, 25, 0.04) 1px, transparent 1px),
+    var(--bg);
+  background-size: 1ch 1em;
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+  width: 100vw;
+}
+
+.rye-tile,
+.rye-status,
+.rye-input,
+.rye-overlay {
+  background: rgba(60, 56, 54, 0.92);
+  border: 2px solid var(--fg);
+  box-shadow: 4px 4px 0 var(--bg2);
+  color: var(--fg);
+  font: inherit;
+  line-height: 1em;
+  margin: 0;
+  overflow: hidden;
+  padding: 0.35em 0.65ch;
+  position: absolute;
+  white-space: pre;
+}
+
+.rye-status,
+.rye-input {
+  background: var(--bg1);
+  border-left: 0;
+  border-right: 0;
+  box-shadow: none;
+  padding-left: 1ch;
+}
+
+.rye-input {
+  border-color: var(--orange);
+}
+
+.rye-overlay {
+  background: var(--bg);
+  border-color: var(--orange);
+  z-index: 10;
+}
+
+.rye-error {
+  background: var(--bg1);
+  border: 2px solid var(--red);
+  box-shadow: 6px 6px 0 var(--bg2);
+  color: var(--fg);
+  margin: 1rem;
+  padding: 1rem;
+}
+
+.rye-error strong {
+  color: var(--red);
+  display: block;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.75rem;
+  text-transform: uppercase;
+}
+
+.rye-error pre {
+  color: var(--fg2);
+  white-space: pre-wrap;
+}
+
+.rye-cell-probe {
+  font: inherit;
+  left: -9999px;
+  line-height: 1em;
+  position: absolute;
+  top: -9999px;
+  visibility: hidden;
+  white-space: pre;
+}

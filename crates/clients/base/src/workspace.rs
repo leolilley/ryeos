@@ -14,7 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum ViewSpec {
     Thread { thread_id: Option<ThreadId> },
     ThreadList,
+    Overview,
     Remotes,
+    Services,
+    ItemInspector,
+    Schedules,
+    GcStatus,
+    Files,
     Projects,
     SpaceBrowser { project: Option<String> },
     Trust,
@@ -89,9 +95,16 @@ impl ViewSpec {
             ViewSpec::Thread { .. } => InputCapability::Prompt,
             ViewSpec::ThreadList | ViewSpec::SpaceBrowser { .. } => InputCapability::Filter,
             ViewSpec::EventInspector => InputCapability::Filter,
-            ViewSpec::Remotes | ViewSpec::Projects | ViewSpec::Trust | ViewSpec::Graph { .. } => {
-                InputCapability::None
-            }
+            ViewSpec::Files => InputCapability::Filter,
+            ViewSpec::Overview
+            | ViewSpec::Remotes
+            | ViewSpec::Services
+            | ViewSpec::ItemInspector
+            | ViewSpec::Schedules
+            | ViewSpec::GcStatus
+            | ViewSpec::Projects
+            | ViewSpec::Trust
+            | ViewSpec::Graph { .. } => InputCapability::None,
         }
     }
 
@@ -106,7 +119,13 @@ impl ViewSpec {
                 }
             }
             ViewSpec::ThreadList => "threads filter",
+            ViewSpec::Overview => "overview",
             ViewSpec::Remotes => "remotes",
+            ViewSpec::Services => "services",
+            ViewSpec::ItemInspector => "item inspector",
+            ViewSpec::Schedules => "schedules",
+            ViewSpec::GcStatus => "gc status",
+            ViewSpec::Files => "files",
             ViewSpec::Projects => "projects",
             ViewSpec::SpaceBrowser { .. } => "search items",
             ViewSpec::Trust => "trust",
@@ -126,7 +145,13 @@ impl ViewSpec {
                 }
             }
             ViewSpec::ThreadList => "Threads".into(),
+            ViewSpec::Overview => "Overview".into(),
             ViewSpec::Remotes => "Remotes".into(),
+            ViewSpec::Services => "Services".into(),
+            ViewSpec::ItemInspector => "Item".into(),
+            ViewSpec::Schedules => "Schedules".into(),
+            ViewSpec::GcStatus => "GC".into(),
+            ViewSpec::Files => "Files".into(),
             ViewSpec::Projects => "Projects".into(),
             ViewSpec::SpaceBrowser { .. } => "Items".into(),
             ViewSpec::Trust => "Trust".into(),
@@ -305,7 +330,7 @@ impl Workspace {
         tiles.insert(
             status_id,
             TileState {
-                view: ViewSpec::Remotes,
+                view: ViewSpec::Overview,
                 local: ViewLocalState::GenericList {
                     cursor: 0,
                     scroll: 0,

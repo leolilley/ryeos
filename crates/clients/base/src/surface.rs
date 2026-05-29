@@ -129,7 +129,13 @@ fn default_ratio() -> f32 {
 pub enum ViewKindSpec {
     ThreadList,
     Thread,
+    Overview,
     Remotes,
+    Services,
+    ItemInspector,
+    Schedules,
+    GcStatus,
+    Files,
     Projects,
     SpaceBrowser,
     Trust,
@@ -143,7 +149,13 @@ impl ViewKindSpec {
         match self {
             ViewKindSpec::ThreadList => ViewSpec::ThreadList,
             ViewKindSpec::Thread => ViewSpec::Thread { thread_id: None },
+            ViewKindSpec::Overview => ViewSpec::Overview,
             ViewKindSpec::Remotes => ViewSpec::Remotes,
+            ViewKindSpec::Services => ViewSpec::Services,
+            ViewKindSpec::ItemInspector => ViewSpec::ItemInspector,
+            ViewKindSpec::Schedules => ViewSpec::Schedules,
+            ViewKindSpec::GcStatus => ViewSpec::GcStatus,
+            ViewKindSpec::Files => ViewSpec::Files,
             ViewKindSpec::Projects => ViewSpec::Projects,
             ViewKindSpec::SpaceBrowser => ViewSpec::SpaceBrowser { project: None },
             ViewKindSpec::Trust => ViewSpec::Trust,
@@ -165,7 +177,13 @@ impl ViewKindSpec {
                 query: String::new(),
                 scroll: 0,
             },
-            ViewKindSpec::EventInspector => ViewLocalState::GenericList {
+            ViewKindSpec::Overview
+            | ViewKindSpec::Services
+            | ViewKindSpec::ItemInspector
+            | ViewKindSpec::Schedules
+            | ViewKindSpec::GcStatus
+            | ViewKindSpec::Files
+            | ViewKindSpec::EventInspector => ViewLocalState::GenericList {
                 cursor: 0,
                 scroll: 0,
             },
@@ -489,7 +507,7 @@ pub fn builtin_default() -> SurfaceSpec {
     nodes.insert(
         "status".into(),
         LayoutNodeSpec::Pane {
-            view: ViewKindSpec::Remotes,
+            view: ViewKindSpec::Overview,
         },
     );
 
@@ -1127,7 +1145,7 @@ view = "thread_list"
     fn bundled_base_surface_loads() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/standard/.ai/surfaces/ryeos/cockpit/base.yaml");
+            .join("bundles/cockpit/.ai/surfaces/ryeos/cockpit/base.yaml");
         assert!(path.exists(), "bundled surface missing at {path:?}");
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
@@ -1149,7 +1167,7 @@ view = "thread_list"
     fn bundled_graph_surface_loads() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/standard/.ai/surfaces/ryeos/cockpit/graph.yaml");
+            .join("bundles/cockpit/.ai/surfaces/ryeos/cockpit/graph.yaml");
         assert!(path.exists(), "bundled graph surface missing at {path:?}");
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)

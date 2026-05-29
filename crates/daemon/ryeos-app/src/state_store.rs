@@ -1234,6 +1234,37 @@ impl StateStore {
             .collect::<Result<Vec<_>>>()
     }
 
+    pub fn latest_thread_events(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let event_rows = queries::latest_thread_events(g.state_db.projection(), thread_id, limit)?;
+        event_rows
+            .into_iter()
+            .map(|row| {
+                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
+                    format!(
+                        "malformed JSON payload for event {} (chain_seq {})",
+                        row.event_id, row.chain_seq
+                    )
+                })?;
+                Ok(PersistedEventRecord {
+                    event_id: row.event_id,
+                    chain_root_id: row.chain_root_id,
+                    chain_seq: row.chain_seq,
+                    thread_id: row.thread_id,
+                    thread_seq: row.thread_seq,
+                    event_type: row.event_type,
+                    storage_class: row.durability,
+                    ts: row.ts,
+                    payload,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
         let g = self.lock()?;
         g.runtime_db.submit_command(cmd)

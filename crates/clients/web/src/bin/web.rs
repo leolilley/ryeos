@@ -30,6 +30,11 @@ struct Cli {
     /// Read-only mode
     #[arg(long = "read-only")]
     read_only: bool,
+
+    /// Allow browser actions that can mutate daemon/project state.
+    /// The cockpit defaults to read-only unless this is explicit.
+    #[arg(long = "allow-actions")]
+    allow_actions: bool,
 }
 
 /// Request body for `ui.launch.mint`.
@@ -82,7 +87,7 @@ async fn main() -> Result<()> {
     let mint_req = MintRequest {
         surface_ref,
         project_path: cli.project.map(|p| p.to_string_lossy().to_string()),
-        read_only: cli.read_only,
+        read_only: cli.read_only || !cli.allow_actions,
     };
 
     let body = serde_json::to_vec(&mint_req).context("serialize mint request")?;
