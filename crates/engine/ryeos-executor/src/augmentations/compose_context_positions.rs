@@ -221,9 +221,14 @@ pub async fn run(
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
     let stdin_data = serde_json::to_string(&envelope)?;
-    let envs = ryeos_app::process::build_subprocess_envs(
+    let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+        &engine_roots,
+        &state.config.system_space_dir,
+    );
+    let envs = ryeos_app::process::build_subprocess_envs_with_roots(
         &std::collections::BTreeMap::new(),
         &vec![("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
+        roots,
     )
     .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
     let result = tokio::task::spawn_blocking(move || {

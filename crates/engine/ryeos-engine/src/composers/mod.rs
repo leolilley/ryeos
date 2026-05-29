@@ -363,6 +363,9 @@ mod tests {
             "\
 location:
   directory: {kind}s
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".md\"]
     parser: parser:ryeos/core/markdown/extends_chain

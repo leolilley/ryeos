@@ -666,6 +666,16 @@ mod tests {
                 }
             }
         };
+        let yaml_owned = if yaml_owned.contains("effective_trust:") {
+            yaml_owned
+        } else {
+            format!("{yaml_owned}effective_trust:\n  include_references: false\n")
+        };
+        let yaml_owned = if yaml_owned.contains("resolution:") {
+            yaml_owned
+        } else {
+            format!("{yaml_owned}resolution: []\n")
+        };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }
 
@@ -1249,7 +1259,10 @@ config:
             spec.args,
             vec!["/project/.ai/tools/echo.py", "--project-path", "/project"]
         );
-        assert_eq!(spec.stdin_data, Some(r#"{"message":"hello"}"#.to_string()));
+        assert_eq!(
+            spec.stdin_data,
+            Some(r#"{"message":"hello","project_path":"/project"}"#.to_string())
+        );
         assert_eq!(spec.timeout_secs, 60);
         assert_eq!(spec.env.get("PYTHONUNBUFFERED").unwrap(), "1");
     }
@@ -1581,10 +1594,16 @@ category: ryeos/core/subprocess\n";
             dispatch.args[2],
         );
 
-        // stdin_data should have the params JSON
-        assert_eq!(
-            dispatch.stdin_data.as_deref(),
-            Some(r#"{"message":"hello"}"#)
+        // stdin_data should have the params JSON plus the injected project path.
+        let stdin: serde_json::Value =
+            serde_json::from_str(dispatch.stdin_data.as_deref().unwrap()).unwrap();
+        assert_eq!(stdin["message"], "hello");
+        assert!(
+            stdin["project_path"]
+                .as_str()
+                .unwrap()
+                .contains("rye_plan_test"),
+            "project_path should be injected, got: {stdin:?}"
         );
 
         // timeout_secs from the runtime config

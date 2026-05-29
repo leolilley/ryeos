@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::contracts::RuntimeEnvSource;
 use crate::error::EngineError;
-use crate::runtime::{expand_template, CompileContext, RuntimeHandler, RESERVED_ENV_PREFIX};
+use crate::runtime::{expand_template, is_reserved_env_name, CompileContext, RuntimeHandler};
 
 pub const KEY: &str = "config";
 
@@ -92,9 +93,11 @@ impl RuntimeHandler for RuntimeConfigHandler {
         }
 
         for (k, v) in config.env {
-            if k.starts_with(RESERVED_ENV_PREFIX) {
+            if is_reserved_env_name(&k) {
                 return Err(EngineError::ReservedEnvKey { key: k });
             }
+            ctx.env_sources
+                .insert(k.clone(), RuntimeEnvSource::RuntimeDescriptor);
             ctx.env.insert(k, v);
         }
 

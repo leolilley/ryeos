@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::policy::BLOCKED_NAMES;
+use crate::policy::is_blocked_name;
 
 pub fn read_dotenv_overlay(search_dirs: &[PathBuf]) -> Result<HashMap<String, String>> {
     let mut out: HashMap<String, String> = HashMap::new();
@@ -48,7 +48,7 @@ fn parse_dotenv_text(content: &str, path: &Path) -> Result<HashMap<String, Strin
                 path.display()
             );
         }
-        if BLOCKED_NAMES.contains(&key) {
+        if is_blocked_name(key) {
             bail!(
                 "vault dotenv: key `{key}` at {}:{lineno} is on the \
                  OS-protected blocked list and would shadow inherited \
@@ -72,5 +72,30 @@ fn strip_matching_quotes(s: &str) -> &str {
         &s[1..s.len() - 1]
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotenv_overlay_rejects_protected_application_env_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        for key in [
+            "LD_AUDIT",
+            "DYLD_PRINT_LIBRARIES",
+            "PYTHONHOME",
+            "RYEOS_PROJECT_SECRET",
+            "RYEOSD_THREAD_AUTH_TOKEN",
+            "USER_SPACE",
+            "RYEOS_SYSTEM_SPACE_DIR",
+            "HTTP_PROXY",
+            "SSL_CERT_FILE",
+        ] {
+            std::fs::write(tmp.path().join(".env"), format!("{key}=x\n")).unwrap();
+            let err = read_dotenv_overlay(&[tmp.path().to_path_buf()]).unwrap_err();
+            assert!(format!("{err:#}").contains(key), "got: {err:#}");
+        }
     }
 }

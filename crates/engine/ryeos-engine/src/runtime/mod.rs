@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::contracts::{ExecutionDecorations, PlanSubprocessSpec};
+use crate::contracts::{ExecutionDecorations, PlanSubprocessSpec, RuntimeEnvSource};
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -33,6 +33,11 @@ use crate::trust::TrustStore;
 /// Reserved env key prefix — runtime configs may not override
 /// daemon-injected bindings.
 pub const RESERVED_ENV_PREFIX: &str = "RYEOS_";
+pub const RESERVED_DAEMON_ENV_PREFIX: &str = "RYEOSD_";
+
+pub fn is_reserved_env_name(name: &str) -> bool {
+    name.starts_with(RESERVED_ENV_PREFIX) || name.starts_with(RESERVED_DAEMON_ENV_PREFIX)
+}
 
 // ── Host env passthrough ────────────────────────────────────────────────
 
@@ -64,7 +69,7 @@ impl HostEnvBindings {
     pub fn from_allowlist(allowed: impl IntoIterator<Item = String>) -> Result<Self, EngineError> {
         let mut out = Self::default();
         for name in allowed {
-            if name.starts_with(RESERVED_ENV_PREFIX) {
+            if is_reserved_env_name(&name) {
                 return Err(EngineError::ReservedHostEnvPassthrough { var: name });
             }
             if let Ok(v) = std::env::var(&name) {
@@ -208,7 +213,7 @@ pub fn expand_env_value(
             };
             let close = i + 2 + close_rel;
             let var = &raw[i + 2..close];
-            if var.starts_with(RESERVED_ENV_PREFIX) {
+            if is_reserved_env_name(var) {
                 return Err(EngineError::ReservedHostEnvPassthrough {
                     var: var.to_string(),
                 });
@@ -263,6 +268,7 @@ pub struct SpecOverrides {
 pub struct CompileContext<'a> {
     pub template_ctx: TemplateContext,
     pub env: HashMap<String, String>,
+    pub env_sources: HashMap<String, RuntimeEnvSource>,
     pub spec_overrides: SpecOverrides,
     pub params: Value,
     /// Original caller-supplied parameters BEFORE any handler
@@ -439,6 +445,10 @@ pub fn compile_with_handlers(
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
         env: plan_env.clone(),
+        env_sources: plan_env
+            .keys()
+            .map(|key| (key.clone(), RuntimeEnvSource::EnginePlan))
+            .collect(),
         spec_overrides: SpecOverrides::default(),
         params: params.clone(),
         original_params: params,
@@ -591,6 +601,7 @@ pub fn compile_with_handlers(
     let CompileContext {
         template_ctx,
         env,
+        env_sources,
         spec_overrides,
         host_env: ctx_host_env,
         ..
@@ -642,8 +653,12 @@ pub fn compile_with_handlers(
 
     // Expand env values now that the template context is final.
     let mut expanded_env = HashMap::with_capacity(env.len());
+    let mut expanded_env_sources = HashMap::with_capacity(env.len());
     for (k, v) in env {
         let expanded = expand_env_value(&v, &template_ctx, ctx_host_env)?;
+        if let Some(source) = env_sources.get(&k).copied() {
+            expanded_env_sources.insert(k.clone(), source);
+        }
         expanded_env.insert(k, expanded);
     }
 
@@ -654,6 +669,7 @@ pub fn compile_with_handlers(
             .cwd
             .or_else(|| project_root.map(|p| p.to_path_buf())),
         env: expanded_env,
+        env_sources: expanded_env_sources,
         stdin_data,
         timeout_secs,
         execution: spec_overrides.execution,
@@ -735,6 +751,12 @@ mod tests {
     #[test]
     fn host_env_bindings_constructor_rejects_reserved_names() {
         let err = HostEnvBindings::from_allowlist(["RYEOS_FOO".into()]).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ReservedHostEnvPassthrough { .. }),
+            "got {err:?}"
+        );
+
+        let err = HostEnvBindings::from_allowlist(["RYEOSD_CALLBACK_TOKEN".into()]).unwrap_err();
         assert!(
             matches!(err, EngineError::ReservedHostEnvPassthrough { .. }),
             "got {err:?}"

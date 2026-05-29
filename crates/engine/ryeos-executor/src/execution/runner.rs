@@ -744,6 +744,10 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     let thread_state_dir =
         ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.system_space_dir, &tid);
     let inline_snapshot = base_snapshot_hash.clone();
+    let inline_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+        &engine.resolution_roots(Some(effective_path.clone())),
+        &state.config.system_space_dir,
+    );
     let mut spawned = match task::spawn_blocking(move || {
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
             engine: &engine,
@@ -752,6 +756,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
             chain_root_id: &crid,
             vault_bindings: vault,
             daemon_callback_env: cb_bindings,
+            roots: inline_roots,
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
             original_snapshot_hash: inline_snapshot.as_deref(),
@@ -1086,6 +1091,14 @@ async fn dispatch_detached_bg_task(
     let snap_for_spawn = bg_base_snapshot_hash.clone();
 
     let spawn_result = task::spawn_blocking(move || {
+        let project_root = match &res_for_spawn.plan_context.project_context {
+            ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
+            _ => None,
+        };
+        let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+            &eng_for_spawn.resolution_roots(project_root),
+            &bg_state_root,
+        );
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
             engine: &eng_for_spawn,
             resolved: &res_for_spawn,
@@ -1093,6 +1106,7 @@ async fn dispatch_detached_bg_task(
             chain_root_id: &crid_for_spawn,
             vault_bindings: vault_for_spawn,
             daemon_callback_env: cb_for_spawn,
+            roots,
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
             original_snapshot_hash: snap_for_spawn.as_deref(),
@@ -1564,6 +1578,7 @@ pub async fn run_existing_detached(
             state.vault.as_ref(),
             &params.acting_principal,
             &params.resolved.item_ref,
+            &dotenv_dirs,
             &mut vault_bindings,
         )
         .map_err(|e| {

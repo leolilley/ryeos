@@ -161,6 +161,7 @@ mod tests {
         let mut ctx = CompileContext {
             template_ctx: TemplateContext::new(PathBuf::from("/dev/null")),
             env: HashMap::new(),
+            env_sources: HashMap::new(),
             spec_overrides: SpecOverrides::default(),
             params: Value::Null,
             original_params: &NULL_PARAMS,
@@ -255,6 +256,7 @@ mod tests {
         let mut ctx = CompileContext {
             template_ctx: TemplateContext::new(PathBuf::from("/dev/null")),
             env: HashMap::new(),
+            env_sources: HashMap::new(),
             spec_overrides: SpecOverrides::default(),
             params: Value::Null,
             original_params: &NULL_PARAMS,
