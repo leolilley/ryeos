@@ -27,9 +27,12 @@ RUN --mount=type=secret,id=publisher-key \
 # rust:1.95-slim currently links binaries requiring GLIBC_2.39+.
 FROM debian:trixie-slim
 
-# Node 22 for TS-authored project tools (e.g. backend-client.js).
+# Node 22 for TS-authored project tools (e.g. backend-client.js), and Python
+# for the bundled python/function and python/script runtimes. Include venv/pip
+# so project images can install their own Python tool dependencies without
+# rebuilding the RyeOS base from scratch.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg && \
+        ca-certificates curl gnupg python3 python3-venv python3-pip && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get purge -y curl gnupg && apt-get autoremove -y && \

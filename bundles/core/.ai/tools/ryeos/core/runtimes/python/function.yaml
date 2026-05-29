@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:24Z:fb32cfe622dbe53aab36e4020cc8345440331a5e6640e61b9655373015c4e1be:Gj26mr6EjMOmNNjlwq1JzyxQ0LvLXezQitzzWAYxmIICuoXVcf2WKQV0qCqYaw1mZRh+EDn38Pgqk3CRjlwiDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-29T04:13:11Z:0c47c1900b57b2ddb8a11e4ada9a45d54f4b0aa42b53f8d40afaaecd00aec0ca:L3eAwpw6yadxjLpdt4KsBqImGDYsltg5fuQSS/jl319VmwycEHoktXfmbtheg6OF5TmrcYIaNPvSMblHPnncDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -46,7 +46,7 @@ config:
       p=json.loads(sys.stdin.read())
       if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,sys.argv[2]))
       else:r=fn(p,sys.argv[2])
-      print(json.dumps(r,default=str)if r is not None else'{}')
+      print(json.dumps(r,default=str)if r is not None else json.dumps(dict()))
     - "{tool_path}"
     - "{project_path}"
   input_data: "{params_json}"

@@ -130,6 +130,15 @@ pub fn expand_template(template: &str, ctx: &TemplateContext) -> Result<String, 
         let abs_close = abs_open + close;
         let token = &result[abs_open + 1..abs_close];
 
+        // Empty braces are common literal syntax in embedded scripts
+        // (for example Python's `'{}'` JSON fallback). They are not a
+        // RyeOS template reference, so leave them untouched and keep
+        // scanning after the closing brace.
+        if token.is_empty() {
+            start = abs_close + 1;
+            continue;
+        }
+
         let value = match token {
             "tool_path" => ctx.tool_path.to_string_lossy().to_string(),
             "project_path" => ctx
@@ -751,5 +760,12 @@ mod tests {
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
         let got = expand_env_value("${MY_HOST}-{tool_path}", &ctx, &host_env).unwrap();
         assert_eq!(got, "hello-/tool.yaml");
+    }
+
+    #[test]
+    fn template_leaves_empty_braces_literal() {
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let got = expand_template("print('{}') {tool_path}", &ctx).unwrap();
+        assert_eq!(got, "print('{}') /tool.yaml");
     }
 }
