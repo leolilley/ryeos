@@ -46,7 +46,7 @@ jobs:
         run: |
           # Extract the compiled-in fingerprint from source (may span 2 lines).
           EXPECTED=$(grep -A1 'OFFICIAL_PUBLISHER_FP.*&str' \
-            crates/core/node/src/init.rs \
+            crates/daemon/ryeos-node/src/init.rs \
             | grep -oE '[0-9a-f]{64}' | head -1)
           echo "Compiled-in OFFICIAL_PUBLISHER_FP: $EXPECTED"
 
@@ -65,7 +65,7 @@ jobs:
           if [ "$EXPECTED" != "$ACTUAL" ]; then
             echo "::error::Publisher key fingerprint mismatch: secret=$ACTUAL compiled=$EXPECTED"
             echo "The RYEOS_PUBLISHER_KEY secret does not match the OFFICIAL_PUBLISHER_FP"
-            echo "compiled into crates/core/node/src/init.rs."
+            echo "compiled into crates/daemon/ryeos-node/src/init.rs."
             echo "Either update the secret or update the source constant."
             exit 1
           fi

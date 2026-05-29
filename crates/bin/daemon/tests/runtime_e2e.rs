@@ -798,8 +798,8 @@ config:
 fn grep_gate_no_kind_name_branching_in_dispatch_code() {
     let workspace = common::workspace_root();
     let execute_mode =
-        workspace.join("crates/services/api/src/routes/response_modes/execute_mode.rs");
-    let dispatch_rs = workspace.join("crates/core/executor/src/dispatch.rs");
+        workspace.join("crates/daemon/ryeos-api/src/routes/response_modes/execute_mode.rs");
+    let dispatch_rs = workspace.join("crates/engine/ryeos-executor/src/dispatch.rs");
 
     // Walk the file directly so we can:
     //   (a) reliably skip lines inside `#[cfg(test)]` modules — test

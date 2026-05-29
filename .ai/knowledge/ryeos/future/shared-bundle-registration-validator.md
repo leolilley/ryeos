@@ -28,12 +28,12 @@ The current implementation intentionally mirrors bootstrap loader semantics in `
 
 Two code paths validate installed bundle registrations:
 
-1. `crates/core/app/src/node_config/loader.rs`
+1. `crates/daemon/ryeos-app/src/node_config/loader.rs`
    - `BootstrapLoader::load_bundle_section()` scans `<system>/.ai/node/bundles/*.yaml`.
    - It verifies signatures/trust, parses structured YAML, enforces `section == bundles`, canonicalizes paths, rejects symlinks/non-regular files, and detects collisions.
    - This is daemon bootstrap's source of truth for effective bundle roots.
 
-2. `crates/core/bundle/src/installed.rs`
+2. `crates/daemon/ryeos-bundle/src/installed.rs`
    - `load_installed_bundle_records()` scans the same registration directory for planner/preflight use.
    - It mirrors the bootstrap semantics and additionally requires a regular signed installed `.ai/manifest.yaml` whose `provides_kinds` matches on-disk schemas.
    - This replaced raw `.ai/bundles/*` scans so ambient unregistered state no longer affects preflight.
@@ -83,13 +83,13 @@ ryeos-app    ──▶ ryeos-engine
 If adding `ryeos-app -> ryeos-bundle` creates no cycle, use:
 
 ```text
-crates/core/bundle/src/registration.rs
+crates/daemon/ryeos-bundle/src/registration.rs
 ```
 
 If it creates an undesirable dependency, create a smaller neutral crate:
 
 ```text
-crates/core/bundle-registration/
+crates/daemon/ryeos-bundle-registration/
 ```
 
 The neutral crate should depend only on:
@@ -230,7 +230,7 @@ This validation should remain separate so daemon bootstrap can choose whether to
 
 Create `registration.rs` in the chosen low-level crate.
 
-Move these concepts out of `crates/core/bundle/src/installed.rs`:
+Move these concepts out of `crates/daemon/ryeos-bundle/src/installed.rs`:
 
 - `BundleRegistrationBody`
 - YAML signature envelope helper
@@ -270,7 +270,7 @@ pub fn load_installed_bundle_records_with_trust(
 
 ### Step 2: Update daemon bootstrap loader
 
-In `crates/core/app/src/node_config/loader.rs`, replace the bespoke `load_bundle_section()` scan with the shared directory loader.
+In `crates/daemon/ryeos-app/src/node_config/loader.rs`, replace the bespoke `load_bundle_section()` scan with the shared directory loader.
 
 Preserve the public return type `Vec<BundleRecord>` by mapping shared records:
 

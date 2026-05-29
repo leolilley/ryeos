@@ -482,7 +482,7 @@ async fn service_maintenance_gc_dry_run_returns_stats() {
     )
     .await;
     let result = unwrap_result(status, &body, "maintenance.gc dry");
-    // GcResult fields (see crates/core/state/src/gc/mod.rs:47-56).
+    // GcResult fields (see crates/state/ryeos-state/src/gc/mod.rs:47-56).
     let obj = result.as_object().expect("gc returns object");
     for required in [
         "roots_walked",

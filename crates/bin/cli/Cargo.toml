@@ -28,12 +28,12 @@ tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 lillux         = { path = "../../kernel/lillux" }
-ryeos-app      = { path = "../../core/app" }
-ryeos-bundle   = { path = "../../core/bundle" }
-ryeos-engine   = { path = "../../core/engine" }
-ryeos-node     = { path = "../../core/node" }
-ryeos-runtime  = { path = "../../core/runtime" }
-ryeos-state    = { path = "../../core/state" }
+ryeos-app      = { path = "../../daemon/ryeos-app" }
+ryeos-bundle   = { path = "../../daemon/ryeos-bundle" }
+ryeos-engine   = { path = "../../engine/ryeos-engine" }
+ryeos-node     = { path = "../../daemon/ryeos-node" }
+ryeos-runtime  = { path = "../../engine/ryeos-runtime" }
+ryeos-state    = { path = "../../state/ryeos-state" }
 ryeos-tools    = { path = "../../tools/core-tools" }
 
 [dev-dependencies]

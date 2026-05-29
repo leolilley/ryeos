@@ -27,8 +27,8 @@ The daemon startup path now builds routes from a composed view of the system:
 - API built-in event stream sources plus UI-registered session events.
 - API static response substrate plus UI-registered web asset provider.
 
-That is the right boundary: `crates/services/api` stays a generic route
-substrate, `crates/services/ui` owns browser/UI semantics, and
+That is the right boundary: `crates/daemon/ryeos-api` stays a generic route
+substrate, `crates/daemon/ryeos-ui` owns browser/UI semantics, and
 `crates/bin/daemon` is the composition root.
 
 The future route-reload path should preserve that same composition. It should

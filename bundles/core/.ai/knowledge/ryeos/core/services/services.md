@@ -17,7 +17,7 @@ can be exposed through `/execute`, through a dedicated HTTP route,
 through a CLI verb/alias, or through multiple surfaces at once.
 
 Service descriptors live under `.ai/services/`; the Rust handlers live
-under `crates/services/api/src/handlers/` and export `DESCRIPTOR`
+under `crates/daemon/ryeos-api/src/handlers/` and export `DESCRIPTOR`
 records consumed by the daemon registry.
 
 ## Bundle Services

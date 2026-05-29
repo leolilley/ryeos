@@ -251,31 +251,7 @@ fn rfc3339_to_systemtime(s: &str) -> Option<std::time::SystemTime> {
 /// known-acceptable hole — that path is rare and republishing is one
 /// command.
 fn bundle_inputs_newer_than(root: &Path, published: std::time::SystemTime) -> bool {
-    const SOURCE_CRATES: &[&str] = &[
-        "ryeos-runtime",
-        "ryeos-directive-runtime",
-        "ryeos-graph-runtime",
-        "ryeos-knowledge-runtime",
-        "ryeos-handler-bins",
-        "ryeos-tools",
-        "ryeos-cli",
-        "ryeosd",
-    ];
-    for crate_name in SOURCE_CRATES {
-        let src_dir = root.join(crate_name).join("src");
-        if dir_has_newer(&src_dir, published) {
-            return true;
-        }
-        let cargo_toml = root.join(crate_name).join("Cargo.toml");
-        if std::fs::metadata(&cargo_toml)
-            .and_then(|m| m.modified())
-            .map(|m| m > published)
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
+    dir_has_newer(&root.join("crates"), published)
 }
 
 fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
@@ -288,10 +264,14 @@ fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
             if dir_has_newer(&p, published) {
                 return true;
             }
-        } else if let Ok(m) = entry.metadata() {
-            if let Ok(modified) = m.modified() {
-                if modified > published {
-                    return true;
+        } else if p.file_name().is_some_and(|name| name == "Cargo.toml")
+            || p.extension().is_some_and(|ext| ext == "rs")
+        {
+            if let Ok(m) = entry.metadata() {
+                if let Ok(modified) = m.modified() {
+                    if modified > published {
+                        return true;
+                    }
                 }
             }
         }

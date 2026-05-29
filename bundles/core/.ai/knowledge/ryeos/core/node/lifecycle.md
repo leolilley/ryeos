@@ -9,7 +9,7 @@ description: >
 
 # Local Node Lifecycle (`ryeos-node`)
 
-`crates/core/node` (`ryeos-node`) is the single owner of local-node
+`crates/daemon/ryeos-node` (`ryeos-node`) is the single owner of local-node
 lifecycle and bootstrap semantics. The supported user lifecycle surface
 is exactly four verbs:
 

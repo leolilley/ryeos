@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-29T01:50:19Z:9ce478c0f88bf20fa781cb1d58ea3de67a642dd7027d2f821d40d1d003a91797:PtI5Dj8mZGqA1GFnSun+Wmk8evFFkT13xPorXMLxmcGqH/O1P5mhgfY630yp79JOpzYp3pvKouhZo3MDLM8cCw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-29T03:56:05Z:ebd7fd690e2f24a42d79f3019e899319d1ab6245a0fafcc1cb15dce5a52ccf16:7+IAFm+ilgTSZPf0Q2BRMfyxiQ1yO7YS9DLPcTo9fl3vrUaaPTt1U5Rn/BE6lJqDOUiDnH7kpu/d5jmgrPSnBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ```yaml
 category: ryeos/future
@@ -469,6 +469,187 @@ Those paths should preserve:
 Canvas v0 does not need a shared execution abstraction. But if frame validators, local runtime hooks, CLI commands, daemon workers, and offline tools start needing identical launch semantics, execution should be centralized below those callers rather than reimplementing descriptor parsing and dispatch repeatedly.
 
 Until then, keep the first creative-space slice declarative and avoid building a broad executor too early.
+
+## Remote-execution implementation context to absorb
+
+The temporary remote-execution implementation notes in `.tmp/remote-execution-impl/` contain additional distributed-systems context that matters for creative spaces. They are not creative-space docs, but several principles should carry forward.
+
+### v1 remotes are operator-trusted, not multi-tenant
+
+The remote-execution v1 trust boundary is explicit:
+
+```text
+v1 remote execution is for operator-trusted remotes, not mutually untrusted tenants.
+CAS is shared/global within a node; capability checks protect access, not storage partitioning.
+Vault is a single shared store in v1; capability checks protect mutation/listing, not per-principal isolation.
+```
+
+Creative spaces should not accidentally inherit this as a permanent product promise. Canvas v0 and early alpha nodes can be operator-trusted, but public creative nodes eventually need stronger boundaries:
+
+- per-principal CAS attribution/manifests;
+- quota/GC ownership;
+- per-principal vault partitioning if secrets are involved;
+- clearer tenant isolation;
+- node policy that distinguishes trusted operators from public creators.
+
+### Clean-base conflict detection maps to region heads and graph branches
+
+Remote execution's pull/apply design requires the exact pushed base manifest. Recomputing the base later is wrong because local state may have drifted.
+
+Creative spaces have the same shape:
+
+```text
+base region head
+  -> proposed module/event
+  -> validation/admission
+  -> advance head only if base still matches policy
+```
+
+If the base changed, do not blindly overwrite. Create a branch/conflict object, ask for merge policy, or let the cockpit show alternate graph branches.
+
+### Async remote work requires a real job/result model, not polling bolted on
+
+Phase 5 notes that long-running remote jobs need a persisted push-base journal and a real async job/result model. Polling a synchronous orchestrator is not enough.
+
+Creative spaces will eventually have long-running validators, directive entities, graph simulations, and node admissions. Those should be represented as durable jobs with:
+
+- persisted base/input hashes;
+- status;
+- result object hashes;
+- validation diagnostics;
+- recovery metadata;
+- cancellation policy;
+- replay/provenance links.
+
+Do not fake this with ad hoc polling once admissions or simulations outlive the user's current request.
+
+### Bundle sync becomes frame distribution
+
+Remote-execution notes defer CAS-sourced bundle export/install until operators need cross-node bundle deployment.
+
+Creative spaces are likely to trigger this sooner because frames are bundles:
+
+```text
+frame schemas
+validators
+render primitives
+projection assets
+directive entity templates
+example modules
+```
+
+A node that accepts `frame:rye-canvas-v0` needs peers to fetch the exact frame bundle/closure that validated and rendered the modules. CAS-sourced bundle sync is therefore part of the later frame federation story.
+
+### Request-scoped trust overlays may matter for public submissions
+
+Remote execution defers request-scoped trust overlays because the engine trust store is boot-time.
+
+Creative nodes may eventually need to validate submissions from creators whose keys are not permanently pinned in the node's global trust store, or whose trust is scoped to one frame/region/admission request.
+
+This does not block Canvas v0, but public creative nodes may need:
+
+- per-request trust overlays;
+- scoped signer authority;
+- temporary submission keys;
+- policy-bound trust rather than global trust pins.
+
+### CAS debugging and arbitrary hash pull are product primitives for worlds
+
+Remote execution treats arbitrary remote hash pull as an operator debugging convenience. In creative spaces, pulling object hashes and dependency closures becomes a core product primitive.
+
+World tooling needs:
+
+```text
+pull this module hash
+pull this module plus closure
+pull this admission and target
+pull this frame bundle closure
+pull this region head graph
+```
+
+The existing `objects_get` shape is a seed, but world sync needs closure-aware object graph pulls.
+
+### Chunked transfer and availability become important with media-heavy worlds
+
+Remote execution defers chunked transfer until blobs exceed roughly 100 MB or unreliable links cause push/pull failures.
+
+Creative spaces may hit that faster because worlds can include textures, models, generated assets, videos, audio, or large simulation artifacts. The world protocol should eventually plan for:
+
+- chunked upload/download;
+- resumable transfer;
+- pinned dependency closures;
+- missing dependency diagnostics;
+- archival/mirror nodes;
+- placeholder rendering when heavy assets are unavailable.
+
+### mTLS/TLS pinning remains secondary to signing keys, but may be required by deployments
+
+Remote execution's stance is that HTTPS + TOFU + signed requests is enough for v1; the signing key remains identity, not the TLS cert.
+
+Creative spaces can keep the same stance initially. But compliance-heavy or public nodes may need mTLS/TLS pinning as a transport hardening layer without changing the underlying identity model.
+
+### Persistent remote workspaces map to long-lived node simulations
+
+Remote execution defers per-principal persistent workspaces until checkout cost dominates runtime.
+
+Creative spaces may later need long-lived per-principal or per-region runtime state for simulations, validators, or directive entities. The same caution applies: do not add persistent workspaces until temp/CAS materialization cost is the actual bottleneck.
+
+### Typed `HandlerContext` matters for principal-aware creative APIs
+
+Remote-execution notes identify `_caller_fingerprint` / `_caller_scopes` injection as a pattern that becomes brittle as principal-aware handlers grow.
+
+Creative spaces will add many principal-aware APIs:
+
+- submit module;
+- sign draft;
+- admit module;
+- advance region head;
+- list private drafts;
+- subscribe to node events;
+- run directive entity;
+- inspect collaborator state.
+
+A typed `HandlerContext` becomes more important as this surface grows.
+
+### Registry with namespace claims maps to multi-publisher frames
+
+Remote execution defers a registry with namespace claims until multiple teams publish bundles.
+
+Creative spaces likely create that pressure once people publish frames, projection packs, validators, directive entities, and style packs. This is not needed for the first alpha, but it is part of the multi-publisher world protocol.
+
+### Daemon-to-daemon and cluster federation are part of the long-term cloud path
+
+The older remote-execution notes treated daemon-to-daemon forwarding as excluded, but that decision has since been superseded. RyeOS is moving toward fuller cloud functionality: storage-backed nodes, node-to-node behavior, and cluster federation.
+
+Creative spaces should absorb the newer direction, not the older exclusion. Long-term world nodes may need to coordinate directly for:
+
+- object graph replication;
+- storage/availability mirroring;
+- frame bundle distribution;
+- node admission federation;
+- remote validation;
+- graph or directive execution on a capable node;
+- cluster-local routing;
+- failover and archival nodes;
+- shared indexes across a cluster.
+
+The caution that remains useful is about authority and provenance. Daemon-to-daemon behavior should be explicit, signed, policy-bound, and inspectable. A node should not silently launder authority by forwarding arbitrary execution without preserving:
+
+- source node identity;
+- target node identity;
+- initiating principal;
+- frame/policy context;
+- input object hashes;
+- output object hashes;
+- validation/admission records;
+- replayable graph events.
+
+So the updated principle is:
+
+```text
+daemon-to-daemon is allowed for cloud/cluster federation,
+but every hop must preserve signed provenance and policy authority.
+```
 
 ## Working phrases
 

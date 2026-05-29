@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-28T09:17:07Z:62e8224d7abe45fc9ee3013da36a96af963ff53867b85e656361b105b8083c78:wVgK26TE0HYzm7bBjBkBbPXy4mIbtkURSIPP88J1dX3jTwOg6E7fzxnlr5T0aw5PpoD/WE/jtgpTM87Gyw/gAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-29T03:56:05Z:6686ede3ed1a4b97897558f0e1562ac3652e1a50b68c88d5a8e74162cebf6012:i0C4yz04XJZKrLnLhcJ368HWLanQpOw4PnMiSfJB96Q1QztibCqOkSKEJufFywl1XBczKz88Zmz64YoW1PPLCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: ryeos/future
 name: ryeos-substrate-roadmap
@@ -649,6 +649,19 @@ Later, nodes should be able to exchange:
 - rejection/quarantine metadata if policy allows;
 - subscription cursors;
 - availability information.
+
+The long-term RyeOS cloud direction also includes storage-backed nodes and cluster federation. Creative spaces should be designed so node-to-node behavior can grow from simple mirroring into richer cluster coordination:
+
+- object graph replication;
+- storage/availability routing;
+- frame bundle distribution;
+- node admission federation;
+- remote validation;
+- graph or directive execution on a capable node;
+- failover/archive nodes;
+- shared cluster indexes.
+
+The rule is not "no daemon-to-daemon". The rule is that daemon-to-daemon behavior must preserve signed provenance, explicit target/source identity, initiating principal, policy context, input/output object hashes, and replayable events.
 
 Nodes may choose to mirror, ignore, quarantine, or revalidate objects from other nodes.
 

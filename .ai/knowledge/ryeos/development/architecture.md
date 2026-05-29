@@ -18,10 +18,10 @@ full design document.
 | Area | Path | Owns |
 |---|---|---|
 | Crypto | `crates/kernel/lillux/` | Ed25519/X25519/SHA primitives and signatures |
-| Engine | `crates/core/engine/` | item resolution, trust verification, composition, plans |
-| App | `crates/core/app/` | daemon/app config, engine boot, node-config loading |
-| State | `crates/core/state/` | SQLite state, CAS objects, thread state |
-| Runtime shared | `crates/core/runtime/` | callback client, runtime envelopes/types |
+| Engine | `crates/engine/ryeos-engine/` | item resolution, trust verification, composition, plans |
+| App | `crates/daemon/ryeos-app/` | daemon/app config, engine boot, node-config loading |
+| State | `crates/state/ryeos-state/` | SQLite state, CAS objects, thread state |
+| Runtime shared | `crates/engine/ryeos-runtime/` | callback client, runtime envelopes/types |
 | Tools | `crates/tools/core-tools/` | init, bundle build/verify, trust, vault, sign/fetch actions |
 | CLI | `crates/bin/cli/` | `ryeos` command dispatch and daemon transport |
 | Daemon | `crates/bin/daemon/` | HTTP/UDS server and execution API |
@@ -81,13 +81,13 @@ generic composed dispatch fields. Avoid kind-specific CLI descriptor parsing.
 
 | Need | Likely area |
 |---|---|
-| Item resolution/composition behavior | `crates/core/engine/src/` |
-| Node-config/bootstrap/bundle root loading | `crates/core/app/src/node_config/` and `crates/core/bundle/src/installed.rs` |
+| Item resolution/composition behavior | `crates/engine/ryeos-engine/src/` |
+| Node-config/bootstrap/bundle root loading | `crates/daemon/ryeos-app/src/node_config/` and `crates/daemon/ryeos-bundle/src/installed.rs` |
 | CLI command behavior | `crates/bin/cli/src/` plus bundle alias/verb descriptors |
 | Offline command execution | `crates/bin/cli/src/offline_dispatch.rs` |
 | Help output | `crates/bin/cli/src/help.rs` |
 | Init/publish/sign/vault tooling | `crates/tools/core-tools/src/actions/` |
-| Runtime protocol semantics | `crates/core/runtime/`, `crates/runtimes/*`, bundle protocol descriptors |
+| Runtime protocol semantics | `crates/engine/ryeos-runtime/`, `crates/runtimes/*`, bundle protocol descriptors |
 
 ## Guardrails for agents
 

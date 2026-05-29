@@ -63,7 +63,7 @@ Full confidence:
 |---|---|
 | CLI | `crates/bin/cli/src/` |
 | Daemon | `crates/bin/daemon/src/` |
-| Engine | `crates/core/engine/src/` |
+| Engine | `crates/engine/ryeos-engine/src/` |
 | Core tools/actions | `crates/tools/core-tools/src/actions/` |
 | TUI shared model | `crates/clients/base/src/` |
 | TUI terminal client | `crates/clients/terminal/src/` |

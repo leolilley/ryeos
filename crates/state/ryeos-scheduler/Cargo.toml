@@ -1,0 +1,26 @@
+[package]
+name = "ryeos-scheduler"
+version = "0.1.0"
+edition = "2021"
+description = "Scheduler for ryeosd — cron, timers, SQLite projection"
+license = "MIT"
+repository = "https://github.com/leolilley/ryeos"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+chrono-tz = "0.10"
+cron = "0.16"
+lillux = { path = "../../kernel/lillux" }
+ryeos-engine = { path = "../../engine/ryeos-engine" }
+ryeos-state = { path = "../ryeos-state" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+ryeos-engine = { path = "../../engine/ryeos-engine", features = ["test-support"] }

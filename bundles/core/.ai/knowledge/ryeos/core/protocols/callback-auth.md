@@ -17,7 +17,7 @@ effective capability set authorizes the requested item before dispatch.
 ## Token types
 
 The daemon mints two independent per-thread tokens in
-`crates/core/app/src/callback_token.rs`:
+`crates/daemon/ryeos-app/src/callback_token.rs`:
 
 - `CallbackCapability` (`cbt-...`) carries thread id, project path,
   composed `effective_caps`, expiry, and required `ExecutionProvenance`
@@ -30,7 +30,7 @@ validation also checks the project path for dispatch calls.
 
 ## Environment injection
 
-`mint_callback_env()` in `crates/core/executor/src/execution/runner.rs:572-631`
+`mint_callback_env()` in `crates/engine/ryeos-executor/src/execution/runner.rs:572-631`
 injects the runtime callback contract:
 
 - `RYEOSD_SOCKET_PATH`
@@ -54,7 +54,7 @@ is used when minting callback capability and thread-auth state.
 The runtime cannot self-authorize callbacks. `runtime.dispatch_action`
 loads the callback token, reads its composed `effective_caps`, and calls
 `enforce_callback_caps()` before dispatch reaches the schema loop
-(`crates/core/executor/src/execution/runtime_dispatch.rs:44-50`,
+(`crates/engine/ryeos-executor/src/execution/runtime_dispatch.rs:44-50`,
 `runtime_dispatch.rs:73-101`). Empty caps are deny-all; wildcard and
 path-prefix matching are delegated to the unified authorizer.
 

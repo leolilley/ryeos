@@ -15,7 +15,7 @@ and snapshot lifecycle that execution is allowed to own.
 
 ## The four legal shapes
 
-`crates/core/app/src/execution_provenance.rs:41-84` defines the complete
+`crates/daemon/ryeos-app/src/execution_provenance.rs:41-84` defines the complete
 role × source matrix:
 
 | Variant | Source | Role | Owns snapshot lineage? |
@@ -48,12 +48,12 @@ those fields.
 ## Lifecycle gates
 
 The runner asks `provenance.is_borrowed_child()` before snapshot pinning
-and post-execution foldback (`crates/core/executor/src/execution/runner.rs:775-785`).
+and post-execution foldback (`crates/engine/ryeos-executor/src/execution/runner.rs:775-785`).
 Root pushed-head executions own pin/foldback. Borrowed children inherit
 the parent's working directory and must not touch snapshot lifecycle.
 
 CAS context preparation is variant-matched in
-`crates/core/executor/src/execution/runner.rs:241-317`. Root LiveFs ingests the
+`crates/engine/ryeos-executor/src/execution/runner.rs:241-317`. Root LiveFs ingests the
 live tree, Root PushedHead tracks the lifeline and reads the pre-manifest,
 and borrowed variants validate the borrowed directory and return no
 manifest/snapshot.

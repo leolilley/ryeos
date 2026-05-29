@@ -164,7 +164,7 @@ pub fn build_overlays(model: &AppModel, viewport: Rect) -> Vec<crate::frame::Ove
                     .unwrap_or_else(|| "—".into())
             };
 
-            let mut help_lines: Vec<(String, bool)> = vec![
+            let help_lines: Vec<(String, bool)> = vec![
                 ("Rye OS TUI — Keybindings".into(), false),
                 ("".into(), false),
                 ("  Global:".into(), true),

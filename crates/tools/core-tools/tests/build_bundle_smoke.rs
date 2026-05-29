@@ -427,7 +427,7 @@ fn workspace_root() -> std::path::PathBuf {
 }
 
 fn api_handler_service_refs() -> Vec<String> {
-    let handlers_dir = workspace_root().join("crates/services/api/src/handlers");
+    let handlers_dir = workspace_root().join("crates/daemon/ryeos-api/src/handlers");
     let mod_rs = std::fs::read_to_string(handlers_dir.join("mod.rs")).unwrap();
 
     let mut module_names = Vec::new();
