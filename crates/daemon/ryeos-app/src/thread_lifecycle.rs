@@ -8,6 +8,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail, EnvSourceKind};
 use crate::event_store_service::EventStoreService;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
@@ -17,7 +18,7 @@ use crate::state_store::{
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
-    FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem,
+    FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem, RuntimeEnvSource,
     ThreadTerminalStatus, TrustClass,
 };
 use ryeos_engine::engine::Engine;
@@ -859,6 +860,7 @@ pub struct SpawnItemParams<'a> {
     pub chain_root_id: &'a str,
     pub vault_bindings: std::collections::HashMap<String, String>,
     pub daemon_callback_env: std::collections::HashMap<String, String>,
+    pub roots: DaemonRootEnv,
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
@@ -883,6 +885,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         chain_root_id,
         vault_bindings,
         daemon_callback_env,
+        roots,
         thread_state_dir,
         is_resume,
         original_snapshot_hash,
@@ -919,54 +922,107 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let base_env = crate::process::build_spawn_env(&secret_map)
-        .map_err(|e| anyhow!("build subprocess env contract: {e}"))?;
-    for node in &mut plan.nodes {
-        if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
-            // Seed allowlisted parent env + daemon-resolved roots +
-            // declared secrets. `insert` overwrites parent-snapshotted
-            // values with daemon-resolved values; plan-builder-set
-            // RYE_* vars (RYEOS_ITEM_KIND, RYEOS_SITE_ID, ...) are
-            // preserved because they don't collide with the allowlist.
-            for (k, v) in &base_env {
-                spec.env.insert(k.clone(), v.clone());
-            }
-            // Layer daemon callback env last — daemon-controlled infra
-            // must always win over anything else.
-            spec.env.extend(
-                daemon_callback_env
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone())),
-            );
-        }
-    }
 
-    // Allocate the per-thread checkpoint directory and inject
-    // RYEOS_CHECKPOINT_DIR / RYEOS_RESUME into the subprocess env when the
-    // spec declares `native_resume`. This is intentionally done at
-    // spawn time rather than in the engine handler because the path
-    // depends on the daemon-owned `<thread_state_dir>`. See
-    // `RuntimeLaunchMetadata::checkpoint_dir`.
+    // Allocate native-resume env before final env composition so the
+    // builder remains the final authority. Preserve the existing
+    // FirstWins behavior: only the first native_resume subprocess gets
+    // the checkpoint/resume bindings.
     let mut allocated_checkpoint_dir: Option<std::path::PathBuf> = None;
+    let mut resume_env_for_first_native_resume: Option<Vec<EnvBinding>> = None;
     if let Some(ts_dir) = thread_state_dir {
-        for node in &mut plan.nodes {
+        for node in &plan.nodes {
             if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
                 if spec.execution.native_resume.is_some() {
                     let ckpt = ts_dir.join("checkpoints");
                     std::fs::create_dir_all(&ckpt).map_err(|e| {
                         anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
                     })?;
-                    spec.env.insert(
-                        "RYEOS_CHECKPOINT_DIR".to_string(),
+                    let mut bindings = vec![EnvBinding::new(
+                        "RYEOS_CHECKPOINT_DIR",
                         ckpt.display().to_string(),
-                    );
+                        EnvSourceDetail::DaemonResume,
+                    )];
                     if is_resume {
-                        spec.env.insert("RYEOS_RESUME".to_string(), "1".to_string());
+                        bindings.push(EnvBinding::new(
+                            "RYEOS_RESUME",
+                            "1",
+                            EnvSourceDetail::DaemonResume,
+                        ));
                     }
                     allocated_checkpoint_dir = Some(ckpt);
+                    resume_env_for_first_native_resume = Some(bindings);
                     break; // first DispatchSubprocess wins, mirrors FirstWins
                 }
             }
+        }
+    }
+
+    for node in &mut plan.nodes {
+        if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
+            let mut builder = crate::env_contract::EnvContractBuilder::new()
+                .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                }))?
+                .with_daemon_roots(roots.clone())?
+                .with_bindings(
+                    EnvSourceKind::DeclaredSecret,
+                    secret_map.iter().map(|(k, v)| (k.clone(), v.clone())),
+                )?;
+
+            builder = builder.with_typed_bindings([
+                EnvBinding::new(
+                    "RYEOS_THREAD_ID",
+                    thread_id.to_string(),
+                    EnvSourceDetail::EnginePlanEnv,
+                ),
+                EnvBinding::new(
+                    "RYEOS_CHAIN_ROOT_ID",
+                    chain_root_id.to_string(),
+                    EnvSourceDetail::EnginePlanEnv,
+                ),
+            ])?;
+
+            let runtime_bindings = spec.env.iter().map(|(key, value)| {
+                let source = match spec.env_sources.get(key).copied() {
+                    Some(RuntimeEnvSource::EnginePlan) => EnvSourceDetail::EnginePlanEnv,
+                    Some(RuntimeEnvSource::RuntimeInterpreter) => {
+                        EnvSourceDetail::RuntimeInterpreter
+                    }
+                    Some(RuntimeEnvSource::RuntimePathMutation) => {
+                        EnvSourceDetail::RuntimePathMutation
+                    }
+                    Some(RuntimeEnvSource::RuntimeDescriptor) | None => {
+                        EnvSourceDetail::RuntimeDescriptor
+                    }
+                };
+                EnvBinding::new(key.clone(), value.clone(), source)
+            });
+            builder = builder.with_typed_bindings(runtime_bindings)?;
+
+            let daemon_callback_bindings = daemon_callback_env.iter().filter_map(|(key, value)| {
+                if key == "USER_SPACE" || key == "RYEOS_SYSTEM_SPACE_DIR" {
+                    None
+                } else {
+                    Some(EnvBinding::new(
+                        key.clone(),
+                        value.clone(),
+                        EnvSourceDetail::DaemonCallback,
+                    ))
+                }
+            });
+            builder = builder.with_typed_bindings(daemon_callback_bindings)?;
+
+            if spec.execution.native_resume.is_some() {
+                if let Some(resume_bindings) = resume_env_for_first_native_resume.take() {
+                    builder = builder.with_typed_bindings(resume_bindings)?;
+                }
+            }
+
+            spec.env = builder.build().into_iter().collect();
+            spec.env_sources.clear();
         }
     }
 

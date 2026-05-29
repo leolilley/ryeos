@@ -469,6 +469,7 @@ pub(crate) fn preflight_inject_provider_secret(
     vault: &dyn ryeos_app::vault::NodeVault,
     acting_principal: &str,
     item_ref_str: &str,
+    dotenv_search_dirs: &[std::path::PathBuf],
     bindings: &mut std::collections::HashMap<String, String>,
 ) -> Result<ryeos_runtime::ResolvedProviderSnapshot, MaterializationError> {
     let header = ryeos_runtime::model_resolution::DirectiveModelHeader {
@@ -481,6 +482,8 @@ pub(crate) fn preflight_inject_provider_secret(
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
 
     if let Some(env_var) = resolved_target.provider.auth.env_var.as_deref() {
+        ryeos_app::process::validate_spawn_secret_name(env_var)
+            .map_err(|e| MaterializationError::Internal(e.to_string()))?;
         // If the secret is already present in bindings (e.g. from
         // `read_required_secrets` which layers vault + dotenv overlay),
         // skip the vault read — the dispatch path already resolved it.
@@ -491,8 +494,13 @@ pub(crate) fn preflight_inject_provider_secret(
                 "vault: provider secret already in bindings (likely from dotenv overlay)"
             );
         } else {
-            match ryeos_app::vault::read_named_secret(vault, acting_principal, env_var)
-                .map_err(|e| MaterializationError::Internal(e.to_string()))?
+            match ryeos_app::vault::read_explicit_secret(
+                vault,
+                acting_principal,
+                env_var,
+                dotenv_search_dirs,
+            )
+            .map_err(|e| MaterializationError::Internal(e.to_string()))?
             {
                 Some(value) => {
                     bindings.insert(env_var.to_string(), value);
@@ -818,12 +826,14 @@ pub async fn build_and_launch(
     //     inject only that provider's secret from the vault. Fail loud here
     //     so the operator gets a clear remediation hint before spawn.
     let mut effective_vault = vault_bindings.clone();
+    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
     let provider_snapshot = preflight_inject_provider_secret(
         &resolution.composed,
         &engine_roots,
         state.vault.as_ref(),
         acting_principal,
         &resolved.item_ref,
+        &dotenv_dirs,
         &mut effective_vault,
     )?;
 
@@ -932,6 +942,13 @@ pub async fn build_and_launch(
         ttl,
     );
     let tat_owned = thread_auth.token.clone();
+    let runtime_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+        &engine_roots,
+        &state.config.system_space_dir,
+    );
+    let provider_secret_name = provider_snapshot.provider.auth.env_var.clone();
+    let system_space_dir_owned = state.config.system_space_dir.clone();
+    let cas_root_owned = state.config.system_space_dir.join("cas");
 
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(SpawnRuntimeParams {
@@ -943,7 +960,11 @@ pub async fn build_and_launch(
             callback: &callback_owned,
             thread_id: &thread_id_owned,
             vault_bindings: &vault_owned,
+            provider_secret_name: provider_secret_name.as_deref(),
             thread_auth_token: &tat_owned,
+            roots: runtime_roots,
+            system_space_dir: &system_space_dir_owned,
+            cas_root: &cas_root_owned,
         })
     })
     .await
@@ -1067,7 +1088,11 @@ struct SpawnRuntimeParams<'a> {
     callback: &'a EnvelopeCallback,
     thread_id: &'a str,
     vault_bindings: &'a [(String, String)],
+    provider_secret_name: Option<&'a str>,
     thread_auth_token: &'a str,
+    roots: ryeos_app::env_contract::DaemonRootEnv,
+    system_space_dir: &'a Path,
+    cas_root: &'a Path,
 }
 
 fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
@@ -1080,13 +1105,14 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         callback,
         thread_id,
         vault_bindings,
+        provider_secret_name,
         thread_auth_token,
+        roots,
+        system_space_dir,
+        cas_root,
     } = params;
-    // Build the base env: allowlisted parent vars + declared secrets.
-    // The builder adds descriptor-declared injection env vars on top.
     let secret_map: std::collections::BTreeMap<String, String> =
         vault_bindings.iter().cloned().collect();
-    let base_env = ryeos_app::process::build_spawn_env(&secret_map)?;
 
     // Use the protocol builder to produce the SubprocessSpec.
     let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
@@ -1109,23 +1135,56 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         vault_bindings,
         launch_envelope: Some(envelope),
         timeout: std::time::Duration::from_secs(timeout_secs),
-        acting_principal: "",     // not needed for env injection in runtime path
-        cas_root: Path::new("/"), // not needed for env injection in runtime path
-        system_space_dir: Path::new("/"), // not needed for env injection in runtime path
+        acting_principal: "", // not needed for env injection in runtime path
+        cas_root,
+        system_space_dir,
         thread_auth_token,
     };
 
     let mut spec = ryeos_engine::protocols::build_subprocess_spec(descriptor, &build_request)
         .map_err(|e| anyhow::anyhow!("builder failed: {e}"))?;
 
-    // Merge builder-produced injected env on top of base env.
-    // Base env has PATH, HOME, etc. + vault secrets.
-    // Builder env has the descriptor-declared injections (socket path, token, etc).
-    let mut merged_env: std::collections::BTreeMap<String, String> = base_env.into_iter().collect();
-    for (k, v) in &spec.env {
-        merged_env.insert(k.clone(), v.clone());
-    }
-    spec.env = merged_env.into_iter().collect();
+    let protocol_bindings = spec.env.iter().map(|(key, value)| {
+        let source = descriptor
+            .env_injections
+            .iter()
+            .find(|injection| injection.name == *key)
+            .map(|injection| injection.source)
+            .ok_or_else(|| anyhow::anyhow!("protocol builder emitted undeclared env `{key}`"))?;
+        Ok(ryeos_app::env_contract::EnvBinding::new(
+            key.clone(),
+            value.clone(),
+            ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection { source },
+        ))
+    });
+    let protocol_bindings: Vec<_> = protocol_bindings.collect::<Result<Vec<_>>>()?;
+
+    let declared_secret_bindings = secret_map
+        .iter()
+        .filter(|(key, _)| Some(key.as_str()) != provider_secret_name)
+        .map(|(key, value)| (key.clone(), value.clone()));
+    let provider_secret_bindings = secret_map
+        .iter()
+        .filter(|(key, _)| Some(key.as_str()) == provider_secret_name)
+        .map(|(key, value)| (key.clone(), value.clone()));
+    spec.env = ryeos_app::env_contract::EnvContractBuilder::new()
+        .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        }))?
+        .with_daemon_roots(roots)?
+        .with_bindings(
+            ryeos_app::env_contract::EnvSourceKind::DeclaredSecret,
+            declared_secret_bindings,
+        )?
+        .with_bindings(
+            ryeos_app::env_contract::EnvSourceKind::ProviderSecret,
+            provider_secret_bindings,
+        )?
+        .with_typed_bindings(protocol_bindings)?
+        .build();
 
     // sandbox_wrap is identity today; the sandbox wave fills it in.
     let spec = ryeos_engine::subprocess_spec::sandbox_wrap(spec)

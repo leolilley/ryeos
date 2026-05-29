@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::env_contract::{DaemonRootEnv, EnvContractBuilder, EnvSourceKind, BASE_ALLOWLIST_NAMES};
+
 /// Poll interval (ms) when waiting for a process group to exit after SIGTERM.
 const KILL_POLL_INTERVAL_MS: u64 = 100;
 
@@ -155,31 +157,38 @@ pub fn hard_kill_process_group(pgid: i64) -> KillResult {
     }
 }
 
-/// Allowlist of env keys the daemon propagates to subprocesses.
-/// Plus declared secrets injected separately by the dispatch path.
-const SPAWN_ENV_ALLOWLIST: &[&str] = &[
-    "PATH", // libc/linker bootstrap
-    "HOME", // libc/lib lookup
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TZ",
-    "TMPDIR",
-    "USER_SPACE",             // root discovery (set by daemon)
-    "RYEOS_SYSTEM_SPACE_DIR", // root discovery (set by daemon)
-    "RUST_LOG",
-    "RUST_BACKTRACE",
-    "RYEOSD_TEST_STDERR_DIR",
-    // Proxy + CA infrastructure — not secrets, needed for egress.
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "NO_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "no_proxy",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-];
+/// Validate an env var name before injecting it as a declared secret.
+///
+/// Declared secrets are real subprocess env vars, so they must not be
+/// allowed to shadow daemon/runtime control env, root discovery, proxy,
+/// CA, logging, or other inherited infrastructure names. Ordinary
+/// application secrets such as `SUPABASE_SERVICE_KEY` and
+/// `OXYLABS_PASSWORD` remain valid.
+pub fn validate_spawn_secret_name(name: &str) -> anyhow::Result<()> {
+    crate::env_contract::validate_secret_name(name)
+        .map_err(|e| anyhow::anyhow!("invalid subprocess secret env name `{name}`: {e:#}"))
+}
+
+fn host_env_snapshot_lossy() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+fn compatibility_daemon_roots() -> anyhow::Result<DaemonRootEnv> {
+    let user_root =
+        ryeos_engine::roots::user_root().context("resolve user root for subprocess env")?;
+    Ok(DaemonRootEnv {
+        user_space: Some(user_root.display().to_string()),
+        system_space_dir: std::env::var_os("RYEOS_SYSTEM_SPACE_DIR")
+            .map(|p| p.to_string_lossy().into_owned()),
+    })
+}
 
 /// Build the env map for a daemon-spawned subprocess.
 ///
@@ -198,24 +207,21 @@ const SPAWN_ENV_ALLOWLIST: &[&str] = &[
 pub fn build_spawn_env(
     declared_secrets: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let mut env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    build_spawn_env_with_roots(declared_secrets, compatibility_daemon_roots()?)
+}
 
-    for k in SPAWN_ENV_ALLOWLIST {
-        if let Some(v) = std::env::var_os(k) {
-            env.insert((*k).to_string(), v.to_string_lossy().into_owned());
-        }
-    }
-
-    // Daemon-resolved roots override whatever the parent env held.
-    let user_root =
-        ryeos_engine::roots::user_root().context("resolve user root for subprocess env")?;
-    env.insert("USER_SPACE".to_string(), user_root.display().to_string());
-
-    for (k, v) in declared_secrets {
-        env.insert(k.clone(), v.clone());
-    }
-
-    Ok(env.into_iter().collect())
+pub fn build_spawn_env_with_roots(
+    declared_secrets: &std::collections::BTreeMap<String, String>,
+    roots: DaemonRootEnv,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let secret_bindings = declared_secrets
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()));
+    Ok(EnvContractBuilder::new()
+        .with_base_allowlist(host_env_snapshot_lossy())?
+        .with_daemon_roots(roots)?
+        .with_bindings(EnvSourceKind::DeclaredSecret, secret_bindings)?
+        .build())
 }
 
 /// Build the env contract for a daemon-spawned subprocess that is
@@ -235,12 +241,31 @@ pub fn build_subprocess_envs(
     declared_secrets: &std::collections::BTreeMap<String, String>,
     per_spawn_env: &[(String, String)],
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let mut env = build_spawn_env(declared_secrets)?;
-    let preset: std::collections::HashSet<String> =
-        per_spawn_env.iter().map(|(k, _)| k.clone()).collect();
-    env.retain(|(k, _)| !preset.contains(k));
-    env.extend(per_spawn_env.iter().cloned());
-    Ok(env)
+    build_subprocess_envs_with_roots(
+        declared_secrets,
+        per_spawn_env,
+        compatibility_daemon_roots()?,
+    )
+}
+
+pub fn build_subprocess_envs_with_roots(
+    declared_secrets: &std::collections::BTreeMap<String, String>,
+    per_spawn_env: &[(String, String)],
+    roots: DaemonRootEnv,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let secret_bindings = declared_secrets
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()));
+    Ok(EnvContractBuilder::new()
+        .with_base_allowlist(host_env_snapshot_lossy())?
+        .with_daemon_roots(roots)?
+        .with_bindings(EnvSourceKind::DeclaredSecret, secret_bindings)?
+        .with_bindings(EnvSourceKind::PerSpawnDaemon, per_spawn_env.iter().cloned())?
+        .build())
+}
+
+pub fn subprocess_base_allowlist_names() -> &'static [&'static str] {
+    BASE_ALLOWLIST_NAMES
 }
 
 #[cfg(test)]
@@ -292,6 +317,47 @@ mod tests {
         let mut s = String::new();
         f.read_to_string(&mut s).ok()?;
         Some(s)
+    }
+
+    #[test]
+    fn spawn_secret_policy_allows_application_secret_names() {
+        validate_spawn_secret_name("SUPABASE_SERVICE_KEY").unwrap();
+        validate_spawn_secret_name("OXYLABS_PASSWORD").unwrap();
+    }
+
+    #[test]
+    fn spawn_secret_policy_rejects_protected_names() {
+        for name in [
+            "USER_SPACE",
+            "RYEOS_SYSTEM_SPACE_DIR",
+            "RYEOSD_THREAD_AUTH_TOKEN",
+            "RYEOS_PROJECT_SECRET",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "SSL_CERT_FILE",
+        ] {
+            let err = validate_spawn_secret_name(name).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("invalid subprocess secret env name"),
+                "expected protected-name rejection for {name}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_spawn_env_rejects_protected_secret_collision() {
+        let mut secrets = std::collections::BTreeMap::new();
+        secrets.insert("USER_SPACE".to_string(), "/tmp/evil".to_string());
+
+        let err = build_spawn_env(&secrets).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("USER_SPACE"), "got: {msg}");
+        assert!(
+            msg.contains("protected") || msg.contains("blocked") || msg.contains("invalid"),
+            "got: {msg}"
+        );
     }
 
     /// Run the kill in a background thread while we concurrently

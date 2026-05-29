@@ -11,9 +11,10 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::contracts::RuntimeEnvSource;
 use crate::error::EngineError;
 use crate::runtime::{
-    expand_env_value, CompileContext, HostEnvBindings, RuntimeHandler, RESERVED_ENV_PREFIX,
+    expand_env_value, is_reserved_env_name, CompileContext, HostEnvBindings, RuntimeHandler,
 };
 
 pub const KEY: &str = "env_config";
@@ -160,20 +161,21 @@ impl RuntimeHandler for EnvConfigHandler {
             // Inject the var binding into env so downstream subprocesses see it.
             let InterpreterConfig::LocalBinary { var, .. } = ic;
             if let Some(v) = var {
-                if v.starts_with(RESERVED_ENV_PREFIX) {
-                    // RYEOS_PYTHON et al. are explicitly *intended* to
-                    // be set here by the runtime, so they bypass the
-                    // reserved-prefix check that applies to user-
-                    // declared `env:` entries below.
+                if is_reserved_env_name(v) && v != "RYEOS_PYTHON" {
+                    return Err(EngineError::ReservedEnvKey { key: v.clone() });
                 }
                 ctx.env.insert(v.clone(), resolved);
+                ctx.env_sources
+                    .insert(v.clone(), RuntimeEnvSource::RuntimeInterpreter);
             }
         }
 
         for (k, v) in env_config.env {
-            if k.starts_with(RESERVED_ENV_PREFIX) {
+            if is_reserved_env_name(&k) {
                 return Err(EngineError::ReservedEnvKey { key: k });
             }
+            ctx.env_sources
+                .insert(k.clone(), RuntimeEnvSource::RuntimeDescriptor);
             ctx.env.insert(k, v);
         }
 
@@ -185,6 +187,7 @@ impl RuntimeHandler for EnvConfigHandler {
         apply_env_paths(
             &env_config.env_paths,
             &mut ctx.env,
+            &mut ctx.env_sources,
             &ctx.template_ctx,
             ctx.host_env,
         )?;
@@ -199,6 +202,7 @@ impl RuntimeHandler for EnvConfigHandler {
 fn apply_env_paths(
     mutations: &HashMap<String, EnvPathMutation>,
     env: &mut HashMap<String, String>,
+    env_sources: &mut HashMap<String, RuntimeEnvSource>,
     template_ctx: &crate::runtime::TemplateContext,
     host_env: &HostEnvBindings,
 ) -> Result<(), EngineError> {
@@ -233,6 +237,7 @@ fn apply_env_paths(
         }
 
         env.insert(var_name.clone(), parts.join(PATH_SEP));
+        env_sources.insert(var_name.clone(), RuntimeEnvSource::RuntimePathMutation);
     }
     Ok(())
 }

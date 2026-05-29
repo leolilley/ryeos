@@ -679,6 +679,16 @@ formats:
                 }
             }
         };
+        let yaml_owned = if yaml_owned.contains("effective_trust:") {
+            yaml_owned
+        } else {
+            format!("{yaml_owned}effective_trust:\n  include_references: false\n")
+        };
+        let yaml_owned = if yaml_owned.contains("resolution:") {
+            yaml_owned
+        } else {
+            format!("{yaml_owned}resolution: []\n")
+        };
         let signed = lillux::signature::sign_content(&yaml_owned, sk, "#", None);
         fs::write(parser_dir.join("parser.kind-schema.yaml"), signed).unwrap();
         KindRegistry::load_base(&[kinds_dir], ts).expect("test parser kind schema loads")

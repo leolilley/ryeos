@@ -229,6 +229,7 @@ mod tests {
             args: Vec::new(),
             cwd: None,
             env: HashMap::new(),
+            env_sources: HashMap::new(),
             stdin_data: None,
             timeout_secs: 60,
             execution: ExecutionDecorations::default(),

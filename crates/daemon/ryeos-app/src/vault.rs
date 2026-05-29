@@ -133,7 +133,7 @@ pub fn read_required_secrets(
         return Ok(HashMap::new());
     }
     for key in required_secrets {
-        validate_key_name(key)
+        crate::process::validate_spawn_secret_name(key)
             .map_err(|e| anyhow!("vault: invalid declared secret `{key}`: {e:#}"))?;
     }
     let vault_map = vault.read_all(principal)?;
@@ -377,6 +377,31 @@ pub fn read_named_secret(
     Ok(map.get(name).cloned())
 }
 
+/// Resolve one explicitly requested secret name through the same source
+/// stack used by `read_required_secrets`: sealed vault, daemon host env,
+/// then `.env` overlay. Returns `Ok(None)` when absent from every source.
+pub fn read_explicit_secret(
+    vault: &dyn NodeVault,
+    principal: &str,
+    name: &str,
+    dotenv_search_dirs: &[PathBuf],
+) -> Result<Option<String>> {
+    crate::process::validate_spawn_secret_name(name)
+        .map_err(|e| anyhow!("vault: invalid explicit secret `{name}`: {e:#}"))?;
+    let required = vec![name.to_string()];
+    let vault_map = vault.read_all(principal)?;
+    if let Some(value) = vault_map.get(name) {
+        return Ok(Some(value.clone()));
+    }
+    let host_env_map = read_declared_host_env(&required)?;
+    if let Some(value) = host_env_map.get(name) {
+        return Ok(Some(value.clone()));
+    }
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+        .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
+    Ok(dotenv_map.get(name).cloned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,54 +534,54 @@ mod tests {
 
     #[test]
     fn host_env_supplies_declared_secret() {
-        let _env = EnvVarGuard::set(&[("RYEOS_TEST_HOST_SECRET", Some("from-host"))]);
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_SECRET", Some("from-host"))]);
         let v = FixedVault(HashMap::new());
-        let required = vec!["RYEOS_TEST_HOST_SECRET".to_string()];
+        let required = vec!["SNAPTRACK_TEST_HOST_SECRET".to_string()];
 
         let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
 
         assert_eq!(
-            bindings.get("RYEOS_TEST_HOST_SECRET"),
+            bindings.get("SNAPTRACK_TEST_HOST_SECRET"),
             Some(&"from-host".to_string())
         );
     }
 
     #[test]
     fn vault_beats_host_env_for_declared_secret() {
-        let _env = EnvVarGuard::set(&[("RYEOS_TEST_PRECEDENCE", Some("from-host"))]);
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_PRECEDENCE", Some("from-host"))]);
         let mut all = HashMap::new();
         all.insert(
-            "RYEOS_TEST_PRECEDENCE".to_string(),
+            "SNAPTRACK_TEST_PRECEDENCE".to_string(),
             "from-vault".to_string(),
         );
         let v = FixedVault(all);
-        let required = vec!["RYEOS_TEST_PRECEDENCE".to_string()];
+        let required = vec!["SNAPTRACK_TEST_PRECEDENCE".to_string()];
 
         let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
 
         assert_eq!(
-            bindings.get("RYEOS_TEST_PRECEDENCE"),
+            bindings.get("SNAPTRACK_TEST_PRECEDENCE"),
             Some(&"from-vault".to_string())
         );
     }
 
     #[test]
     fn host_env_beats_dotenv_for_declared_secret() {
-        let _env = EnvVarGuard::set(&[("RYEOS_TEST_HOST_DOTENV", Some("from-host"))]);
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_DOTENV", Some("from-host"))]);
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join(".env"),
-            "RYEOS_TEST_HOST_DOTENV=from-dotenv\n",
+            "SNAPTRACK_TEST_HOST_DOTENV=from-dotenv\n",
         )
         .unwrap();
         let v = FixedVault(HashMap::new());
-        let required = vec!["RYEOS_TEST_HOST_DOTENV".to_string()];
+        let required = vec!["SNAPTRACK_TEST_HOST_DOTENV".to_string()];
         let dirs = vec![tmp.path().to_path_buf()];
 
         let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
 
         assert_eq!(
-            bindings.get("RYEOS_TEST_HOST_DOTENV"),
+            bindings.get("SNAPTRACK_TEST_HOST_DOTENV"),
             Some(&"from-host".to_string())
         );
     }
@@ -564,20 +589,20 @@ mod tests {
     #[test]
     fn host_env_only_returns_declared_keys() {
         let _env = EnvVarGuard::set(&[
-            ("RYEOS_TEST_DECLARED", Some("declared")),
-            ("RYEOS_TEST_UNDECLARED", Some("must-not-leak")),
+            ("SNAPTRACK_TEST_DECLARED", Some("declared")),
+            ("SNAPTRACK_TEST_UNDECLARED", Some("must-not-leak")),
         ]);
         let v = FixedVault(HashMap::new());
-        let required = vec!["RYEOS_TEST_DECLARED".to_string()];
+        let required = vec!["SNAPTRACK_TEST_DECLARED".to_string()];
 
         let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
 
         assert_eq!(bindings.len(), 1);
         assert_eq!(
-            bindings.get("RYEOS_TEST_DECLARED"),
+            bindings.get("SNAPTRACK_TEST_DECLARED"),
             Some(&"declared".to_string())
         );
-        assert!(!bindings.contains_key("RYEOS_TEST_UNDECLARED"));
+        assert!(!bindings.contains_key("SNAPTRACK_TEST_UNDECLARED"));
     }
 
     #[test]
@@ -594,14 +619,14 @@ mod tests {
 
     #[test]
     fn missing_declared_secret_mentions_host_env_source() {
-        let _env = EnvVarGuard::set(&[("RYEOS_TEST_MISSING_SECRET", None)]);
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_MISSING_SECRET", None)]);
         let v = FixedVault(HashMap::new());
-        let required = vec!["RYEOS_TEST_MISSING_SECRET".to_string()];
+        let required = vec!["SNAPTRACK_TEST_MISSING_SECRET".to_string()];
 
         let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
         let msg = format!("{err:#}");
 
-        assert!(msg.contains("RYEOS_TEST_MISSING_SECRET"), "got: {msg}");
+        assert!(msg.contains("SNAPTRACK_TEST_MISSING_SECRET"), "got: {msg}");
         assert!(msg.contains("daemon host environment"), "got: {msg}");
         assert!(msg.contains("sealed vault"), "got: {msg}");
         assert!(msg.contains(".env"), "got: {msg}");

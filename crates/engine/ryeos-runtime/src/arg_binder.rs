@@ -150,6 +150,9 @@ pub fn bind_argv_with_alias(
         return Ok(bind_argv(argv));
     };
 
+    let mut value = bind_argv(argv);
+    decode_structured_alias_fields(&mut value)?;
+
     let mut forms = alias.positional_forms.clone();
     if forms.is_empty() {
         if let Some(field) = &alias.positional_field {
@@ -162,10 +165,9 @@ pub fn bind_argv_with_alias(
         }
     }
     if forms.is_empty() {
-        return Ok(bind_argv(argv));
+        return Ok(value);
     }
 
-    let mut value = bind_argv(argv);
     let Some(obj) = value.as_object_mut() else {
         return Ok(value);
     };
@@ -209,6 +211,25 @@ pub fn bind_argv_with_alias(
         "positional arguments {:?} do not match any positional form for alias {:?}",
         positionals, alias.tokens
     ))
+}
+
+fn decode_structured_alias_fields(value: &mut serde_json::Value) -> Result<(), String> {
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(raw) = obj.get("parameters").cloned() else {
+        return Ok(());
+    };
+    let Some(raw_str) = raw.as_str() else {
+        return Ok(());
+    };
+    let decoded: serde_json::Value = serde_json::from_str(raw_str)
+        .map_err(|e| format!("--parameters must be valid JSON object: {e}"))?;
+    if !decoded.is_object() {
+        return Err("--parameters must decode to a JSON object".into());
+    }
+    obj.insert("parameters".to_string(), decoded);
+    Ok(())
 }
 
 fn positional_matches(matcher: PositionalMatcher, arg: &str) -> bool {
@@ -523,5 +544,52 @@ mod tests {
         // Nothing to bind; flags pass through.
         assert!(result.get("item_ref").is_none());
         assert_eq!(result["name"], "alice");
+    }
+
+    #[test]
+    fn alias_decodes_parameters_json_object() {
+        let alias = AliasDef {
+            tokens: vec!["remote".into(), "run".into()],
+            verb: "remote-run".into(),
+            deprecated: false,
+            replacement_tokens: None,
+            removed_in: None,
+            positional_field: None,
+            positional_forms: Vec::new(),
+            project_resolution: crate::alias_registry::ProjectResolution::None,
+        };
+
+        let result = bind_argv_with_alias(
+            &[
+                "--parameters".into(),
+                r#"{"smoke_only":true,"limit":1}"#.into(),
+            ],
+            Some(&alias),
+        )
+        .unwrap();
+
+        assert_eq!(result["parameters"]["smoke_only"], true);
+        assert_eq!(result["parameters"]["limit"], 1);
+    }
+
+    #[test]
+    fn alias_rejects_parameters_json_array() {
+        let alias = AliasDef {
+            tokens: vec!["remote".into(), "run".into()],
+            verb: "remote-run".into(),
+            deprecated: false,
+            replacement_tokens: None,
+            removed_in: None,
+            positional_field: None,
+            positional_forms: Vec::new(),
+            project_resolution: crate::alias_registry::ProjectResolution::None,
+        };
+
+        let result = bind_argv_with_alias(
+            &["--parameters".into(), r#"["not","object"]"#.into()],
+            Some(&alias),
+        );
+
+        assert!(result.unwrap_err().contains("JSON object"));
     }
 }
