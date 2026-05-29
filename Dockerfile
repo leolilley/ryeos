@@ -49,6 +49,7 @@ COPY --from=builder /build/target/release/ryeos-core-tools   /usr/local/bin/ryeo
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
 COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
 COPY --from=builder /build/bundles/web       /opt/ryeos/web
+COPY --from=builder /build/bundles/cockpit   /opt/ryeos/cockpit
 
 # Entrypoint runs ryeos init every boot (idempotent) then starts daemon.
 # Both /data/core (system) and /data/user (operator) persist across redeploys.
