@@ -181,6 +181,30 @@ const SPAWN_ENV_ALLOWLIST: &[&str] = &[
     "SSL_CERT_DIR",
 ];
 
+/// Validate an env var name before injecting it as a declared secret.
+///
+/// Declared secrets are real subprocess env vars, so they must not be
+/// allowed to shadow daemon/runtime control env, root discovery, proxy,
+/// CA, logging, or other inherited infrastructure names. Ordinary
+/// application secrets such as `SUPABASE_SERVICE_KEY` and
+/// `OXYLABS_PASSWORD` remain valid.
+pub fn validate_spawn_secret_name(name: &str) -> anyhow::Result<()> {
+    ryeos_vault::policy::validate_key_name(name)
+        .map_err(|e| anyhow::anyhow!("invalid subprocess secret env name `{name}`: {e:#}"))?;
+
+    if name.starts_with("RYEOS_") || name.starts_with("RYEOSD_") {
+        anyhow::bail!("invalid subprocess secret env name `{name}`: reserved RyeOS env prefix");
+    }
+
+    if name == "USER_SPACE" || SPAWN_ENV_ALLOWLIST.contains(&name) {
+        anyhow::bail!(
+            "invalid subprocess secret env name `{name}`: would override protected subprocess env"
+        );
+    }
+
+    Ok(())
+}
+
 /// Build the env map for a daemon-spawned subprocess.
 ///
 /// Composition:
@@ -212,6 +236,12 @@ pub fn build_spawn_env(
     env.insert("USER_SPACE".to_string(), user_root.display().to_string());
 
     for (k, v) in declared_secrets {
+        validate_spawn_secret_name(k)?;
+        if env.contains_key(k) {
+            anyhow::bail!(
+                "invalid subprocess secret env name `{k}`: would override protected subprocess env"
+            );
+        }
         env.insert(k.clone(), v.clone());
     }
 
@@ -292,6 +322,47 @@ mod tests {
         let mut s = String::new();
         f.read_to_string(&mut s).ok()?;
         Some(s)
+    }
+
+    #[test]
+    fn spawn_secret_policy_allows_application_secret_names() {
+        validate_spawn_secret_name("SUPABASE_SERVICE_KEY").unwrap();
+        validate_spawn_secret_name("OXYLABS_PASSWORD").unwrap();
+    }
+
+    #[test]
+    fn spawn_secret_policy_rejects_protected_names() {
+        for name in [
+            "USER_SPACE",
+            "RYEOS_SYSTEM_SPACE_DIR",
+            "RYEOSD_THREAD_AUTH_TOKEN",
+            "RYEOS_PROJECT_SECRET",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "SSL_CERT_FILE",
+        ] {
+            let err = validate_spawn_secret_name(name).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("invalid subprocess secret env name"),
+                "expected protected-name rejection for {name}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_spawn_env_rejects_protected_secret_collision() {
+        let mut secrets = std::collections::BTreeMap::new();
+        secrets.insert("USER_SPACE".to_string(), "/tmp/evil".to_string());
+
+        let err = build_spawn_env(&secrets).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("USER_SPACE"), "got: {msg}");
+        assert!(
+            msg.contains("protected") || msg.contains("blocked") || msg.contains("invalid"),
+            "got: {msg}"
+        );
     }
 
     /// Run the kill in a background thread while we concurrently

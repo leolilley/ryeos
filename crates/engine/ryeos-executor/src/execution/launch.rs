@@ -481,6 +481,8 @@ pub(crate) fn preflight_inject_provider_secret(
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
 
     if let Some(env_var) = resolved_target.provider.auth.env_var.as_deref() {
+        ryeos_app::process::validate_spawn_secret_name(env_var)
+            .map_err(|e| MaterializationError::Internal(e.to_string()))?;
         // If the secret is already present in bindings (e.g. from
         // `read_required_secrets` which layers vault + dotenv overlay),
         // skip the vault read — the dispatch path already resolved it.
