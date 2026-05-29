@@ -51,7 +51,7 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
             "value": session_id,
             "http_only": true,
             "same_site": "Lax",
-            "secure": true,
+            "secure": false,
             "path": "/ui"
         }
     }))
