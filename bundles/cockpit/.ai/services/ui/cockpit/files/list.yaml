@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-29T02:43:39Z:27c69a6370a2d6ecf4b5330a35bbf84ba4bcf680ad4b13609dac4f6910ad7535:mNJKcaBopNoA+HUp/QT4pn5r0RHVAt+Ix76dfkmNL8veEiI+IHN66SbzjFMOKDhAd5Hf4KF4wub78t4iSS0fBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: cockpit/files/list
+version: "1.0.0"
+description: Safe scoped file listing — constrained to session project root or project .ai directory. No arbitrary path access.
+endpoint: ui.cockpit.files.list
+availability: daemon_only

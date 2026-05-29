@@ -54,6 +54,7 @@ echo "[populate-bundles] target dir: $TARGET"
 CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
 WEB="$ROOT/bundles/web"
+COCKPIT="$ROOT/bundles/cockpit"
 
 # ── Clean derived state from all bundles ────────────────────────────
 # Wipe everything that will be regenerated so stale artifacts (old
@@ -69,8 +70,9 @@ done
 CORE_BIN="$CORE/.ai/bin/$TRIPLE"
 STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
+COCKPIT_BIN="$COCKPIT/.ai/bin/$TRIPLE"
 
-mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN"
+mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN" "$COCKPIT_BIN"
 
 # ── Build ────────────────────────────────────────────────────────────
 
@@ -103,11 +105,15 @@ install -m 0755 \
   "$TARGET/release/ryeos-directive-runtime" \
   "$TARGET/release/ryeos-graph-runtime" \
   "$TARGET/release/ryeos-knowledge-runtime" \
-  "$TARGET/release/ryeos-tui" \
-  "$TARGET/release/web" \
   "$TARGET/release/rye-composer-extends-chain" \
   "$TARGET/release/rye-composer-graph-permissions" \
   "$STD_BIN/"
+
+echo "[populate-bundles] installing cockpit bundle binaries → $COCKPIT_BIN"
+install -m 0755 \
+  "$TARGET/release/ryeos-tui" \
+  "$TARGET/release/web" \
+  "$COCKPIT_BIN/"
 
 echo "[populate-bundles] installing web bundle binaries → $WEB_BIN"
 install -m 0755 \
@@ -140,6 +146,11 @@ USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$STD" \
 
 echo "[populate-bundles] publishing web bundle…"
 USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$WEB" \
+  --registry-root "$CORE" \
+  --owner "$OWNER" >/dev/null
+
+echo "[populate-bundles] publishing cockpit bundle…"
+USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$COCKPIT" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 

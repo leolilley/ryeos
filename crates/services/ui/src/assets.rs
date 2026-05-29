@@ -47,6 +47,8 @@ static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html")
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
 static GRAPH_VIEW_JS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.js");
 static GRAPH_VIEW_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/graph-view.css");
+static COCKPIT_JS: &[u8] = include_bytes!("../../../clients/web/pkg/cockpit.js");
+static COCKPIT_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/cockpit.css");
 static FORCE_GRAPH_3D_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/vendor/3d-force-graph.min.js");
 static FORCE_GRAPH_3D_META: &[u8] =
@@ -63,6 +65,8 @@ impl StaticAssetProvider for WebAssetProvider {
             "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
             "graph-view.js" | "ui/assets/graph-view.js" => (GRAPH_VIEW_JS, "no-cache"),
             "graph-view.css" | "ui/assets/graph-view.css" => (GRAPH_VIEW_CSS, "no-cache"),
+            "cockpit.js" | "ui/assets/cockpit.js" => (COCKPIT_JS, "no-cache"),
+            "cockpit.css" | "ui/assets/cockpit.css" => (COCKPIT_CSS, "no-cache"),
             "3d-force-graph.v1.73.0.min.js" | "ui/assets/3d-force-graph.v1.73.0.min.js" => {
                 (FORCE_GRAPH_3D_JS, "public, max-age=31536000, immutable")
             }

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-28T11:09:26Z:6740a18bfe4dc63d2fe7fd3e21dc70d68bb3c820f6ef27a4ec1d89394815f313:W4z4zg24xK1+6IMMGi42PGBUjGFTvDMe0cHfPteizLkmlqgw8gEDWqevZmF72DLKk6IMP6vd0SCjrS9DiK35CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: cockpit/snapshot
+version: "1.0.0"
+description: Returns a single aggregated snapshot for the 2D cockpit overview — node identity, health, spaces, bundles, remotes, threads, schedules, and GC state.
+endpoint: ui.cockpit.snapshot
+availability: daemon_only

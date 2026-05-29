@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-29T02:30:24Z:6025a3c468bc72fd37d505417315e971768fd01adb21baccbfc99faab122eb4f:ORgAJpxwo1ZnC2ielKq5cGcATG7Pa972Ai69ahInM0+TW4+0XsdZnINNcyFhOkZ0lYbOz5HJyWgnqmEr2RR+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/cockpit
+section: routes
+id: ui/api/cockpit/gc/status
+path: /ui/api/cockpit/gc/status
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/cockpit/gc/status"

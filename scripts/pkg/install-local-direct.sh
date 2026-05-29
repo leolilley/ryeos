@@ -4,7 +4,7 @@
 # This intentionally skips yay/makepkg but installs the same runtime layout
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
-#   - bundle sources -> /usr/share/ryeos/{core,standard,web}
+#   - bundle sources -> /usr/share/ryeos/{core,standard,cockpit,web}
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -18,8 +18,8 @@ Usage: scripts/pkg/install-local-direct.sh [options]
 
 Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
-  /usr/share/ryeos/{core,standard,web}/.ai
-  ~/.local/share/ryeos/.ai/bundles/{core,standard,web}  (after init)
+  /usr/share/ryeos/{core,standard,cockpit,web}/.ai
+  ~/.local/share/ryeos/.ai/bundles/{core,standard,cockpit,web}  (after init)
 
 Options:
   --skip-populate       Do not run scripts/populate-bundles.sh first
@@ -42,6 +42,56 @@ EOF
 die() {
     echo "install-local-direct.sh: $*" >&2
     exit 1
+}
+
+run_timeout() {
+    local seconds="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
+ryeos_status_quick() {
+    run_timeout 10 ryeos status 2>/dev/null || true
+}
+
+pid_from_status() {
+    awk '/^pid:/ { print $2; exit }'
+}
+
+stop_daemon_for_install() {
+    local status_out pid final_status
+
+    status_out="$(ryeos_status_quick)"
+    if ! grep -qx "running" <<<"$status_out"; then
+        return 1
+    fi
+
+    echo "[install-local-direct] stopping running daemon before replacing binaries"
+    if ! run_timeout 30 ryeos stop --force >/dev/null; then
+        echo "[install-local-direct] ryeos stop timed out or failed; falling back to direct process kill" >&2
+        pid="$(pid_from_status <<<"$status_out")"
+        if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            for _ in {1..30}; do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.2
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    final_status="$(ryeos_status_quick)"
+    if grep -qx "running" <<<"$final_status"; then
+        die "failed to stop running daemon before install"
+    fi
+
+    return 0
 }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -120,11 +170,8 @@ fi
 
 daemon_was_running=0
 if [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then
-    status_out="$(ryeos status 2>/dev/null || true)"
-    if grep -qx "running" <<<"$status_out"; then
+    if stop_daemon_for_install; then
         daemon_was_running=1
-        echo "[install-local-direct] stopping running daemon before replacing binaries"
-        ryeos stop --force >/dev/null || die "failed to stop running daemon before install"
     fi
 fi
 
@@ -157,9 +204,11 @@ done
 
 [[ -d "$repo_root/bundles/core/.ai" ]] || die "missing bundles/core/.ai"
 [[ -d "$repo_root/bundles/standard/.ai" ]] || die "missing bundles/standard/.ai"
+[[ -d "$repo_root/bundles/cockpit/.ai" ]] || die "missing bundles/cockpit/.ai"
 [[ -d "$repo_root/bundles/web/.ai" ]] || die "missing bundles/web/.ai"
 [[ -f "$repo_root/bundles/core/PUBLISHER_TRUST.toml" ]] || die "missing bundles/core/PUBLISHER_TRUST.toml"
 [[ -f "$repo_root/bundles/standard/PUBLISHER_TRUST.toml" ]] || die "missing bundles/standard/PUBLISHER_TRUST.toml"
+[[ -f "$repo_root/bundles/cockpit/PUBLISHER_TRUST.toml" ]] || die "missing bundles/cockpit/PUBLISHER_TRUST.toml"
 [[ -f "$repo_root/bundles/web/PUBLISHER_TRUST.toml" ]] || die "missing bundles/web/PUBLISHER_TRUST.toml"
 
 echo "[install-local-direct] installing binaries -> $bin_dir"
@@ -230,23 +279,25 @@ if [[ $run_init -eq 1 ]]; then
         die "initialized core bundle missing from ~/.local/share/ryeos"
     test -d "$HOME/.local/share/ryeos/.ai/bundles/standard/.ai" || \
         die "initialized standard bundle missing from ~/.local/share/ryeos"
+    test -d "$HOME/.local/share/ryeos/.ai/bundles/cockpit/.ai" || \
+        die "initialized cockpit bundle missing from ~/.local/share/ryeos"
     test -d "$HOME/.local/share/ryeos/.ai/bundles/web/.ai" || \
         die "initialized web bundle missing from ~/.local/share/ryeos"
     grep -q '^execute: client:ryeos/tui$' \
-        "$HOME/.local/share/ryeos/.ai/bundles/standard/.ai/node/verbs/tui.yaml" || \
+        "$HOME/.local/share/ryeos/.ai/bundles/cockpit/.ai/node/verbs/tui.yaml" || \
         die "initialized tui verb is stale or not client-backed"
 fi
 
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "[install-local-direct] restarting daemon"
-    ryeos start >/dev/null
-    ryeos status | grep -qx "running" || die "daemon did not restart cleanly"
+    run_timeout 30 ryeos start >/dev/null || die "daemon did not restart cleanly"
+    ryeos_status_quick | grep -qx "running" || die "daemon did not restart cleanly"
 fi
 
 echo
 echo "[install-local-direct] complete"
 echo "  ryeos:        $(command -v ryeos)"
-echo "  bundle src:   $share_dir/{core,standard,web}"
+echo "  bundle src:   $share_dir/{core,standard,cockpit,web}"
 echo "  local state:  $HOME/.local/share/ryeos"
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "  daemon:       restarted"

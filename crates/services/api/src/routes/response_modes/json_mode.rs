@@ -168,7 +168,7 @@ impl CompiledResponseMode for CompiledJsonMode {
             serde_json::from_slice(&ctx.body_raw)
                 .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?
         } else if self.source_config_template.is_null() {
-            serde_json::Value::Object(serde_json::Map::new())
+            query_params_to_json(ctx.request_parts.uri.query())
         } else {
             interpolation::interpolate_path(&self.source_config_template, &ctx.captures)?
         };
@@ -211,6 +211,31 @@ impl CompiledResponseMode for CompiledJsonMode {
             // caught as an Internal error by the enforcement layer.
             _ => unreachable!("invoke_checked enforces Json"),
         }
+    }
+}
+
+fn query_params_to_json(query: Option<&str>) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    let Some(query) = query else {
+        return serde_json::Value::Object(map);
+    };
+
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        map.insert(key.into_owned(), query_value_to_json(&value));
+    }
+
+    serde_json::Value::Object(map)
+}
+
+fn query_value_to_json(value: &str) -> serde_json::Value {
+    if value.eq_ignore_ascii_case("true") {
+        serde_json::Value::Bool(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        serde_json::Value::Bool(false)
+    } else if let Ok(n) = value.parse::<u64>() {
+        serde_json::Value::Number(n.into())
+    } else {
+        serde_json::Value::String(value.to_string())
     }
 }
 
@@ -514,6 +539,18 @@ mod tests {
             msg.contains("undeclared path capture 'unknown'"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn query_params_to_json_coerces_expected_scalars() {
+        let value = query_params_to_json(Some(
+            "kind=tool&space=project&query=ryeos%2Fcore&limit=25&include_shadowed=true",
+        ));
+        assert_eq!(value["kind"], "tool");
+        assert_eq!(value["space"], "project");
+        assert_eq!(value["query"], "ryeos/core");
+        assert_eq!(value["limit"], 25);
+        assert_eq!(value["include_shadowed"], true);
     }
 
     #[test]

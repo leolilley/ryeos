@@ -1,13 +1,22 @@
 //! Node-config: daemon-consumed control-plane configuration items.
 //!
-//! `kind: node` items are signed YAML files at `.ai/node/<section>/<name>.yaml`.
-//! Each declares `section: <name>` which must match its parent directory.
+//! `kind: node` items are signed YAML files at `.ai/node/<section>/...`.
+//! Each declares `section: <name>` which must match the section it was
+//! loaded under.
+//!
+//! Section directories (routes, verbs, aliases) support recursive subfolders:
+//!
+//!   .ai/node/routes/ui/cockpit/snapshot.yaml
+//!   .ai/node/routes/ui/cockpit/items/list.yaml
+//!   .ai/node/aliases/web.yaml
+//!
+//! The `bundles` section remains flat (no subdirectories).
 //!
 //! The daemon loads node-config at startup in two phases:
 //! - **Phase 1 (bootstrap):** load only the `bundles` section from
 //!   `system_space_dir` to determine effective bundle roots.
 //! - **Phase 2 (full pass):** build the engine with effective roots, then
-//!   scan all sections from all sources.
+//!   scan all sections from all sources (recursive for routes/verbs/aliases).
 //!
 //! Trust model: signed-required, fail-closed. Unsigned, tampered, or
 //! untrusted-signer items are startup errors.

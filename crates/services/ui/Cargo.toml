@@ -14,6 +14,7 @@ ryeos-api = { path = "../api" }
 ryeos-app = { path = "../../core/app" }
 ryeos-engine = { path = "../../core/engine" }
 ryeos-executor = { path = "../../core/executor" }
+ryeos-runtime = { path = "../../core/runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

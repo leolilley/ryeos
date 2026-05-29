@@ -1139,7 +1139,7 @@ mod tests {
         let bundles = discover_bundles(&workspace_root().join("bundles")).unwrap();
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
-            "core + standard should satisfy all dependencies"
+            "all bundle dependencies should be satisfied"
         );
     }
 

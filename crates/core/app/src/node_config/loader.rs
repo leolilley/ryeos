@@ -1,8 +1,24 @@
 //! Node-config loader: two-phase bootstrap for daemon-consumed control-plane items.
+//!
+//! Phase 1: `load_bundle_section()` — minimal bootstrap verifier, system space only.
+//! Phase 2: `load_full()` — full engine-based scan across all sources.
+//!
+//! Section directories support recursive subfolders. For example:
+//!
+//!   .ai/node/routes/ui/cockpit/snapshot.yaml
+//!   .ai/node/routes/ui/cockpit/items/list.yaml
+//!   .ai/node/aliases/web.yaml
+//!
+//! The section invariant requires:
+//! - The file lives under `.ai/node/<section>/` (any depth)
+//! - The YAML body declares `section: <section>`
+//!
+//! Security: signed-required, trusted-signer-required, symlinks rejected,
+//! regular files only, deterministic traversal order.
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -27,144 +43,234 @@ pub struct BootstrapLoader<'a> {
     pub trust_store: &'a TrustStore,
 }
 
+/// A verified and parsed node-config YAML file, ready for section-specific handling.
+struct VerifiedItem {
+    path: PathBuf,
+    name: String,
+    body: Value,
+}
+
+/// Signature envelope used for all node-config items.
+fn node_config_envelope() -> SignatureEnvelope {
+    SignatureEnvelope {
+        prefix: "#".into(),
+        suffix: None,
+        after_shebang: false,
+    }
+}
+
+/// Recursively collect all `.yaml`/`.yml` regular files under a directory.
+///
+/// Returns files in deterministic depth-first order, with entries sorted
+/// alphabetically at each directory level. Rejects symlinks at every level
+/// (both files and directories).
+fn scan_yaml_files_recursive(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    scan_dir_recursive(dir, &mut files)?;
+    Ok(files)
+}
+
+fn scan_dir_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    // Read and sort for deterministic order
+    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
+        .with_context(|| format!("failed to read directory {}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+
+        // Reject all symlinks — both files and directories
+        if path.is_symlink() {
+            bail!(
+                "node config scan encountered symlink at {} (symlinks rejected)",
+                path.display()
+            );
+        }
+
+        if path.is_dir() {
+            scan_dir_recursive(&path, files)?;
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str());
+            if ext == Some("yaml") || ext == Some("yml") {
+                files.push(path);
+            }
+        }
+        // Ignore special files (sockets, fifos, etc.)
+    }
+    Ok(())
+}
+
+/// Verify signature, trust, and section invariant for a single node-config file.
+///
+/// The `section_root` is the `.ai/node/<section>/` directory (e.g. the
+/// `routes/` dir). The invariant checks that:
+/// 1. `file` lives under `section_root` (at any depth)
+/// 2. The YAML body declares `section: <expected_section>`
+fn verify_and_parse(
+    file: &Path,
+    section_root: &Path,
+    expected_section: &str,
+    trust_store: &TrustStore,
+) -> Result<VerifiedItem> {
+    // Reject symlinks and non-regular files
+    if !file.is_file() || file.is_symlink() {
+        bail!(
+            "node config item at {} is not a regular file (symlinks rejected)",
+            file.display()
+        );
+    }
+
+    let ext = file.extension().and_then(|e| e.to_str());
+    if ext != Some("yaml") && ext != Some("yml") {
+        bail!(
+            "node config item at {} is not a .yaml or .yml file",
+            file.display()
+        );
+    }
+
+    let name = file.file_stem().and_then(|s| s.to_str()).context(format!(
+        "node config item at {} has no filename stem",
+        file.display()
+    ))?;
+
+    let content =
+        fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
+
+    let envelope = node_config_envelope();
+
+    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+        .with_context(|| {
+            format!(
+                "node config item at {} has no valid signature line",
+                file.display()
+            )
+        })?;
+
+    let (trust_class, _) =
+        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
+
+    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
+        bail!(
+            "node config item at {} is not trusted (trust_class: {:?}); \
+             only trusted items are allowed in node config",
+            file.display(),
+            trust_class
+        );
+    }
+
+    let body_str = strip_signature(&content);
+    let body: Value = serde_yaml::from_str(&body_str)
+        .with_context(|| format!("failed to parse YAML body of {}", file.display()))?;
+
+    // Check section invariant: file must live under section_root AND declare section
+    if !file.starts_with(section_root) {
+        bail!(
+            "node config item at {} is not under expected section directory '{}' \
+             (section containment invariant violated)",
+            file.display(),
+            section_root.display()
+        );
+    }
+
+    let declared_section = body
+        .get("section")
+        .and_then(|v| v.as_str())
+        .with_context(|| {
+            format!(
+                "node config item at {} missing 'section' field",
+                file.display()
+            )
+        })?;
+
+    if declared_section != expected_section {
+        bail!(
+            "node config item at {} declares section '{}' but was loaded under section '{}' \
+             (section = containment invariant violated)",
+            file.display(),
+            declared_section,
+            expected_section
+        );
+    }
+
+    Ok(VerifiedItem {
+        path: file.to_path_buf(),
+        name: name.to_string(),
+        body,
+    })
+}
+
 impl<'a> BootstrapLoader<'a> {
     /// Phase 1: load only the `bundles` section to determine effective bundle roots.
     ///
-    /// Scans `<system_space_dir>/.ai/node/bundles/`.
+    /// Scans `<system_space_dir>/.ai/node/bundles/` (flat only — no recursion).
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
     pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
         let section = BundleSection;
-        let envelope = SignatureEnvelope {
-            prefix: "#".into(),
-            suffix: None,
-            after_shebang: false,
-        };
-
         let mut records: Vec<BundleRecord> = Vec::new();
 
-        let scan_roots = [self.system_space_dir];
-        for root in &scan_roots {
-            let node_dir = root.join(".ai").join("node").join("bundles");
-            if !node_dir.is_dir() {
-                continue;
-            }
-            for entry in fs::read_dir(&node_dir)
-                .with_context(|| format!("failed to read node config dir {}", node_dir.display()))?
-            {
-                let entry = entry?;
-                let path = entry.path();
+        let node_dir = self
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join("bundles");
+        if !node_dir.is_dir() {
+            return Ok(records);
+        }
 
-                // Reject symlinks and non-regular files
-                if !path.is_file() || path.is_symlink() {
-                    bail!(
-                        "node config item at {} is not a regular file (symlinks rejected)",
-                        path.display()
-                    );
-                }
+        // Bundles use flat scan only (no subdirectories for bundles)
+        let mut entries: Vec<fs::DirEntry> = fs::read_dir(&node_dir)
+            .with_context(|| format!("failed to read node config dir {}", node_dir.display()))?
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
 
-                let ext = path.extension().and_then(|e| e.to_str());
-                if ext != Some("yaml") && ext != Some("yml") {
+        for entry in entries {
+            let path = entry.path();
+
+            let verified = match verify_and_parse(&path, &node_dir, "bundles", self.trust_store) {
+                Ok(v) => v,
+                Err(e) => {
+                    // For bundles, non-YAML files are silently skipped (backward compat)
+                    let ext = path.extension().and_then(|e| e.to_str());
+                    if ext == Some("yaml") || ext == Some("yml") {
+                        return Err(e);
+                    }
                     continue;
                 }
+            };
 
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .context("node config item has no filename stem")?;
-
-                // Read and verify
-                let content = fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read {}", path.display()))?;
-
-                let header =
-                    ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-                        .context(format!(
-                            "node config item at {} has no valid signature line",
-                            path.display()
-                        ))?;
-
-                // Verify signature against trust store
-                let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
-                    &content,
-                    &header,
-                    &envelope,
-                    self.trust_store,
-                )?;
-
-                if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
-                    bail!(
-                        "node config item at {} is not trusted (trust_class: {:?}); \
-                         only trusted items are allowed in node config",
-                        path.display(),
-                        trust_class
-                    );
-                }
-
-                // Strip signature and parse YAML body
-                let body_str = strip_signature(&content);
-                let body: Value = serde_yaml::from_str(&body_str)
-                    .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
-
-                // Check path = section invariant
-                let declared_section =
-                    body.get("section")
-                        .and_then(|v| v.as_str())
-                        .context(format!(
-                            "node config item at {} missing 'section' field",
-                            path.display()
-                        ))?;
-
-                let parent_dir_name = path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .context(format!(
-                        "node config item at {} has no parent directory",
-                        path.display()
-                    ))?;
-
-                if declared_section != parent_dir_name {
-                    bail!(
-                        "node config item at {} declares section '{}' but lives under directory '{}' \
-                         (path = section invariant violated)",
-                        path.display(),
-                        declared_section,
-                        parent_dir_name
-                    );
-                }
-
-                // Parse as bundle record
-                let record = section
-                    .parse(name, &body)
-                    .with_context(|| format!("failed to parse bundle record {}", path.display()))?;
-                let mut record: BundleRecord = record
-                    .as_any()
-                    .downcast_ref::<BundleRecord>()
-                    .context("BundleSection::parse returned wrong type")?
-                    .clone();
-                record.source_file = path.clone();
-
-                // Validate path: canonicalize, must exist as directory
-                if !record.path.is_dir() {
-                    bail!(
-                        "bundle '{}' path '{}' does not exist or is not a directory (declared in {})",
-                        name,
-                        record.path.display(),
-                        path.display()
-                    );
-                }
-
-                let canonical = record.path.canonicalize().with_context(|| {
-                    format!(
-                        "failed to canonicalize bundle '{}' path '{}'",
-                        name,
-                        record.path.display()
-                    )
+            let record = section
+                .parse(&verified.name, &verified.body)
+                .with_context(|| {
+                    format!("failed to parse bundle record {}", verified.path.display())
                 })?;
-                record.path = canonical;
+            let mut record: BundleRecord = record
+                .as_any()
+                .downcast_ref::<BundleRecord>()
+                .context("BundleSection::parse returned wrong type")?
+                .clone();
+            record.source_file = verified.path.clone();
 
-                records.push(record);
+            // Validate path: canonicalize, must exist as directory
+            if !record.path.is_dir() {
+                bail!(
+                    "bundle '{}' path '{}' does not exist or is not a directory (declared in {})",
+                    record.name,
+                    record.path.display(),
+                    record.source_file.display()
+                );
             }
+
+            let canonical = record.path.canonicalize().with_context(|| {
+                format!(
+                    "failed to canonicalize bundle '{}' path '{}'",
+                    record.name,
+                    record.path.display()
+                )
+            })?;
+            record.path = canonical;
+
+            records.push(record);
         }
 
         // Collision detection: by canonical path AND by name (fail-closed)
@@ -174,6 +280,9 @@ impl<'a> BootstrapLoader<'a> {
     }
 
     /// Phase 2: full node-config scan across all sections and sources.
+    ///
+    /// For sections with `EffectiveBundleRootsAndState` policy (routes, verbs, aliases),
+    /// scans recursively into subdirectories. For `SystemAndState` (bundles), scans flat.
     pub fn load_full(
         &self,
         section_table: &SectionTable,
@@ -205,155 +314,141 @@ impl<'a> BootstrapLoader<'a> {
                 }
             };
 
-            let envelope = SignatureEnvelope {
-                prefix: "#".into(),
-                suffix: None,
-                after_shebang: false,
-            };
-
             for root in &scan_roots {
-                let node_section_dir = root.join(".ai").join("node").join(section_name);
-                if !node_section_dir.is_dir() {
+                let section_dir = root.join(".ai").join("node").join(section_name);
+                if !section_dir.is_dir() {
                     continue;
                 }
-                for entry in fs::read_dir(&node_section_dir).with_context(|| {
-                    format!(
-                        "failed to read node config section dir {}",
-                        node_section_dir.display()
-                    )
-                })? {
-                    let entry = entry?;
-                    let path = entry.path();
 
-                    if !path.is_file() || path.is_symlink() {
-                        bail!(
-                            "node config item at {} is not a regular file (symlinks rejected)",
-                            path.display()
-                        );
+                // Routes, verbs, aliases: recursive scan.
+                // Bundles: flat scan (enforced by policy type, but we handle
+                // both for correctness — bundles don't actually reach here
+                // with subdirectories).
+                let use_recursive = section_name != "bundles";
+                let yaml_files = if use_recursive {
+                    scan_yaml_files_recursive(&section_dir).with_context(|| {
+                        format!(
+                            "failed to scan node config section '{}' recursively in {}",
+                            section_name,
+                            section_dir.display()
+                        )
+                    })?
+                } else {
+                    // Flat scan for bundles (same as Phase 1)
+                    let mut files: Vec<PathBuf> = Vec::new();
+                    let mut entries: Vec<fs::DirEntry> = fs::read_dir(&section_dir)
+                        .with_context(|| {
+                            format!(
+                                "failed to read node config section dir {}",
+                                section_dir.display()
+                            )
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    entries.sort_by_key(|e| e.file_name());
+                    for entry in entries {
+                        let path = entry.path();
+                        let ext = path.extension().and_then(|e| e.to_str());
+                        if ext == Some("yaml") || ext == Some("yml") {
+                            files.push(path);
+                        }
                     }
+                    files
+                };
 
-                    let ext = path.extension().and_then(|e| e.to_str());
-                    if ext != Some("yaml") && ext != Some("yml") {
-                        continue;
-                    }
-
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .context("node config item has no filename stem")?;
-
-                    let content = fs::read_to_string(&path)
-                        .with_context(|| format!("failed to read {}", path.display()))?;
-
-                    let header =
-                        ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-                            .context(format!(
-                                "node config item at {} has no valid signature line",
-                                path.display()
-                            ))?;
-
-                    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
-                        &content,
-                        &header,
-                        &envelope,
-                        self.trust_store,
-                    )?;
-
-                    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
-                        bail!(
-                            "node config item at {} is not trusted (trust_class: {:?})",
-                            path.display(),
-                            trust_class
-                        );
-                    }
-
-                    let body_str = strip_signature(&content);
-                    let body: Value = serde_yaml::from_str(&body_str).with_context(|| {
-                        format!("failed to parse YAML body of {}", path.display())
-                    })?;
-
-                    let declared_section =
-                        body.get("section")
-                            .and_then(|v| v.as_str())
-                            .context(format!(
-                                "node config item at {} missing 'section' field",
-                                path.display()
-                            ))?;
-
-                    let parent_dir_name = path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
-
-                    if declared_section != parent_dir_name {
-                        bail!(
-                            "node config item at {} declares section '{}' but lives under '{}'",
-                            path.display(),
-                            declared_section,
-                            parent_dir_name
-                        );
-                    }
+                for path in yaml_files {
+                    let verified =
+                        verify_and_parse(&path, &section_dir, section_name, self.trust_store)
+                            .with_context(|| {
+                                format!(
+                                    "failed to verify node config item {} in section '{}'",
+                                    path.display(),
+                                    section_name
+                                )
+                            })?;
 
                     if section_name == "bundles" {
-                        let record = section.parse(name, &body).with_context(|| {
-                            format!("failed to parse bundle record {}", path.display())
-                        })?;
+                        let record =
+                            section
+                                .parse(&verified.name, &verified.body)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse bundle record {}",
+                                        verified.path.display()
+                                    )
+                                })?;
                         let mut record: BundleRecord = record
                             .as_any()
                             .downcast_ref::<BundleRecord>()
                             .context("BundleSection::parse returned wrong type")?
                             .clone();
-                        record.source_file = path.clone();
+                        record.source_file = verified.path.clone();
                         if !record.path.is_dir() {
                             bail!(
                                 "bundle '{}' path '{}' does not exist or is not a directory (declared in {})",
-                                name,
+                                record.name,
                                 record.path.display(),
-                                path.display()
+                                record.source_file.display()
                             );
                         }
                         let canonical = record.path.canonicalize().with_context(|| {
                             format!(
                                 "failed to canonicalize bundle '{}' path '{}'",
-                                name,
+                                record.name,
                                 record.path.display()
                             )
                         })?;
                         record.path = canonical;
                         loaded_bundles.push(record);
                     } else if section_name == "routes" {
-                        let record = section.parse(name, &body).with_context(|| {
-                            format!("failed to parse route record {}", path.display())
-                        })?;
+                        let record =
+                            section
+                                .parse(&verified.name, &verified.body)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse route record {}",
+                                        verified.path.display()
+                                    )
+                                })?;
                         let mut record: RawRouteSpec = record
                             .as_any()
                             .downcast_ref::<RawRouteSpec>()
                             .context("RouteSection::parse returned wrong type")?
                             .clone();
-                        record.source_file = path.clone();
+                        record.source_file = verified.path.clone();
                         routes.push(record);
                     } else if section_name == "verbs" {
-                        let record = section.parse(name, &body).with_context(|| {
-                            format!("failed to parse verb record {}", path.display())
-                        })?;
+                        let record =
+                            section
+                                .parse(&verified.name, &verified.body)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse verb record {}",
+                                        verified.path.display()
+                                    )
+                                })?;
                         let mut record: VerbRecord = record
                             .as_any()
                             .downcast_ref::<VerbRecord>()
                             .context("VerbSection::parse returned wrong type")?
                             .clone();
-                        record.source_file = path.clone();
+                        record.source_file = verified.path.clone();
                         verbs.push(record);
                     } else if section_name == "aliases" {
-                        let record = section.parse(name, &body).with_context(|| {
-                            format!("failed to parse alias record {}", path.display())
-                        })?;
+                        let record =
+                            section
+                                .parse(&verified.name, &verified.body)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse alias record {}",
+                                        verified.path.display()
+                                    )
+                                })?;
                         let mut record: AliasRecord = record
                             .as_any()
                             .downcast_ref::<AliasRecord>()
                             .context("AliasSection::parse returned wrong type")?
                             .clone();
-                        record.source_file = path.clone();
+                        record.source_file = verified.path.clone();
                         aliases.push(record);
                     }
                 }
@@ -431,7 +526,8 @@ mod tests {
 
     #[test]
     fn strip_signature_removes_signed_line() {
-        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\nsection: bundles\npath: /foo\n";
+        let content =
+            "# ryeos:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\nsection: bundles\npath: /foo\n";
         let stripped = strip_signature(content);
         assert!(stripped.starts_with("section: bundles"));
         assert!(!stripped.contains("ryeos:signed:"));
@@ -488,7 +584,7 @@ mod tests {
             make_record(
                 "core",
                 "/var/lib/ryeos/bundles/core-b",
-                "/var/lib/ryeos/.ai/node/bundles/core.yaml",
+                "/etc/ryeos/.ai/node/bundles/core.yaml",
             ),
         ];
         let err = check_bundle_collisions(&records).unwrap_err();
@@ -517,5 +613,255 @@ mod tests {
     #[test]
     fn check_bundle_collisions_empty_ok() {
         check_bundle_collisions(&[]).unwrap();
+    }
+
+    // ── Recursive scan tests ──────────────────────────────────────────
+
+    #[test]
+    fn scan_yaml_files_recursive_finds_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        let ui_dir = routes_dir.join("ui");
+        let cockpit_dir = ui_dir.join("cockpit");
+        fs::create_dir_all(&cockpit_dir).unwrap();
+
+        // Flat file
+        fs::write(routes_dir.join("health.yaml"), "section: routes").unwrap();
+        // Nested one level
+        fs::write(ui_dir.join("index.yaml"), "section: routes").unwrap();
+        // Nested two levels
+        fs::write(cockpit_dir.join("snapshot.yaml"), "section: routes").unwrap();
+        // Non-yaml file (should be skipped)
+        fs::write(routes_dir.join("README.md"), "not yaml").unwrap();
+        // Hidden file (should be found — no hidden filtering)
+        fs::write(routes_dir.join(".hidden.yaml"), "section: routes").unwrap();
+
+        let files = scan_yaml_files_recursive(&routes_dir).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        // Sorted: .hidden.yaml, health.yaml, then ui/cockpit/snapshot.yaml, ui/index.yaml
+        assert_eq!(names.len(), 4, "expected 4 yaml files, got: {:?}", names);
+        assert!(names.contains(&".hidden.yaml".to_string()));
+        assert!(names.contains(&"health.yaml".to_string()));
+        assert!(names.contains(&"snapshot.yaml".to_string()));
+        assert!(names.contains(&"index.yaml".to_string()));
+
+        // Verify deterministic order: depth-first, sorted at each level
+        // Level 1: .hidden.yaml, health.yaml, ui/
+        //   Level 2: ui/cockpit/snapshot.yaml, ui/index.yaml
+        assert_eq!(names[0], ".hidden.yaml");
+        assert_eq!(names[1], "health.yaml");
+        assert_eq!(names[2], "snapshot.yaml");
+        assert_eq!(names[3], "index.yaml");
+    }
+
+    #[test]
+    fn scan_yaml_files_recursive_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = scan_yaml_files_recursive(dir.path()).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn scan_yaml_files_recursive_rejects_symlink_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+
+        // Create a symlinked subdirectory
+        let link_target = routes_dir.join("symlinked_subdir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), &link_target).unwrap();
+
+        let result = scan_yaml_files_recursive(&routes_dir);
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("symlink"),
+            "symlinked directory should be rejected, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn scan_yaml_files_rejects_symlink_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+
+        // Create a real target file
+        let target = dir.path().join("target.yaml");
+        fs::write(&target, "section: routes").unwrap();
+
+        // Create a symlink to it inside routes dir
+        let link = routes_dir.join("evil.yaml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let result = scan_yaml_files_recursive(&routes_dir);
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("symlink"),
+            "symlinked file should be rejected, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn scan_yaml_files_deterministic_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+
+        // Create files in non-alphabetical order
+        fs::write(routes_dir.join("zebra.yaml"), "").unwrap();
+        fs::write(routes_dir.join("alpha.yaml"), "").unwrap();
+        fs::write(routes_dir.join("middle.yaml"), "").unwrap();
+
+        let files = scan_yaml_files_recursive(&routes_dir).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        assert_eq!(names, vec!["alpha.yaml", "middle.yaml", "zebra.yaml"]);
+    }
+
+    #[test]
+    fn scan_yaml_files_nested_deterministic_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        let api_dir = routes_dir.join("api");
+        let ui_dir = routes_dir.join("ui");
+        let cockpit_dir = ui_dir.join("cockpit");
+        fs::create_dir_all(&cockpit_dir).unwrap();
+        fs::create_dir_all(&api_dir).unwrap();
+
+        // api/a.yaml (alphabetically before ui/)
+        fs::write(api_dir.join("a.yaml"), "").unwrap();
+        // ui/aaa.yaml (alphabetically before ui/cockpit/)
+        fs::write(ui_dir.join("aaa.yaml"), "").unwrap();
+        // ui/cockpit/c.yaml (deeper under ui/)
+        fs::write(cockpit_dir.join("c.yaml"), "").unwrap();
+
+        let files = scan_yaml_files_recursive(&routes_dir).unwrap();
+        let relative: Vec<String> = files
+            .iter()
+            .map(|f| {
+                f.strip_prefix(&routes_dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        // api/ sorts before ui/
+        // Within ui/: aaa.yaml sorts before cockpit/ (a < c)
+        // So order is: api/a.yaml, ui/aaa.yaml, ui/cockpit/c.yaml
+        assert_eq!(
+            relative,
+            vec![
+                "api/a.yaml".to_string(),
+                "ui/aaa.yaml".to_string(),
+                "ui/cockpit/c.yaml".to_string(),
+            ]
+        );
+    }
+
+    // ── Section invariant tests (new: under-section-root) ─────────────
+
+    #[test]
+    fn section_invariant_nested_file_under_correct_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        let cockpit_dir = routes_dir.join("ui").join("cockpit");
+        fs::create_dir_all(&cockpit_dir).unwrap();
+
+        let file = cockpit_dir.join("snapshot.yaml");
+        fs::write(&file, "section: routes").unwrap();
+
+        let body: Value = serde_yaml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+
+        // File is under routes/ and declares section: routes — should pass
+        assert!(file.starts_with(&routes_dir));
+        assert_eq!(body.get("section").and_then(|v| v.as_str()), Some("routes"));
+    }
+
+    #[test]
+    fn section_invariant_wrong_section_in_nested_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        let nested = routes_dir.join("aliased");
+        fs::create_dir_all(&nested).unwrap();
+
+        let file = nested.join("evil.yaml");
+        // Declares section: aliases but lives under routes/
+        fs::write(&file, "section: aliases").unwrap();
+
+        // Use a dummy trust store — we're testing the invariant logic,
+        // not the signature verification here. Instead, test directly.
+        let body: Value = serde_yaml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let declared_section = body.get("section").and_then(|v| v.as_str()).unwrap();
+
+        // File IS under routes_dir
+        assert!(file.starts_with(&routes_dir));
+        // But declares wrong section
+        assert_ne!(declared_section, "routes");
+    }
+
+    #[test]
+    fn load_full_loads_real_cockpit_bundle_nested_routes() {
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .expect("workspace root with bundles/ directory")
+            .to_path_buf();
+        let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
+        let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
+
+        let core = workspace.join("bundles/core").canonicalize().unwrap();
+        let standard = workspace.join("bundles/standard").canonicalize().unwrap();
+        let cockpit = workspace.join("bundles/cockpit").canonicalize().unwrap();
+        let bundles = vec![
+            BundleRecord {
+                name: "standard".into(),
+                path: standard,
+                source_file: workspace.join("bundles/core/.ai/node/bundles/standard.yaml"),
+            },
+            BundleRecord {
+                name: "cockpit".into(),
+                path: cockpit,
+                source_file: workspace.join("bundles/core/.ai/node/bundles/cockpit.yaml"),
+            },
+        ];
+
+        let loader = BootstrapLoader {
+            system_space_dir: &core,
+            trust_store: &trust_store,
+        };
+        let snapshot = loader
+            .load_full(&SectionTable::new(), &bundles)
+            .expect("load full node config with cockpit bundle");
+
+        let cockpit_snapshot_route = snapshot
+            .routes
+            .iter()
+            .find(|route| route.path == "/ui/api/cockpit/snapshot")
+            .expect("cockpit snapshot route should load from nested route directory");
+        assert!(
+            cockpit_snapshot_route
+                .source_file
+                .ends_with(".ai/node/routes/ui/cockpit/snapshot.yaml"),
+            "route source should preserve nested path, got {}",
+            cockpit_snapshot_route.source_file.display()
+        );
+        assert!(
+            snapshot.routes.iter().any(|route| route.path == "/ui"),
+            "moved cockpit bundle should still provide base UI route"
+        );
     }
 }

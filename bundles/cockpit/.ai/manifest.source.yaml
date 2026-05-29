@@ -1,0 +1,12 @@
+name: cockpit
+version: "0.5.0"
+description: "Browser cockpit surfaces, UI routes, and operational inspector services"
+requires_kinds:
+  - client
+  - service
+  - surface
+uses_kinds:
+  - directive
+  - graph
+  - knowledge
+  - tool

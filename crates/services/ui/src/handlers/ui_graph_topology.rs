@@ -684,7 +684,7 @@ fn add_execute_reference_edges(
     }
 }
 
-fn read_item_body(path: &std::path::Path) -> Option<String> {
+pub(crate) fn read_item_body(path: &std::path::Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     Some(lillux::signature::strip_signature_lines(&raw))
 }
@@ -792,7 +792,7 @@ fn split_ref(ref_: &str) -> Option<(String, String)> {
     Some((parsed.kind, parsed.bare_id))
 }
 
-fn label_for_bare_id(bare_id: &str) -> String {
+pub(crate) fn label_for_bare_id(bare_id: &str) -> String {
     bare_id
         .rsplit_once('/')
         .map(|(_, label)| label)
@@ -800,7 +800,7 @@ fn label_for_bare_id(bare_id: &str) -> String {
         .to_owned()
 }
 
-fn namespace_for_bare_id(bare_id: &str) -> Option<String> {
+pub(crate) fn namespace_for_bare_id(bare_id: &str) -> Option<String> {
     bare_id
         .rsplit_once('/')
         .map(|(namespace, _)| namespace.to_owned())
@@ -810,7 +810,7 @@ fn space_to_string(space: ItemSpace) -> String {
     space.as_str().to_owned()
 }
 
-fn classify_trust(
+pub(crate) fn classify_trust(
     path: &std::path::Path,
     envelope: Option<&SignatureEnvelope>,
     trust_store: &ryeos_engine::trust::TrustStore,

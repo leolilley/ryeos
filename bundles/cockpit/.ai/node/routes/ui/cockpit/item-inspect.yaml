@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-29T02:30:24Z:73af86ce91ee45cc7193c19f7ab09225faeb890db278a292ffc8e33970680479:y/eIg8hSyQhr4ifrymom3e0pQFbxiUmRaErpLkAhh8G3BJ6gL4ugeVtuOOlammf8Qp/ZrAaMj2Q8CbP7XAiXCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/cockpit
+section: routes
+id: ui/api/cockpit/item/inspect
+path: /ui/api/cockpit/item/inspect
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 15000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/cockpit/item/inspect"

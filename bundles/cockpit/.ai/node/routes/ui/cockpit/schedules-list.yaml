@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-29T02:30:24Z:e43b6fab9daa56b4eb456ed39b1b9b1943f22b6ab871a1db5a7aa8424f761719:731LByGJRq9ahdwtMrBVV8d9C8jxtfD81gDYf2TpMUu2DvVHSfAUOT3538uqYCMCAAXUAMSItYoM1OhsoDE1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/cockpit
+section: routes
+id: ui/api/cockpit/schedules/list
+path: /ui/api/cockpit/schedules/list
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/cockpit/schedules/list"

@@ -1,0 +1,485 @@
+/* ── RyeOS Cockpit — 2D Operational Inspector ────────────────────── */
+
+/* Shell: 3-column grid */
+.cockpit-shell {
+  display: grid;
+  grid-template-columns: 11rem 1fr 22rem;
+  gap: 0.75rem;
+  min-height: calc(100vh - 2rem);
+}
+
+/* ── Navigation sidebar ──────────────────────────────────────────── */
+
+.cockpit-nav {
+  background: var(--bg1);
+  border: 2px solid var(--fg);
+  box-shadow: 6px 6px 0 var(--bg2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cockpit-nav-header {
+  border-bottom: 2px solid var(--fg);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 0.85rem 1rem;
+  text-transform: uppercase;
+}
+
+.cockpit-nav-list {
+  flex: 1;
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 0;
+}
+
+.cockpit-nav-item {
+  border: 0;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  padding: 0.55rem 1rem;
+  text-align: left;
+  text-transform: uppercase;
+  width: 100%;
+}
+
+.cockpit-nav-item:hover {
+  background: var(--bg2);
+  color: var(--fg);
+  translate: -1px -1px;
+  box-shadow: 2px 2px 0 var(--bg2);
+}
+
+.cockpit-nav-item:active {
+  translate: 1px 1px;
+  box-shadow: none;
+}
+
+.cockpit-nav-item.active {
+  background: var(--orange);
+  color: var(--bg);
+  font-weight: 700;
+}
+
+.cockpit-nav-footer {
+  border-top: 2px solid var(--fg);
+  color: var(--fg4);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  padding: 0.6rem 1rem;
+  text-transform: uppercase;
+}
+
+/* ── Main content area ───────────────────────────────────────────── */
+
+.cockpit-main {
+  background: var(--bg1);
+  border: 2px solid var(--fg);
+  box-shadow: 6px 6px 0 var(--bg2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cockpit-main-header {
+  align-items: center;
+  border-bottom: 2px solid var(--fg);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+}
+
+.cockpit-main-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.cockpit-main-meta {
+  color: var(--fg4);
+  font-size: 0.72rem;
+}
+
+.cockpit-main-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.cockpit-tab-panel {
+  display: none;
+}
+
+.cockpit-tab-panel.active {
+  display: block;
+}
+
+/* ── Inspector (right panel) ─────────────────────────────────────── */
+
+.cockpit-inspector {
+  background: var(--bg1);
+  border: 2px solid var(--fg);
+  box-shadow: 6px 6px 0 var(--bg2);
+  overflow-y: auto;
+}
+
+.cockpit-inspector-header {
+  border-bottom: 2px solid var(--fg);
+  color: var(--fg4);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  padding: 0.85rem 1rem;
+  text-transform: uppercase;
+}
+
+.cockpit-inspector-body {
+  padding: 1rem;
+}
+
+/* ── Status cards (overview) ─────────────────────────────────────── */
+
+.cockpit-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.75rem;
+}
+
+.cockpit-card {
+  background: var(--bg);
+  border: 2px solid var(--fg4);
+  box-shadow: 4px 4px 0 var(--bg2);
+  padding: 0.85rem 1rem;
+}
+
+.cockpit-card-label {
+  color: var(--fg4);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.35rem;
+  text-transform: uppercase;
+}
+
+.cockpit-card-value {
+  font-size: 1rem;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+.cockpit-card-value.path {
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--fg2);
+}
+
+/* ── Status indicators ───────────────────────────────────────────── */
+
+.status-healthy {
+  color: var(--aqua);
+}
+
+.status-degraded {
+  color: var(--yellow);
+}
+
+.status-running {
+  color: var(--orange);
+}
+
+.status-idle {
+  color: var(--fg4);
+}
+
+/* ── Section headers ─────────────────────────────────────────────── */
+
+.cockpit-section {
+  margin-top: 1.25rem;
+}
+
+.cockpit-section:first-child {
+  margin-top: 0;
+}
+
+.cockpit-section-title {
+  border-left: 3px solid var(--orange);
+  color: var(--fg2);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.2rem 0 0.2rem 0.65rem;
+  text-transform: uppercase;
+  margin-bottom: 0.6rem;
+}
+
+/* ── Tables ──────────────────────────────────────────────────────── */
+
+.cockpit-table-wrap {
+  border: 2px solid var(--fg4);
+  overflow-x: auto;
+}
+
+.cockpit-table {
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  width: 100%;
+}
+
+.cockpit-table th {
+  background: var(--bg2);
+  border: 1px solid var(--fg4);
+  color: var(--fg4);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 0.4rem 0.65rem;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cockpit-table td {
+  border: 1px solid var(--bg2);
+  padding: 0.35rem 0.65rem;
+  vertical-align: top;
+}
+
+.cockpit-table tr:hover td {
+  background: rgba(254, 128, 25, 0.06);
+}
+
+/* ── Inspector detail readout ────────────────────────────────────── */
+
+.inspector-prompt {
+  color: var(--orange);
+  margin-bottom: 0.75rem;
+}
+
+.inspector-kv {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.inspector-kv dt {
+  color: var(--fg4);
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.inspector-kv dd {
+  color: var(--fg);
+  font-size: 0.82rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.inspector-section {
+  margin-top: 0.85rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--bg2);
+}
+
+.inspector-section-title {
+  color: var(--fg4);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 0.4rem;
+}
+
+/* ── Tags/badges in cockpit ──────────────────────────────────────── */
+
+.cockpit-tag {
+  display: inline-block;
+  background: var(--bg2);
+  border: 1px solid var(--fg4);
+  color: var(--fg2);
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  padding: 0.08rem 0.4rem;
+  text-transform: uppercase;
+}
+
+.cockpit-tag-system { color: var(--purple); border-color: var(--purple); }
+.cockpit-tag-user   { color: var(--aqua); border-color: var(--aqua); }
+.cockpit-tag-project { color: var(--orange); border-color: var(--orange); }
+
+/* ── Empty/placeholder states ─────────────────────────────────────── */
+
+.cockpit-empty {
+  color: var(--fg4);
+  font-size: 0.78rem;
+  font-style: italic;
+  padding: 2rem 0;
+  text-align: center;
+}
+
+/* ── Topology tab (reuses graph-view) ─────────────────────────────── */
+
+.cockpit-topology-container {
+  height: calc(100vh - 10rem);
+  min-height: 24rem;
+  position: relative;
+  width: 100%;
+}
+
+.cockpit-topology-container canvas {
+  display: block;
+  outline: none;
+}
+
+/* ── Items filter bar ─────────────────────────────────────────────── */
+
+.cockpit-filter-input,
+.cockpit-filter-select {
+  background: var(--bg);
+  border: 2px solid var(--fg4);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.38rem 0.65rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.cockpit-filter-input:focus,
+.cockpit-filter-select:focus {
+  border-color: var(--orange);
+  outline: none;
+}
+
+.cockpit-filter-input::placeholder {
+  color: var(--fg4);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.cockpit-filter-btn {
+  background: var(--bg2);
+  border: 2px solid var(--fg4);
+  color: var(--fg2);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  padding: 0.38rem 0.75rem;
+  text-transform: uppercase;
+}
+
+.cockpit-filter-btn:hover {
+  border-color: var(--orange);
+  color: var(--fg);
+  translate: -1px -1px;
+  box-shadow: 2px 2px 0 var(--bg2);
+}
+
+.cockpit-filter-btn:active {
+  translate: 1px 1px;
+  box-shadow: none;
+}
+
+/* ── Source content view (raw + effective) ─────────────────────────── */
+
+.cockpit-source-view {
+  background: var(--bg);
+  border: 1px solid var(--bg2);
+  color: var(--fg2);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  margin: 0.35rem 0 0;
+  max-height: 28rem;
+  overflow: auto;
+  padding: 0.65rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── File entry buttons ─────────────────────────────────────────── */
+
+.cockpit-file-entry {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.55rem;
+  text-align: left;
+  width: 100%;
+}
+
+.cockpit-file-entry:hover {
+  border-color: var(--fg4);
+  background: var(--bg);
+  color: var(--fg);
+  translate: -1px -1px;
+  box-shadow: 2px 2px 0 var(--bg2);
+}
+
+.cockpit-file-entry:active {
+  translate: 1px 1px;
+  box-shadow: none;
+}
+
+.cockpit-file-entry + .cockpit-file-entry {
+  margin-top: 0.1rem;
+  border-top: 1px solid var(--bg2);
+  padding-left: 1.5rem;
+}
+
+/* ── Item row hover ────────────────────────────────────────────── */
+
+.cockpit-item-row {
+  cursor: pointer;
+}
+
+.cockpit-item-row:hover td {
+  background: rgba(254, 128, 25, 0.08);
+}
+
+/* ── Active filter button variant ─────────────────────────────────── */
+
+.cockpit-filter-btn.active {
+  background: var(--orange);
+  color: var(--bg);
+  border-color: var(--orange);
+  font-weight: 700;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────── */
+
+@media (max-width: 1100px) {
+  .cockpit-shell {
+    grid-template-columns: 1fr;
+  }
+  .cockpit-nav {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .cockpit-nav-list {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.35rem 0.5rem;
+  }
+  .cockpit-nav-item {
+    white-space: nowrap;
+    padding: 0.35rem 0.65rem;
+    width: auto;
+  }
+  .cockpit-nav-footer {
+    display: none;
+  }
+  .cockpit-inspector {
+    order: -1;
+  }
+}
