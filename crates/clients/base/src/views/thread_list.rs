@@ -137,13 +137,17 @@ pub fn build(model: &AppModel, tile_id: TileId, w: usize, h: usize) -> TextSurfa
 
 fn elapsed_str(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<String> {
     let start = start_ms?;
-    let end = end_ms.unwrap_or_else(|| {
-        std::time::SystemTime::now()
+    let end = match end_ms {
+        Some(end) => end,
+        #[cfg(target_arch = "wasm32")]
+        None => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        None => std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
-    });
-    let secs = ((end - start) / 1000) as u64;
+            .unwrap_or(0),
+    };
+    let secs = end.saturating_sub(start) as u64 / 1000;
     if secs < 60 {
         Some(format!("{}s", secs))
     } else if secs < 3600 {

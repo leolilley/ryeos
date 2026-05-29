@@ -87,7 +87,7 @@ pub struct CompiledStaticMode {
 }
 
 /// Security headers applied to all embedded asset responses.
-static CSP_VALUE: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:";
+static CSP_VALUE: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
 
 impl ResponseMode for StaticMode {
     fn key(&self) -> &'static str {

@@ -59,6 +59,7 @@ async function boot() {
       refreshState();
     }, 5000);
   } catch (err) {
+    console.error("RyeOS web boot failed", err);
     renderError(err);
   }
 }
@@ -414,7 +415,7 @@ function millis(value) {
 }
 
 function renderError(err) {
-  const message = err && err.message ? err.message : String(err);
+  const message = err && (err.stack || err.message) ? (err.stack || err.message) : String(err);
   app.innerHTML = `<div class="rye-error"><strong>RyeOS web boot failed</strong><pre>${escapeHtml(message)}</pre></div>`;
 }
 
