@@ -74,6 +74,23 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
             continue;
         }
 
+        let live_system_space_dir = value
+            .get("system_space_dir")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from);
+        let reports_requested_system_space = live_system_space_dir
+            .as_ref()
+            .map(|path| path == &config.system_space_dir)
+            .unwrap_or_else(|| {
+                metadata_hint
+                    .as_ref()
+                    .map(|metadata| metadata.system_space_dir == config.system_space_dir)
+                    .unwrap_or(false)
+            });
+        if !reports_requested_system_space {
+            continue;
+        }
+
         // Live response — prefer live fields over the (possibly stale) hint.
         let hint = metadata_hint.clone();
         let metadata = DaemonMetadata {
@@ -103,9 +120,8 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned)
                 .or_else(|| hint.as_ref().and_then(|m| m.version.clone())),
-            system_space_dir: hint
-                .as_ref()
-                .map(|m| m.system_space_dir.clone())
+            system_space_dir: live_system_space_dir
+                .or_else(|| hint.as_ref().map(|m| m.system_space_dir.clone()))
                 .unwrap_or_else(|| config.system_space_dir.clone()),
         };
         return Ok(LifecycleStatus::Running { metadata });
@@ -205,6 +221,7 @@ mod tests {
         std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
         let uds_path = config.uds_path.clone();
+        let system_space_dir = config.system_space_dir.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _request = read_frame(&mut stream).await;
@@ -215,6 +232,7 @@ mod tests {
                     "pid": 1234u64,
                     "bind": "127.0.0.1:7400",
                     "uds_path": uds_path.display().to_string(),
+                    "system_space_dir": system_space_dir.display().to_string(),
                     "started_at": "now",
                     "version": "test"
                 }
@@ -252,10 +270,17 @@ mod tests {
         .unwrap();
 
         let listener = tokio::net::UnixListener::bind(&hinted_uds_path).unwrap();
+        let system_space_dir = config.system_space_dir.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _request = read_frame(&mut stream).await;
-            let response = serde_json::json!({"request_id": 1u64, "result": {"status": "running"}});
+            let response = serde_json::json!({
+                "request_id": 1u64,
+                "result": {
+                    "status": "running",
+                    "system_space_dir": system_space_dir.display().to_string()
+                }
+            });
             let encoded = rmp_serde::to_vec_named(&response).unwrap();
             write_frame(&mut stream, &encoded).await;
         });
@@ -288,6 +313,7 @@ mod tests {
         .unwrap();
 
         let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
+        let system_space_dir = config.system_space_dir.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _request = read_frame(&mut stream).await;
@@ -297,6 +323,7 @@ mod tests {
                     "status": "running",
                     "pid": 9999u64,
                     "bind": "127.0.0.1:7400",
+                    "system_space_dir": system_space_dir.display().to_string(),
                     "started_at": "live",
                     "version": "live"
                 }
@@ -357,6 +384,38 @@ mod tests {
         assert!(
             matches!(status, LifecycleStatus::Stale { .. }),
             "non-running response with metadata hint should be Stale, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_control_for_different_system_space_is_not_trusted_as_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.system_space_dir);
+        std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
+        let other_system_space = tmp.path().join("other-state");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _request = read_frame(&mut stream).await;
+            let response = serde_json::json!({
+                "request_id": 1u64,
+                "result": {
+                    "status": "running",
+                    "pid": 9999u64,
+                    "system_space_dir": other_system_space.display().to_string()
+                }
+            });
+            let encoded = rmp_serde::to_vec_named(&response).unwrap();
+            write_frame(&mut stream, &encoded).await;
+        });
+
+        let status = status(&env).await.unwrap();
+        server.await.unwrap();
+        assert!(
+            matches!(status, LifecycleStatus::Stopped { .. }),
+            "response for a different system space should be ignored, got: {status:?}"
         );
     }
 

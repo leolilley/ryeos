@@ -86,6 +86,7 @@ pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcRespon
                 "started_at": &state.started_at_iso,
                 "bind": state.config.bind.to_string(),
                 "uds_path": state.config.uds_path.display().to_string(),
+                "system_space_dir": state.config.system_space_dir.display().to_string(),
             }),
         ),
         "lifecycle.shutdown" => {
