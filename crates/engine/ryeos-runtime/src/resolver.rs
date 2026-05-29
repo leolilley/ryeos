@@ -385,6 +385,23 @@ mod tests {
         assert_eq!(with_remote.parameters["item_ref"], "service:health/status");
         assert_eq!(with_remote.parameters["no_project"], true);
 
+        let with_parameters = resolve_command(
+            &[
+                "remote".into(),
+                "execute".into(),
+                "railway".into(),
+                "tool:demo/echo".into(),
+                "--parameters".into(),
+                r#"{"smoke_only":true}"#.into(),
+            ],
+            &aliases,
+            &verbs,
+        )
+        .unwrap();
+        assert_eq!(with_parameters.parameters["remote"], "railway");
+        assert_eq!(with_parameters.parameters["item_ref"], "tool:demo/echo");
+        assert_eq!(with_parameters.parameters["parameters"]["smoke_only"], true);
+
         let default_remote = resolve_command(
             &[
                 "remote".into(),
