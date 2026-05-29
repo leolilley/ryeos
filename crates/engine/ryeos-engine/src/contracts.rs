@@ -3078,6 +3078,14 @@ pub struct PlanSubprocessSpec {
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Source category for each env entry. This lets the daemon apply
+    /// final subprocess env policy without guessing from key names.
+    ///
+    /// Kept as a sidecar instead of changing `env` wire shape so older
+    /// serialized specs remain readable and current callers can keep
+    /// using `spec.env` as the final key/value map.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env_sources: HashMap<String, RuntimeEnvSource>,
     pub stdin_data: Option<String>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -3087,6 +3095,15 @@ pub struct PlanSubprocessSpec {
     /// behavior for tools that declare none of these.
     #[serde(default)]
     pub execution: ExecutionDecorations,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeEnvSource {
+    EnginePlan,
+    RuntimeDescriptor,
+    RuntimeInterpreter,
+    RuntimePathMutation,
 }
 
 /// Typed bag of `DecorateSpec`-phase outputs. Each field is `Option`

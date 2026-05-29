@@ -415,6 +415,7 @@ mod tests {
         CompileContext {
             template_ctx: TemplateContext::new(chain[0].source_path.clone()),
             env: HashMap::new(),
+            env_sources: HashMap::new(),
             spec_overrides: SpecOverrides::default(),
             params: Value::Object(Map::new()),
             original_params: &NULL_PARAMS,

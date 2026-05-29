@@ -428,6 +428,9 @@ mod tests {
         let yaml = "\
 location:
   directory: config
+resolution: []
+effective_trust:
+  include_references: false
 formats:
   - extensions: [\".yaml\", \".yml\"]
     parser: parser:ryeos/core/yaml/yaml
@@ -536,6 +539,7 @@ metadata:
         let mut ctx = CompileContext {
             template_ctx: TemplateContext::new(PathBuf::from("/dev/null")),
             env: HashMap::new(),
+            env_sources: HashMap::new(),
             spec_overrides: SpecOverrides::default(),
             params: initial_params,
             original_params: &NULL_PARAMS,

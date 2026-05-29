@@ -377,6 +377,31 @@ pub fn read_named_secret(
     Ok(map.get(name).cloned())
 }
 
+/// Resolve one explicitly requested secret name through the same source
+/// stack used by `read_required_secrets`: sealed vault, daemon host env,
+/// then `.env` overlay. Returns `Ok(None)` when absent from every source.
+pub fn read_explicit_secret(
+    vault: &dyn NodeVault,
+    principal: &str,
+    name: &str,
+    dotenv_search_dirs: &[PathBuf],
+) -> Result<Option<String>> {
+    crate::process::validate_spawn_secret_name(name)
+        .map_err(|e| anyhow!("vault: invalid explicit secret `{name}`: {e:#}"))?;
+    let required = vec![name.to_string()];
+    let vault_map = vault.read_all(principal)?;
+    if let Some(value) = vault_map.get(name) {
+        return Ok(Some(value.clone()));
+    }
+    let host_env_map = read_declared_host_env(&required)?;
+    if let Some(value) = host_env_map.get(name) {
+        return Ok(Some(value.clone()));
+    }
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+        .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
+    Ok(dotenv_map.get(name).cloned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

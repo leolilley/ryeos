@@ -671,6 +671,11 @@ mod tests {
         } else {
             format!("{yaml_owned}effective_trust:\n  include_references: false\n")
         };
+        let yaml_owned = if yaml_owned.contains("resolution:") {
+            yaml_owned
+        } else {
+            format!("{yaml_owned}resolution: []\n")
+        };
         lillux::signature::sign_content(&yaml_owned, &test_signing_key(), "#", None)
     }
 

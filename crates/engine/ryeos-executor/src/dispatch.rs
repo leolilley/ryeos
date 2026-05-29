@@ -808,8 +808,9 @@ pub(crate) async fn dispatch_op(
 
     // 7. Mint thread auth token and build env injections. The op-dispatch
     //    subprocess needs the same daemon env vars as the normal subprocess
-    //    path: socket path, callback token, thread ID, system space dir,
-    //    thread auth token, and optionally project path.
+    //    path: socket path, callback token, thread ID, thread auth token,
+    //    and optionally project path. System/user roots come from the
+    //    daemon-root layer, not per-spawn env.
     let thread_auth = state.thread_auth.mint(
         &thread_id,
         request.acting_principal.to_string(),
@@ -819,13 +820,11 @@ pub(crate) async fn dispatch_op(
     let callback_token_str = cap.token.clone();
     let thread_auth_token_str = thread_auth.token.clone();
     let socket_path_str = state.config.uds_path.to_string_lossy().to_string();
-    let system_space_str = state.config.system_space_dir.to_string_lossy().to_string();
 
     let mut per_spawn: Vec<(String, String)> = vec![
         ("RYEOSD_SOCKET_PATH".to_string(), socket_path_str),
         ("RYEOSD_CALLBACK_TOKEN".to_string(), callback_token_str),
         ("RYEOSD_THREAD_ID".to_string(), thread_id.clone()),
-        ("RYEOS_SYSTEM_SPACE_DIR".to_string(), system_space_str),
         (
             "RYEOSD_THREAD_AUTH_TOKEN".to_string(),
             thread_auth_token_str,
@@ -868,9 +867,16 @@ pub(crate) async fn dispatch_op(
     })?;
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
-    let envs =
-        ryeos_app::process::build_subprocess_envs(&std::collections::BTreeMap::new(), &per_spawn)
-            .map_err(|e| DispatchError::Internal(e.into()))?;
+    let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+        &engine_roots,
+        &state.config.system_space_dir,
+    );
+    let envs = ryeos_app::process::build_subprocess_envs_with_roots(
+        &std::collections::BTreeMap::new(),
+        &per_spawn,
+        roots,
+    )
+    .map_err(|e| DispatchError::Internal(e.into()))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
@@ -1530,8 +1536,16 @@ async fn dispatch_streaming_subprocess(
     })?;
 
     let executor_path_str = executor_path.to_string_lossy().to_string();
-    let envs = ryeos_app::process::build_subprocess_envs(&std::collections::BTreeMap::new(), &[])
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+    let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+        &engine_roots,
+        &state.config.system_space_dir,
+    );
+    let envs = ryeos_app::process::build_subprocess_envs_with_roots(
+        &std::collections::BTreeMap::new(),
+        &[],
+        roots,
+    )
+    .map_err(|e| DispatchError::Internal(e.into()))?;
     let result = tokio::task::spawn_blocking(move || {
         lillux::run(lillux::SubprocessRequest {
             cmd: executor_path_str,
@@ -1966,12 +1980,18 @@ mod tests {
 version: "1.0.0"
 location:
   directory: runtimes
+resolution: []
+effective_trust:
+  include_references: false
 execution:
   terminator:
     kind: subprocess
     protocol: protocol:ryeos/core/runtime_v1
-  thread_profile: runtime_run
-  resolution: []
+  thread_profile:
+    name: runtime_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

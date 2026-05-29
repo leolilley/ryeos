@@ -72,33 +72,24 @@ pub fn execute_plan(
 
 /// Dispatch a subprocess plan node via Lillux.
 ///
-/// Converts a `PlanSubprocessSpec` into a `lillux::SubprocessRequest`,
-/// injecting daemon context bindings (RYEOS_THREAD_ID, RYEOS_CHAIN_ROOT_ID).
+/// Converts a finalized `PlanSubprocessSpec` into a `lillux::SubprocessRequest`.
 fn dispatch_subprocess(
     spec: &PlanSubprocessSpec,
 
-    ctx: &EngineContext,
+    _ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
-    let request = spec_to_request(spec, ctx)?;
+    let request = spec_to_request(spec)?;
     let result = lillux::run(request);
     Ok(translate_result(result))
 }
 
 /// Convert a `PlanSubprocessSpec` + daemon context into a `lillux::SubprocessRequest`.
-fn spec_to_request(
-    spec: &PlanSubprocessSpec,
-    ctx: &EngineContext,
-) -> Result<lillux::SubprocessRequest, EngineError> {
-    // Build env: spec.env + daemon context bindings
-    let mut envs: Vec<(String, String)> = spec
+fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessRequest, EngineError> {
+    let envs: Vec<(String, String)> = spec
         .env
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-
-    // Daemon context bindings (always injected, override any spec values)
-    envs.push(("RYEOS_THREAD_ID".to_owned(), ctx.thread_id.clone()));
-    envs.push(("RYEOS_CHAIN_ROOT_ID".to_owned(), ctx.chain_root_id.clone()));
 
     Ok(lillux::SubprocessRequest {
         cmd: spec.cmd.clone(),
@@ -222,9 +213,9 @@ pub fn spawn_plan(
 
 fn spawn_subprocess(
     spec: &PlanSubprocessSpec,
-    ctx: &EngineContext,
+    _ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
-    let request = spec_to_request(spec, ctx)?;
+    let request = spec_to_request(spec)?;
 
     match lillux::spawn(request) {
         Ok(running) => {
@@ -305,6 +296,7 @@ mod tests {
                     args: vec!["hello world".into()],
                     cwd: None,
                     env: HashMap::new(),
+                    env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
@@ -343,6 +335,7 @@ mod tests {
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
+                    env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
@@ -372,6 +365,7 @@ mod tests {
                     args: Vec::new(),
                     cwd: None,
                     env: HashMap::new(),
+                    env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
@@ -402,6 +396,7 @@ mod tests {
 
         let mut env = HashMap::new();
         env.insert("RYEOS_ITEM_REF".into(), "tool:my_tool".into());
+        env.insert("RYEOS_THREAD_ID".into(), "thread:test".into());
 
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
@@ -411,6 +406,7 @@ mod tests {
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env,
+                    env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
@@ -441,6 +437,7 @@ mod tests {
                     args: Vec::new(),
                     cwd: None,
                     env: HashMap::new(),
+                    env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
@@ -475,21 +472,23 @@ mod tests {
     }
 
     #[test]
-    fn spec_to_request_injects_context_bindings() {
+    fn spec_to_request_preserves_finalized_env() {
+        let mut env = HashMap::new();
+        env.insert("RYEOS_THREAD_ID".into(), "thread:test".into());
+        env.insert("RYEOS_CHAIN_ROOT_ID".into(), "chain:test".into());
         let spec = PlanSubprocessSpec {
             cmd: "/bin/echo".into(),
             args: vec!["hello".into()],
             cwd: None,
-            env: HashMap::new(),
+            env,
+            env_sources: HashMap::new(),
             stdin_data: None,
             timeout_secs: 60,
             execution: Default::default(),
         };
-        let ctx = test_engine_context();
-        let request = spec_to_request(&spec, &ctx).unwrap();
+        let request = spec_to_request(&spec).unwrap();
         assert_eq!(request.cmd, "/bin/echo");
         assert_eq!(request.timeout, 60.0);
-        // Context bindings must be present
         let env_map: HashMap<String, String> = request.envs.into_iter().collect();
         assert_eq!(env_map.get("RYEOS_THREAD_ID").unwrap(), "thread:test");
         assert_eq!(env_map.get("RYEOS_CHAIN_ROOT_ID").unwrap(), "chain:test");
