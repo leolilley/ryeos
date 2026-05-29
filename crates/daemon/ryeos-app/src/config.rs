@@ -46,6 +46,8 @@ pub struct Config {
     pub authorized_keys_dir: PathBuf,
     /// Comma-separated list of host-env var names that tool subprocesses
     /// may reference via `${VAR}` in their `env_config.env` values.
+    /// This is distinct from `required_secrets`: declared secrets can
+    /// be resolved from host env by name without appearing here.
     /// Also set via `RYEOS_TOOL_ENV_PASSTHROUGH` env var (env var wins).
     /// Empty by default — most deployments don't need passthrough.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

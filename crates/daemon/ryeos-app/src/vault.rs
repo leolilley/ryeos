@@ -25,10 +25,9 @@
 //!   [`lillux::vault`]); the daemon's vault X25519 secret key
 //!   (auto-generated at boot, separate from the Ed25519 node identity)
 //!   is the only thing that can decrypt them.
-//! - Already-set process env on the daemon does NOT poison the vault
-//!   — vault output is always layered on top of `daemon_callback_env`
-//!   and OS-inherited env at spawn time, but the vault itself is read
-//!   solely from disk.
+//! - Already-set process env on the daemon does NOT poison the vault.
+//!   Host env is only consulted for item-declared `required_secrets`,
+//!   and only those declared names are projected into subprocess env.
 //!
 //! ## Backend (`SealedEnvelopeVault`)
 //!
@@ -51,6 +50,7 @@
 //! No silent dropping of bad entries: typed-fail-loud, end-to-end.
 
 use std::collections::HashMap;
+use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
@@ -102,24 +102,27 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
 /// ## Sources, in precedence order (highest wins)
 ///
 /// 1. The sealed-envelope vault (`vault.read_all(principal)`).
-/// 2. `.env` files under each entry of `dotenv_search_dirs`, with
+/// 2. Declared names from the daemon host environment (for hosted
+///    platforms like Railway/Fly/Render where service variables are
+///    the operator's native secret mechanism).
+/// 3. `.env` files under each entry of `dotenv_search_dirs`, with
 ///    later directories overriding earlier ones (typical caller
 ///    passes `[user_home, project_root]` so project beats user).
 ///
-/// `.env` is intentionally lower precedence than the vault — the
-/// vault is the operator's authoritative store, the project's
-/// `.env` is convenience for declared secrets the operator hasn't
-/// (yet) baked into the vault. Vault entries always win.
+/// `.env` is intentionally lower precedence than both vault and host
+/// env — the vault is RyeOS's explicit operator store, host env is the
+/// deployment platform's operator store, and project `.env` is a
+/// convenience fallback for local/dev. Vault entries always win.
 ///
 /// ## Refusal semantics
 ///
-/// Refuses on any declared secret missing from BOTH sources — that's
+/// Refuses on any declared secret missing from ALL sources — that's
 /// a misconfiguration the caller wants surfaced, not silently
 /// absorbed (the alternative is a tool calling a provider with
 /// `None` and emitting an opaque upstream auth error).
 ///
-/// Empty `required_secrets` ⇒ empty map. Neither vault nor `.env`
-/// files are read in that case (the dispatch fast-path).
+/// Empty `required_secrets` ⇒ empty map. Neither vault, host env, nor
+/// `.env` files are read in that case (the dispatch fast-path).
 pub fn read_required_secrets(
     vault: &dyn NodeVault,
     principal: &str,
@@ -129,14 +132,22 @@ pub fn read_required_secrets(
     if required_secrets.is_empty() {
         return Ok(HashMap::new());
     }
+    for key in required_secrets {
+        validate_key_name(key)
+            .map_err(|e| anyhow!("vault: invalid declared secret `{key}`: {e:#}"))?;
+    }
     let vault_map = vault.read_all(principal)?;
+    let host_env_map = read_declared_host_env(required_secrets)?;
     let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
         .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     let mut out = HashMap::with_capacity(required_secrets.len());
     let mut missing: Vec<&str> = Vec::new();
     for key in required_secrets {
-        // Vault wins on conflict; .env is the fallback source.
+        // Vault wins on conflict; host env is the deployment fallback;
+        // .env is the local/dev convenience fallback.
         if let Some(v) = vault_map.get(key.as_str()) {
+            out.insert(key.clone(), v.clone());
+        } else if let Some(v) = host_env_map.get(key.as_str()) {
             out.insert(key.clone(), v.clone());
         } else if let Some(v) = dotenv_map.get(key.as_str()) {
             out.insert(key.clone(), v.clone());
@@ -147,12 +158,32 @@ pub fn read_required_secrets(
     if !missing.is_empty() {
         bail!(
             "vault: missing declared secret(s) for principal `{principal}`: [{}]. \
-             The item declares these in `required_secrets` but neither the \
-             operator vault nor any `.env` overlay provides them. Add them via \
-             `ryeos vault put`, drop them into a `.env` next to the project, or \
-             remove the declaration.",
+             The item declares these in `required_secrets` but none of the checked \
+             sources provides them: sealed vault, daemon host environment, or \
+             `.env` overlay. For hosted deployments, configure them as service \
+             variables. For local/dev, use `ryeos vault put` or a project/user \
+             `.env`, or remove the declaration.",
             missing.join(", ")
         );
+    }
+    Ok(out)
+}
+
+fn read_declared_host_env(required_secrets: &[String]) -> Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    for key in required_secrets {
+        match std::env::var(key) {
+            Ok(value) => {
+                out.insert(key.clone(), value);
+            }
+            Err(VarError::NotPresent) => {}
+            Err(VarError::NotUnicode(_)) => {
+                bail!(
+                    "vault: declared secret `{key}` is present in daemon host env \
+                     but is not valid UTF-8"
+                );
+            }
+        }
     }
     Ok(out)
 }
@@ -349,6 +380,48 @@ pub fn read_named_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        _guard: MutexGuard<'static, ()>,
+        previous: Vec<(String, Option<OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn set(vars: &[(&str, Option<&str>)]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let previous = vars
+                .iter()
+                .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in vars {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
 
     #[test]
     fn empty_vault_trait_returns_empty() {
@@ -432,6 +505,106 @@ mod tests {
             msg.contains("missing declared secret"),
             "expected scoping note in error: {msg}"
         );
+    }
+
+    #[test]
+    fn host_env_supplies_declared_secret() {
+        let _env = EnvVarGuard::set(&[("RYEOS_TEST_HOST_SECRET", Some("from-host"))]);
+        let v = FixedVault(HashMap::new());
+        let required = vec!["RYEOS_TEST_HOST_SECRET".to_string()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+
+        assert_eq!(
+            bindings.get("RYEOS_TEST_HOST_SECRET"),
+            Some(&"from-host".to_string())
+        );
+    }
+
+    #[test]
+    fn vault_beats_host_env_for_declared_secret() {
+        let _env = EnvVarGuard::set(&[("RYEOS_TEST_PRECEDENCE", Some("from-host"))]);
+        let mut all = HashMap::new();
+        all.insert(
+            "RYEOS_TEST_PRECEDENCE".to_string(),
+            "from-vault".to_string(),
+        );
+        let v = FixedVault(all);
+        let required = vec!["RYEOS_TEST_PRECEDENCE".to_string()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+
+        assert_eq!(
+            bindings.get("RYEOS_TEST_PRECEDENCE"),
+            Some(&"from-vault".to_string())
+        );
+    }
+
+    #[test]
+    fn host_env_beats_dotenv_for_declared_secret() {
+        let _env = EnvVarGuard::set(&[("RYEOS_TEST_HOST_DOTENV", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            "RYEOS_TEST_HOST_DOTENV=from-dotenv\n",
+        )
+        .unwrap();
+        let v = FixedVault(HashMap::new());
+        let required = vec!["RYEOS_TEST_HOST_DOTENV".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+
+        assert_eq!(
+            bindings.get("RYEOS_TEST_HOST_DOTENV"),
+            Some(&"from-host".to_string())
+        );
+    }
+
+    #[test]
+    fn host_env_only_returns_declared_keys() {
+        let _env = EnvVarGuard::set(&[
+            ("RYEOS_TEST_DECLARED", Some("declared")),
+            ("RYEOS_TEST_UNDECLARED", Some("must-not-leak")),
+        ]);
+        let v = FixedVault(HashMap::new());
+        let required = vec!["RYEOS_TEST_DECLARED".to_string()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings.get("RYEOS_TEST_DECLARED"),
+            Some(&"declared".to_string())
+        );
+        assert!(!bindings.contains_key("RYEOS_TEST_UNDECLARED"));
+    }
+
+    #[test]
+    fn declared_secret_rejects_blocked_host_env_name() {
+        let v = FixedVault(HashMap::new());
+        let required = vec!["PATH".to_string()];
+
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("invalid declared secret"), "got: {msg}");
+        assert!(msg.contains("blocked list"), "got: {msg}");
+    }
+
+    #[test]
+    fn missing_declared_secret_mentions_host_env_source() {
+        let _env = EnvVarGuard::set(&[("RYEOS_TEST_MISSING_SECRET", None)]);
+        let v = FixedVault(HashMap::new());
+        let required = vec!["RYEOS_TEST_MISSING_SECRET".to_string()];
+
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("RYEOS_TEST_MISSING_SECRET"), "got: {msg}");
+        assert!(msg.contains("daemon host environment"), "got: {msg}");
+        assert!(msg.contains("sealed vault"), "got: {msg}");
+        assert!(msg.contains(".env"), "got: {msg}");
     }
 
     // ── SealedEnvelopeVault tests ────────────────────────────────
