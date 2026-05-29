@@ -35,6 +35,14 @@ struct Cli {
     /// The cockpit defaults to read-only unless this is explicit.
     #[arg(long = "allow-actions")]
     allow_actions: bool,
+
+    /// Print the minted one-shot launch URL to stdout.
+    #[arg(long = "print-url")]
+    print_url: bool,
+
+    /// Mint a launch URL but do not open a browser.
+    #[arg(long = "no-open")]
+    no_open: bool,
 }
 
 /// Request body for `ui.launch.mint`.
@@ -119,6 +127,14 @@ async fn main() -> Result<()> {
     }
 
     let mint_resp: MintResponse = resp.json().await.context("parse mint response")?;
+
+    if cli.print_url || cli.no_open {
+        println!("{}", mint_resp.launch_url);
+    }
+
+    if cli.no_open {
+        return Ok(());
+    }
 
     // Open the browser at the daemon-returned launch URL.
     eprintln!("Opening browser: {}", mint_resp.launch_url);
