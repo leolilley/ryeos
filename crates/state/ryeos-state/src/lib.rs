@@ -12,6 +12,7 @@ pub mod gc;
 pub mod head_cache;
 pub mod ignore;
 pub mod locators;
+pub mod object_closure;
 pub mod objects;
 pub mod project_discovery;
 pub mod project_sync;
@@ -32,7 +33,7 @@ pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;
 pub use objects::{
     thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
-    ChainState,
+    Attestation, ChainState,
 };
 pub use projection::ProjectionDb;
 pub use refs::{SignedRef, TrustStore};

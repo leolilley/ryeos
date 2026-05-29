@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-29T15:07:01Z:558326be1d23017b871b60ad2dca0a0558c3f29eae83725aa24d35cd1b0031d3:+ESo3wnnlrTvBa4PheXmAUZiZhWx+MVZPJbiMYaLt8isq3LnsWx0FZXqvWz1EgEkK7cR38hBz39iLLDzbP6ABQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: objects.closure.get
+required_caps: ["ryeos.execute.service.objects.closure.get"]
+schema:
+  roots: string[]
+  max_objects: number?
+  max_blobs: number?
+  max_blob_bytes: number?
+description: "Retrieve every present object and blob in a schema-defined CAS closure"

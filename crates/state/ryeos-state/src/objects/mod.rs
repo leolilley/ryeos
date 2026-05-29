@@ -9,7 +9,11 @@
 //! - [`ProjectSnapshot`] — snapshot of a project's source state
 //! - [`SourceManifest`] — mapping of item refs to content blobs
 //! - [`ItemSource`] — individual item with integrity metadata
+//!
+//! Distributed trust types:
+//! - [`Attestation`] — signed claim about a CAS object
 
+pub mod attestation;
 pub mod chain_state;
 pub mod item_source;
 pub mod project_snapshot;
@@ -17,6 +21,7 @@ pub mod source_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
 
+pub use attestation::Attestation;
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use item_source::ItemSource;
 pub use project_snapshot::ProjectSnapshot;

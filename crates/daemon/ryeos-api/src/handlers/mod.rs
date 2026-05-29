@@ -26,6 +26,8 @@ pub mod ingest_ignore;
 pub mod items_effective;
 pub mod maintenance_gc;
 pub mod node_sign;
+pub mod objects_closure_describe;
+pub mod objects_closure_get;
 pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
@@ -82,6 +84,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     objects_has::DESCRIPTOR,
     objects_put::DESCRIPTOR,
     objects_get::DESCRIPTOR,
+    objects_closure_describe::DESCRIPTOR,
+    objects_closure_get::DESCRIPTOR,
     push_head::DESCRIPTOR,
     project_apply_snapshot::DESCRIPTOR,
     project_status::DESCRIPTOR,

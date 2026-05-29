@@ -260,6 +260,28 @@ impl RemoteClient {
         Ok(ObjectsGetResponse { entries })
     }
 
+    /// POST /objects/closure/describe (authenticated).
+    pub async fn objects_closure_describe(
+        &self,
+        roots: &[String],
+        max_objects: Option<usize>,
+    ) -> Result<ObjectsClosureDescribeResponse> {
+        let body = closure_request_body(roots, max_objects);
+        let resp = self.signed_post("/objects/closure/describe", &body).await?;
+        serde_json::from_value(resp).context("failed to parse objects/closure/describe response")
+    }
+
+    /// POST /objects/closure/get (authenticated).
+    pub async fn objects_closure_get(
+        &self,
+        roots: &[String],
+        max_objects: Option<usize>,
+    ) -> Result<ObjectsClosureGetResponse> {
+        let body = closure_request_body(roots, max_objects);
+        let resp = self.signed_post("/objects/closure/get", &body).await?;
+        serde_json::from_value(resp).context("failed to parse objects/closure/get response")
+    }
+
     /// POST /push-head (authenticated).
     pub async fn push_head(&self, project_path: &str, snapshot_hash: &str) -> Result<Value> {
         let body = serde_json::json!({
@@ -627,7 +649,7 @@ pub struct ObjectsPutResponse {
 }
 
 /// A single entry from the `objects/get` response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct CasEntry {
     pub hash: String,
     /// "blob", "object", or "missing".
@@ -663,6 +685,55 @@ impl ObjectsGetResponse {
             .and_then(|e| e.data.as_ref())
             .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
     }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ObjectsClosureDescribeResponse {
+    #[serde(flatten)]
+    pub closure: ObjectsClosureSummary,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ObjectsClosureGetResponse {
+    pub closure: ObjectsClosureSummary,
+    pub entries: Vec<CasEntry>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ObjectsClosureSummary {
+    pub roots: Vec<String>,
+    pub complete: bool,
+    pub object_hashes: Vec<String>,
+    pub blob_hashes: Vec<String>,
+    pub missing_objects: Vec<ClosureMissingObject>,
+    pub malformed_objects: Vec<ClosureMalformedObject>,
+    pub unsupported_objects: Vec<ClosureUnsupportedObject>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClosureMissingObject {
+    pub hash: String,
+    pub referenced_by: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClosureMalformedObject {
+    pub hash: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClosureUnsupportedObject {
+    pub hash: String,
+    pub kind: String,
+}
+
+fn closure_request_body(roots: &[String], max_objects: Option<usize>) -> Value {
+    let mut body = serde_json::json!({ "roots": roots });
+    if let Some(limit) = max_objects {
+        body["max_objects"] = serde_json::json!(limit);
+    }
+    body
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

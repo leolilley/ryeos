@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-29T15:07:01Z:b3594eae4a4131ca5bcd796d303ae8e888f18505d5c88e68644c207e08f78619:QND7PzWn4tMdsVYLpvDlj31Z4VopoYwA8VTVIrpckLwOcBERoJ2Jxwea6keMDnk/A5SPOMfENZccYgycnxixDw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: objects.closure.describe
+required_caps: ["ryeos.execute.service.objects.closure.describe"]
+schema:
+  roots: string[]
+  max_objects: number?
+  max_blobs: number?
+  max_blob_bytes: number?
+description: "Describe the schema-defined CAS closure reachable from root object hashes"

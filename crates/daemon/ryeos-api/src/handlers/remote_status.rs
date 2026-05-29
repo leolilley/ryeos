@@ -75,6 +75,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "ryeos.execute.service.objects.has",
         "ryeos.execute.service.objects.put",
         "ryeos.execute.service.objects.get",
+        "ryeos.execute.service.objects.closure.describe",
+        "ryeos.execute.service.objects.closure.get",
         "ryeos.execute.service.push.head",
         "ryeos.execute.service.project.status",
         "ryeos.execute.service.project.apply",
