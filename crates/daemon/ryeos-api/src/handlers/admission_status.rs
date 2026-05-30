@@ -73,9 +73,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "status": status,
         "attestation_hash": head.target_hash,
         "head": {
-            "ref_path": head.ref_path,
-            "signer": head.signer,
-            "updated_at": head.updated_at,
+            "ref_path": head.ref_path.clone(),
+            "signer": head.signer.clone(),
+            "updated_at": head.updated_at.clone(),
+            "signed_ref": head,
         },
         "attestation": attestation,
     }))

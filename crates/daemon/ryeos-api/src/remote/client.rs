@@ -275,7 +275,10 @@ impl RemoteClient {
     ) -> Result<ObjectsClosureDescribeResponse> {
         let body = closure_request_body(roots, &options);
         let resp = self.signed_post("/objects/closure/describe", &body).await?;
-        serde_json::from_value(resp).context("failed to parse objects/closure/describe response")
+        let response: ObjectsClosureDescribeResponse = serde_json::from_value(resp)
+            .context("failed to parse objects/closure/describe response")?;
+        response.validate_against_request(roots)?;
+        Ok(response)
     }
 
     /// POST /objects/closure/get (authenticated).
@@ -288,7 +291,7 @@ impl RemoteClient {
         let resp = self.signed_post("/objects/closure/get", &body).await?;
         let response: ObjectsClosureGetResponse =
             serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
-        response.validate()?;
+        response.validate_against_request(roots)?;
         Ok(response)
     }
 
@@ -899,6 +902,12 @@ pub struct ObjectsClosureDescribeResponse {
     pub closure: ObjectsClosureSummary,
 }
 
+impl ObjectsClosureDescribeResponse {
+    pub fn validate_against_request(&self, requested_roots: &[String]) -> Result<()> {
+        validate_closure_summary_against_request(&self.closure, requested_roots)
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ObjectsClosureGetResponse {
     pub closure: ObjectsClosureSummary,
@@ -910,7 +919,8 @@ pub struct ObjectsClosureGetResponse {
 }
 
 impl ObjectsClosureGetResponse {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate_against_request(&self, requested_roots: &[String]) -> Result<()> {
+        validate_closure_summary_against_request(&self.closure, requested_roots)?;
         if !self.closure.complete {
             anyhow::bail!("remote returned incomplete object closure");
         }
@@ -996,6 +1006,52 @@ impl ObjectsClosureGetResponse {
         }
         Ok(())
     }
+}
+
+fn validate_closure_summary_against_request(
+    closure: &ObjectsClosureSummary,
+    requested_roots: &[String],
+) -> Result<()> {
+    let requested: std::collections::BTreeSet<&str> =
+        requested_roots.iter().map(String::as_str).collect();
+    let returned: std::collections::BTreeSet<&str> =
+        closure.roots.iter().map(String::as_str).collect();
+    if requested != returned {
+        anyhow::bail!("closure response roots do not match request");
+    }
+    for hash in closure
+        .roots
+        .iter()
+        .chain(closure.object_hashes.iter())
+        .chain(closure.blob_hashes.iter())
+        .chain(closure.missing_objects.iter().map(|item| &item.hash))
+        .chain(closure.missing_blobs.iter().map(|item| &item.hash))
+        .chain(closure.malformed_objects.iter().map(|item| &item.hash))
+        .chain(closure.unsupported_objects.iter().map(|item| &item.hash))
+    {
+        if !lillux::valid_hash(hash) || hash.bytes().any(|b| b.is_ascii_uppercase()) {
+            anyhow::bail!("invalid closure summary hash {hash}");
+        }
+    }
+    for root in requested_roots {
+        let accounted = closure.object_hashes.iter().any(|hash| hash == root)
+            || closure
+                .missing_objects
+                .iter()
+                .any(|item| item.hash == *root)
+            || closure
+                .malformed_objects
+                .iter()
+                .any(|item| item.hash == *root)
+            || closure
+                .unsupported_objects
+                .iter()
+                .any(|item| item.hash == *root);
+        if !accounted {
+            anyhow::bail!("closure response did not account for requested root {root}");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -1509,14 +1565,23 @@ impl AdmissionStatusResponse {
                 }
             }
             "accepted" => {
-                if self.head.is_none() {
+                let Some(head) = self.head.as_ref() else {
                     anyhow::bail!("accepted admission status missing head");
-                }
+                };
                 let Some(hash) = self.attestation_hash.as_deref() else {
                     anyhow::bail!("accepted admission status missing attestation_hash");
                 };
                 if !lillux::valid_hash(hash) {
                     anyhow::bail!("invalid admission attestation hash: {hash}");
+                }
+                if let Some(signed_ref_value) = head.get("signed_ref") {
+                    let signed_ref: RemoteSignedRef =
+                        serde_json::from_value(signed_ref_value.clone())
+                            .context("failed to parse admission head signed_ref")?;
+                    signed_ref.validate()?;
+                    if signed_ref.target_hash != hash {
+                        anyhow::bail!("admission head signed_ref does not point at attestation");
+                    }
                 }
                 let Some(attestation) = self.attestation.as_ref() else {
                     anyhow::bail!("accepted admission status missing attestation object");
@@ -1658,6 +1723,40 @@ mod tests {
         }
         .validate_against_request(&[a, b])
         .is_err());
+    }
+
+    #[test]
+    fn closure_describe_response_validates_requested_roots() {
+        let root = "11".repeat(32);
+        let other = "22".repeat(32);
+        let response: ObjectsClosureDescribeResponse = serde_json::from_value(serde_json::json!({
+            "roots": [root.clone()],
+            "complete": true,
+            "object_hashes": [root.clone()],
+            "blob_hashes": [],
+            "missing_objects": [],
+            "missing_blobs": [],
+            "malformed_objects": [],
+            "unsupported_objects": []
+        }))
+        .unwrap();
+        response
+            .validate_against_request(std::slice::from_ref(&root))
+            .unwrap();
+        assert!(response.validate_against_request(&[other]).is_err());
+
+        let response: ObjectsClosureDescribeResponse = serde_json::from_value(serde_json::json!({
+            "roots": [root.clone()],
+            "complete": true,
+            "object_hashes": [],
+            "blob_hashes": [],
+            "missing_objects": [],
+            "missing_blobs": [],
+            "malformed_objects": [],
+            "unsupported_objects": []
+        }))
+        .unwrap();
+        assert!(response.validate_against_request(&[root]).is_err());
     }
 
     #[test]
