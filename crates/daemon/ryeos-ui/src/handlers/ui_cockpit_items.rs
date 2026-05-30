@@ -455,9 +455,29 @@ pub const ITEMS_LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
+pub const STUDIO_ITEMS_LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/items/list",
+    endpoint: "ui.studio.items.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_items_list(params, ctx, state).await })
+    },
+};
+
 pub const ITEM_INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/cockpit/item/inspect",
     endpoint: "ui.cockpit.item.inspect",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_item_inspect(params, ctx, state).await })
+    },
+};
+
+pub const STUDIO_ITEM_INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/item/inspect",
+    endpoint: "ui.studio.item.inspect",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| {

@@ -1884,6 +1884,7 @@ mod tests {
         tile.local = crate::workspace::ViewLocalState::SpaceBrowser {
             cursor: 0,
             query: String::new(),
+            kind: String::new(),
             scroll: 0,
         };
 

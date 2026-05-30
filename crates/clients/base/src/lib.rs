@@ -18,6 +18,7 @@ pub mod model;
 pub mod scene;
 pub mod scene_config;
 pub mod store;
+pub mod studio;
 pub mod substrate;
 pub mod surface;
 pub mod text_surface;

@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-30T04:40:55Z:9d1408ba6e00d13babf326c4c0030ed6ff8b0253c4ade517ceed4bc6071eb6c4:8u0Hv58qsimSxJ7T6xZh5znnCeHEhrnWuv4hJ/g4EKrcoPklW7m7XDjxq7DoN2YfmPW3pUJxVLfDJoOEZ3EBAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/schedules/list
+path: /ui/api/studio/schedules/list
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/studio/schedules/list"

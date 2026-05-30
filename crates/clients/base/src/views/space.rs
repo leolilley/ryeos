@@ -28,11 +28,7 @@ pub fn build(model: &AppModel, tile_id: TileId, w: usize, h: usize) -> TextSurfa
         .tiles
         .get(&tile_id)
         .and_then(|t| match &t.local {
-            ViewLocalState::SpaceBrowser {
-                query,
-                cursor,
-                scroll: _,
-            } => Some((query.clone(), *cursor)),
+            ViewLocalState::SpaceBrowser { query, cursor, .. } => Some((query.clone(), *cursor)),
             _ => None,
         })
         .unwrap_or_default();

@@ -214,9 +214,29 @@ pub const FILES_LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
+pub const STUDIO_FILES_LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/files/list",
+    endpoint: "ui.studio.files.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_files_list(params, ctx, state).await })
+    },
+};
+
 pub const FILES_READ_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/cockpit/files/read",
     endpoint: "ui.cockpit.files.read",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_files_read(params, ctx, state).await })
+    },
+};
+
+pub const STUDIO_FILES_READ_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/files/read",
+    endpoint: "ui.studio.files.read",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| {

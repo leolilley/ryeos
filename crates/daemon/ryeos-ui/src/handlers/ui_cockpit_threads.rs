@@ -115,9 +115,25 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };
 
+pub const STUDIO_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/threads/list",
+    endpoint: "ui.studio.threads.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
+};
+
 pub const INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/cockpit/thread/inspect",
     endpoint: "ui.cockpit.thread.inspect",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(async move { handle_inspect(params, ctx, state).await }),
+};
+
+pub const STUDIO_INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/thread/inspect",
+    endpoint: "ui.studio.thread.inspect",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle_inspect(params, ctx, state).await }),

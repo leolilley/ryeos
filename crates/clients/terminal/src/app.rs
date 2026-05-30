@@ -266,10 +266,7 @@ async fn run_effects(
                 // terminal client may still render cockpit views, but it does
                 // not currently expose the HTTP cockpit endpoints directly.
             }
-            Effect::SendThreadCommand {
-                thread_id,
-                command,
-            } => match command {
+            Effect::SendThreadCommand { thread_id, command } => match command {
                 ryeos_client_base::effects::ThreadCommand::Cancel => {
                     let req = crate::transport::DaemonRequest::CancelThread {
                         thread_id: *thread_id,

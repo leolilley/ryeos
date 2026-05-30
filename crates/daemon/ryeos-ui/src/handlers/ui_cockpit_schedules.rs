@@ -79,3 +79,11 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };
+
+pub const STUDIO_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/schedules/list",
+    endpoint: "ui.studio.schedules.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
+};

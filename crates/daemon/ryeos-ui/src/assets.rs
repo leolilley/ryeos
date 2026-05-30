@@ -45,6 +45,10 @@ fn compute_etag(bytes: &[u8]) -> String {
 
 static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html");
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
+static STUDIO_DOM_ADAPTER_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/studio_dom_adapter.js");
+static STUDIO_EFFECTS_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_effects.js");
+static STUDIO_SHELL_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_shell.js");
 static WEB_SHELL_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/web-shell.css");
 static RYEOS_WEB_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web.js");
 static RYEOS_WEB_WASM: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web_bg.wasm");
@@ -58,6 +62,11 @@ impl StaticAssetProvider for WebAssetProvider {
         let (bytes, cache_control) = match trimmed {
             "index.html" | "ui/index.html" => (INDEX_HTML, "no-cache"),
             "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
+            "studio_dom_adapter.js" | "ui/assets/studio_dom_adapter.js" => {
+                (STUDIO_DOM_ADAPTER_JS, "no-cache")
+            }
+            "studio_effects.js" | "ui/assets/studio_effects.js" => (STUDIO_EFFECTS_JS, "no-cache"),
+            "studio_shell.js" | "ui/assets/studio_shell.js" => (STUDIO_SHELL_JS, "no-cache"),
             "web-shell.css" | "ui/assets/web-shell.css" => (WEB_SHELL_CSS, "no-cache"),
             "ryeos_web.js" | "ui/assets/ryeos_web.js" => (RYEOS_WEB_JS, "no-cache"),
             "ryeos_web_bg.wasm" | "ui/assets/ryeos_web_bg.wasm" => (RYEOS_WEB_WASM, "no-cache"),
@@ -112,6 +121,12 @@ mod tests {
             .expect("ryeos_web.js must be embedded");
         assert!(js.bytes.len() > 0);
         assert!(js.content_type.contains("javascript"));
+
+        let studio = provider
+            .get("ui/assets/studio_shell.js")
+            .expect("studio_shell.js must be embedded");
+        assert!(studio.bytes.len() > 0);
+        assert!(studio.content_type.contains("javascript"));
 
         let wasm = provider
             .get("ui/assets/ryeos_web_bg.wasm")

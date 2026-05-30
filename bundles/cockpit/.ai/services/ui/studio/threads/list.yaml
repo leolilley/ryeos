@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-30T04:42:28Z:7aea934dbed56820b05a5c9586ea620d3d31ec0f56baf108f42c4c2df9da2690:HLpYv7AMoTWlE9hGnWAGpfYOdhwhcuCJAB2c9WPKlSiNZvIHORyzowrFw6e4Hp71TCbJlWxO1G4BbDbOVjT2Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: studio/threads/list
+version: "1.0.0"
+description: Thread listing for RyeOS Studio — returns recent threads with status, kind, item_ref, and timestamps.
+endpoint: ui.studio.threads.list
+availability: daemon_only
