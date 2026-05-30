@@ -1,6 +1,6 @@
 mod test_state;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -19,7 +19,7 @@ use ryeos_api::handlers::{
 };
 use ryeos_api::remote::config::{self, RemoteConfig};
 use ryeos_app::state::AppState;
-use ryeos_state::{CasEntryKind, CasEntryState};
+use ryeos_state::{CasEntryKind, CasEntryState, SyncJobState};
 
 fn store_subject(state: &AppState) -> String {
     store_subject_with_root(state, "T-remote-import-e2e")
@@ -41,8 +41,12 @@ fn store_subject_with_root(state: &AppState, chain_root_id: &str) -> String {
 }
 
 fn store_item_subject_with_blob(state: &AppState) -> String {
+    store_item_subject_with_blob_content(state, b"remote import dependency")
+}
+
+fn store_item_subject_with_blob_content(state: &AppState, content: &[u8]) -> String {
     let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
-    let blob_hash = cas.store_blob(b"remote import dependency").unwrap();
+    let blob_hash = cas.store_blob(content).unwrap();
     cas.store_object(&json!({
         "kind": "item_source",
         "item_ref": "directive:test/remote-import",
@@ -85,6 +89,19 @@ async fn start_remote_server_with_closure(
     state: Arc<AppState>,
     lie_about_closure: bool,
 ) -> Result<(String, tokio::task::JoinHandle<()>)> {
+    let incomplete_roots = if lie_about_closure {
+        None
+    } else {
+        Some(HashSet::new())
+    };
+    start_remote_server_with_incomplete_roots(state, incomplete_roots).await
+}
+
+async fn start_remote_server_with_incomplete_roots(
+    state: Arc<AppState>,
+    incomplete_roots: Option<HashSet<String>>,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
+    let incomplete_roots = Arc::new(incomplete_roots);
     let app = Router::new()
         .route(
             "/federation/heads/list",
@@ -116,7 +133,17 @@ async fn start_remote_server_with_closure(
             "/objects/closure/get",
             post(
                 move |State(state): State<Arc<AppState>>, Json(body): Json<Value>| async move {
-                    if lie_about_closure {
+                    let root = body
+                        .get("roots")
+                        .and_then(Value::as_array)
+                        .and_then(|roots| roots.first())
+                        .and_then(Value::as_str);
+                    let should_lie = match (&*incomplete_roots, root) {
+                        (None, Some(_)) => true,
+                        (Some(roots), Some(root)) => roots.contains(root),
+                        _ => false,
+                    };
+                    if should_lie {
                         return incomplete_closure_response(state, body).await;
                     }
                     json_handler::<ryeos_api::handlers::objects_closure_describe::Request, _>(
@@ -450,6 +477,109 @@ async fn sync_admitted_heads_mirrors_missing_heads_and_is_idempotent() {
 }
 
 #[tokio::test]
+async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
+    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let good_subject = store_subject_with_root(&remote_state, "T-remote-import-partial-good");
+    let mut bad_subject = store_item_subject_with_blob_content(&remote_state, b"bad dependency 0");
+    for index in 1..64 {
+        if good_subject < bad_subject {
+            break;
+        }
+        bad_subject = store_item_subject_with_blob_content(
+            &remote_state,
+            format!("bad dependency {index}").as_bytes(),
+        );
+    }
+    assert!(
+        good_subject < bad_subject,
+        "test setup requires good head to sort before bad head"
+    );
+    let remote_state = Arc::new(remote_state);
+    let good_attestation = admit_subject(remote_state.clone(), good_subject.clone()).await;
+    let bad_attestation = admit_subject(remote_state.clone(), bad_subject.clone()).await;
+
+    let (base_url, server) = start_remote_server_with_incomplete_roots(
+        remote_state.clone(),
+        Some(HashSet::from([bad_subject.clone()])),
+    )
+    .await
+    .unwrap();
+    let (_local_tmp, local_state) = test_state::build_test_state();
+    install_remote(
+        &local_state,
+        remote_config("upstream", &base_url, &remote_state),
+    );
+    let local_state = Arc::new(local_state);
+
+    let err = remote_sync_admitted_heads::handle(
+        remote_sync_admitted_heads::Request {
+            remote: "upstream".to_string(),
+            project: None,
+            policy: "local-node-v1".to_string(),
+            limit: 100,
+            max_imports: None,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_response_bytes: Some(64 * 1024),
+            max_links_per_object: Some(16),
+        },
+        local_state.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("incomplete after local verification"),
+        "unexpected error: {err:#}"
+    );
+
+    local_state
+        .state_store
+        .with_state_db(|db| {
+            let good = db
+                .get_cas_entry(CasEntryKind::Object, &good_subject)?
+                .expect("good subject should be mirrored before later failure");
+            assert_eq!(good.state, CasEntryState::Mirrored);
+            let good_attestation_entry = db
+                .get_cas_entry(CasEntryKind::Object, &good_attestation)?
+                .expect("good attestation should be mirrored before later failure");
+            assert_eq!(good_attestation_entry.state, CasEntryState::Mirrored);
+            let bad = db
+                .get_cas_entry(CasEntryKind::Object, &bad_subject)?
+                .expect("bad subject should be staged before local verification fails");
+            assert_eq!(bad.state, CasEntryState::Staged);
+            let jobs = db.list_sync_jobs_by_state(Some(SyncJobState::Failed), 10)?;
+            let job = jobs
+                .iter()
+                .find(|job| job.operation_type == "remote_sync_admitted_heads")
+                .expect("failed batch sync job should be recorded");
+            assert_eq!(job.peer.as_deref(), Some("upstream"));
+            assert_eq!(
+                job.fetched_hashes,
+                vec![good_subject.clone(), good_attestation]
+            );
+            let result = job
+                .result
+                .as_ref()
+                .expect("partial result should be recorded");
+            assert_eq!(result["partial"], true);
+            assert_eq!(result["imported_heads"].as_u64().unwrap(), 1);
+            assert!(result["error"]
+                .as_str()
+                .unwrap()
+                .contains("incomplete after local verification"));
+            assert!(!job.fetched_hashes.contains(&bad_attestation));
+            Ok::<_, anyhow::Error>(())
+        })
+        .unwrap();
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn import_admitted_head_rejects_wrong_pinned_key() {
     let (_remote_tmp, remote_state) = test_state::build_test_state();
     let subject_hash = store_subject(&remote_state);
@@ -562,6 +692,27 @@ async fn sync_admitted_heads_rejects_wrong_pinned_key_before_importing() {
             assert!(db
                 .get_cas_entry(CasEntryKind::Object, &subject_hash)?
                 .is_none());
+            let jobs = db.list_sync_jobs_by_state(Some(SyncJobState::Failed), 10)?;
+            let job = jobs
+                .iter()
+                .find(|job| job.operation_type == "remote_sync_admitted_heads")
+                .expect("discovery failure should still record a batch sync job");
+            assert_eq!(job.phase, "failed");
+            assert_eq!(job.peer.as_deref(), Some("upstream"));
+            assert!(job.roots.is_empty());
+            assert!(job.heads.is_empty());
+            assert!(job.fetched_hashes.is_empty());
+            assert!(job
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("failed to verify federated head"));
+            let result = job
+                .result
+                .as_ref()
+                .expect("failed result should be recorded");
+            assert_eq!(result["partial"], true);
+            assert_eq!(result["imported_heads"].as_u64().unwrap(), 0);
             Ok::<_, anyhow::Error>(())
         })
         .unwrap();

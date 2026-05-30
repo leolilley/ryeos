@@ -21,6 +21,8 @@ use ryeos_state::{
 
 const DEFAULT_POLICY: &str = "local-node-v1";
 const DEFAULT_LIMIT: usize = 500;
+const DEFAULT_MAX_IMPORTS: usize = 50;
+const MAX_IMPORTS: usize = 500;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +81,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if matches!(req.max_imports, Some(0)) {
         anyhow::bail!("max_imports must be greater than zero when supplied");
     }
+    if matches!(req.max_imports, Some(max) if max > MAX_IMPORTS) {
+        anyhow::bail!("max_imports must be less than or equal to {MAX_IMPORTS}");
+    }
 
     let remote_cfg = {
         let remotes =
@@ -94,66 +99,60 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     })?;
     let expected_signer = lillux::crypto::fingerprint(&expected_key);
     let expected_issuer = format!("fp:{expected_signer}");
-    let prefix = format!("admissions/{}", req.policy);
+    let ids = create_batch_job(&state, &remote_cfg.name)?;
+    let mut progress = BatchProgress::new();
 
-    let heads = client
-        .federation_heads_list(&prefix, Some(req.limit), &expected_signer, &expected_key)
-        .await?;
-    if heads.truncated {
-        anyhow::bail!("remote returned a truncated admission head list for policy '{}'; increase limit or sync a narrower policy shard", req.policy);
-    }
+    let result: Result<Value> = async {
+        let prefix = format!("admissions/{}", req.policy);
 
-    let candidates = heads
-        .heads
-        .iter()
-        .map(|head| {
-            let subject_hash = admission_subject_from_head(head, &req.policy)?;
-            Ok((head, subject_hash))
-        })
-        .collect::<Result<Vec<_>>>()?;
+        let heads = client
+            .federation_heads_list(&prefix, Some(req.limit), &expected_signer, &expected_key)
+            .await?;
+        if heads.truncated {
+            anyhow::bail!("remote returned a truncated admission head list for policy '{}'; increase limit or sync a narrower policy shard", req.policy);
+        }
 
-    let missing = state.state_store.with_state_db(|db| {
-        candidates
+        let candidates = heads
+            .heads
             .iter()
-            .filter_map(|(head, subject_hash)| {
-                match db.get_cas_entry(CasEntryKind::Object, &head.target_hash) {
-                    Ok(Some(entry)) if entry.state == CasEntryState::Mirrored => None,
-                    Ok(_) => Some(Ok((*head, subject_hash.clone()))),
-                    Err(err) => Some(Err(err)),
-                }
+            .map(|head| {
+                let subject_hash = admission_subject_from_head(head, &req.policy)?;
+                Ok((head, subject_hash))
             })
-            .collect::<Result<Vec<_>>>()
-    })?;
-    let already_mirrored = candidates.len().saturating_sub(missing.len());
-    let missing_count = missing.len();
+            .collect::<Result<Vec<_>>>()?;
 
-    let to_import = match req.max_imports {
-        Some(max) => missing.into_iter().take(max).collect::<Vec<_>>(),
-        None => missing,
-    };
-    let deferred = missing_count.saturating_sub(to_import.len());
+        let missing = state.state_store.with_state_db(|db| {
+            candidates
+                .iter()
+                .filter_map(|(head, subject_hash)| {
+                    match db.get_cas_entry(CasEntryKind::Object, &head.target_hash) {
+                        Ok(Some(entry)) if entry.state == CasEntryState::Mirrored => None,
+                        Ok(_) => Some(Ok((*head, subject_hash.clone()))),
+                        Err(err) => Some(Err(err)),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        let already_mirrored = candidates.len().saturating_sub(missing.len());
+        let missing_count = missing.len();
+        let max_imports = req.max_imports.unwrap_or(DEFAULT_MAX_IMPORTS);
 
-    let ids = create_batch_job(
-        &state,
-        &remote_cfg.name,
-        to_import
-            .iter()
-            .map(|(_, subject)| subject.clone())
-            .collect::<Vec<_>>(),
-        to_import
-            .iter()
-            .map(|(head, _)| head.target_hash.clone())
-            .collect::<Vec<_>>(),
-    )?;
-
-    let result = async {
-        let mut imported = Vec::new();
-        let mut total_imported = 0usize;
-        let mut total_already_present = 0usize;
-        let mut total_bytes_written = 0usize;
-        let mut total_mirrored_objects = 0usize;
-        let mut total_mirrored_blobs = 0usize;
-        let mut fetched_hashes = Vec::new();
+        let to_import = missing.into_iter().take(max_imports).collect::<Vec<_>>();
+        let deferred = missing_count.saturating_sub(to_import.len());
+        progress.record_discovery(candidates.len(), already_mirrored, deferred);
+        update_batch_job_scope(
+            &state,
+            &ids,
+            to_import
+                .iter()
+                .map(|(_, subject)| subject.clone())
+                .collect::<Vec<_>>(),
+            to_import
+                .iter()
+                .map(|(head, _)| head.target_hash.clone())
+                .collect::<Vec<_>>(),
+            "importing",
+        )?;
 
         for (head, subject_hash) in &to_import {
             let import = import::import_admitted_root(
@@ -181,45 +180,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 },
             )
             .await?;
-            total_imported = total_imported.saturating_add(import.imported);
-            total_already_present = total_already_present.saturating_add(import.already_present);
-            total_bytes_written = total_bytes_written.saturating_add(import.bytes_written);
-            total_mirrored_objects = total_mirrored_objects.saturating_add(import.mirrored_objects);
-            total_mirrored_blobs = total_mirrored_blobs.saturating_add(import.mirrored_blobs);
-            fetched_hashes.push(import.subject_hash.clone());
-            fetched_hashes.push(import.attestation_hash.clone());
-            imported.push(serde_json::json!({
-                "subject_hash": import.subject_hash,
-                "attestation_hash": import.attestation_hash,
-                "head_ref": head.ref_path,
-                "imported": import.imported,
-                "already_present": import.already_present,
-                "bytes_written": import.bytes_written,
-                "mirrored_objects": import.mirrored_objects,
-                "mirrored_blobs": import.mirrored_blobs,
-            }));
+            progress.record_import(head, import);
         }
 
-        Ok::<_, anyhow::Error>(serde_json::json!({
-            "job_id": ids.job_id,
-            "attempt_id": ids.attempt_id,
-            "remote": remote_cfg.name,
-            "policy": req.policy,
-            "listed": candidates.len(),
-            "already_mirrored": already_mirrored,
-            "deferred": deferred,
-            "skipped": already_mirrored.saturating_add(deferred),
-            "imported_heads": imported.len(),
-            "imported": imported,
-            "totals": {
-                "imported": total_imported,
-                "already_present": total_already_present,
-                "bytes_written": total_bytes_written,
-                "mirrored_objects": total_mirrored_objects,
-                "mirrored_blobs": total_mirrored_blobs,
-            },
-            "fetched_hashes": fetched_hashes,
-        }))
+        Ok::<_, anyhow::Error>(progress.to_json(&ids, &remote_cfg.name, &req.policy, false, None))
     }
     .await;
 
@@ -232,42 +196,29 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 "completed",
                 None,
                 Some(value.clone()),
-                value
-                    .get("fetched_hashes")
-                    .and_then(Value::as_array)
-                    .map(|hashes| {
-                        hashes
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                progress.fetched_hashes.clone(),
             )?;
             Ok(value)
         }
         Err(err) => {
             let message = format!("{err:#}");
+            let result =
+                progress.to_json(&ids, &remote_cfg.name, &req.policy, true, Some(&message));
             let _ = finish_batch_job(
                 &state,
                 &ids,
                 SyncJobState::Failed,
                 "failed",
                 Some(message.clone()),
-                None,
-                Vec::new(),
+                Some(result),
+                progress.fetched_hashes.clone(),
             );
             Err(err)
         }
     }
 }
 
-fn create_batch_job(
-    state: &Arc<AppState>,
-    peer: &str,
-    roots: Vec<String>,
-    heads: Vec<String>,
-) -> Result<SyncJobIds> {
+fn create_batch_job(state: &Arc<AppState>, peer: &str) -> Result<SyncJobIds> {
     let job_id = format!("remote-sync-admissions:{}", uuid::Uuid::new_v4());
     let attempt_id = format!("remote-sync-admissions-attempt:{}", uuid::Uuid::new_v4());
     state.state_store.with_state_db(|db| {
@@ -275,23 +226,23 @@ fn create_batch_job(
             job_id: job_id.clone(),
             operation_type: "remote_sync_admitted_heads".to_string(),
             peer: Some(peer.to_string()),
-            roots: roots.clone(),
-            heads: heads.clone(),
+            roots: Vec::new(),
+            heads: Vec::new(),
             max_attempts: 1,
         })?;
         db.create_sync_job_attempt(&NewSyncJobAttempt {
             attempt_id: attempt_id.clone(),
             job_id: job_id.clone(),
             worker_id: Some("remote-sync-admissions".to_string()),
-            phase: "importing".to_string(),
+            phase: "listing_heads".to_string(),
         })?;
         db.update_sync_job(
             &job_id,
             &SyncJobUpdate {
                 state: SyncJobState::Running,
-                phase: "importing".to_string(),
-                roots: Some(roots),
-                heads: Some(heads),
+                phase: "listing_heads".to_string(),
+                roots: Some(Vec::new()),
+                heads: Some(Vec::new()),
                 uploaded_hashes: Vec::new(),
                 fetched_hashes: Vec::new(),
                 last_error: None,
@@ -301,6 +252,120 @@ fn create_batch_job(
         Ok(())
     })?;
     Ok(SyncJobIds { job_id, attempt_id })
+}
+
+fn update_batch_job_scope(
+    state: &Arc<AppState>,
+    ids: &SyncJobIds,
+    roots: Vec<String>,
+    heads: Vec<String>,
+    phase: &str,
+) -> Result<()> {
+    state.state_store.with_state_db(|db| {
+        db.update_sync_job(
+            &ids.job_id,
+            &SyncJobUpdate {
+                state: SyncJobState::Running,
+                phase: phase.to_string(),
+                roots: Some(roots),
+                heads: Some(heads),
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: None,
+            },
+        )
+    })
+}
+
+#[derive(Debug, Default)]
+struct BatchProgress {
+    listed: usize,
+    already_mirrored: usize,
+    deferred: usize,
+    imported: Vec<Value>,
+    total_imported: usize,
+    total_already_present: usize,
+    total_bytes_written: usize,
+    total_mirrored_objects: usize,
+    total_mirrored_blobs: usize,
+    fetched_hashes: Vec<String>,
+}
+
+impl BatchProgress {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn record_discovery(&mut self, listed: usize, already_mirrored: usize, deferred: usize) {
+        self.listed = listed;
+        self.already_mirrored = already_mirrored;
+        self.deferred = deferred;
+    }
+
+    fn record_import(
+        &mut self,
+        head: &FederationHeadRemoteRecord,
+        import: import::VerifiedRemoteImportResult,
+    ) {
+        self.total_imported = self.total_imported.saturating_add(import.imported);
+        self.total_already_present = self
+            .total_already_present
+            .saturating_add(import.already_present);
+        self.total_bytes_written = self
+            .total_bytes_written
+            .saturating_add(import.bytes_written);
+        self.total_mirrored_objects = self
+            .total_mirrored_objects
+            .saturating_add(import.mirrored_objects);
+        self.total_mirrored_blobs = self
+            .total_mirrored_blobs
+            .saturating_add(import.mirrored_blobs);
+        self.fetched_hashes.push(import.subject_hash.clone());
+        self.fetched_hashes.push(import.attestation_hash.clone());
+        self.imported.push(serde_json::json!({
+            "subject_hash": import.subject_hash,
+            "attestation_hash": import.attestation_hash,
+            "head_ref": head.ref_path,
+            "imported": import.imported,
+            "already_present": import.already_present,
+            "bytes_written": import.bytes_written,
+            "mirrored_objects": import.mirrored_objects,
+            "mirrored_blobs": import.mirrored_blobs,
+        }));
+    }
+
+    fn to_json(
+        &self,
+        ids: &SyncJobIds,
+        remote: &str,
+        policy: &str,
+        partial: bool,
+        error: Option<&str>,
+    ) -> Value {
+        serde_json::json!({
+            "job_id": ids.job_id,
+            "attempt_id": ids.attempt_id,
+            "remote": remote,
+            "policy": policy,
+            "partial": partial,
+            "error": error,
+            "listed": self.listed,
+            "already_mirrored": self.already_mirrored,
+            "deferred": self.deferred,
+            "skipped": self.already_mirrored.saturating_add(self.deferred),
+            "imported_heads": self.imported.len(),
+            "imported": self.imported,
+            "totals": {
+                "imported": self.total_imported,
+                "already_present": self.total_already_present,
+                "bytes_written": self.total_bytes_written,
+                "mirrored_objects": self.total_mirrored_objects,
+                "mirrored_blobs": self.total_mirrored_blobs,
+            },
+            "fetched_hashes": self.fetched_hashes,
+        })
+    }
 }
 
 fn finish_batch_job(
