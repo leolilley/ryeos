@@ -12,6 +12,8 @@
 
 use crate::registry::ServiceDescriptor;
 
+pub mod admission_status;
+pub mod admission_submit;
 pub mod authorize_key;
 pub mod bundle_export;
 pub mod bundle_install;
@@ -77,6 +79,8 @@ pub(crate) fn default_replay_limit() -> usize {
 }
 
 pub const ALL: &[ServiceDescriptor] = &[
+    admission_submit::DESCRIPTOR,
+    admission_status::DESCRIPTOR,
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     system_status::DESCRIPTOR,
