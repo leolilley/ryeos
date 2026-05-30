@@ -1438,6 +1438,24 @@ impl ProjectionDb {
             .ok_or_else(|| anyhow::anyhow!("sync job not found: {job_id}"))?;
         let current_state = SyncJobState::from_str(&current_state)?;
         validate_sync_job_transition(current_state, update.state)?;
+        if matches!(
+            update.state,
+            SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled
+        ) {
+            let running_attempts: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
+                    [job_id],
+                    |row| row.get(0),
+                )
+                .context("failed to count running sync job attempts")?;
+            if running_attempts > 0 {
+                anyhow::bail!(
+                    "cannot mark sync job {job_id} terminal while {running_attempts} attempt(s) are still running"
+                );
+            }
+        }
         for hash in update
             .roots
             .iter()
@@ -1595,10 +1613,10 @@ impl ProjectionDb {
             .context("failed to create sync job attempt")?;
         self.conn
             .execute(
-                "UPDATE sync_jobs SET attempt_count = attempt_count + 1, updated_at = ? WHERE job_id = ?",
-                rusqlite::params![&now, &attempt.job_id],
+                "UPDATE sync_jobs SET state = 'running', phase = ?, attempt_count = attempt_count + 1, updated_at = ?, finished_at = NULL WHERE job_id = ?",
+                rusqlite::params![&attempt.phase, &now, &attempt.job_id],
             )
-            .context("failed to increment sync job attempt count")?;
+            .context("failed to activate sync job attempt")?;
 
         self.get_sync_job_attempt(&attempt.attempt_id)?
             .ok_or_else(|| {
@@ -2570,6 +2588,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(second.attempt_number, 2);
+        let err = db
+            .update_sync_job(
+                "job:attempts",
+                &SyncJobUpdate {
+                    state: SyncJobState::Completed,
+                    phase: "done".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: vec![],
+                    fetched_hashes: vec![],
+                    last_error: None,
+                    result: None,
+                    increment_attempts: false,
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("attempt(s) are still running"));
         assert_eq!(
             db.list_sync_job_attempts("job:attempts")
                 .unwrap()

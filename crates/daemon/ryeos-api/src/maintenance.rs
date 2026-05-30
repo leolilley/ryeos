@@ -46,18 +46,6 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     let cas_root = state_root.join("objects");
     let refs_root = state_root.join("refs");
 
-    if !params.dry_run {
-        let active_sync_jobs = state
-            .state_store
-            .with_state_db(|db| db.count_active_sync_jobs())
-            .context("failed to inspect active sync jobs before GC")?;
-        if active_sync_jobs > 0 {
-            anyhow::bail!(
-                "GC refused: {active_sync_jobs} active sync job(s) may pin staged CAS roots"
-            );
-        }
-    }
-
     // Step 1: Acquire GC lock
     let _gc_lock = gc::GcLock::acquire(&state_root, state.identity.fingerprint())
         .context("failed to acquire GC lock (another GC may be running)")?;
@@ -74,6 +62,26 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         .quiesce(DEFAULT_QUIESCE_TIMEOUT)
         .await
         .context("write barrier quiesce timed out (GC aborted)")?;
+
+    if !params.dry_run {
+        let active_sync_jobs = state
+            .state_store
+            .with_state_db(|db| db.count_active_sync_jobs())
+            .context("failed to inspect active sync jobs before GC");
+        match active_sync_jobs {
+            Ok(0) => {}
+            Ok(active_sync_jobs) => {
+                state.write_barrier.resume();
+                anyhow::bail!(
+                    "GC refused: {active_sync_jobs} active sync job(s) may pin staged CAS roots"
+                );
+            }
+            Err(err) => {
+                state.write_barrier.resume();
+                return Err(err);
+            }
+        }
+    }
 
     // Step 3: Run GC in a blocking task (CPU/disk I/O heavy)
     // Extract all data from AppState before spawning, since the closure

@@ -199,6 +199,16 @@ pub async fn execute_unary_forward(
         .await
         .map_err(|e| {
             let message = format!("{e:#}");
+            let _ = finish_sync_job_attempt(
+                state,
+                &attempt_id,
+                FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "push_failed".to_string(),
+                    error: Some(message.clone()),
+                    result: None,
+                },
+            );
             let _ = update_sync_job(
                 state,
                 &job_id,
@@ -214,16 +224,6 @@ pub async fn execute_unary_forward(
                     increment_attempts: false,
                 },
             );
-            let _ = finish_sync_job_attempt(
-                state,
-                &attempt_id,
-                FinishSyncJobAttempt {
-                    state: SyncJobAttemptState::Failed,
-                    phase: "push_failed".to_string(),
-                    error: Some(message.clone()),
-                    result: None,
-                },
-            );
             RemoteForwardError::PushFailed(message)
         })?,
         None => {
@@ -231,6 +231,16 @@ pub async fn execute_unary_forward(
             match push_no_project(state, client, req.remote_project_path).await {
                 Ok(value) => value,
                 Err(err) => {
+                    let _ = finish_sync_job_attempt(
+                        state,
+                        &attempt_id,
+                        FinishSyncJobAttempt {
+                            state: SyncJobAttemptState::Failed,
+                            phase: "push_failed".to_string(),
+                            error: Some(err.to_string()),
+                            result: None,
+                        },
+                    );
                     let _ = update_sync_job(
                         state,
                         &job_id,
@@ -244,16 +254,6 @@ pub async fn execute_unary_forward(
                             last_error: Some(err.to_string()),
                             result: None,
                             increment_attempts: false,
-                        },
-                    );
-                    let _ = finish_sync_job_attempt(
-                        state,
-                        &attempt_id,
-                        FinishSyncJobAttempt {
-                            state: SyncJobAttemptState::Failed,
-                            phase: "push_failed".to_string(),
-                            error: Some(err.to_string()),
-                            result: None,
                         },
                     );
                     return Err(err);
@@ -293,6 +293,16 @@ pub async fn execute_unary_forward(
         Ok(value) => value,
         Err(e) => {
             let message = format!("{e:#}");
+            finish_sync_job_attempt(
+                state,
+                &attempt_id,
+                FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "remote_execute_failed".to_string(),
+                    error: Some(message.clone()),
+                    result: None,
+                },
+            )?;
             update_sync_job(
                 state,
                 &job_id,
@@ -308,22 +318,22 @@ pub async fn execute_unary_forward(
                     increment_attempts: false,
                 },
             )?;
-            finish_sync_job_attempt(
-                state,
-                &attempt_id,
-                FinishSyncJobAttempt {
-                    state: SyncJobAttemptState::Failed,
-                    phase: "remote_execute_failed".to_string(),
-                    error: Some(message.clone()),
-                    result: None,
-                },
-            )?;
             return Err(RemoteForwardError::ExecuteFailed(message));
         }
     };
 
     // 3. Extract result snapshot hash.
     let Some(result_snapshot_hash) = extract_snapshot_hash(&remote_result) else {
+        finish_sync_job_attempt(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "missing_snapshot_hash".to_string(),
+                error: Some("remote result missing snapshot hash".to_string()),
+                result: Some(remote_result.clone()),
+            },
+        )?;
         update_sync_job(
             state,
             &job_id,
@@ -337,16 +347,6 @@ pub async fn execute_unary_forward(
                 last_error: Some("remote result missing snapshot hash".to_string()),
                 result: Some(remote_result.clone()),
                 increment_attempts: false,
-            },
-        )?;
-        finish_sync_job_attempt(
-            state,
-            &attempt_id,
-            FinishSyncJobAttempt {
-                state: SyncJobAttemptState::Failed,
-                phase: "missing_snapshot_hash".to_string(),
-                error: Some("remote result missing snapshot hash".to_string()),
-                result: Some(remote_result.clone()),
             },
         )?;
         return Err(RemoteForwardError::MissingSnapshotHash);
@@ -390,6 +390,16 @@ pub async fn execute_unary_forward(
             }
             PullResultsError::Other(e) => RemoteForwardError::PullFailed(format!("{e:#}")),
         };
+        let _ = finish_sync_job_attempt(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "pull_results_failed".to_string(),
+                error: Some(err.to_string()),
+                result: Some(remote_result.clone()),
+            },
+        );
         let _ = update_sync_job(
             state,
             &job_id,
@@ -405,19 +415,27 @@ pub async fn execute_unary_forward(
                 increment_attempts: false,
             },
         );
-        let _ = finish_sync_job_attempt(
-            state,
-            &attempt_id,
-            FinishSyncJobAttempt {
-                state: SyncJobAttemptState::Failed,
-                phase: "pull_results_failed".to_string(),
-                error: Some(err.to_string()),
-                result: Some(remote_result.clone()),
-            },
-        );
         err
     })?;
 
+    let completed_result = serde_json::json!({
+        "snapshot_hash": pull_result.snapshot_hash,
+        "cas_objects_fetched": pull_result.cas_objects_fetched,
+        "files_updated": pull_result.files_updated,
+        "files_deleted": pull_result.files_deleted,
+        "user_files_updated": pull_result.user_files_updated,
+        "user_files_deleted": pull_result.user_files_deleted,
+    });
+    finish_sync_job_attempt(
+        state,
+        &attempt_id,
+        FinishSyncJobAttempt {
+            state: SyncJobAttemptState::Completed,
+            phase: "completed".to_string(),
+            error: None,
+            result: Some(completed_result.clone()),
+        },
+    )?;
     update_sync_job(
         state,
         &job_id,
@@ -429,32 +447,8 @@ pub async fn execute_unary_forward(
             uploaded_hashes: vec![push_result.snapshot_hash.clone()],
             fetched_hashes: vec![result_snapshot_hash.clone()],
             last_error: None,
-            result: Some(serde_json::json!({
-                "snapshot_hash": pull_result.snapshot_hash,
-                "cas_objects_fetched": pull_result.cas_objects_fetched,
-                "files_updated": pull_result.files_updated,
-                "files_deleted": pull_result.files_deleted,
-                "user_files_updated": pull_result.user_files_updated,
-                "user_files_deleted": pull_result.user_files_deleted,
-            })),
+            result: Some(completed_result),
             increment_attempts: false,
-        },
-    )?;
-    finish_sync_job_attempt(
-        state,
-        &attempt_id,
-        FinishSyncJobAttempt {
-            state: SyncJobAttemptState::Completed,
-            phase: "completed".to_string(),
-            error: None,
-            result: Some(serde_json::json!({
-                "snapshot_hash": pull_result.snapshot_hash,
-                "cas_objects_fetched": pull_result.cas_objects_fetched,
-                "files_updated": pull_result.files_updated,
-                "files_deleted": pull_result.files_deleted,
-                "user_files_updated": pull_result.user_files_updated,
-                "user_files_deleted": pull_result.user_files_deleted,
-            })),
         },
     )?;
 

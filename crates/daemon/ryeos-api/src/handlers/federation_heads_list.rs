@@ -30,6 +30,9 @@ impl Default for Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    if req.prefix.is_empty() {
+        anyhow::bail!("federation heads list requires a non-empty prefix");
+    }
     let limit = req.limit.min(500);
     let heads = state
         .state_store
@@ -55,6 +58,7 @@ fn generic_head_to_json(head: ryeos_state::GenericHeadRef) -> Value {
         "target_hash": head.target_hash,
         "signer": head.signer,
         "updated_at": head.updated_at,
+        "signed_ref": head.signed_ref,
     })
 }
 

@@ -30,7 +30,7 @@ const SIGNED_REF_SCHEMA: u32 = 1;
 const SIGNED_REF_KIND: &str = "signed_ref";
 
 /// A signed reference — an authoritative mutable pointer to a CAS object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedRef {
     pub schema: u32,
@@ -314,6 +314,7 @@ pub struct GenericHeadRef {
     pub target_hash: String,
     pub signer: String,
     pub updated_at: String,
+    pub signed_ref: SignedRef,
 }
 
 fn validate_relative_ref_component_path(label: &str, value: &str) -> anyhow::Result<()> {
@@ -494,9 +495,10 @@ fn collect_generic_head_refs(
             namespace: namespace.to_string(),
             name: name.to_string(),
             ref_path: signed_ref.ref_path.clone(),
-            target_hash: signed_ref.target_hash,
-            signer: signed_ref.signer,
-            updated_at: signed_ref.updated_at,
+            target_hash: signed_ref.target_hash.clone(),
+            signer: signed_ref.signer.clone(),
+            updated_at: signed_ref.updated_at.clone(),
+            signed_ref,
         });
     }
     Ok(())

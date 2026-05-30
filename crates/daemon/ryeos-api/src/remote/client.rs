@@ -1202,7 +1202,7 @@ impl FederationHeadsListResponse {
         if self.limit > 500 {
             anyhow::bail!("federation heads response limit exceeds protocol maximum");
         }
-        if !self.truncated && self.heads.len() > self.limit {
+        if self.heads.len() > self.limit {
             anyhow::bail!("federation heads response exceeds declared limit");
         }
         for head in &self.heads {
@@ -1229,6 +1229,7 @@ pub struct FederationHeadRemoteRecord {
     pub target_hash: String,
     pub signer: String,
     pub updated_at: String,
+    pub signed_ref: RemoteSignedRef,
 }
 
 impl FederationHeadRemoteRecord {
@@ -1251,6 +1252,55 @@ impl FederationHeadRemoteRecord {
             || self.target_hash.bytes().any(|b| b.is_ascii_uppercase())
         {
             anyhow::bail!("invalid federation head target hash: {}", self.target_hash);
+        }
+        self.signed_ref.validate()?;
+        if self.signed_ref.ref_path != self.ref_path
+            || self.signed_ref.target_hash != self.target_hash
+            || self.signed_ref.signer != self.signer
+            || self.signed_ref.updated_at != self.updated_at
+        {
+            anyhow::bail!("federation head signed_ref does not match response metadata");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RemoteSignedRef {
+    pub schema: u32,
+    pub kind: String,
+    pub ref_path: String,
+    pub target_hash: String,
+    pub updated_at: String,
+    pub signer: String,
+    pub signature: String,
+}
+
+impl RemoteSignedRef {
+    fn validate(&self) -> Result<()> {
+        if self.schema != 1 {
+            anyhow::bail!("unsupported signed ref schema: {}", self.schema);
+        }
+        if self.kind != "signed_ref" {
+            anyhow::bail!("unexpected signed ref kind: {}", self.kind);
+        }
+        if self.ref_path.is_empty()
+            || self.updated_at.is_empty()
+            || self.signer.is_empty()
+            || self.signature.is_empty()
+        {
+            anyhow::bail!("signed ref contains empty required field");
+        }
+        if !self.ref_path.ends_with("/head")
+            || self.ref_path.contains("..")
+            || self.ref_path.starts_with('/')
+        {
+            anyhow::bail!("signed ref has unsafe ref_path");
+        }
+        if !lillux::valid_hash(&self.target_hash)
+            || self.target_hash.bytes().any(|b| b.is_ascii_uppercase())
+        {
+            anyhow::bail!("invalid signed ref target hash: {}", self.target_hash);
         }
         Ok(())
     }
@@ -1694,7 +1744,16 @@ mod tests {
                 "ref_path": "admissions/policy-a/subject-a/head",
                 "target_hash": "11".repeat(32),
                 "signer": "fp:node",
-                "updated_at": "2026-05-30T00:00:01Z"
+                "updated_at": "2026-05-30T00:00:01Z",
+                "signed_ref": {
+                    "schema": 1,
+                    "kind": "signed_ref",
+                    "ref_path": "admissions/policy-a/subject-a/head",
+                    "target_hash": "11".repeat(32),
+                    "updated_at": "2026-05-30T00:00:01Z",
+                    "signer": "fp:node",
+                    "signature": "sig"
+                }
             }]
         }))
         .unwrap();
@@ -1711,7 +1770,16 @@ mod tests {
                 "ref_path": "admissions/policy-a/subject-a/head",
                 "target_hash": "AA".repeat(32),
                 "signer": "fp:node",
-                "updated_at": "2026-05-30T00:00:01Z"
+                "updated_at": "2026-05-30T00:00:01Z",
+                "signed_ref": {
+                    "schema": 1,
+                    "kind": "signed_ref",
+                    "ref_path": "admissions/policy-a/subject-a/head",
+                    "target_hash": "AA".repeat(32),
+                    "updated_at": "2026-05-30T00:00:01Z",
+                    "signer": "fp:node",
+                    "signature": "sig"
+                }
             }]
         }))
         .unwrap();
