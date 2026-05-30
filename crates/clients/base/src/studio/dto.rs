@@ -113,6 +113,30 @@ pub struct StudioProjectDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioProjectsDto {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub projects: Vec<StudioKnownProjectDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioKnownProjectDto {
+    #[serde(default)]
+    pub local_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub added_at: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StudioRemoteDto {
     #[serde(default)]
     pub name: String,

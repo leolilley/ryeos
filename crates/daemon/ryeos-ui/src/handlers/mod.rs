@@ -14,6 +14,7 @@ pub mod ui_graph_topology;
 pub mod ui_launch;
 pub mod ui_launch_mint;
 pub mod ui_session_current;
+pub mod ui_studio_projects;
 
 pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
@@ -30,6 +31,14 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_cockpit_gc::STUDIO_DESCRIPTOR,
     ui_cockpit_files::STUDIO_FILES_LIST_DESCRIPTOR,
     ui_cockpit_files::STUDIO_FILES_READ_DESCRIPTOR,
+    ui_studio_projects::PROJECTS_LIST_DESCRIPTOR,
+    ui_studio_projects::PROJECTS_ADD_DESCRIPTOR,
+    ui_studio_projects::PROJECTS_FORGET_DESCRIPTOR,
+    ui_studio_projects::PROJECTS_RESOLVE_DESCRIPTOR,
+    ui_studio_projects::RECENT_TOUCH_DESCRIPTOR,
+    ui_studio_projects::RECENT_LIST_DESCRIPTOR,
+    ui_studio_projects::CONFIG_GET_DESCRIPTOR,
+    ui_studio_projects::CONFIG_UPDATE_DESCRIPTOR,
     ui_cockpit_snapshot::DESCRIPTOR,
     ui_cockpit_items::ITEMS_LIST_DESCRIPTOR,
     ui_cockpit_items::ITEM_INSPECT_DESCRIPTOR,

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-30T08:49:52Z:94ca211a94e295494c285600b65531448ae5542a3e79fc97ba687b41f7e761df:uxiHzbZwfWUO/Jur93i7asHmzRscPuCAZ03V2ervqqLshadtI/l9etFzmf7uGL6k1DVy/CZ/GJVzCKaDmaZLDg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+name: studio/recent/touch
+version: "1.0.0"
+description: Mark a known local Studio project as recently opened.
+endpoint: ui.studio.recent.touch
+availability: daemon_only

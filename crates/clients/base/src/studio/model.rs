@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 
 use super::dto::{
     StudioFileReadDto, StudioFilesDto, StudioGcStatusDto, StudioItemInspectionDto, StudioItemsDto,
-    StudioSchedulesDto, StudioSnapshotDto, StudioThreadInspectionDto, StudioThreadsDto,
+    StudioProjectsDto, StudioSchedulesDto, StudioSnapshotDto, StudioThreadInspectionDto,
+    StudioThreadsDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::scene_model::StudioSceneModel;
@@ -133,6 +134,7 @@ pub struct StudioUiState {
 pub struct StudioDataState {
     pub session: Option<BrowserSession>,
     pub snapshot: Option<StudioSnapshotDto>,
+    pub projects: Option<StudioProjectsDto>,
     pub threads: Option<StudioThreadsDto>,
     pub items: Option<StudioItemsDto>,
     pub tile_items: HashMap<String, StudioItemsDto>,
@@ -226,7 +228,10 @@ impl StudioCore {
             }
         }
 
-        let mut effects = vec![self.emit(StudioEffectKind::FetchSnapshot)];
+        let mut effects = vec![
+            self.emit(StudioEffectKind::FetchSnapshot),
+            self.emit(StudioEffectKind::FetchProjects),
+        ];
         if needs_threads {
             effects.push(self.emit(StudioEffectKind::FetchThreads { limit: 200 }));
         }

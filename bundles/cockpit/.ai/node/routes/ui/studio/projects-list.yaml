@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-30T08:58:03Z:5096de91801049eb6766e00f3b5dc1eb837d5e581d10a079a2caede5c5c5a1cf:pJutTvMmZD9plvMt2snR8YaImOgzCQg70NNW5yDxCZkKyWY75Mt4quPIRTfkLMscvCR2VR0m1TTnzhrH0gS1DQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/projects/list
+path: /ui/api/studio/projects/list
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/studio/projects/list"

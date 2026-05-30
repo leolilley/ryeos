@@ -501,6 +501,15 @@ impl StudioCore {
                     core.data.snapshot = Some(snapshot);
                 });
             }
+            StudioEffectResultKind::Projects => {
+                self.apply_parsed::<super::dto::StudioProjectsDto>(
+                    data,
+                    "projects",
+                    |core, projects| {
+                        core.data.projects = Some(projects);
+                    },
+                );
+            }
             StudioEffectResultKind::Threads => {
                 self.apply_parsed::<StudioThreadsDto>(data, "threads", |core, threads| {
                     core.data.threads = Some(threads);
@@ -686,6 +695,9 @@ fn effect_result_kind_matches(
         (
             StudioEffectKind::FetchSnapshot,
             StudioEffectResultKind::Snapshot
+        ) | (
+            StudioEffectKind::FetchProjects,
+            StudioEffectResultKind::Projects
         ) | (
             StudioEffectKind::FetchThreads { .. },
             StudioEffectResultKind::Threads

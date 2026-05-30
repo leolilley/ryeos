@@ -343,9 +343,10 @@ fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm
         ViewSpec::ItemInspector | ViewSpec::EventInspector => {
             StudioViewVm::Inspector(inspector(core))
         }
-        ViewSpec::Projects => StudioViewVm::Placeholder {
+        ViewSpec::Projects => StudioViewVm::Rows {
             title: "Projects".to_string(),
-            message: "Project management view is not wired yet.".to_string(),
+            columns: vec!["Name".to_string(), "Root".to_string(), "Status".to_string()],
+            rows: project_rows(core),
         },
         ViewSpec::Trust => StudioViewVm::Placeholder {
             title: "Trust".to_string(),
@@ -503,6 +504,21 @@ fn overview(core: &StudioCore) -> StudioViewVm {
                 }),
             ),
             metric(
+                "Projects",
+                &core
+                    .data
+                    .projects
+                    .as_ref()
+                    .map(|x| x.projects.len())
+                    .unwrap_or(0)
+                    .to_string(),
+                "Known local roots",
+                StudioTone::Neutral,
+                Some(StudioAction::OpenView {
+                    view: ViewSpec::Projects,
+                }),
+            ),
+            metric(
                 "Services",
                 &core
                     .data
@@ -532,6 +548,36 @@ fn overview(core: &StudioCore) -> StudioViewVm {
             action: Some(StudioAction::SelectSnapshot),
         }],
     }
+}
+
+fn project_rows(core: &StudioCore) -> Vec<StudioRowVm> {
+    core.data
+        .projects
+        .as_ref()
+        .map(|projects| projects.projects.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|project| {
+            row(
+                project.local_id,
+                if project.name.is_empty() {
+                    project.root.clone()
+                } else {
+                    project.name
+                },
+                Some(project.root),
+                Some(
+                    if project.exists {
+                        "available"
+                    } else {
+                        "missing"
+                    }
+                    .to_string(),
+                ),
+                None,
+            )
+        })
+        .collect()
 }
 
 fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<StudioRowVm> {

@@ -33,5 +33,6 @@ pub mod state_store;
 pub mod stream_envelope;
 pub mod temp_dir_guard;
 pub mod thread_lifecycle;
+pub mod user_space;
 pub mod vault;
 pub mod write_barrier;

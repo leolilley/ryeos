@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-30T08:46:51Z:88a0399f7518ca5c3079413726162f7b90d89af6f00971f69df401fa48a0b0a7:EbBXnzaII1kYj3Q1epeWCm/1je4utgjFeOSenD1lGvzaDayafIxkV74VIUTwbzXPtqoHpIXhKo/EYW4e9zz0DQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+name: studio/projects/list
+version: "1.0.0"
+description: List the local user-space Studio project registry.
+endpoint: ui.studio.projects.list
+availability: daemon_only

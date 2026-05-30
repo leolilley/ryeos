@@ -10,6 +10,7 @@ pub struct StudioEffect {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioEffectKind {
     FetchSnapshot,
+    FetchProjects,
     FetchThreads {
         limit: usize,
     },
@@ -65,6 +66,7 @@ pub struct StudioEffectResult {
 #[serde(rename_all = "snake_case")]
 pub enum StudioEffectResultKind {
     Snapshot,
+    Projects,
     Threads,
     Items,
     Schedules,
