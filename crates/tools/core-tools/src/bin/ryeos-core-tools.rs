@@ -55,10 +55,11 @@ enum Cmd {
         /// Bundle source root (directory containing `.ai/`).
         bundle_source: Option<PathBuf>,
 
-        /// Registry root supplying kind schemas + parsers.
+        /// Registry/dependency root supplying kind schemas + parsers.
         /// Defaults to `bundle_source` (suitable when building `core` itself).
-        #[arg(long)]
-        registry_root: Option<PathBuf>,
+        /// May be repeated for bundles that depend on multiple bundle roots.
+        #[arg(long = "registry-root")]
+        registry_roots: Vec<PathBuf>,
 
         /// Owner label for the trust doc. Defaults to "local-dev".
         #[arg(long, default_value = "local-dev")]
@@ -74,9 +75,9 @@ enum Cmd {
         /// Bundle source root (directory containing `.ai/`).
         source: Option<PathBuf>,
 
-        /// Registry/dependency root to include while validating.
-        #[arg(long)]
-        registry_root: Option<PathBuf>,
+        /// Registry/dependency root to include while validating. May be repeated.
+        #[arg(long = "registry-root")]
+        registry_roots: Vec<PathBuf>,
     },
 
     /// Resolve, optionally verify, and read an item.
@@ -217,20 +218,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         } => run_sign(item_ref, project, source, cli.stdin_json),
         Cmd::Build {
             bundle_source,
-            registry_root,
+            registry_roots,
             owner,
             no_trust_doc,
         } => run_build(
             bundle_source,
-            registry_root,
+            registry_roots,
             owner,
             no_trust_doc,
             cli.stdin_json,
         ),
         Cmd::BundleVerify {
             source,
-            registry_root,
-        } => run_bundle_verify(source, registry_root, cli.stdin_json),
+            registry_roots,
+        } => run_bundle_verify(source, registry_roots, cli.stdin_json),
         Cmd::Fetch {
             item_ref,
             with_content,
@@ -317,7 +318,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
 fn run_build(
     bundle_source: Option<PathBuf>,
-    registry_root: Option<PathBuf>,
+    registry_roots: Vec<PathBuf>,
     owner: String,
     no_trust_doc: bool,
     stdin_json: bool,
@@ -325,21 +326,22 @@ fn run_build(
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 
-    let (bundle_source, registry_root, owner, no_trust_doc) = if stdin_json {
+    let (bundle_source, mut registry_roots, owner, no_trust_doc) = if stdin_json {
         if bundle_source.is_some() {
             anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
         }
         let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
+        let registry_roots = params.registry_roots();
         (
             params.source,
-            params.registry_root,
+            registry_roots,
             params.owner.unwrap_or_else(|| "local-dev".to_string()),
             params.no_trust_doc,
         )
     } else {
         let source = bundle_source
             .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
-        (source, registry_root, owner, no_trust_doc)
+        (source, registry_roots, owner, no_trust_doc)
     };
 
     let user_root = roots::user_root().map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
@@ -360,11 +362,13 @@ fn run_build(
     let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
         .with_context(|| format!("load signing key from {}", key_path.display()))?;
 
-    let registry_root = registry_root.unwrap_or_else(|| bundle_source.clone());
+    if registry_roots.is_empty() {
+        registry_roots.push(bundle_source.clone());
+    }
 
     let report = run_publish(&PublishOptions {
         bundle_source,
-        registry_root,
+        registry_roots,
         signing_key,
         owner,
         emit_trust_doc: !no_trust_doc,
@@ -380,26 +384,39 @@ struct BundlePublishParams {
     #[serde(default)]
     registry_root: Option<PathBuf>,
     #[serde(default)]
+    registry_roots: Vec<PathBuf>,
+    #[serde(default)]
     owner: Option<String>,
     #[serde(default)]
     no_trust_doc: bool,
 }
 
+impl BundlePublishParams {
+    fn registry_roots(&self) -> Vec<PathBuf> {
+        if self.registry_roots.is_empty() {
+            self.registry_root.iter().cloned().collect()
+        } else {
+            self.registry_roots.clone()
+        }
+    }
+}
+
 fn run_bundle_verify(
     source: Option<PathBuf>,
-    registry_root: Option<PathBuf>,
+    registry_roots: Vec<PathBuf>,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    let (source, registry_root) = if stdin_json {
+    let (source, registry_roots) = if stdin_json {
         if source.is_some() {
             anyhow::bail!("--stdin-json is mutually exclusive with positional SOURCE");
         }
         let params: BundleVerifyParams = serde_json::from_value(read_stdin_json()?)?;
-        (params.source, params.registry_root)
+        let registry_roots = params.registry_roots();
+        (params.source, registry_roots)
     } else {
         let source =
             source.ok_or_else(|| anyhow::anyhow!("SOURCE required (or pass --stdin-json)"))?;
-        (source, registry_root)
+        (source, registry_roots)
     };
 
     let source_path = std::fs::canonicalize(&source)
@@ -418,7 +435,7 @@ fn run_bundle_verify(
     let user_root = ryeos_engine::roots::user_root().ok();
     let dependency_roots = bundle_verify_dependency_roots(
         &source_path,
-        registry_root,
+        registry_roots,
         &system_space_dir,
         user_root.as_deref(),
     )?;
@@ -459,16 +476,18 @@ fn run_bundle_verify(
 
 fn bundle_verify_dependency_roots(
     source_path: &Path,
-    registry_root: Option<PathBuf>,
+    registry_roots: Vec<PathBuf>,
     system_space_dir: &Path,
     user_root: Option<&Path>,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut dependency_roots: Vec<PathBuf> = Vec::new();
-    if let Some(root) = registry_root {
-        let root = std::fs::canonicalize(&root)
-            .with_context(|| format!("resolve registry root {}", root.display()))?;
-        if root != source_path {
-            dependency_roots.push(root);
+    if !registry_roots.is_empty() {
+        for root in registry_roots {
+            let root = std::fs::canonicalize(&root)
+                .with_context(|| format!("resolve registry root {}", root.display()))?;
+            if root != source_path && !dependency_roots.iter().any(|seen| seen == &root) {
+                dependency_roots.push(root);
+            }
         }
     } else {
         let installed_roots =
@@ -487,6 +506,18 @@ struct BundleVerifyParams {
     source: PathBuf,
     #[serde(default)]
     registry_root: Option<PathBuf>,
+    #[serde(default)]
+    registry_roots: Vec<PathBuf>,
+}
+
+impl BundleVerifyParams {
+    fn registry_roots(&self) -> Vec<PathBuf> {
+        if self.registry_roots.is_empty() {
+            self.registry_root.iter().cloned().collect()
+        } else {
+            self.registry_roots.clone()
+        }
+    }
 }
 
 fn run_sign(

@@ -32,9 +32,14 @@ use ryeos_bundle::manifest::{materialize_manifest, BundleManifestSource};
 pub struct PublishOptions {
     /// Bundle source root (the directory containing `.ai/`).
     pub bundle_source: PathBuf,
-    /// Registry root supplying kind schemas + parsers for sign-items.
+    /// Registry/dependency roots supplying kind schemas + parsers for sign-items.
+    ///
     /// When publishing `core` itself, pass the same path as `bundle_source`.
-    pub registry_root: PathBuf,
+    /// Bundles that depend on kinds from multiple bundles (for example cockpit
+    /// depends on `surface` from standard and base parsers/handlers from core)
+    /// must pass each dependency root so every signable item is discovered and
+    /// validated during authoring.
+    pub registry_roots: Vec<PathBuf>,
     /// Author signing key used for every signing operation in this run.
     pub signing_key: SigningKey,
     /// Owner label written into PUBLISHER_TRUST.toml (e.g. "ryeos-official",
@@ -93,9 +98,12 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
             .context("rebuild-manifest phase failed")?;
 
     // ── Phase 3: sign every other signable item ──
-    let sign_report =
-        sign_bundle::sign_bundle_items(&opts.bundle_source, &opts.registry_root, &opts.signing_key)
-            .context("sign-items phase failed")?;
+    let sign_report = sign_bundle::sign_bundle_items(
+        &opts.bundle_source,
+        &opts.registry_roots,
+        &opts.signing_key,
+    )
+    .context("sign-items phase failed")?;
     if !sign_report.is_total_success() {
         let mut msg = format!(
             "sign-items reported {} failure(s):\n",

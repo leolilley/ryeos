@@ -59,13 +59,13 @@ pub struct ItemOutcome {
 
 /// Sign every signable item in the bundle at `source` using `signing_key`.
 ///
-/// `registry_root` provides the kind schemas and parser tools for
-/// validation. When signing core's own items, pass `--registry-root`
-/// pointing at the same core bundle (after its kind schemas are
-/// bootstrap-signed).
+/// `registry_roots` provide the kind schemas and parser tools for validation.
+/// When signing core's own items, pass the core bundle itself (after its kind
+/// schemas are bootstrap-signed). For bundles with transitive dependencies,
+/// pass every dependency root in dependency order.
 pub fn sign_bundle_items(
     source: &Path,
-    registry_root: &Path,
+    registry_roots: &[PathBuf],
     signing_key: &lillux::crypto::SigningKey,
 ) -> Result<SignBundleReport> {
     let verifying_key = signing_key.verifying_key();
@@ -78,15 +78,17 @@ pub fn sign_bundle_items(
         label: Some("author".to_string()),
     }]);
 
-    // 2. Load KindRegistry from registry_root AND source bundle's own kind schemas.
-    //    The registry_root provides base kinds (core); the source bundle may provide
-    //    additional kinds (e.g. standard provides knowledge, directive, graph).
+    // 2. Load KindRegistry from registry_roots AND source bundle's own kind
+    //    schemas. Registry roots provide base/dependency kinds (core, standard,
+    //    etc.); the source bundle may provide additional kinds.
     let mut schema_roots = Vec::new();
-    let registry_schema_root = registry_root
-        .join(AI_DIR)
-        .join(ryeos_engine::KIND_SCHEMAS_DIR);
-    if registry_schema_root.is_dir() {
-        schema_roots.push(registry_schema_root);
+    for registry_root in registry_roots {
+        let registry_schema_root = registry_root
+            .join(AI_DIR)
+            .join(ryeos_engine::KIND_SCHEMAS_DIR);
+        if registry_schema_root.is_dir() {
+            schema_roots.push(registry_schema_root);
+        }
     }
     let source_schema_root = source.join(AI_DIR).join(ryeos_engine::KIND_SCHEMAS_DIR);
     if source_schema_root.is_dir() {
@@ -98,21 +100,22 @@ pub fn sign_bundle_items(
     let kinds =
         KindRegistry::load_base(&schema_roots, &trust_store).context("load kind schemas")?;
 
-    // 3. Build ParserDispatcher from registry_root AND source bundle.
+    // 3. Build ParserDispatcher from registry_roots AND source bundle.
     //    Requires: kind schemas AND parser tool YAMLs must already be signed
     //    (done by the bootstrap_sign_core_kind_schemas example, which signs
     //    both kind schemas and parser descriptors in one pass).
-    let mut parser_roots = vec![registry_root.to_path_buf()];
-    if source != registry_root {
+    let mut parser_roots = registry_roots.to_vec();
+    if !parser_roots.iter().any(|root| root == source) {
         parser_roots.push(source.to_path_buf());
     }
     let (parser_tools, _dups) = ParserRegistry::load_base(&parser_roots, &trust_store, &kinds)
         .context("load parser tools")?;
-    let mut handler_roots = vec![(
-        registry_root.to_path_buf(),
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
-    )];
-    if source != registry_root {
+    let mut handler_roots: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = registry_roots
+        .iter()
+        .cloned()
+        .map(|root| (root, ryeos_engine::resolution::TrustClass::TrustedSystem))
+        .collect();
+    if !registry_roots.iter().any(|root| root == source) {
         handler_roots.push((
             source.to_path_buf(),
             ryeos_engine::resolution::TrustClass::TrustedSystem,

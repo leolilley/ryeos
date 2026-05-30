@@ -144,6 +144,16 @@ USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$STD" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
+echo "[populate-bundles] republishing core bundle with standard extension kinds…"
+# Core owns foundational runtime items but also ships documentation items whose
+# `knowledge` kind is provided by standard. Once standard has been signed, run
+# core through the authoring path again with both roots so those extension-kind
+# items are signed by the publisher key instead of being silently skipped.
+USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$CORE" \
+  --registry-root "$CORE" \
+  --registry-root "$STD" \
+  --owner "$OWNER" >/dev/null
+
 echo "[populate-bundles] publishing web bundle…"
 USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$WEB" \
   --registry-root "$CORE" \
@@ -152,6 +162,7 @@ USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$WEB" \
 echo "[populate-bundles] publishing cockpit bundle…"
 USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$COCKPIT" \
   --registry-root "$CORE" \
+  --registry-root "$STD" \
   --owner "$OWNER" >/dev/null
 
 echo "[populate-bundles] done"
