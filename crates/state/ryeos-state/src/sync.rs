@@ -85,11 +85,8 @@ pub fn export_chain(
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let head_path = refs_root
-            .join("generic/chains")
-            .join(chain_root_id)
-            .join("head");
-        let signed_ref = crate::refs::read_signed_ref(&head_path)
+        let signed_ref = crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("missing chain head ref for {chain_root_id}"))
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
     };
@@ -151,11 +148,8 @@ pub fn reconcile_export(
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let head_path = refs_root
-            .join("generic/chains")
-            .join(chain_root_id)
-            .join("head");
-        let signed_ref = crate::refs::read_signed_ref(&head_path)
+        let signed_ref = crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("missing chain head ref for {chain_root_id}"))
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
     };
@@ -241,6 +235,7 @@ pub fn import_objects(cas_root: &Path, payload: &ExportPayload) -> Result<Import
 
         // Skip if already present
         if path.exists() {
+            verify_existing_cas_path(&path, &entry.hash)?;
             result.already_present += 1;
             continue;
         }
@@ -288,6 +283,7 @@ pub fn import_objects_staged(
 
         let path = lillux::shard_path(db.cas_root(), namespace, &entry.hash, ext);
         if path.exists() {
+            verify_existing_cas_path(&path, &entry.hash)?;
             result.already_present += 1;
         } else {
             if let Some(parent) = path.parent() {
@@ -315,6 +311,25 @@ pub fn import_objects_staged(
     }
 
     Ok(result)
+}
+
+fn verify_existing_cas_path(path: &Path, expected_hash: &str) -> Result<()> {
+    let existing = std::fs::read(path).with_context(|| {
+        format!(
+            "failed to read existing CAS entry {} for verification",
+            path.display()
+        )
+    })?;
+    let actual = lillux::sha256_hex(&existing);
+    if actual != expected_hash {
+        anyhow::bail!(
+            "CAS corruption: existing entry at {} hashes to {}, expected {}",
+            path.display(),
+            actual,
+            expected_hash
+        );
+    }
+    Ok(())
 }
 
 /// Finalize an import: sign a local chain head ref and catch up projection.
@@ -346,18 +361,13 @@ pub fn finalize_import(
     }
 
     // Step 2: Sign and write local chain head ref
-    let ref_path = format!("chains/{}/head", chain_root_id);
-    let signed_ref = crate::refs::SignedRef::new(
-        ref_path,
-        chain_head_hash.to_string(),
-        lillux::time::iso8601_now(),
-        signer.fingerprint().to_string(),
-    );
-    let head_ref_path = refs_root
-        .join("generic/chains")
-        .join(chain_root_id)
-        .join("head");
-    crate::refs::write_signed_ref(&head_ref_path, signed_ref, signer)?;
+    crate::refs::write_generic_head_ref(
+        refs_root,
+        "chains",
+        chain_root_id,
+        chain_head_hash,
+        signer,
+    )?;
 
     tracing::info!(
         chain_root_id,
@@ -424,6 +434,11 @@ mod tests {
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 
+    fn object_hash(value: &serde_json::Value) -> String {
+        let canonical = lillux::canonical_json(value);
+        lillux::sha256_hex(canonical.as_bytes())
+    }
+
     fn write_signed_head(refs_root: &Path, chain_root_id: &str, target_hash: &str) {
         let signer = crate::signer::TestSigner::default();
         let ref_path = format!("chains/{}/head", chain_root_id);
@@ -448,25 +463,6 @@ mod tests {
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&refs_root).unwrap();
 
-        let cs_hash = make_hash("cs");
-        let snap_hash = make_hash("snap");
-        let cs = serde_json::json!({
-            "kind": "chain_state",
-            "schema": 1,
-            "chain_root_id": "T-root",
-            "prev_chain_state_hash": null,
-            "last_event_hash": null,
-            "last_chain_seq": 0,
-            "updated_at": "2026-04-23T00:00:00Z",
-            "threads": {
-                "T-root": {
-                    "snapshot_hash": snap_hash,
-                    "last_event_hash": null,
-                    "last_thread_seq": 0,
-                    "status": "created"
-                }
-            }
-        });
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
             "schema": 1,
@@ -496,6 +492,25 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
         });
+        let snap_hash = object_hash(&snap);
+        let cs = serde_json::json!({
+            "kind": "chain_state",
+            "schema": 1,
+            "chain_root_id": "T-root",
+            "prev_chain_state_hash": null,
+            "last_event_hash": null,
+            "last_chain_seq": 0,
+            "updated_at": "2026-04-23T00:00:00Z",
+            "threads": {
+                "T-root": {
+                    "snapshot_hash": snap_hash,
+                    "last_event_hash": null,
+                    "last_thread_seq": 0,
+                    "status": "created"
+                }
+            }
+        });
+        let cs_hash = object_hash(&cs);
 
         write_object(&cas_root, &cs_hash, &cs);
         write_object(&cas_root, &snap_hash, &snap);
@@ -646,25 +661,6 @@ mod tests {
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&refs_root).unwrap();
 
-        let cs_hash = make_hash("cs");
-        let snap_hash = make_hash("snap");
-        let cs = serde_json::json!({
-            "kind": "chain_state",
-            "schema": 1,
-            "chain_root_id": "T-root",
-            "prev_chain_state_hash": null,
-            "last_event_hash": null,
-            "last_chain_seq": 0,
-            "updated_at": "2026-04-23T00:00:00Z",
-            "threads": {
-                "T-root": {
-                    "snapshot_hash": snap_hash,
-                    "last_event_hash": null,
-                    "last_thread_seq": 0,
-                    "status": "created"
-                }
-            }
-        });
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
             "schema": 1,
@@ -694,6 +690,25 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
         });
+        let snap_hash = object_hash(&snap);
+        let cs = serde_json::json!({
+            "kind": "chain_state",
+            "schema": 1,
+            "chain_root_id": "T-root",
+            "prev_chain_state_hash": null,
+            "last_event_hash": null,
+            "last_chain_seq": 0,
+            "updated_at": "2026-04-23T00:00:00Z",
+            "threads": {
+                "T-root": {
+                    "snapshot_hash": snap_hash,
+                    "last_event_hash": null,
+                    "last_thread_seq": 0,
+                    "status": "created"
+                }
+            }
+        });
+        let cs_hash = object_hash(&cs);
 
         write_object(&cas_root, &cs_hash, &cs);
         write_object(&cas_root, &snap_hash, &snap);

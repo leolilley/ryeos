@@ -151,13 +151,10 @@ pub fn collect_chain_reachable(
     let mut set = ReachableSet::default();
     let mut roots: Vec<String> = Vec::new();
 
-    let head_path = refs_root
-        .join("generic/chains")
-        .join(chain_root_id)
-        .join("head");
-    let expected_ref_path = format!("chains/{chain_root_id}/head");
-    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
-        roots.push(target);
+    if let Some(signed_ref) =
+        crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+    {
+        roots.push(signed_ref.target_hash);
         set.chain_root_ids.push(chain_root_id.to_string());
     }
 
@@ -170,8 +167,9 @@ fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut Reachable
     let closure = collect_object_closure(cas_root, roots)?;
     if !closure.is_complete() {
         anyhow::bail!(
-            "reachable closure incomplete: missing={}, malformed={}, unsupported={}",
+            "reachable closure incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
             closure.missing_objects.len(),
+            closure.missing_blobs.len(),
             closure.malformed_objects.len(),
             closure.unsupported_objects.len()
         );

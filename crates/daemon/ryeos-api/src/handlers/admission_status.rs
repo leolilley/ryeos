@@ -38,15 +38,18 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let cas_root = state.state_store.cas_root()?;
     let cas = lillux::cas::CasStore::new(cas_root);
-    let attestation = match cas.get_object(&head.target_hash)? {
-        Some(value) => Some(value),
-        None => None,
+    let attestation = cas.get_object(&head.target_hash)?;
+    let status = match attestation.as_ref() {
+        Some(value) => ryeos_state::Attestation::from_value(value)
+            .map(|attestation| attestation.claim)
+            .unwrap_or_else(|_| "invalid".to_string()),
+        None => "missing_attestation".to_string(),
     };
 
     Ok(serde_json::json!({
         "subject_hash": req.subject_hash,
         "policy": req.policy,
-        "status": "accepted",
+        "status": status,
         "attestation_hash": head.target_hash,
         "head": {
             "ref_path": head.ref_path,

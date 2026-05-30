@@ -61,15 +61,32 @@ pub fn admit_root(
     if request.claim.is_empty() {
         anyhow::bail!("admission claim must not be empty");
     }
+    if request.claim != DEFAULT_ADMISSION_CLAIM {
+        anyhow::bail!(
+            "unsupported admission claim '{}': only '{}' is currently supported",
+            request.claim,
+            DEFAULT_ADMISSION_CLAIM
+        );
+    }
 
     if let Some(existing) = db.read_generic_head_ref(
         &format!("admissions/{}", request.policy),
         &request.subject_hash,
     )? {
+        let existing_attestation = read_attestation(db, &existing.target_hash)?;
+        if existing_attestation.subject_hash != request.subject_hash
+            || existing_attestation.policy != request.policy
+            || existing_attestation.claim != request.claim
+        {
+            anyhow::bail!(
+                "existing admission head {} does not match requested subject/policy/claim",
+                existing.target_hash
+            );
+        }
         return Ok(AdmissionResult {
             subject_hash: request.subject_hash.clone(),
             policy: request.policy.clone(),
-            claim: request.claim.clone(),
+            claim: existing_attestation.claim,
             attestation_hash: existing.target_hash,
             reused_existing: true,
         });
@@ -84,12 +101,14 @@ pub fn admit_root(
 
     if !closure.is_complete() {
         anyhow::bail!(
-            "admission closure incomplete: missing_objects={}, malformed_objects={}, unsupported_objects={}",
+            "admission closure incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
             closure.missing_objects.len(),
+            closure.missing_blobs.len(),
             closure.malformed_objects.len(),
             closure.unsupported_objects.len()
         );
     }
+    verify_closure_content_hashes(db, &closure)?;
 
     let evidence = json!({
         "closure": {
@@ -125,25 +144,42 @@ pub fn admit_root(
     lillux::atomic_write(&path, canonical.as_bytes())
         .context("failed to write attestation CAS object")?;
 
-    let subject_path = lillux::shard_path(db.cas_root(), "objects", &request.subject_hash, ".json");
-    let subject_bytes = std::fs::metadata(&subject_path)
-        .with_context(|| format!("failed to stat admission subject {}", request.subject_hash))?
-        .len();
-
-    db.record_cas_entry(&NewCasEntryAttribution {
-        hash: request.subject_hash.clone(),
-        entry_kind: CasEntryKind::Object,
-        bytes: subject_bytes,
-        source_principal: Some(format!("fp:{}", signer.fingerprint())),
-        source_peer: None,
-        job_id: None,
-        state: CasEntryState::Accepted,
-    })?;
+    let source_principal = Some(format!("fp:{}", signer.fingerprint()));
+    for hash in &closure.object_hashes {
+        let path = lillux::shard_path(db.cas_root(), "objects", hash, ".json");
+        let bytes = std::fs::metadata(&path)
+            .with_context(|| format!("failed to stat admitted object {hash}"))?
+            .len();
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes,
+            source_principal: source_principal.clone(),
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Accepted,
+        })?;
+    }
+    for hash in &closure.blob_hashes {
+        let path = lillux::shard_path(db.cas_root(), "blobs", hash, "");
+        let bytes = std::fs::metadata(&path)
+            .with_context(|| format!("failed to stat admitted blob {hash}"))?
+            .len();
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Blob,
+            bytes,
+            source_principal: source_principal.clone(),
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Accepted,
+        })?;
+    }
     db.record_cas_entry(&NewCasEntryAttribution {
         hash: attestation_hash.clone(),
         entry_kind: CasEntryKind::Object,
         bytes: canonical.len() as u64,
-        source_principal: Some(format!("fp:{}", signer.fingerprint())),
+        source_principal,
         source_peer: None,
         job_id: None,
         state: CasEntryState::Local,
@@ -164,6 +200,56 @@ pub fn admit_root(
         attestation_hash,
         reused_existing: false,
     })
+}
+
+fn read_attestation(db: &StateDb, hash: &str) -> Result<Attestation> {
+    let path = lillux::shard_path(db.cas_root(), "objects", hash, ".json");
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("failed to read admission attestation {hash}"))?;
+    let actual = lillux::sha256_hex(&bytes);
+    if actual != hash {
+        anyhow::bail!(
+            "admission attestation content hash mismatch: expected {}, got {}",
+            hash,
+            actual
+        );
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse admission attestation {hash}"))?;
+    Attestation::from_value(&value)
+}
+
+fn verify_closure_content_hashes(
+    db: &StateDb,
+    closure: &crate::object_closure::ObjectClosureReport,
+) -> Result<()> {
+    for hash in &closure.object_hashes {
+        let path = lillux::shard_path(db.cas_root(), "objects", hash, ".json");
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("failed to read admission object {hash}"))?;
+        let actual = lillux::sha256_hex(&bytes);
+        if actual != *hash {
+            anyhow::bail!(
+                "admission object content hash mismatch: expected {}, got {}",
+                hash,
+                actual
+            );
+        }
+    }
+    for hash in &closure.blob_hashes {
+        let path = lillux::shard_path(db.cas_root(), "blobs", hash, "");
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("failed to read admission blob {hash}"))?;
+        let actual = lillux::sha256_hex(&bytes);
+        if actual != *hash {
+            anyhow::bail!(
+                "admission blob content hash mismatch: expected {}, got {}",
+                hash,
+                actual
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

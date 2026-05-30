@@ -24,6 +24,8 @@ pub struct ObjectClosureReport {
     pub object_hashes: BTreeSet<String>,
     /// All reachable blob hashes.
     pub blob_hashes: BTreeSet<String>,
+    /// Blob hashes referenced by reachable objects but absent from CAS.
+    pub missing_blobs: Vec<MissingDependency>,
     /// Object hashes that were referenced but not present in CAS.
     pub missing_objects: Vec<MissingDependency>,
     /// Object hashes whose JSON body or schema-defined edges were malformed.
@@ -35,6 +37,7 @@ pub struct ObjectClosureReport {
 impl ObjectClosureReport {
     pub fn is_complete(&self) -> bool {
         self.missing_objects.is_empty()
+            && self.missing_blobs.is_empty()
             && self.malformed_objects.is_empty()
             && self.unsupported_objects.is_empty()
     }
@@ -179,7 +182,6 @@ pub fn collect_object_closure_with_limits(
             }
             Err(err) => return Err(err).with_context(|| format!("read object {hash}")),
         };
-
         let value: Value = match serde_json::from_str(&content) {
             Ok(value) => value,
             Err(err) => {
@@ -225,6 +227,18 @@ pub fn collect_object_closure_with_limits(
         }
         for blob in links.blob_hashes {
             if lillux::valid_hash(&blob) {
+                let blob_path = lillux::shard_path(cas_root, "blobs", &blob, "");
+                match std::fs::metadata(&blob_path) {
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        report.missing_blobs.push(MissingDependency {
+                            hash: blob,
+                            referenced_by: Some(hash.clone()),
+                        });
+                        continue;
+                    }
+                    Err(err) => return Err(err).with_context(|| format!("stat blob {blob}")),
+                }
                 report.blob_hashes.insert(blob);
             } else {
                 report.malformed_objects.push(MalformedObject {
@@ -236,6 +250,7 @@ pub fn collect_object_closure_with_limits(
     }
 
     report.missing_objects.sort_by(|a, b| a.hash.cmp(&b.hash));
+    report.missing_blobs.sort_by(|a, b| a.hash.cmp(&b.hash));
     report.malformed_objects.sort_by(|a, b| a.hash.cmp(&b.hash));
     report
         .unsupported_objects
@@ -367,11 +382,21 @@ mod tests {
         hash
     }
 
+    fn write_blob(cas_root: &Path, data: &[u8]) -> String {
+        let hash = lillux::sha256_hex(data);
+        let path = lillux::shard_path(cas_root, "blobs", &hash, "");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        lillux::atomic_write(&path, data).unwrap();
+        hash
+    }
+
     #[test]
     fn project_snapshot_reaches_manifest_item_and_blob() {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
-        let blob_hash = h("cd");
+        let blob_hash = write_blob(&cas_root, b"hello closure");
         let item = write_object(
             &cas_root,
             &json!({
@@ -405,6 +430,27 @@ mod tests {
         assert!(report.is_complete());
         assert_eq!(report.object_hashes.len(), 3);
         assert!(report.blob_hashes.contains(&blob_hash));
+    }
+
+    #[test]
+    fn missing_blob_makes_closure_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let blob_hash = h("cd");
+        let item = write_object(
+            &cas_root,
+            &json!({
+                "kind": "item_source",
+                "item_ref": "directive:test/example",
+                "content_blob_hash": blob_hash,
+                "integrity": "none"
+            }),
+        );
+
+        let report = collect_object_closure(&cas_root, [item]).unwrap();
+        assert!(!report.is_complete());
+        assert_eq!(report.missing_blobs.len(), 1);
+        assert_eq!(report.missing_blobs[0].hash, blob_hash);
     }
 
     #[test]

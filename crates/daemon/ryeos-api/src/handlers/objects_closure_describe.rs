@@ -156,6 +156,16 @@ pub(crate) fn closure_summary_json(
             })
         })
         .collect();
+    let missing_blobs: Vec<Value> = report
+        .missing_blobs
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "hash": item.hash,
+                "referenced_by": item.referenced_by,
+            })
+        })
+        .collect();
     let unsupported: Vec<Value> = report
         .unsupported_objects
         .iter()
@@ -173,6 +183,7 @@ pub(crate) fn closure_summary_json(
         "object_hashes": report.object_hashes.iter().cloned().collect::<Vec<_>>(),
         "blob_hashes": report.blob_hashes.iter().cloned().collect::<Vec<_>>(),
         "missing_objects": missing,
+        "missing_blobs": missing_blobs,
         "malformed_objects": malformed,
         "unsupported_objects": unsupported,
     });
@@ -182,6 +193,7 @@ pub(crate) fn closure_summary_json(
             "objects": report.object_hashes.len(),
             "blobs": report.blob_hashes.len(),
             "missing_objects": report.missing_objects.len(),
+            "missing_blobs": report.missing_blobs.len(),
             "malformed_objects": report.malformed_objects.len(),
             "unsupported_objects": report.unsupported_objects.len(),
         });

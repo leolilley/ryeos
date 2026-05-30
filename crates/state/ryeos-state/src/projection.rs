@@ -133,7 +133,7 @@ CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
 
 -- CAS entry attribution: why a CAS object/blob is present locally.
 CREATE TABLE IF NOT EXISTS cas_entries (
-    hash TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
     entry_kind TEXT NOT NULL CHECK (entry_kind IN ('object', 'blob')),
     bytes INTEGER NOT NULL CHECK (bytes >= 0),
     first_seen_at TEXT NOT NULL,
@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS cas_entries (
     source_principal TEXT,
     source_peer TEXT,
     job_id TEXT,
-    state TEXT NOT NULL CHECK (state IN ('local', 'staged', 'accepted', 'mirrored', 'rejected'))
+    state TEXT NOT NULL CHECK (state IN ('local', 'staged', 'accepted', 'mirrored', 'rejected')),
+    PRIMARY KEY(entry_kind, hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cas_entries_state ON cas_entries(state);
@@ -550,7 +551,7 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "entry_kind",
                         col_type: "TEXT",
-                        pk: false,
+                        pk: true,
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
@@ -874,14 +875,23 @@ impl ProjectionDb {
                     hash, entry_kind, bytes, first_seen_at, updated_at,
                     source_principal, source_peer, job_id, state
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(hash) DO UPDATE SET
-                    entry_kind = excluded.entry_kind,
-                    bytes = excluded.bytes,
+                ON CONFLICT(entry_kind, hash) DO UPDATE SET
+                    bytes = CASE
+                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored', 'rejected')
+                            AND excluded.state = 'staged'
+                            THEN cas_entries.bytes
+                        ELSE excluded.bytes
+                    END,
                     updated_at = excluded.updated_at,
                     source_principal = COALESCE(excluded.source_principal, cas_entries.source_principal),
                     source_peer = COALESCE(excluded.source_peer, cas_entries.source_peer),
                     job_id = COALESCE(excluded.job_id, cas_entries.job_id),
-                    state = excluded.state",
+                    state = CASE
+                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored', 'rejected')
+                            AND excluded.state = 'staged'
+                            THEN cas_entries.state
+                        ELSE excluded.state
+                    END",
                 rusqlite::params![
                     &entry.hash,
                     entry.entry_kind.as_str(),
@@ -1352,6 +1362,21 @@ mod tests {
         assert_eq!(updated.source_principal.as_deref(), Some("fp:source"));
         assert_eq!(updated.source_peer.as_deref(), Some("peer-a"));
         assert_eq!(updated.job_id.as_deref(), Some("job-a"));
+
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 512,
+            source_principal: Some("fp:untrusted".to_string()),
+            source_peer: Some("peer-untrusted".to_string()),
+            job_id: Some("job-untrusted".to_string()),
+            state: CasEntryState::Staged,
+        })
+        .unwrap();
+
+        let still_accepted = db.get_cas_entry(&hash).unwrap().unwrap();
+        assert_eq!(still_accepted.bytes, 256);
+        assert_eq!(still_accepted.state, CasEntryState::Accepted);
     }
 
     #[test]

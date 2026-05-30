@@ -309,7 +309,10 @@ impl RemoteClient {
             body["max_links_per_object"] = serde_json::json!(limit);
         }
         let resp = self.signed_post("/admission/submit", &body).await?;
-        serde_json::from_value(resp).context("failed to parse admission/submit response")
+        let response: AdmissionSubmitResponse =
+            serde_json::from_value(resp).context("failed to parse admission/submit response")?;
+        response.validate_against_request(subject_hash, policy)?;
+        Ok(response)
     }
 
     /// POST /admission/status (authenticated).
@@ -323,7 +326,10 @@ impl RemoteClient {
             "policy": policy,
         });
         let resp = self.signed_post("/admission/status", &body).await?;
-        serde_json::from_value(resp).context("failed to parse admission/status response")
+        let response: AdmissionStatusResponse =
+            serde_json::from_value(resp).context("failed to parse admission/status response")?;
+        response.validate_against_request(subject_hash, policy)?;
+        Ok(response)
     }
 
     /// POST /push-head (authenticated).
@@ -752,6 +758,18 @@ impl ObjectsClosureGetResponse {
         if !self.closure.complete {
             anyhow::bail!("remote returned incomplete object closure");
         }
+        let object_hashes: std::collections::BTreeSet<&str> = self
+            .closure
+            .object_hashes
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let blob_hashes: std::collections::BTreeSet<&str> = self
+            .closure
+            .blob_hashes
+            .iter()
+            .map(String::as_str)
+            .collect();
         for hash in self
             .closure
             .object_hashes
@@ -767,14 +785,57 @@ impl ObjectsClosureGetResponse {
                 anyhow::bail!("invalid closure entry hash {}", entry.hash);
             }
             match entry.kind.as_str() {
-                "object" if entry.value.is_some() && entry.data.is_none() => {}
+                "object" if entry.value.is_some() && entry.data.is_none() => {
+                    if !object_hashes.contains(entry.hash.as_str()) {
+                        anyhow::bail!("object entry {} is not in advertised closure", entry.hash);
+                    }
+                    let canonical =
+                        lillux::canonical_json(entry.value.as_ref().expect("value checked above"));
+                    let actual = lillux::sha256_hex(canonical.as_bytes());
+                    if actual != entry.hash {
+                        anyhow::bail!(
+                            "object closure entry hash mismatch: expected {}, got {}",
+                            entry.hash,
+                            actual
+                        );
+                    }
+                }
                 "blob" if entry.data.is_some() && entry.value.is_none() => {
-                    base64::engine::general_purpose::STANDARD
+                    if !blob_hashes.contains(entry.hash.as_str()) {
+                        anyhow::bail!("blob entry {} is not in advertised closure", entry.hash);
+                    }
+                    let decoded = base64::engine::general_purpose::STANDARD
                         .decode(entry.data.as_ref().expect("data checked above"))
                         .context("invalid base64 in closure blob entry")?;
+                    let actual = lillux::sha256_hex(&decoded);
+                    if actual != entry.hash {
+                        anyhow::bail!(
+                            "blob closure entry hash mismatch: expected {}, got {}",
+                            entry.hash,
+                            actual
+                        );
+                    }
                 }
                 "missing" if entry.value.is_none() && entry.data.is_none() => {}
                 other => anyhow::bail!("invalid closure entry kind/shape: {other}"),
+            }
+        }
+        for hash in object_hashes {
+            if !self
+                .entries
+                .iter()
+                .any(|entry| entry.kind == "object" && entry.hash == hash)
+            {
+                anyhow::bail!("missing object entry for advertised closure hash {hash}");
+            }
+        }
+        for hash in blob_hashes {
+            if !self
+                .entries
+                .iter()
+                .any(|entry| entry.kind == "blob" && entry.hash == hash)
+            {
+                anyhow::bail!("missing blob entry for advertised closure hash {hash}");
             }
         }
         Ok(())
@@ -788,6 +849,8 @@ pub struct ObjectsClosureSummary {
     pub object_hashes: Vec<String>,
     pub blob_hashes: Vec<String>,
     pub missing_objects: Vec<ClosureMissingObject>,
+    #[serde(default)]
+    pub missing_blobs: Vec<ClosureMissingObject>,
     pub malformed_objects: Vec<ClosureMalformedObject>,
     pub unsupported_objects: Vec<ClosureUnsupportedObject>,
 }
@@ -868,6 +931,35 @@ pub struct AdmissionSubmitResponse {
     pub reused_existing: bool,
 }
 
+impl AdmissionSubmitResponse {
+    pub fn validate_against_request(&self, subject_hash: &str, policy: &str) -> Result<()> {
+        if self.subject_hash != subject_hash {
+            anyhow::bail!(
+                "admission submit subject mismatch: expected {}, got {}",
+                subject_hash,
+                self.subject_hash
+            );
+        }
+        if self.policy != policy {
+            anyhow::bail!(
+                "admission submit policy mismatch: expected {}, got {}",
+                policy,
+                self.policy
+            );
+        }
+        if !lillux::valid_hash(&self.attestation_hash) {
+            anyhow::bail!(
+                "invalid admission attestation hash: {}",
+                self.attestation_hash
+            );
+        }
+        if self.claim != "accepted" {
+            anyhow::bail!("unsupported admission claim in response: {}", self.claim);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AdmissionStatusResponse {
     pub subject_hash: String,
@@ -876,6 +968,59 @@ pub struct AdmissionStatusResponse {
     pub attestation_hash: Option<String>,
     pub head: Option<Value>,
     pub attestation: Option<Value>,
+}
+
+impl AdmissionStatusResponse {
+    pub fn validate_against_request(&self, subject_hash: &str, policy: &str) -> Result<()> {
+        if self.subject_hash != subject_hash {
+            anyhow::bail!(
+                "admission status subject mismatch: expected {}, got {}",
+                subject_hash,
+                self.subject_hash
+            );
+        }
+        if self.policy != policy {
+            anyhow::bail!(
+                "admission status policy mismatch: expected {}, got {}",
+                policy,
+                self.policy
+            );
+        }
+        match self.status.as_str() {
+            "missing" => {
+                if self.attestation_hash.is_some()
+                    || self.head.is_some()
+                    || self.attestation.is_some()
+                {
+                    anyhow::bail!("missing admission status must not include attestation data");
+                }
+            }
+            "accepted" => {
+                if self.head.is_none() {
+                    anyhow::bail!("accepted admission status missing head");
+                }
+                let Some(hash) = self.attestation_hash.as_deref() else {
+                    anyhow::bail!("accepted admission status missing attestation_hash");
+                };
+                if !lillux::valid_hash(hash) {
+                    anyhow::bail!("invalid admission attestation hash: {hash}");
+                }
+                let Some(attestation) = self.attestation.as_ref() else {
+                    anyhow::bail!("accepted admission status missing attestation object");
+                };
+                let attestation = ryeos_state::Attestation::from_value(attestation)?;
+                if attestation.subject_hash != subject_hash
+                    || attestation.policy != policy
+                    || attestation.claim != "accepted"
+                {
+                    anyhow::bail!("accepted admission attestation does not match request");
+                }
+            }
+            "invalid" | "missing_attestation" => {}
+            other => anyhow::bail!("unknown admission status: {other}"),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
