@@ -1,4 +1,4 @@
-//! `remote/import-admitted-root` — verified remote CAS import.
+//! `remote/import-admitted-root-advanced` — advanced verified remote CAS import.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,8 +25,15 @@ pub struct Request {
     pub subject_hash: String,
     #[serde(default = "default_policy")]
     pub policy: String,
+    /// Optional attestation hash to bind this raw-root import to a known
+    /// signed admission head. Normal callers should use
+    /// `remote.import-admitted-head`, which discovers and supplies this
+    /// binding automatically.
+    #[serde(default)]
+    pub expected_attestation_hash: Option<String>,
     /// Optional override for the configured pinned remote Ed25519 signing key.
-    /// When omitted, the remote config's pinned `signing_key` is used.
+    /// This is an assertion only: when present, it must equal the configured
+    /// pinned remote `signing_key`.
     #[serde(default)]
     pub expected_signing_key: Option<String>,
     #[serde(default)]
@@ -84,7 +91,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             policy: req.policy,
             expected_issuer,
             expected_key,
-            expected_attestation_hash: None,
+            expected_attestation_hash: req.expected_attestation_hash,
             source_peer: Some(remote_cfg.name.clone()),
             job_id: None,
             closure_options: ObjectsClosureRequestOptions {
@@ -121,10 +128,10 @@ fn decode_expected_signing_key(input: &str) -> Result<lillux::crypto::VerifyingK
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:remote/import-admitted-root",
-    endpoint: "remote.import-admitted-root",
+    service_ref: "service:remote/import-admitted-root-advanced",
+    endpoint: "remote.import-admitted-root-advanced",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.remote.import-admitted-root"],
+    required_caps: &["ryeos.execute.service.remote.admin"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
