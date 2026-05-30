@@ -387,6 +387,8 @@ impl RemoteClient {
         &self,
         prefix: &str,
         limit: Option<usize>,
+        expected_signer: &str,
+        verifying_key: &lillux::crypto::VerifyingKey,
     ) -> Result<FederationHeadsListResponse> {
         let mut body = serde_json::json!({ "prefix": prefix });
         if let Some(limit) = limit {
@@ -396,6 +398,7 @@ impl RemoteClient {
         let response: FederationHeadsListResponse = serde_json::from_value(resp)
             .context("failed to parse federation/heads/list response")?;
         response.validate(prefix)?;
+        response.verify_signed_refs(expected_signer, verifying_key)?;
         Ok(response)
     }
 
@@ -798,7 +801,7 @@ impl ObjectsHasResponse {
 
         let mut seen = BTreeSet::new();
         for hash in self.found.iter().chain(self.missing.iter()) {
-            if !lillux::valid_hash(hash) || hash.chars().any(|c| c.is_ascii_uppercase()) {
+            if !is_canonical_hash(hash) {
                 anyhow::bail!("objects/has returned invalid hash: {hash}");
             }
             if !requested_set.contains(hash.as_str()) {
@@ -849,7 +852,7 @@ impl ObjectsGetResponse {
             requested.iter().map(String::as_str).collect();
         let mut seen = std::collections::BTreeSet::new();
         for entry in &self.entries {
-            if !lillux::valid_hash(&entry.hash) {
+            if !is_canonical_hash(&entry.hash) {
                 anyhow::bail!("invalid objects/get entry hash {}", entry.hash);
             }
             if !requested.contains(entry.hash.as_str()) {
@@ -962,12 +965,12 @@ impl ObjectsClosureGetResponse {
             .iter()
             .chain(self.closure.blob_hashes.iter())
         {
-            if !lillux::valid_hash(hash) {
+            if !is_canonical_hash(hash) {
                 anyhow::bail!("invalid closure hash {hash}");
             }
         }
         for entry in &self.entries {
-            if !lillux::valid_hash(&entry.hash) {
+            if !is_canonical_hash(&entry.hash) {
                 anyhow::bail!("invalid closure entry hash {}", entry.hash);
             }
             match entry.kind.as_str() {
@@ -1049,7 +1052,7 @@ fn validate_closure_summary_against_request(
         .chain(closure.malformed_objects.iter().map(|item| &item.hash))
         .chain(closure.unsupported_objects.iter().map(|item| &item.hash))
     {
-        if !lillux::valid_hash(hash) || hash.bytes().any(|b| b.is_ascii_uppercase()) {
+        if !is_canonical_hash(hash) {
             anyhow::bail!("invalid closure summary hash {hash}");
         }
     }
@@ -1112,6 +1115,7 @@ pub struct ObjectsClosureRequestOptions {
     pub max_object_bytes: Option<u64>,
     pub max_total_object_bytes: Option<u64>,
     pub max_blob_bytes: Option<u64>,
+    pub max_total_blob_bytes: Option<u64>,
     pub max_response_bytes: Option<u64>,
     pub max_links_per_object: Option<usize>,
     pub allow_incomplete: bool,
@@ -1133,6 +1137,9 @@ fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions
     }
     if let Some(limit) = options.max_blob_bytes {
         body["max_blob_bytes"] = serde_json::json!(limit);
+    }
+    if let Some(limit) = options.max_total_blob_bytes {
+        body["max_total_blob_bytes"] = serde_json::json!(limit);
     }
     if let Some(limit) = options.max_response_bytes {
         body["max_response_bytes"] = serde_json::json!(limit);
@@ -1182,7 +1189,7 @@ impl AdmissionSubmitResponse {
                 self.policy
             );
         }
-        if !lillux::valid_hash(&self.attestation_hash) {
+        if !is_canonical_hash(&self.attestation_hash) {
             anyhow::bail!(
                 "invalid admission attestation hash: {}",
                 self.attestation_hash
@@ -1225,6 +1232,7 @@ pub struct AdmissionAttestationRemoteRecord {
     pub head_ref_path: Option<String>,
     pub indexed_at: String,
     pub state: String,
+    pub attestation: Value,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1317,6 +1325,19 @@ impl FederationHeadsListResponse {
         }
         Ok(())
     }
+
+    pub fn verify_signed_refs(
+        &self,
+        expected_signer: &str,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> Result<()> {
+        for head in &self.heads {
+            head.signed_ref
+                .verify_with_key(expected_signer, verifying_key)
+                .with_context(|| format!("failed to verify federated head {}", head.ref_path))?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1346,9 +1367,7 @@ impl FederationHeadRemoteRecord {
         if self.ref_path.contains("..") || self.ref_path.starts_with('/') {
             anyhow::bail!("federation head response has unsafe ref_path");
         }
-        if !lillux::valid_hash(&self.target_hash)
-            || self.target_hash.bytes().any(|b| b.is_ascii_uppercase())
-        {
+        if !is_canonical_hash(&self.target_hash) {
             anyhow::bail!("invalid federation head target hash: {}", self.target_hash);
         }
         self.signed_ref.validate()?;
@@ -1395,9 +1414,7 @@ impl RemoteSignedRef {
         {
             anyhow::bail!("signed ref has unsafe ref_path");
         }
-        if !lillux::valid_hash(&self.target_hash)
-            || self.target_hash.bytes().any(|b| b.is_ascii_uppercase())
-        {
+        if !is_canonical_hash(&self.target_hash) {
             anyhow::bail!("invalid signed ref target hash: {}", self.target_hash);
         }
         Ok(())
@@ -1558,7 +1575,7 @@ impl SyncJobRemoteRecord {
             .chain(self.uploaded_hashes.iter())
             .chain(self.fetched_hashes.iter())
         {
-            if !lillux::valid_hash(hash) || hash.bytes().any(|b| b.is_ascii_uppercase()) {
+            if !is_canonical_hash(hash) {
                 anyhow::bail!("invalid sync job response hash: {hash}");
             }
         }
@@ -1649,7 +1666,7 @@ impl AdmissionStatusResponse {
                 let Some(hash) = self.attestation_hash.as_deref() else {
                     anyhow::bail!("accepted admission status missing attestation_hash");
                 };
-                if !lillux::valid_hash(hash) {
+                if !is_canonical_hash(hash) {
                     anyhow::bail!("invalid admission attestation hash: {hash}");
                 }
                 if let Some(signed_ref_value) = head.get("signed_ref") {
@@ -1725,20 +1742,13 @@ impl AdmissionAttestationsForSubjectResponse {
 
 impl AdmissionAttestationRemoteRecord {
     fn validate(&self) -> Result<()> {
-        if !lillux::valid_hash(&self.attestation_hash)
-            || self
-                .attestation_hash
-                .bytes()
-                .any(|b| b.is_ascii_uppercase())
-        {
+        if !is_canonical_hash(&self.attestation_hash) {
             anyhow::bail!(
                 "invalid admission attestation hash: {}",
                 self.attestation_hash
             );
         }
-        if !lillux::valid_hash(&self.subject_hash)
-            || self.subject_hash.bytes().any(|b| b.is_ascii_uppercase())
-        {
+        if !is_canonical_hash(&self.subject_hash) {
             anyhow::bail!("invalid admission subject hash: {}", self.subject_hash);
         }
         if self.policy.is_empty()
@@ -1749,11 +1759,34 @@ impl AdmissionAttestationRemoteRecord {
         {
             anyhow::bail!("admission attestation response contains empty required field");
         }
-        match self.state.as_str() {
-            "accepted" | "rejected" => Ok(()),
-            other => anyhow::bail!("unknown admission attestation state: {other}"),
+        if !matches!(self.state.as_str(), "accepted" | "rejected") {
+            anyhow::bail!("unknown admission attestation state: {}", self.state);
         }
+        let canonical = lillux::canonical_json(&self.attestation);
+        let actual = lillux::sha256_hex(canonical.as_bytes());
+        if actual != self.attestation_hash {
+            anyhow::bail!(
+                "admission attestation object hash mismatch: expected {}, got {}",
+                self.attestation_hash,
+                actual
+            );
+        }
+        let attestation = ryeos_state::Attestation::from_value(&self.attestation)?;
+        if attestation.subject_hash != self.subject_hash
+            || attestation.policy != self.policy
+            || attestation.claim != self.claim
+            || attestation.issuer != self.issuer
+            || attestation.issued_at != self.issued_at
+            || attestation.expires_at != self.expires_at
+        {
+            anyhow::bail!("admission attestation object does not match index row");
+        }
+        Ok(())
     }
+}
+
+fn is_canonical_hash(hash: &str) -> bool {
+    lillux::valid_hash(hash) && !hash.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1908,7 +1941,20 @@ mod tests {
     #[test]
     fn admission_attestations_response_validates_subject_and_policy() {
         let subject = "11".repeat(32);
-        let attestation = "22".repeat(32);
+        let signature = base64::engine::general_purpose::STANDARD.encode([0_u8; 64]);
+        let attestation_value = serde_json::json!({
+            "schema": 1,
+            "kind": "attestation",
+            "subject_hash": subject,
+            "policy": "local-node-v1",
+            "claim": "accepted",
+            "issuer": format!("fp:{}", "44".repeat(32)),
+            "issued_at": "2026-05-30T00:00:00Z",
+            "expires_at": null,
+            "evidence": {},
+            "signature": signature,
+        });
+        let attestation = lillux::sha256_hex(lillux::canonical_json(&attestation_value).as_bytes());
         let response: AdmissionAttestationsForSubjectResponse =
             serde_json::from_value(serde_json::json!({
                 "subject_hash": subject,
@@ -1918,12 +1964,13 @@ mod tests {
                     "subject_hash": "11".repeat(32),
                     "policy": "local-node-v1",
                     "claim": "accepted",
-                    "issuer": "fp:issuer",
+                    "issuer": format!("fp:{}", "44".repeat(32)),
                     "issued_at": "2026-05-30T00:00:00Z",
                     "expires_at": null,
                     "head_ref_path": "admissions/local-node-v1/subject/head",
                     "indexed_at": "2026-05-30T00:00:01Z",
-                    "state": "accepted"
+                    "state": "accepted",
+                    "attestation": attestation_value,
                 }]
             }))
             .unwrap();

@@ -76,7 +76,7 @@ impl SignedRef {
         if self.ref_path.is_empty() {
             anyhow::bail!("ref_path must not be empty");
         }
-        if !lillux::valid_hash(&self.target_hash) {
+        if !is_canonical_hash(&self.target_hash) {
             anyhow::bail!("invalid target_hash: {}", self.target_hash);
         }
         if self.updated_at.is_empty() {
@@ -201,6 +201,10 @@ pub fn verify_signed_ref(
 
 /// Trust store — map of fingerprint → public key.
 pub type TrustStore = std::collections::HashMap<String, lillux::crypto::VerifyingKey>;
+
+fn is_canonical_hash(hash: &str) -> bool {
+    lillux::valid_hash(hash) && !hash.bytes().any(|b| b.is_ascii_uppercase())
+}
 
 /// Canonical principal storage key — raw fingerprint hex, no `fp:` prefix.
 ///
@@ -357,7 +361,7 @@ pub fn write_generic_head_ref(
     target_hash: &str,
     signer: &dyn Signer,
 ) -> anyhow::Result<()> {
-    if !lillux::valid_hash(target_hash) {
+    if !is_canonical_hash(target_hash) {
         anyhow::bail!("invalid generic head target hash: {target_hash}");
     }
     let ref_path = generic_head_ref_path(namespace, name)?;

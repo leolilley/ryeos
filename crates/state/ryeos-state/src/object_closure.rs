@@ -150,7 +150,7 @@ pub fn collect_object_closure_with_limits(
     }
 
     while let Some((hash, referenced_by)) = queue.pop_front() {
-        if !lillux::valid_hash(&hash) {
+        if !is_canonical_hash(&hash) {
             report.malformed_objects.push(MalformedObject {
                 hash,
                 reason: "invalid object hash".to_string(),
@@ -239,7 +239,7 @@ pub fn collect_object_closure_with_limits(
             queue.push_back((child, Some(hash.clone())));
         }
         for blob in links.blob_hashes {
-            if lillux::valid_hash(&blob) {
+            if is_canonical_hash(&blob) {
                 let blob_path = lillux::shard_path(cas_root, "blobs", &blob, "");
                 match std::fs::metadata(&blob_path) {
                     Ok(metadata) => {
@@ -393,11 +393,15 @@ fn push_optional_hash(value: &Value, field: &str, out: &mut Vec<String>) -> Resu
 }
 
 fn push_hash(hash: &str, out: &mut Vec<String>) -> Result<(), String> {
-    if !lillux::valid_hash(hash) {
+    if !is_canonical_hash(hash) {
         return Err(format!("invalid hash: {hash}"));
     }
     out.push(hash.to_string());
     Ok(())
+}
+
+fn is_canonical_hash(hash: &str) -> bool {
+    lillux::valid_hash(hash) && !hash.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 #[cfg(test)]

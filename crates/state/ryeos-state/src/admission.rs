@@ -132,7 +132,10 @@ pub fn admit_root(
         },
         "limits": {
             "max_objects": request.limits.max_objects,
+            "max_blobs": request.limits.max_blobs,
             "max_object_bytes": request.limits.max_object_bytes,
+            "max_blob_bytes": request.limits.max_blob_bytes,
+            "max_total_blob_bytes": request.limits.max_total_blob_bytes,
             "max_links_per_object": request.limits.max_links_per_object,
         }
     });

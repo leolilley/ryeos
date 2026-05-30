@@ -1492,6 +1492,21 @@ impl ProjectionDb {
         state: CasEntryState,
     ) -> anyhow::Result<()> {
         validate_canonical_hash("CAS entry hash", hash)?;
+        let current = self.get_cas_entry(entry_kind, hash)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "CAS entry attribution not found for {} hash {hash}",
+                entry_kind.as_str()
+            )
+        })?;
+        if !cas_entry_transition_allowed(current.state, state) {
+            anyhow::bail!(
+                "illegal CAS entry state transition for {} hash {}: {} -> {}",
+                entry_kind.as_str(),
+                hash,
+                current.state.as_str(),
+                state.as_str()
+            );
+        }
         let changed = self
             .conn
             .execute(
@@ -2126,6 +2141,16 @@ fn validate_canonical_hash(label: &str, hash: &str) -> anyhow::Result<()> {
         anyhow::bail!("invalid {label}: {hash}");
     }
     Ok(())
+}
+
+fn cas_entry_transition_allowed(current: CasEntryState, next: CasEntryState) -> bool {
+    !matches!(
+        (current, next),
+        (
+            CasEntryState::Local | CasEntryState::Accepted | CasEntryState::Mirrored,
+            CasEntryState::Staged | CasEntryState::Rejected
+        ) | (CasEntryState::Rejected, CasEntryState::Staged)
+    )
 }
 
 fn validate_sync_job_transition(from: SyncJobState, to: SyncJobState) -> anyhow::Result<()> {
