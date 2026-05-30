@@ -149,6 +149,30 @@ CREATE INDEX IF NOT EXISTS idx_cas_entries_state ON cas_entries(state);
 CREATE INDEX IF NOT EXISTS idx_cas_entries_source_principal ON cas_entries(source_principal);
 CREATE INDEX IF NOT EXISTS idx_cas_entries_source_peer ON cas_entries(source_peer);
 CREATE INDEX IF NOT EXISTS idx_cas_entries_job_id ON cas_entries(job_id);
+
+-- Durable distributed-substrate jobs. These are operational records, not CAS facts.
+CREATE TABLE IF NOT EXISTS sync_jobs (
+    job_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    peer TEXT,
+    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
+    phase TEXT NOT NULL,
+    roots_json BLOB NOT NULL,
+    heads_json BLOB NOT NULL,
+    uploaded_hashes_json BLOB NOT NULL,
+    fetched_hashes_json BLOB NOT NULL,
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
+    last_error TEXT,
+    result_json BLOB,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_jobs_state ON sync_jobs(state);
+CREATE INDEX IF NOT EXISTS idx_sync_jobs_operation_type ON sync_jobs(operation_type);
+CREATE INDEX IF NOT EXISTS idx_sync_jobs_peer ON sync_jobs(peer);
 "#;
 
 use crate::sqlite_schema;
@@ -598,6 +622,107 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "sync_jobs",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "job_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_type",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "peer",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "roots_json",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "heads_json",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "uploaded_hashes_json",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "fetched_hashes_json",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_count",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "max_attempts",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_error",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "result_json",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "finished_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -702,6 +827,24 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["job_id"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_sync_jobs_state",
+                table: "sync_jobs",
+                columns: &["state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_sync_jobs_operation_type",
+                table: "sync_jobs",
+                columns: &["operation_type"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_sync_jobs_peer",
+                table: "sync_jobs",
+                columns: &["peer"],
+                unique: false,
+            },
         ],
     }
 }
@@ -793,6 +936,82 @@ pub struct CasEntriesByStateSummary {
     pub state: CasEntryState,
     pub count: u64,
     pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncJobState {
+    Planned,
+    Running,
+    Completed,
+    Failed,
+    Retryable,
+    Cancelled,
+}
+
+impl SyncJobState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Retryable => "retryable",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "planned" => Ok(Self::Planned),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "retryable" => Ok(Self::Retryable),
+            "cancelled" => Ok(Self::Cancelled),
+            other => anyhow::bail!("unknown sync job state: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncJobRecord {
+    pub job_id: String,
+    pub operation_type: String,
+    pub peer: Option<String>,
+    pub state: SyncJobState,
+    pub phase: String,
+    pub roots: Vec<String>,
+    pub heads: Vec<String>,
+    pub uploaded_hashes: Vec<String>,
+    pub fetched_hashes: Vec<String>,
+    pub attempt_count: u64,
+    pub max_attempts: u64,
+    pub last_error: Option<String>,
+    pub result: Option<serde_json::Value>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSyncJob {
+    pub job_id: String,
+    pub operation_type: String,
+    pub peer: Option<String>,
+    pub roots: Vec<String>,
+    pub heads: Vec<String>,
+    pub max_attempts: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncJobUpdate {
+    pub state: SyncJobState,
+    pub phase: String,
+    pub uploaded_hashes: Vec<String>,
+    pub fetched_hashes: Vec<String>,
+    pub last_error: Option<String>,
+    pub result: Option<serde_json::Value>,
+    pub increment_attempts: bool,
 }
 
 impl ProjectionDb {
@@ -982,6 +1201,206 @@ impl ProjectionDb {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to collect CAS entry attribution summary")
     }
+
+    pub fn create_sync_job(&self, job: &NewSyncJob) -> anyhow::Result<SyncJobRecord> {
+        validate_sync_job_id(&job.job_id)?;
+        validate_non_empty_label("operation_type", &job.operation_type)?;
+        for hash in job.roots.iter().chain(job.heads.iter()) {
+            if !lillux::valid_hash(hash) {
+                anyhow::bail!("invalid sync job root/head hash: {hash}");
+            }
+        }
+        let max_attempts = i64::try_from(job.max_attempts).context("max_attempts exceeds i64")?;
+        let now = lillux::time::iso8601_now();
+        let roots_json = serde_json::to_vec(&job.roots).context("failed to serialize job roots")?;
+        let heads_json = serde_json::to_vec(&job.heads).context("failed to serialize job heads")?;
+        let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
+        self.conn
+            .execute(
+                "INSERT INTO sync_jobs (
+                    job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                    last_error, result_json, created_at, updated_at, finished_at
+                 ) VALUES (?, ?, ?, 'planned', 'planned', ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, NULL)",
+                rusqlite::params![
+                    &job.job_id,
+                    &job.operation_type,
+                    &job.peer,
+                    roots_json,
+                    heads_json,
+                    empty_hashes,
+                    empty_hashes,
+                    max_attempts,
+                    &now,
+                    &now,
+                ],
+            )
+            .context("failed to create sync job")?;
+        self.get_sync_job(&job.job_id)?
+            .ok_or_else(|| anyhow::anyhow!("created sync job {} not found", job.job_id))
+    }
+
+    pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
+        validate_sync_job_id(job_id)?;
+        validate_non_empty_label("phase", &update.phase)?;
+        for hash in update
+            .uploaded_hashes
+            .iter()
+            .chain(update.fetched_hashes.iter())
+        {
+            if !lillux::valid_hash(hash) {
+                anyhow::bail!("invalid sync job transfer hash: {hash}");
+            }
+        }
+        let uploaded_json = serde_json::to_vec(&update.uploaded_hashes)
+            .context("failed to serialize uploaded hashes")?;
+        let fetched_json = serde_json::to_vec(&update.fetched_hashes)
+            .context("failed to serialize fetched hashes")?;
+        let result_json = update
+            .result
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .context("failed to serialize sync job result")?;
+        let now = lillux::time::iso8601_now();
+        let finished_at = match update.state {
+            SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled => {
+                Some(now.clone())
+            }
+            SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable => None,
+        };
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sync_jobs SET
+                state = ?, phase = ?, uploaded_hashes_json = ?, fetched_hashes_json = ?,
+                attempt_count = attempt_count + ?, last_error = ?, result_json = ?,
+                updated_at = ?, finished_at = ?
+             WHERE job_id = ?",
+                rusqlite::params![
+                    update.state.as_str(),
+                    &update.phase,
+                    uploaded_json,
+                    fetched_json,
+                    if update.increment_attempts {
+                        1_i64
+                    } else {
+                        0_i64
+                    },
+                    &update.last_error,
+                    result_json,
+                    &now,
+                    &finished_at,
+                    job_id,
+                ],
+            )
+            .context("failed to update sync job")?;
+        if changed == 0 {
+            anyhow::bail!("sync job not found: {job_id}");
+        }
+        Ok(())
+    }
+
+    pub fn get_sync_job(&self, job_id: &str) -> anyhow::Result<Option<SyncJobRecord>> {
+        validate_sync_job_id(job_id)?;
+        self.conn
+            .query_row(
+                "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                    last_error, result_json, created_at, updated_at, finished_at
+                 FROM sync_jobs WHERE job_id = ?",
+                [job_id],
+                sync_job_from_row,
+            )
+            .optional()
+            .context("failed to get sync job")
+    }
+
+    pub fn list_sync_jobs_by_state(
+        &self,
+        state: Option<SyncJobState>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        let limit = limit.clamp(1, 500);
+        let sql = if state.is_some() {
+            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                last_error, result_json, created_at, updated_at, finished_at
+             FROM sync_jobs WHERE state = ? ORDER BY created_at DESC, job_id DESC LIMIT ?"
+        } else {
+            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                last_error, result_json, created_at, updated_at, finished_at
+             FROM sync_jobs ORDER BY created_at DESC, job_id DESC LIMIT ?"
+        };
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .context("failed to prepare sync job list query")?;
+        let rows = if let Some(state) = state {
+            stmt.query_map(
+                rusqlite::params![state.as_str(), limit as i64],
+                sync_job_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map(rusqlite::params![limit as i64], sync_job_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+}
+
+fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
+    validate_non_empty_label("job_id", job_id)?;
+    if job_id.len() > 128
+        || !job_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        anyhow::bail!("invalid sync job id: {job_id}");
+    }
+    Ok(())
+}
+
+fn validate_non_empty_label(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.is_empty() || value.len() > 256 || value.contains('/') || value.contains("..") {
+        anyhow::bail!("invalid {label}: {value}");
+    }
+    Ok(())
+}
+
+fn sync_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobRecord> {
+    let state: String = row.get("state")?;
+    let roots_json: Vec<u8> = row.get("roots_json")?;
+    let heads_json: Vec<u8> = row.get("heads_json")?;
+    let uploaded_json: Vec<u8> = row.get("uploaded_hashes_json")?;
+    let fetched_json: Vec<u8> = row.get("fetched_hashes_json")?;
+    let result_json: Option<Vec<u8>> = row.get("result_json")?;
+    let attempt_count: i64 = row.get("attempt_count")?;
+    let max_attempts: i64 = row.get("max_attempts")?;
+    Ok(SyncJobRecord {
+        job_id: row.get("job_id")?,
+        operation_type: row.get("operation_type")?,
+        peer: row.get("peer")?,
+        state: SyncJobState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        phase: row.get("phase")?,
+        roots: serde_json::from_slice(&roots_json).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        heads: serde_json::from_slice(&heads_json).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        uploaded_hashes: serde_json::from_slice(&uploaded_json)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        fetched_hashes: serde_json::from_slice(&fetched_json)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        attempt_count: u64::try_from(attempt_count).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        max_attempts: u64::try_from(max_attempts).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        last_error: row.get("last_error")?,
+        result: result_json
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| rusqlite::Error::InvalidQuery))
+            .transpose()?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        finished_at: row.get("finished_at")?,
+    })
 }
 
 fn cas_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CasEntryAttribution> {
@@ -1445,6 +1864,111 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("invalid CAS entry hash"));
+    }
+
+    #[test]
+    fn sync_job_lifecycle_is_persisted() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        let root_hash = "11".repeat(32);
+        let head_hash = "22".repeat(32);
+        let uploaded_hash = "33".repeat(32);
+        let fetched_hash = "44".repeat(32);
+
+        let created = db
+            .create_sync_job(&NewSyncJob {
+                job_id: "job:alpha".to_string(),
+                operation_type: "mirror_pull".to_string(),
+                peer: Some("node-a".to_string()),
+                roots: vec![root_hash.clone()],
+                heads: vec![head_hash.clone()],
+                max_attempts: 3,
+            })
+            .unwrap();
+
+        assert_eq!(created.job_id, "job:alpha");
+        assert_eq!(created.operation_type, "mirror_pull");
+        assert_eq!(created.peer.as_deref(), Some("node-a"));
+        assert_eq!(created.state, SyncJobState::Planned);
+        assert_eq!(created.phase, "planned");
+        assert_eq!(created.roots, vec![root_hash]);
+        assert_eq!(created.heads, vec![head_hash]);
+        assert_eq!(created.attempt_count, 0);
+        assert_eq!(created.max_attempts, 3);
+        assert!(created.finished_at.is_none());
+
+        db.update_sync_job(
+            "job:alpha",
+            &SyncJobUpdate {
+                state: SyncJobState::Running,
+                phase: "fetching_closure".to_string(),
+                uploaded_hashes: vec![uploaded_hash.clone()],
+                fetched_hashes: vec![fetched_hash.clone()],
+                last_error: None,
+                result: None,
+                increment_attempts: true,
+            },
+        )
+        .unwrap();
+
+        let running = db.get_sync_job("job:alpha").unwrap().unwrap();
+        assert_eq!(running.state, SyncJobState::Running);
+        assert_eq!(running.phase, "fetching_closure");
+        assert_eq!(running.uploaded_hashes, vec![uploaded_hash]);
+        assert_eq!(running.fetched_hashes, vec![fetched_hash]);
+        assert_eq!(running.attempt_count, 1);
+        assert!(running.finished_at.is_none());
+
+        db.update_sync_job(
+            "job:alpha",
+            &SyncJobUpdate {
+                state: SyncJobState::Completed,
+                phase: "done".to_string(),
+                uploaded_hashes: running.uploaded_hashes,
+                fetched_hashes: running.fetched_hashes,
+                last_error: None,
+                result: Some(serde_json::json!({"accepted": true})),
+                increment_attempts: false,
+            },
+        )
+        .unwrap();
+
+        let completed = db.get_sync_job("job:alpha").unwrap().unwrap();
+        assert_eq!(completed.state, SyncJobState::Completed);
+        assert_eq!(completed.phase, "done");
+        assert_eq!(completed.attempt_count, 1);
+        assert_eq!(
+            completed.result,
+            Some(serde_json::json!({"accepted": true}))
+        );
+        assert!(completed.finished_at.is_some());
+
+        let completed_jobs = db
+            .list_sync_jobs_by_state(Some(SyncJobState::Completed), 10)
+            .unwrap();
+        assert_eq!(completed_jobs.len(), 1);
+        assert_eq!(completed_jobs[0].job_id, "job:alpha");
+    }
+
+    #[test]
+    fn sync_job_rejects_invalid_hashes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        let err = db
+            .create_sync_job(&NewSyncJob {
+                job_id: "job-invalid".to_string(),
+                operation_type: "mirror_pull".to_string(),
+                peer: None,
+                roots: vec!["not-a-hash".to_string()],
+                heads: vec![],
+                max_attempts: 1,
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("invalid sync job root/head hash"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
 use crate::projection::{
     self, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState, NewCasEntryAttribution,
-    ProjectionDb,
+    NewSyncJob, ProjectionDb, SyncJobRecord, SyncJobState, SyncJobUpdate,
 };
 use crate::queries;
 use crate::refs::{GenericHeadRef, SignedRef};
@@ -320,6 +320,26 @@ impl StateDb {
 
     pub fn cas_entries_by_state_summary(&self) -> anyhow::Result<Vec<CasEntriesByStateSummary>> {
         self.projection.cas_entries_by_state_summary()
+    }
+
+    pub fn create_sync_job(&self, job: &NewSyncJob) -> anyhow::Result<SyncJobRecord> {
+        self.projection.create_sync_job(job)
+    }
+
+    pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
+        self.projection.update_sync_job(job_id, update)
+    }
+
+    pub fn get_sync_job(&self, job_id: &str) -> anyhow::Result<Option<SyncJobRecord>> {
+        self.projection.get_sync_job(job_id)
+    }
+
+    pub fn list_sync_jobs_by_state(
+        &self,
+        state: Option<SyncJobState>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.projection.list_sync_jobs_by_state(state, limit)
     }
 }
 
