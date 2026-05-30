@@ -285,6 +285,47 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// POST /admission/submit (authenticated).
+    pub async fn admission_submit(
+        &self,
+        subject_hash: &str,
+        policy: &str,
+        options: AdmissionSubmitOptions,
+    ) -> Result<AdmissionSubmitResponse> {
+        let mut body = serde_json::json!({
+            "subject_hash": subject_hash,
+            "policy": policy,
+        });
+        if let Some(claim) = options.claim {
+            body["claim"] = serde_json::json!(claim);
+        }
+        if let Some(limit) = options.max_objects {
+            body["max_objects"] = serde_json::json!(limit);
+        }
+        if let Some(limit) = options.max_object_bytes {
+            body["max_object_bytes"] = serde_json::json!(limit);
+        }
+        if let Some(limit) = options.max_links_per_object {
+            body["max_links_per_object"] = serde_json::json!(limit);
+        }
+        let resp = self.signed_post("/admission/submit", &body).await?;
+        serde_json::from_value(resp).context("failed to parse admission/submit response")
+    }
+
+    /// POST /admission/status (authenticated).
+    pub async fn admission_status(
+        &self,
+        subject_hash: &str,
+        policy: &str,
+    ) -> Result<AdmissionStatusResponse> {
+        let body = serde_json::json!({
+            "subject_hash": subject_hash,
+            "policy": policy,
+        });
+        let resp = self.signed_post("/admission/status", &body).await?;
+        serde_json::from_value(resp).context("failed to parse admission/status response")
+    }
+
     /// POST /push-head (authenticated).
     pub async fn push_head(&self, project_path: &str, snapshot_hash: &str) -> Result<Value> {
         let body = serde_json::json!({
@@ -808,6 +849,33 @@ fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions
         body["allow_incomplete"] = serde_json::json!(true);
     }
     body
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AdmissionSubmitOptions {
+    pub claim: Option<String>,
+    pub max_objects: Option<usize>,
+    pub max_object_bytes: Option<u64>,
+    pub max_links_per_object: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AdmissionSubmitResponse {
+    pub subject_hash: String,
+    pub policy: String,
+    pub claim: String,
+    pub attestation_hash: String,
+    pub reused_existing: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AdmissionStatusResponse {
+    pub subject_hash: String,
+    pub policy: String,
+    pub status: String,
+    pub attestation_hash: Option<String>,
+    pub head: Option<Value>,
+    pub attestation: Option<Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
