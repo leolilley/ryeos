@@ -90,6 +90,9 @@ pub struct PullSummary {
 /// Errors from the unary forward pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteForwardError {
+    /// Durable sync job ledger failed before or during remote orchestration.
+    #[error("sync job ledger failed: {0}")]
+    JobLedgerFailed(String),
     /// Push phase failed.
     #[error("push failed: {0}")]
     PushFailed(String),
@@ -120,6 +123,7 @@ impl RemoteForwardError {
     /// Machine-readable error code.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::JobLedgerFailed(_) => "remote_job_ledger_failed",
             Self::PushFailed(_) => "remote_push_failed",
             Self::ExecuteFailed(_) => "remote_execute_failed",
             Self::MissingSnapshotHash => "remote_missing_snapshot_hash",
@@ -142,6 +146,34 @@ pub async fn execute_unary_forward(
     client: &RemoteClient,
     req: RemoteForwardRequest<'_>,
 ) -> Result<RemoteForwardResult, RemoteForwardError> {
+    let job_id = format!("remote-execute:{}", uuid::Uuid::new_v4());
+    record_sync_job(
+        state,
+        &NewSyncJob {
+            job_id: job_id.clone(),
+            operation_type: "remote_execute".to_string(),
+            peer: Some(client.base_url().to_string()),
+            roots: Vec::new(),
+            heads: Vec::new(),
+            max_attempts: 1,
+        },
+    )?;
+    update_sync_job(
+        state,
+        &job_id,
+        SyncJobUpdate {
+            state: SyncJobState::Running,
+            phase: "push_uploading".to_string(),
+            roots: None,
+            heads: None,
+            uploaded_hashes: Vec::new(),
+            fetched_hashes: Vec::new(),
+            last_error: None,
+            result: None,
+            increment_attempts: true,
+        },
+    )?;
+
     // 1. Push project (or no-project user-space-only push).
     let push_result = match req.local_project_path {
         Some(proj_path) => push_project(
@@ -152,38 +184,66 @@ pub async fn execute_unary_forward(
             req.remote_ignore,
         )
         .await
-        .map_err(|e| RemoteForwardError::PushFailed(format!("{e:#}")))?,
+        .map_err(|e| {
+            let message = format!("{e:#}");
+            let _ = update_sync_job(
+                state,
+                &job_id,
+                SyncJobUpdate {
+                    state: SyncJobState::Failed,
+                    phase: "push_failed".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: Vec::new(),
+                    fetched_hashes: Vec::new(),
+                    last_error: Some(message.clone()),
+                    result: None,
+                    increment_attempts: false,
+                },
+            );
+            RemoteForwardError::PushFailed(message)
+        })?,
         None => {
             // --no-project mode: push user space only.
-            push_no_project(state, client, req.remote_project_path).await?
+            match push_no_project(state, client, req.remote_project_path).await {
+                Ok(value) => value,
+                Err(err) => {
+                    let _ = update_sync_job(
+                        state,
+                        &job_id,
+                        SyncJobUpdate {
+                            state: SyncJobState::Failed,
+                            phase: "push_failed".to_string(),
+                            roots: None,
+                            heads: None,
+                            uploaded_hashes: Vec::new(),
+                            fetched_hashes: Vec::new(),
+                            last_error: Some(err.to_string()),
+                            result: None,
+                            increment_attempts: false,
+                        },
+                    );
+                    return Err(err);
+                }
+            }
         }
     };
 
-    let job_id = format!("remote-execute:{}", uuid::Uuid::new_v4());
-    record_sync_job(
-        state,
-        &NewSyncJob {
-            job_id: job_id.clone(),
-            operation_type: "remote_execute".to_string(),
-            peer: Some(client.base_url().to_string()),
-            roots: vec![push_result.snapshot_hash.clone()],
-            heads: Vec::new(),
-            max_attempts: 1,
-        },
-    );
     update_sync_job(
         state,
         &job_id,
         SyncJobUpdate {
             state: SyncJobState::Running,
             phase: "remote_execute".to_string(),
+            roots: Some(vec![push_result.snapshot_hash.clone()]),
+            heads: None,
             uploaded_hashes: vec![push_result.snapshot_hash.clone()],
             fetched_hashes: Vec::new(),
             last_error: None,
             result: None,
             increment_attempts: true,
         },
-    );
+    )?;
 
     // 2. Execute on remote with project_source: pushed_head.
     let remote_result = match client
@@ -206,13 +266,15 @@ pub async fn execute_unary_forward(
                 SyncJobUpdate {
                     state: SyncJobState::Failed,
                     phase: "remote_execute_failed".to_string(),
+                    roots: None,
+                    heads: None,
                     uploaded_hashes: vec![push_result.snapshot_hash.clone()],
                     fetched_hashes: Vec::new(),
                     last_error: Some(message.clone()),
                     result: None,
                     increment_attempts: false,
                 },
-            );
+            )?;
             return Err(RemoteForwardError::ExecuteFailed(message));
         }
     };
@@ -225,13 +287,15 @@ pub async fn execute_unary_forward(
             SyncJobUpdate {
                 state: SyncJobState::Failed,
                 phase: "missing_snapshot_hash".to_string(),
+                roots: None,
+                heads: None,
                 uploaded_hashes: vec![push_result.snapshot_hash.clone()],
                 fetched_hashes: Vec::new(),
                 last_error: Some("remote result missing snapshot hash".to_string()),
                 result: Some(remote_result.clone()),
                 increment_attempts: false,
             },
-        );
+        )?;
         return Err(RemoteForwardError::MissingSnapshotHash);
     };
     update_sync_job(
@@ -240,13 +304,15 @@ pub async fn execute_unary_forward(
         SyncJobUpdate {
             state: SyncJobState::Running,
             phase: "pull_results".to_string(),
+            roots: None,
+            heads: Some(vec![result_snapshot_hash.clone()]),
             uploaded_hashes: vec![push_result.snapshot_hash.clone()],
             fetched_hashes: vec![result_snapshot_hash.clone()],
             last_error: None,
             result: None,
             increment_attempts: false,
         },
-    );
+    )?;
 
     // 4. Pull results and apply to local workspace.
     let pull_result = pull_results(
@@ -271,12 +337,14 @@ pub async fn execute_unary_forward(
             }
             PullResultsError::Other(e) => RemoteForwardError::PullFailed(format!("{e:#}")),
         };
-        update_sync_job(
+        let _ = update_sync_job(
             state,
             &job_id,
             SyncJobUpdate {
                 state: SyncJobState::Failed,
                 phase: "pull_results_failed".to_string(),
+                roots: None,
+                heads: None,
                 uploaded_hashes: vec![push_result.snapshot_hash.clone()],
                 fetched_hashes: vec![result_snapshot_hash.clone()],
                 last_error: Some(err.to_string()),
@@ -293,6 +361,8 @@ pub async fn execute_unary_forward(
         SyncJobUpdate {
             state: SyncJobState::Completed,
             phase: "completed".to_string(),
+            roots: None,
+            heads: None,
             uploaded_hashes: vec![push_result.snapshot_hash.clone()],
             fetched_hashes: vec![result_snapshot_hash.clone()],
             last_error: None,
@@ -306,7 +376,7 @@ pub async fn execute_unary_forward(
             })),
             increment_attempts: false,
         },
-    );
+    )?;
 
     Ok(RemoteForwardResult {
         remote_result,
@@ -328,22 +398,26 @@ pub async fn execute_unary_forward(
     })
 }
 
-fn record_sync_job(state: &std::sync::Arc<AppState>, job: &NewSyncJob) {
-    if let Err(err) = state
+fn record_sync_job(
+    state: &std::sync::Arc<AppState>,
+    job: &NewSyncJob,
+) -> Result<(), RemoteForwardError> {
+    state
         .state_store
         .with_state_db(|db| db.create_sync_job(job))
-    {
-        tracing::warn!(job_id = %job.job_id, error = %err, "failed to create sync job record");
-    }
+        .map(|_| ())
+        .map_err(|err| RemoteForwardError::JobLedgerFailed(format!("{err:#}")))
 }
 
-fn update_sync_job(state: &std::sync::Arc<AppState>, job_id: &str, update: SyncJobUpdate) {
-    if let Err(err) = state
+fn update_sync_job(
+    state: &std::sync::Arc<AppState>,
+    job_id: &str,
+    update: SyncJobUpdate,
+) -> Result<(), RemoteForwardError> {
+    state
         .state_store
         .with_state_db(|db| db.update_sync_job(job_id, &update))
-    {
-        tracing::warn!(job_id = %job_id, error = %err, "failed to update sync job record");
-    }
+        .map_err(|err| RemoteForwardError::JobLedgerFailed(format!("{err:#}")))
 }
 
 /// --no-project mode: push user space only (no project ingest).
@@ -423,6 +497,10 @@ mod tests {
 
     #[test]
     fn error_codes_are_stable() {
+        assert_eq!(
+            RemoteForwardError::JobLedgerFailed("x".into()).code(),
+            "remote_job_ledger_failed"
+        );
         assert_eq!(
             RemoteForwardError::PushFailed("x".into()).code(),
             "remote_push_failed"

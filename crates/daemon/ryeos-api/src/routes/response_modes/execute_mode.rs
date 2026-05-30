@@ -775,7 +775,9 @@ fn map_forward_error_to_dispatch(
 ) -> ryeos_executor::dispatch_error::DispatchError {
     use crate::remote::forward::RemoteForwardError;
     match e {
-        RemoteForwardError::PushFailed(detail) | RemoteForwardError::PullFailed(detail) => {
+        RemoteForwardError::JobLedgerFailed(detail)
+        | RemoteForwardError::PushFailed(detail)
+        | RemoteForwardError::PullFailed(detail) => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardInternal {
                 target_site_id: target_site_id.to_string(),
                 detail: detail.clone(),

@@ -1007,6 +1007,8 @@ pub struct NewSyncJob {
 pub struct SyncJobUpdate {
     pub state: SyncJobState,
     pub phase: String,
+    pub roots: Option<Vec<String>>,
+    pub heads: Option<Vec<String>>,
     pub uploaded_hashes: Vec<String>,
     pub fetched_hashes: Vec<String>,
     pub last_error: Option<String>,
@@ -1244,14 +1246,29 @@ impl ProjectionDb {
         validate_sync_job_id(job_id)?;
         validate_non_empty_label("phase", &update.phase)?;
         for hash in update
-            .uploaded_hashes
+            .roots
             .iter()
+            .flatten()
+            .chain(update.heads.iter().flatten())
+            .chain(update.uploaded_hashes.iter())
             .chain(update.fetched_hashes.iter())
         {
             if !lillux::valid_hash(hash) {
                 anyhow::bail!("invalid sync job transfer hash: {hash}");
             }
         }
+        let roots_json = update
+            .roots
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .context("failed to serialize job roots")?;
+        let heads_json = update
+            .heads
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .context("failed to serialize job heads")?;
         let uploaded_json = serde_json::to_vec(&update.uploaded_hashes)
             .context("failed to serialize uploaded hashes")?;
         let fetched_json = serde_json::to_vec(&update.fetched_hashes)
@@ -1273,13 +1290,17 @@ impl ProjectionDb {
             .conn
             .execute(
                 "UPDATE sync_jobs SET
-                state = ?, phase = ?, uploaded_hashes_json = ?, fetched_hashes_json = ?,
+                state = ?, phase = ?,
+                roots_json = COALESCE(?, roots_json), heads_json = COALESCE(?, heads_json),
+                uploaded_hashes_json = ?, fetched_hashes_json = ?,
                 attempt_count = attempt_count + ?, last_error = ?, result_json = ?,
                 updated_at = ?, finished_at = ?
              WHERE job_id = ?",
                 rusqlite::params![
                     update.state.as_str(),
                     &update.phase,
+                    roots_json,
+                    heads_json,
                     uploaded_json,
                     fetched_json,
                     if update.increment_attempts {
@@ -1348,6 +1369,18 @@ impl ProjectionDb {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         Ok(rows)
+    }
+
+    pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_jobs WHERE state IN ('planned', 'running', 'retryable')",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to count active sync jobs")?;
+        u64::try_from(count).context("active sync job count was negative")
     }
 }
 
@@ -1903,6 +1936,8 @@ mod tests {
             &SyncJobUpdate {
                 state: SyncJobState::Running,
                 phase: "fetching_closure".to_string(),
+                roots: None,
+                heads: None,
                 uploaded_hashes: vec![uploaded_hash.clone()],
                 fetched_hashes: vec![fetched_hash.clone()],
                 last_error: None,
@@ -1925,6 +1960,8 @@ mod tests {
             &SyncJobUpdate {
                 state: SyncJobState::Completed,
                 phase: "done".to_string(),
+                roots: None,
+                heads: None,
                 uploaded_hashes: running.uploaded_hashes,
                 fetched_hashes: running.fetched_hashes,
                 last_error: None,
@@ -1949,6 +1986,50 @@ mod tests {
             .unwrap();
         assert_eq!(completed_jobs.len(), 1);
         assert_eq!(completed_jobs[0].job_id, "job:alpha");
+        assert_eq!(db.count_active_sync_jobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn active_sync_job_count_only_includes_non_terminal_jobs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job-running".to_string(),
+            operation_type: "mirror_pull".to_string(),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 3,
+        })
+        .unwrap();
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job-completed".to_string(),
+            operation_type: "mirror_pull".to_string(),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 3,
+        })
+        .unwrap();
+        db.update_sync_job(
+            "job-completed",
+            &SyncJobUpdate {
+                state: SyncJobState::Completed,
+                phase: "done".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![],
+                fetched_hashes: vec![],
+                last_error: None,
+                result: None,
+                increment_attempts: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(db.count_active_sync_jobs().unwrap(), 1);
     }
 
     #[test]

@@ -341,6 +341,10 @@ impl StateDb {
     ) -> anyhow::Result<Vec<SyncJobRecord>> {
         self.projection.list_sync_jobs_by_state(state, limit)
     }
+
+    pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {
+        self.projection.count_active_sync_jobs()
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use base64::Engine;
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
@@ -156,7 +157,9 @@ impl RemoteClient {
                 found.extend(resp.found);
                 missing.extend(resp.missing);
             }
-            return Ok(ObjectsHasResponse { found, missing });
+            let response = ObjectsHasResponse { found, missing };
+            response.validate_against_request(hashes)?;
+            return Ok(response);
         }
         self.objects_has_once(hashes).await
     }
@@ -164,7 +167,7 @@ impl RemoteClient {
     async fn objects_has_once(&self, hashes: &[String]) -> Result<ObjectsHasResponse> {
         let body = serde_json::json!({ "hashes": hashes });
         let resp = self.signed_post("/objects/has", &body).await?;
-        Ok(ObjectsHasResponse {
+        let response = ObjectsHasResponse {
             found: resp["found"]
                 .as_array()
                 .map(|a| {
@@ -181,7 +184,9 @@ impl RemoteClient {
                         .collect()
                 })
                 .unwrap_or_default(),
-        })
+        };
+        response.validate_against_request(hashes)?;
+        Ok(response)
     }
 
     /// POST /objects/put (authenticated).
@@ -731,6 +736,36 @@ pub struct PublicKeyResponse {
 pub struct ObjectsHasResponse {
     pub found: Vec<String>,
     pub missing: Vec<String>,
+}
+
+impl ObjectsHasResponse {
+    pub fn validate_against_request(&self, requested: &[String]) -> Result<()> {
+        let requested_set: BTreeSet<&str> = requested.iter().map(String::as_str).collect();
+        if requested_set.len() != requested.len() {
+            anyhow::bail!("objects/has request contains duplicate hashes");
+        }
+
+        let mut seen = BTreeSet::new();
+        for hash in self.found.iter().chain(self.missing.iter()) {
+            if !lillux::valid_hash(hash) || hash.chars().any(|c| c.is_ascii_uppercase()) {
+                anyhow::bail!("objects/has returned invalid hash: {hash}");
+            }
+            if !requested_set.contains(hash.as_str()) {
+                anyhow::bail!("objects/has returned unexpected hash: {hash}");
+            }
+            if !seen.insert(hash.as_str()) {
+                anyhow::bail!("objects/has returned duplicate hash: {hash}");
+            }
+        }
+
+        for hash in requested_set {
+            if !seen.contains(hash) {
+                anyhow::bail!("objects/has omitted requested hash: {hash}");
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1338,6 +1373,32 @@ mod tests {
         for chunk in chunks {
             assert!(hashes_request_body_size(&chunk) <= 512);
         }
+    }
+
+    #[test]
+    fn objects_has_response_must_partition_request() {
+        let a = "11".repeat(32);
+        let b = "22".repeat(32);
+        ObjectsHasResponse {
+            found: vec![a.clone()],
+            missing: vec![b.clone()],
+        }
+        .validate_against_request(&[a.clone(), b.clone()])
+        .unwrap();
+
+        assert!(ObjectsHasResponse {
+            found: vec![a.clone()],
+            missing: vec![],
+        }
+        .validate_against_request(&[a.clone(), b.clone()])
+        .is_err());
+
+        assert!(ObjectsHasResponse {
+            found: vec![a.clone()],
+            missing: vec![a.clone()],
+        }
+        .validate_against_request(&[a, b])
+        .is_err());
     }
 
     #[test]
