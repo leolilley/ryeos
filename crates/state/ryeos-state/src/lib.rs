@@ -7,6 +7,7 @@
 //! The crate does NOT own the signing key (daemon passes a [`Signer`] trait),
 //! item resolution (engine), or low-level CAS primitives (lillux).
 
+pub mod admission;
 pub mod chain;
 pub mod gc;
 pub mod head_cache;
@@ -28,6 +29,7 @@ pub mod sync;
 pub mod user_sync;
 pub mod verify;
 
+pub use admission::{admit_root, AdmissionRequest, AdmissionResult};
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;

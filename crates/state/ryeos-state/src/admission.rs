@@ -1,0 +1,255 @@
+//! Minimal node admission primitive.
+//!
+//! Admission turns a verified local CAS closure into a signed attestation and a
+//! generic head. It deliberately does not make trust global: the attestation is
+//! only evidence that this node/key accepted a subject under a named policy.
+
+use anyhow::{Context, Result};
+use serde_json::json;
+
+use crate::object_closure::{collect_object_closure_with_limits, ObjectClosureLimits};
+use crate::{Attestation, CasEntryKind, CasEntryState, NewCasEntryAttribution, Signer, StateDb};
+
+const DEFAULT_ADMISSION_CLAIM: &str = "accepted";
+
+#[derive(Debug, Clone)]
+pub struct AdmissionRequest {
+    pub subject_hash: String,
+    pub policy: String,
+    pub claim: String,
+    pub limits: ObjectClosureLimits,
+}
+
+impl AdmissionRequest {
+    pub fn accepted(subject_hash: impl Into<String>, policy: impl Into<String>) -> Self {
+        Self {
+            subject_hash: subject_hash.into(),
+            policy: policy.into(),
+            claim: DEFAULT_ADMISSION_CLAIM.to_string(),
+            limits: ObjectClosureLimits::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionResult {
+    pub subject_hash: String,
+    pub policy: String,
+    pub claim: String,
+    pub attestation_hash: String,
+    pub reused_existing: bool,
+}
+
+/// Admit a local CAS root under a named policy.
+///
+/// The root must already be present locally. The function verifies closure
+/// completeness within the supplied limits, signs an attestation, writes it to
+/// CAS, records attribution rows, and advances an idempotency head at:
+///
+/// `refs/generic/admissions/<policy>/<subject_hash>/head`
+pub fn admit_root(
+    db: &StateDb,
+    request: &AdmissionRequest,
+    signer: &dyn Signer,
+) -> Result<AdmissionResult> {
+    if !lillux::valid_hash(&request.subject_hash) {
+        anyhow::bail!("invalid admission subject hash: {}", request.subject_hash);
+    }
+    if request.policy.is_empty() {
+        anyhow::bail!("admission policy must not be empty");
+    }
+    if request.claim.is_empty() {
+        anyhow::bail!("admission claim must not be empty");
+    }
+
+    if let Some(existing) = db.read_generic_head_ref(
+        &format!("admissions/{}", request.policy),
+        &request.subject_hash,
+    )? {
+        return Ok(AdmissionResult {
+            subject_hash: request.subject_hash.clone(),
+            policy: request.policy.clone(),
+            claim: request.claim.clone(),
+            attestation_hash: existing.target_hash,
+            reused_existing: true,
+        });
+    }
+
+    let closure = collect_object_closure_with_limits(
+        db.cas_root(),
+        [request.subject_hash.clone()],
+        request.limits,
+    )
+    .context("failed to collect admission closure")?;
+
+    if !closure.is_complete() {
+        anyhow::bail!(
+            "admission closure incomplete: missing_objects={}, malformed_objects={}, unsupported_objects={}",
+            closure.missing_objects.len(),
+            closure.malformed_objects.len(),
+            closure.unsupported_objects.len()
+        );
+    }
+
+    let evidence = json!({
+        "closure": {
+            "root_count": closure.roots.len(),
+            "object_count": closure.object_hashes.len(),
+            "blob_count": closure.blob_hashes.len(),
+        },
+        "limits": {
+            "max_objects": request.limits.max_objects,
+            "max_object_bytes": request.limits.max_object_bytes,
+            "max_links_per_object": request.limits.max_links_per_object,
+        }
+    });
+
+    let attestation = Attestation::unsigned(
+        request.subject_hash.clone(),
+        request.claim.clone(),
+        request.policy.clone(),
+        lillux::time::iso8601_now(),
+        None,
+        evidence,
+    )
+    .sign(signer)
+    .context("failed to sign admission attestation")?;
+
+    let attestation_value = attestation.to_value();
+    let canonical = lillux::canonical_json(&attestation_value);
+    let attestation_hash = lillux::sha256_hex(canonical.as_bytes());
+    let path = lillux::shard_path(db.cas_root(), "objects", &attestation_hash, ".json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("failed to create attestation CAS parent")?;
+    }
+    lillux::atomic_write(&path, canonical.as_bytes())
+        .context("failed to write attestation CAS object")?;
+
+    let subject_path = lillux::shard_path(db.cas_root(), "objects", &request.subject_hash, ".json");
+    let subject_bytes = std::fs::metadata(&subject_path)
+        .with_context(|| format!("failed to stat admission subject {}", request.subject_hash))?
+        .len();
+
+    db.record_cas_entry(&NewCasEntryAttribution {
+        hash: request.subject_hash.clone(),
+        entry_kind: CasEntryKind::Object,
+        bytes: subject_bytes,
+        source_principal: Some(format!("fp:{}", signer.fingerprint())),
+        source_peer: None,
+        job_id: None,
+        state: CasEntryState::Accepted,
+    })?;
+    db.record_cas_entry(&NewCasEntryAttribution {
+        hash: attestation_hash.clone(),
+        entry_kind: CasEntryKind::Object,
+        bytes: canonical.len() as u64,
+        source_principal: Some(format!("fp:{}", signer.fingerprint())),
+        source_peer: None,
+        job_id: None,
+        state: CasEntryState::Local,
+    })?;
+
+    db.advance_generic_head_ref(
+        &format!("admissions/{}", request.policy),
+        &request.subject_hash,
+        &attestation_hash,
+        None,
+        signer,
+    )?;
+
+    Ok(AdmissionResult {
+        subject_hash: request.subject_hash.clone(),
+        policy: request.policy.clone(),
+        claim: request.claim.clone(),
+        attestation_hash,
+        reused_existing: false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::objects::Attestation;
+    use crate::signer::TestSigner;
+    use serde_json::json;
+
+    fn write_object(db: &StateDb, value: &serde_json::Value) -> String {
+        let canonical = lillux::canonical_json(value);
+        let hash = lillux::sha256_hex(canonical.as_bytes());
+        let path = lillux::shard_path(db.cas_root(), "objects", &hash, ".json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, canonical).unwrap();
+        hash
+    }
+
+    #[test]
+    fn admit_root_writes_attestation_and_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(tmp.path()).unwrap();
+        let signer = TestSigner::default();
+        let subject_hash = write_object(
+            &db,
+            &json!({
+                "kind": "chain_state",
+                "schema": 1,
+                "chain_root_id": "T-admit",
+                "prev_chain_state_hash": null,
+                "last_event_hash": null,
+                "last_chain_seq": 0,
+                "updated_at": "2026-05-30T00:00:00Z",
+                "threads": {}
+            }),
+        );
+
+        let result = admit_root(
+            &db,
+            &AdmissionRequest::accepted(subject_hash.clone(), "test.policy.v1"),
+            &signer,
+        )
+        .unwrap();
+        assert!(!result.reused_existing);
+
+        let head = db
+            .read_generic_head_ref(&format!("admissions/{}", result.policy), &subject_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.target_hash, result.attestation_hash);
+
+        let path = lillux::shard_path(db.cas_root(), "objects", &result.attestation_hash, ".json");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let attestation = Attestation::from_value(&value).unwrap();
+        assert_eq!(attestation.subject_hash, subject_hash);
+        assert_eq!(attestation.claim, "accepted");
+        assert_eq!(attestation.policy, "test.policy.v1");
+
+        let subject_row = db.get_cas_entry(&subject_hash).unwrap().unwrap();
+        assert_eq!(subject_row.state, CasEntryState::Accepted);
+        let attestation_row = db.get_cas_entry(&result.attestation_hash).unwrap().unwrap();
+        assert_eq!(attestation_row.state, CasEntryState::Local);
+
+        let second = admit_root(
+            &db,
+            &AdmissionRequest::accepted(subject_hash, "test.policy.v1"),
+            &signer,
+        )
+        .unwrap();
+        assert!(second.reused_existing);
+        assert_eq!(second.attestation_hash, result.attestation_hash);
+    }
+
+    #[test]
+    fn admit_root_rejects_missing_subject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(tmp.path()).unwrap();
+        let signer = TestSigner::default();
+
+        let err = admit_root(
+            &db,
+            &AdmissionRequest::accepted("aa".repeat(32), "test.policy.v1"),
+            &signer,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("admission closure incomplete"));
+    }
+}
