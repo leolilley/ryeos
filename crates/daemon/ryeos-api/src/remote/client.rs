@@ -348,6 +348,17 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// POST /federation/capabilities (authenticated identity handshake).
+    pub async fn federation_capabilities(&self) -> Result<FederationCapabilitiesResponse> {
+        let resp = self
+            .signed_post("/federation/capabilities", &serde_json::json!({}))
+            .await?;
+        let response: FederationCapabilitiesResponse = serde_json::from_value(resp)
+            .context("failed to parse federation/capabilities response")?;
+        response.validate()?;
+        Ok(response)
+    }
+
     /// POST /sync/jobs/list (authenticated).
     pub async fn sync_jobs_list(
         &self,
@@ -1107,6 +1118,52 @@ pub struct SyncJobsListResponse {
     pub jobs: Vec<SyncJobRemoteRecord>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FederationCapabilitiesResponse {
+    pub protocol: Value,
+    pub identity: Value,
+    #[serde(default)]
+    pub object_kinds: Vec<String>,
+    pub services: Value,
+    pub limits: Value,
+}
+
+impl FederationCapabilitiesResponse {
+    pub fn validate(&self) -> Result<()> {
+        let protocol_name = self
+            .protocol
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("federation capabilities missing protocol.name"))?;
+        if protocol_name != "ryeos-distributed-substrate" {
+            anyhow::bail!("unsupported federation protocol: {protocol_name}");
+        }
+        let versions = self
+            .protocol
+            .get("versions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("federation capabilities missing protocol.versions"))?;
+        if !versions.iter().any(|version| version.as_u64() == Some(1)) {
+            anyhow::bail!("federation capabilities missing supported protocol version 1");
+        }
+        for field in ["principal_id", "fingerprint", "site_id"] {
+            if self.identity.get(field).and_then(Value::as_str).is_none() {
+                anyhow::bail!("federation capabilities missing identity.{field}");
+            }
+        }
+        if !self.object_kinds.iter().any(|kind| kind == "attestation") {
+            anyhow::bail!("federation capabilities missing attestation object support");
+        }
+        if self.services.get("objects").is_none() || self.services.get("admission").is_none() {
+            anyhow::bail!("federation capabilities missing core services");
+        }
+        if self.limits.get("default_max_objects_per_closure").is_none() {
+            anyhow::bail!("federation capabilities missing closure limits");
+        }
+        Ok(())
+    }
+}
+
 impl SyncJobsListResponse {
     pub fn validate(&self, requested_state: Option<&str>) -> Result<()> {
         if let Some(state) = requested_state {
@@ -1487,6 +1544,50 @@ mod tests {
 
         response.validate(Some("running")).unwrap();
         assert!(response.validate(Some("completed")).is_err());
+    }
+
+    #[test]
+    fn federation_capabilities_response_validates_core_contract() {
+        let response: FederationCapabilitiesResponse = serde_json::from_value(serde_json::json!({
+            "protocol": {
+                "name": "ryeos-distributed-substrate",
+                "versions": [1],
+                "preferred_version": 1
+            },
+            "identity": {
+                "principal_id": "principal:node",
+                "fingerprint": "fp:node",
+                "site_id": "site:node"
+            },
+            "object_kinds": ["chain_state", "attestation"],
+            "services": {
+                "objects": {"closure_describe": true},
+                "admission": {"submit": true}
+            },
+            "limits": {
+                "default_max_objects_per_closure": 4096
+            }
+        }))
+        .unwrap();
+        response.validate().unwrap();
+
+        let response: FederationCapabilitiesResponse = serde_json::from_value(serde_json::json!({
+            "protocol": {
+                "name": "ryeos-distributed-substrate",
+                "versions": [2],
+                "preferred_version": 2
+            },
+            "identity": {
+                "principal_id": "principal:node",
+                "fingerprint": "fp:node",
+                "site_id": "site:node"
+            },
+            "object_kinds": ["attestation"],
+            "services": {"objects": {}, "admission": {}},
+            "limits": {"default_max_objects_per_closure": 4096}
+        }))
+        .unwrap();
+        assert!(response.validate().is_err());
     }
 
     #[test]

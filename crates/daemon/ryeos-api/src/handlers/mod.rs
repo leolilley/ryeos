@@ -22,6 +22,7 @@ pub mod bundle_remove;
 pub mod commands_submit;
 pub mod events_chain_replay;
 pub mod events_replay;
+pub mod federation_capabilities;
 pub mod health_status;
 pub mod identity_public_key;
 pub mod ingest_ignore;
@@ -83,6 +84,7 @@ pub(crate) fn default_replay_limit() -> usize {
 pub const ALL: &[ServiceDescriptor] = &[
     admission_submit::DESCRIPTOR,
     admission_status::DESCRIPTOR,
+    federation_capabilities::DESCRIPTOR,
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     system_status::DESCRIPTOR,
