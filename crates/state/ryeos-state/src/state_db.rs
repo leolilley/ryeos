@@ -355,6 +355,17 @@ impl StateDb {
         self.projection.finish_sync_job_attempt(attempt_id, finish)
     }
 
+    pub fn finish_sync_job_attempt_and_update_job(
+        &self,
+        attempt_id: &str,
+        finish: &crate::projection::FinishSyncJobAttempt,
+        job_id: &str,
+        update: &SyncJobUpdate,
+    ) -> anyhow::Result<()> {
+        self.projection
+            .finish_sync_job_attempt_and_update_job(attempt_id, finish, job_id, update)
+    }
+
     pub fn get_sync_job_attempt(
         &self,
         attempt_id: &str,

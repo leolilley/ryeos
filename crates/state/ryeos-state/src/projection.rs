@@ -1189,6 +1189,28 @@ pub struct FinishSyncJobAttempt {
 }
 
 impl ProjectionDb {
+    fn immediate_transaction<T>(
+        &self,
+        label: &'static str,
+        f: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .with_context(|| format!("failed to begin {label} transaction"))?;
+        match f() {
+            Ok(value) => {
+                self.conn
+                    .execute_batch("COMMIT")
+                    .with_context(|| format!("failed to commit {label} transaction"))?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
     /// Open or create a projection database.
     ///
     /// If the file exists, verifies it matches the schema spec exactly
@@ -1533,6 +1555,15 @@ impl ProjectionDb {
         &self,
         attempt: &NewSyncJobAttempt,
     ) -> anyhow::Result<SyncJobAttemptRecord> {
+        self.immediate_transaction("create sync job attempt", || {
+            self.create_sync_job_attempt_inner(attempt)
+        })
+    }
+
+    fn create_sync_job_attempt_inner(
+        &self,
+        attempt: &NewSyncJobAttempt,
+    ) -> anyhow::Result<SyncJobAttemptRecord> {
         validate_sync_job_id(&attempt.job_id)?;
         validate_sync_job_id(&attempt.attempt_id)?;
         validate_non_empty_label("phase", &attempt.phase)?;
@@ -1629,6 +1660,16 @@ impl ProjectionDb {
         attempt_id: &str,
         finish: &FinishSyncJobAttempt,
     ) -> anyhow::Result<()> {
+        self.immediate_transaction("finish sync job attempt", || {
+            self.finish_sync_job_attempt_inner(attempt_id, finish)
+        })
+    }
+
+    fn finish_sync_job_attempt_inner(
+        &self,
+        attempt_id: &str,
+        finish: &FinishSyncJobAttempt,
+    ) -> anyhow::Result<()> {
         validate_sync_job_id(attempt_id)?;
         validate_non_empty_label("phase", &finish.phase)?;
         if !finish.state.is_terminal() {
@@ -1680,6 +1721,20 @@ impl ProjectionDb {
             .context("failed to finish sync job attempt")?;
         debug_assert_eq!(changed, 1);
         Ok(())
+    }
+
+    pub fn finish_sync_job_attempt_and_update_job(
+        &self,
+        attempt_id: &str,
+        finish: &FinishSyncJobAttempt,
+        job_id: &str,
+        update: &SyncJobUpdate,
+    ) -> anyhow::Result<()> {
+        self.immediate_transaction("finish sync job attempt and update job", || {
+            self.finish_sync_job_attempt_inner(attempt_id, finish)?;
+            self.update_sync_job(job_id, update)?;
+            Ok(())
+        })
     }
 
     pub fn get_sync_job_attempt(
