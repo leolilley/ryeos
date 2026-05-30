@@ -343,6 +343,36 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// POST /sync/jobs/list (authenticated).
+    pub async fn sync_jobs_list(
+        &self,
+        state: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<SyncJobsListResponse> {
+        let mut body = serde_json::json!({});
+        if let Some(state) = state {
+            body["state"] = serde_json::json!(state);
+        }
+        if let Some(limit) = limit {
+            body["limit"] = serde_json::json!(limit);
+        }
+        let resp = self.signed_post("/sync/jobs/list", &body).await?;
+        let response: SyncJobsListResponse =
+            serde_json::from_value(resp).context("failed to parse sync/jobs/list response")?;
+        response.validate(state)?;
+        Ok(response)
+    }
+
+    /// POST /sync/jobs/inspect (authenticated).
+    pub async fn sync_jobs_inspect(&self, job_id: &str) -> Result<SyncJobsInspectResponse> {
+        let body = serde_json::json!({ "job_id": job_id });
+        let resp = self.signed_post("/sync/jobs/inspect", &body).await?;
+        let response: SyncJobsInspectResponse =
+            serde_json::from_value(resp).context("failed to parse sync/jobs/inspect response")?;
+        response.validate_against_request(job_id)?;
+        Ok(response)
+    }
+
     /// POST /push-head (authenticated).
     pub async fn push_head(&self, project_path: &str, snapshot_hash: &str) -> Result<Value> {
         let body = serde_json::json!({
@@ -1036,6 +1066,129 @@ pub struct AdmissionStatusResponse {
     pub attestation: Option<Value>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SyncJobsListResponse {
+    #[serde(default)]
+    pub jobs: Vec<SyncJobRemoteRecord>,
+}
+
+impl SyncJobsListResponse {
+    pub fn validate(&self, requested_state: Option<&str>) -> Result<()> {
+        if let Some(state) = requested_state {
+            parse_remote_sync_job_state(state)?;
+            for job in &self.jobs {
+                if job.state != state {
+                    anyhow::bail!(
+                        "sync jobs list state mismatch: expected {}, got {} for {}",
+                        state,
+                        job.state,
+                        job.job_id
+                    );
+                }
+            }
+        }
+        for job in &self.jobs {
+            job.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SyncJobsInspectResponse {
+    pub status: String,
+    pub job_id: Option<String>,
+    pub job: Option<SyncJobRemoteRecord>,
+}
+
+impl SyncJobsInspectResponse {
+    pub fn validate_against_request(&self, job_id: &str) -> Result<()> {
+        match self.status.as_str() {
+            "missing" => {
+                if self.job.is_some() {
+                    anyhow::bail!("missing sync job response must not include job data");
+                }
+                if self.job_id.as_deref() != Some(job_id) {
+                    anyhow::bail!("sync job inspect missing response id mismatch");
+                }
+            }
+            "found" => {
+                let Some(job) = self.job.as_ref() else {
+                    anyhow::bail!("found sync job response missing job data");
+                };
+                job.validate()?;
+                if job.job_id != job_id {
+                    anyhow::bail!(
+                        "sync job inspect id mismatch: expected {}, got {}",
+                        job_id,
+                        job.job_id
+                    );
+                }
+            }
+            other => anyhow::bail!("unknown sync job inspect status: {other}"),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SyncJobRemoteRecord {
+    pub job_id: String,
+    pub operation_type: String,
+    pub peer: Option<String>,
+    pub state: String,
+    pub phase: String,
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(default)]
+    pub heads: Vec<String>,
+    #[serde(default)]
+    pub uploaded_hashes: Vec<String>,
+    #[serde(default)]
+    pub fetched_hashes: Vec<String>,
+    pub attempt_count: u64,
+    pub max_attempts: u64,
+    pub last_error: Option<String>,
+    pub result: Option<Value>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+}
+
+impl SyncJobRemoteRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.job_id.is_empty() {
+            anyhow::bail!("sync job response missing job_id");
+        }
+        if self.operation_type.is_empty() {
+            anyhow::bail!("sync job response missing operation_type");
+        }
+        parse_remote_sync_job_state(&self.state)?;
+        if self.phase.is_empty() {
+            anyhow::bail!("sync job response missing phase");
+        }
+        for hash in self
+            .roots
+            .iter()
+            .chain(self.heads.iter())
+            .chain(self.uploaded_hashes.iter())
+            .chain(self.fetched_hashes.iter())
+        {
+            if !lillux::valid_hash(hash) {
+                anyhow::bail!("invalid sync job response hash: {hash}");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn parse_remote_sync_job_state(value: &str) -> Result<()> {
+    match value {
+        "planned" | "running" | "completed" | "failed" | "retryable" | "cancelled" => Ok(()),
+        other => anyhow::bail!("unknown sync job state: {other}"),
+    }
+}
+
 impl AdmissionStatusResponse {
     pub fn validate_against_request(&self, subject_hash: &str, policy: &str) -> Result<()> {
         if self.subject_hash != subject_hash {
@@ -1185,5 +1338,62 @@ mod tests {
         for chunk in chunks {
             assert!(hashes_request_body_size(&chunk) <= 512);
         }
+    }
+
+    #[test]
+    fn sync_jobs_list_response_validates_state_filter() {
+        let response: SyncJobsListResponse = serde_json::from_value(serde_json::json!({
+            "jobs": [{
+                "job_id": "job-a",
+                "operation_type": "mirror_pull",
+                "peer": "node-a",
+                "state": "running",
+                "phase": "fetching",
+                "roots": ["11".repeat(32)],
+                "heads": [],
+                "uploaded_hashes": [],
+                "fetched_hashes": ["22".repeat(32)],
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "last_error": null,
+                "result": null,
+                "created_at": "2026-05-30T00:00:00Z",
+                "updated_at": "2026-05-30T00:00:01Z",
+                "finished_at": null
+            }]
+        }))
+        .unwrap();
+
+        response.validate(Some("running")).unwrap();
+        assert!(response.validate(Some("completed")).is_err());
+    }
+
+    #[test]
+    fn sync_jobs_inspect_response_validates_requested_id() {
+        let response: SyncJobsInspectResponse = serde_json::from_value(serde_json::json!({
+            "status": "found",
+            "job": {
+                "job_id": "job-a",
+                "operation_type": "mirror_pull",
+                "peer": null,
+                "state": "completed",
+                "phase": "done",
+                "roots": [],
+                "heads": ["33".repeat(32)],
+                "uploaded_hashes": [],
+                "fetched_hashes": [],
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "last_error": null,
+                "result": {"ok": true},
+                "created_at": "2026-05-30T00:00:00Z",
+                "updated_at": "2026-05-30T00:00:01Z",
+                "finished_at": "2026-05-30T00:00:01Z"
+            }
+        }))
+        .unwrap();
+
+        response.validate_against_request("job-a").unwrap();
+        assert!(response.validate_against_request("job-b").is_err());
     }
 }

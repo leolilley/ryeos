@@ -61,6 +61,8 @@ pub mod scheduler_pause;
 pub mod scheduler_register;
 pub mod scheduler_resume;
 pub mod scheduler_show_fires;
+pub mod sync_jobs_inspect;
+pub mod sync_jobs_list;
 pub mod system_status;
 pub mod threads_cancel;
 pub mod threads_chain;
@@ -115,6 +117,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     scheduler_show_fires::DESCRIPTOR,
     scheduler_pause::DESCRIPTOR,
     scheduler_resume::DESCRIPTOR,
+    sync_jobs_list::DESCRIPTOR,
+    sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
     remote_bind_project::DESCRIPTOR,
     remote_doctor::DESCRIPTOR,
