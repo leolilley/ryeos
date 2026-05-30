@@ -37,6 +37,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Discover the remote's public key
     let client = RemoteClient::new(&req.url, "", state.identity.clone());
     let pubkey = client.get_public_key().await?;
+    pubkey.validate_identity_binding()?;
 
     // Fetch the remote's ingest-ignore rules — required for push to work
     // correctly. Fail hard if unavailable.
@@ -57,22 +58,21 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut remotes = config::load_remotes_at(&config::remotes_config_path(&target_root))?;
     let vault_fp = pubkey.vault_fingerprint.clone();
     let signing_key = pubkey.signing_key.clone();
-    remotes.insert(
-        req.remote.clone(),
-        config::RemoteConfig {
-            name: req.remote.clone(),
-            url: req.url.clone(),
-            principal_id: pubkey.principal_id.clone(),
-            signing_key: pubkey.signing_key,
-            site_id: pubkey.site_id.clone(),
-            vault_fingerprint: pubkey.vault_fingerprint,
-            ingest_ignore,
-            project_bindings: remotes
-                .get(&req.remote)
-                .map(|r| r.project_bindings.clone())
-                .unwrap_or_default(),
-        },
-    );
+    let remote_config = config::RemoteConfig {
+        name: req.remote.clone(),
+        url: req.url.clone(),
+        principal_id: pubkey.principal_id.clone(),
+        signing_key: pubkey.signing_key,
+        site_id: pubkey.site_id.clone(),
+        vault_fingerprint: pubkey.vault_fingerprint,
+        ingest_ignore,
+        project_bindings: remotes
+            .get(&req.remote)
+            .map(|r| r.project_bindings.clone())
+            .unwrap_or_default(),
+    };
+    remote_config.validate()?;
+    remotes.insert(req.remote.clone(), remote_config);
     config::save_remotes(&target_root, &remotes)?;
 
     Ok(serde_json::json!({

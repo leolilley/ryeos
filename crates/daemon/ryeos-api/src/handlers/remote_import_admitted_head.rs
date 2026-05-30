@@ -79,7 +79,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     })?;
     let expected_signer = lillux::crypto::fingerprint(&expected_key);
     let expected_issuer = format!("fp:{expected_signer}");
-    let prefix = format!("admissions/{}", req.policy);
+    if let Some(subject_hash) = req.subject_hash.as_deref() {
+        validate_subject_hash(subject_hash)?;
+    }
+    let prefix = match req.subject_hash.as_deref() {
+        Some(subject_hash) => format!("admissions/{}/{subject_hash}", req.policy),
+        None => format!("admissions/{}", req.policy),
+    };
 
     let heads = client
         .federation_heads_list(
@@ -89,6 +95,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &expected_key,
         )
         .await?;
+    if heads.truncated && req.subject_hash.is_none() {
+        anyhow::bail!(
+            "remote returned a truncated admission head list for policy '{}'; pass subject_hash",
+            req.policy
+        );
+    }
     let selected = select_admission_head(&heads.heads, &req.policy, req.subject_hash.as_deref())?;
     let selected_subject = admission_subject_from_head(selected, &req.policy)?;
 
@@ -100,6 +112,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             policy: req.policy.clone(),
             expected_issuer,
             expected_key,
+            expected_attestation_hash: Some(selected.target_hash.clone()),
             source_peer: Some(remote_cfg.name.clone()),
             job_id: None,
             closure_options: ObjectsClosureRequestOptions {
@@ -177,10 +190,16 @@ fn admission_subject_from_head(head: &FederationHeadRemoteRecord, policy: &str) 
                 policy
             )
         })?;
-    if !lillux::valid_hash(suffix) || suffix.bytes().any(|b| b.is_ascii_uppercase()) {
-        anyhow::bail!("admission head {} has invalid subject hash", head.ref_path);
-    }
+    validate_subject_hash(suffix)
+        .with_context(|| format!("admission head {} has invalid subject hash", head.ref_path))?;
     Ok(suffix.to_string())
+}
+
+fn validate_subject_hash(subject_hash: &str) -> Result<()> {
+    if !lillux::valid_hash(subject_hash) || subject_hash.bytes().any(|b| b.is_ascii_uppercase()) {
+        anyhow::bail!("invalid admission subject hash: {subject_hash}");
+    }
+    Ok(())
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

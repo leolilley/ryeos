@@ -26,6 +26,7 @@ pub struct VerifiedRemoteImportRequest {
     pub policy: String,
     pub expected_issuer: String,
     pub expected_key: lillux::crypto::VerifyingKey,
+    pub expected_attestation_hash: Option<String>,
     pub source_peer: Option<String>,
     pub job_id: Option<String>,
     pub closure_options: ObjectsClosureRequestOptions,
@@ -180,6 +181,14 @@ pub async fn import_admitted_root(
     if req.expected_issuer.is_empty() {
         anyhow::bail!("remote import expected issuer must not be empty");
     }
+    if let Some(expected_attestation_hash) = req.expected_attestation_hash.as_deref() {
+        if !is_canonical_hash(expected_attestation_hash) {
+            anyhow::bail!(
+                "invalid remote import expected attestation hash: {}",
+                expected_attestation_hash
+            );
+        }
+    }
 
     let attestations = client
         .admission_attestations_for_subject(&req.subject_hash, Some(&req.policy))
@@ -191,10 +200,14 @@ pub async fn import_admitted_root(
             record.state == "accepted"
                 && record.claim == "accepted"
                 && record.issuer == req.expected_issuer
+                && req
+                    .expected_attestation_hash
+                    .as_deref()
+                    .map_or(true, |expected| record.attestation_hash == expected)
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "remote returned no accepted admission attestation for {} under {} from {}",
+                "remote returned no accepted admission attestation for {} under {} from {} matching selected head",
                 req.subject_hash,
                 req.policy,
                 req.expected_issuer
@@ -212,6 +225,16 @@ pub async fn import_admitted_root(
         .objects_closure_get(&[req.subject_hash.clone()], req.closure_options)
         .await?;
     let mut payload = closure_response_to_payload(&req.subject_hash, &closure.entries)?;
+    if !payload
+        .entries
+        .iter()
+        .any(|entry| !entry.is_blob && entry.hash == req.subject_hash)
+    {
+        anyhow::bail!(
+            "remote closure did not include admitted subject root object {}",
+            req.subject_hash
+        );
+    }
     append_attestation_entry(&mut payload, attestation)?;
 
     let attribution = ImportAttribution {

@@ -792,6 +792,36 @@ pub struct PublicKeyResponse {
     pub site_id: String,
 }
 
+impl PublicKeyResponse {
+    pub fn validate_identity_binding(&self) -> Result<lillux::crypto::VerifyingKey> {
+        let key = super::config::decode_signing_key(&self.signing_key)
+            .context("invalid remote signing_key from /public-key")?;
+        let actual_fingerprint = lillux::crypto::fingerprint(&key);
+        if self.fingerprint != actual_fingerprint {
+            anyhow::bail!(
+                "remote /public-key fingerprint mismatch: response fingerprint {}, signing_key fingerprint {}",
+                self.fingerprint,
+                actual_fingerprint,
+            );
+        }
+        let expected_principal = format!("fp:{actual_fingerprint}");
+        if self.principal_id != expected_principal {
+            anyhow::bail!(
+                "remote /public-key principal_id mismatch: expected {}, got {}",
+                expected_principal,
+                self.principal_id,
+            );
+        }
+        if self.site_id.trim().is_empty() {
+            anyhow::bail!("remote /public-key site_id must not be empty");
+        }
+        if self.vault_fingerprint.trim().is_empty() {
+            anyhow::bail!("remote /public-key vault_fingerprint must not be empty");
+        }
+        Ok(key)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObjectsHasResponse {
     pub found: Vec<String>,
@@ -952,6 +982,15 @@ impl ObjectsClosureGetResponse {
         validate_closure_summary_against_request(&self.closure, requested_roots)?;
         if !self.closure.complete {
             anyhow::bail!("remote returned incomplete object closure");
+        }
+        if !self.closure.missing_objects.is_empty()
+            || !self.closure.missing_blobs.is_empty()
+            || !self.closure.malformed_objects.is_empty()
+            || !self.closure.unsupported_objects.is_empty()
+        {
+            anyhow::bail!(
+                "remote returned complete closure with missing/malformed/unsupported entries"
+            );
         }
         let object_hashes: std::collections::BTreeSet<&str> = self
             .closure
@@ -1813,6 +1852,43 @@ pub struct BlobUpload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn public_key_response(seed: u8) -> PublicKeyResponse {
+        let signing_key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let fingerprint = lillux::crypto::fingerprint(&verifying_key);
+        PublicKeyResponse {
+            principal_id: format!("fp:{fingerprint}"),
+            fingerprint,
+            signing_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes())
+            ),
+            vault_fingerprint: "sha256:vault".into(),
+            site_id: "site:test".into(),
+        }
+    }
+
+    #[test]
+    fn public_key_response_validates_identity_binding() {
+        let response = public_key_response(7);
+        let key = response.validate_identity_binding().unwrap();
+        assert_eq!(lillux::crypto::fingerprint(&key), response.fingerprint);
+    }
+
+    #[test]
+    fn public_key_response_rejects_mismatched_fingerprint() {
+        let mut response = public_key_response(7);
+        response.fingerprint = "00".repeat(32);
+        assert!(response.validate_identity_binding().is_err());
+    }
+
+    #[test]
+    fn public_key_response_rejects_mismatched_principal() {
+        let mut response = public_key_response(7);
+        response.principal_id = format!("fp:{}", "00".repeat(32));
+        assert!(response.validate_identity_binding().is_err());
+    }
 
     #[test]
     fn canonicalize_path_no_query() {

@@ -62,15 +62,18 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         config::get_remote(&remotes, &req.remote)?
     };
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
-    let expected_key = match req.expected_signing_key.as_deref() {
-        Some(input) => decode_expected_signing_key(input)?,
-        None => remote_cfg.pinned_signing_key().with_context(|| {
-            format!(
-                "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`",
-                remote_cfg.name, remote_cfg.name,
-            )
-        })?,
-    };
+    let expected_key = remote_cfg.pinned_signing_key().with_context(|| {
+        format!(
+            "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`",
+            remote_cfg.name, remote_cfg.name,
+        )
+    })?;
+    if let Some(input) = req.expected_signing_key.as_deref() {
+        let asserted_key = decode_expected_signing_key(input)?;
+        if asserted_key.as_bytes() != expected_key.as_bytes() {
+            anyhow::bail!("expected_signing_key does not match pinned remote signing_key");
+        }
+    }
     let expected_issuer = format!("fp:{}", lillux::crypto::fingerprint(&expected_key));
 
     let result = import::import_admitted_root_with_job(
@@ -81,6 +84,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             policy: req.policy,
             expected_issuer,
             expected_key,
+            expected_attestation_hash: None,
             source_peer: Some(remote_cfg.name.clone()),
             job_id: None,
             closure_options: ObjectsClosureRequestOptions {

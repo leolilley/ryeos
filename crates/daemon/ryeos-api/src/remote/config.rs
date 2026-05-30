@@ -80,7 +80,20 @@ impl RemoteConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            anyhow::bail!("remote name must not be empty");
+        }
+        validate_url(&self.url)?;
         self.pinned_signing_key()?;
+        if self.site_id.trim().is_empty() {
+            anyhow::bail!("remote '{}' site_id must not be empty", self.name);
+        }
+        if self.vault_fingerprint.trim().is_empty() {
+            anyhow::bail!("remote '{}' vault_fingerprint must not be empty", self.name);
+        }
+        for binding in self.project_bindings.values() {
+            validate_remote_project_path(&binding.remote_project_path)?;
+        }
         Ok(())
     }
 }
@@ -141,6 +154,12 @@ pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
     let mut out = HashMap::with_capacity(file.remotes.len());
     for (name, raw) in file.remotes {
         match serde_yaml::from_value::<RemoteConfig>(raw).and_then(|cfg| {
+            if cfg.name != name {
+                return Err(serde_yaml::Error::custom(format!(
+                    "remote map key '{}' does not match remote.name '{}'",
+                    name, cfg.name,
+                )));
+            }
             cfg.validate()
                 .map_err(|e| serde_yaml::Error::custom(e.to_string()))?;
             Ok(cfg)
@@ -293,14 +312,15 @@ pub fn validate_url(url: &str) -> Result<()> {
         .parse()
         .with_context(|| format!("invalid URL: {}", url))?;
 
-    let scheme = parsed.scheme();
-    if scheme != "https" {
-        let host = parsed.host_str().unwrap_or("");
-        let is_loopback =
-            host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
-        if !is_loopback {
+    let host = parsed.host_str().unwrap_or("");
+    let is_loopback = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback => {}
+        other => {
             anyhow::bail!(
-                "remote URL must use HTTPS (got '{}'). Loopback addresses are allowed without TLS.",
+                "remote URL must use HTTPS except HTTP loopback (got scheme '{}' in '{}')",
+                other,
                 url
             );
         }
@@ -447,6 +467,11 @@ mod tests {
     fn validate_accepts_localhost_http() {
         assert!(validate_url("http://localhost:7400").is_ok());
         assert!(validate_url("http://127.0.0.1:7400").is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_non_http_loopback_scheme() {
+        assert!(validate_url("ftp://localhost:7400").is_err());
     }
 
     #[test]
