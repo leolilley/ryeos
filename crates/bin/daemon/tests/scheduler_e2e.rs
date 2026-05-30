@@ -393,6 +393,10 @@ async fn scheduler_at_schedule_fires() {
         fire["scheduled_at"].as_i64().is_some(),
         "scheduled_at should be present"
     );
+    assert!(
+        fire["thread_id"].as_str().unwrap_or("").starts_with("T-"),
+        "scheduled execution thread_id must be canonical T-*; got {fire}"
+    );
 }
 
 // ── Timer dispatch: interval schedule fires ────────────────────────────────

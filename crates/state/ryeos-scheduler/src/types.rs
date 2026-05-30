@@ -64,10 +64,20 @@ pub fn fire_id(schedule_id: &str, scheduled_at_ms: i64) -> String {
 
 /// Compute the deterministic thread_id from a fire_id.
 /// Uses `lillux::cas::sha256_hex` (same hash used throughout ryeosd).
-/// Takes the first 32 hex chars (128 bits) with a `sched-` prefix.
+/// Takes the first 32 hex chars (128 bits) and formats them as a
+/// canonical RyeOS execution thread id (`T-{uuid}`). Scheduler-specific
+/// identity remains in `fire_id`; execution threads must stay in the
+/// global `T-*` namespace enforced by thread lifecycle.
 pub fn thread_id_from_fire(fire_id: &str) -> String {
     let hash = lillux::cas::sha256_hex(fire_id.as_bytes());
-    format!("sched-{}", &hash[..32])
+    format!(
+        "T-{}-{}-{}-{}-{}",
+        &hash[0..8],
+        &hash[8..12],
+        &hash[12..16],
+        &hash[16..20],
+        &hash[20..32],
+    )
 }
 
 #[cfg(test)]
@@ -102,17 +112,25 @@ mod tests {
     }
 
     #[test]
-    fn thread_id_has_sched_prefix() {
+    fn thread_id_has_canonical_thread_prefix() {
         let tid = thread_id_from_fire("test@1000");
-        assert!(tid.starts_with("sched-"));
+        assert!(tid.starts_with("T-"));
     }
 
     #[test]
-    fn thread_id_is_32_hex_chars() {
+    fn thread_id_is_uuid_shaped() {
         let tid = thread_id_from_fire("test@1000");
-        let hex_part = &tid[6..]; // after "sched-"
-        assert_eq!(hex_part.len(), 32);
-        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+        let uuid_part = tid.strip_prefix("T-").expect("T- prefix");
+        let groups: Vec<&str> = uuid_part.split('-').collect();
+        assert_eq!(groups.len(), 5);
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(groups
+            .iter()
+            .flat_map(|group| group.chars())
+            .all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

@@ -232,6 +232,7 @@ fn launch_metadata_from_spec_carries_cancellation_mode() {
         args: vec![],
         cwd: None,
         env: HashMap::new(),
+        env_sources: HashMap::new(),
         stdin_data: None,
         timeout_secs: 60,
         execution: ExecutionDecorations {

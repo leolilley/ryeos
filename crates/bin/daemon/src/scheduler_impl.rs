@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ryeos_app::state::AppState;
+use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_scheduler::db::SchedulerDb;
 use ryeos_scheduler::types::ScheduleSpecRecord;
 use ryeos_scheduler::SchedulerContext;
@@ -72,6 +73,9 @@ impl SchedulerContext for AppSchedulerContext {
             )
         });
         let project_path_buf = std::path::PathBuf::from(project_path);
+        let original_root_kind = CanonicalRef::parse(&spec.item_ref)
+            .map(|ref_| ref_.kind)
+            .unwrap_or_else(|_| "item".to_string());
 
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_path_buf.clone(),
@@ -86,7 +90,7 @@ impl SchedulerContext for AppSchedulerContext {
             acting_principal: &spec.requester_fingerprint,
             project_path: std::path::Path::new(project_path),
             provenance,
-            original_root_kind: "directive",
+            original_root_kind: &original_root_kind,
             pre_minted_thread_id: Some(thread_id.to_string()),
             operation: None,
             inputs: None,

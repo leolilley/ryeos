@@ -572,16 +572,17 @@ impl SchedulerDb {
                 return Ok(false);
             }
 
-            // Fire is dispatched with thread_id — update to clear thread_id
-            // so redispatch can proceed. The thread row check is done by the caller.
+            // Fire is dispatched with thread_id — clear it before redispatch so
+            // recovery never preserves a stale execution id from an older
+            // scheduler/runtime contract.
             conn.execute(
-                "UPDATE schedule_fires SET fired_at = ?1 WHERE fire_id = ?2",
+                "UPDATE schedule_fires SET fired_at = ?1, thread_id = NULL WHERE fire_id = ?2",
                 params![lillux::time::timestamp_millis(), fire_id],
             )?;
             return Ok(true);
         }
 
-        // No thread_id at all — safe to reclaim
+        // No thread_id at all — safe to reclaim.
         conn.execute(
             "UPDATE schedule_fires SET fired_at = ?1 WHERE fire_id = ?2",
             params![lillux::time::timestamp_millis(), fire_id],
@@ -883,13 +884,14 @@ mod tests {
     }
 
     fn make_fire(schedule_id: &str, scheduled_at: i64, status: &str) -> FireRecord {
+        let fire_id = format!("{}@{}", schedule_id, scheduled_at);
         FireRecord {
-            fire_id: format!("{}@{}", schedule_id, scheduled_at),
+            thread_id: Some(crate::types::thread_id_from_fire(&fire_id)),
+            fire_id,
             schedule_id: schedule_id.to_string(),
             scheduled_at,
             fired_at: Some(1001),
             completed_at: None,
-            thread_id: Some(format!("sched-{:032x}", scheduled_at)),
             status: status.to_string(),
             trigger_reason: "normal".to_string(),
             outcome: None,
@@ -1226,12 +1228,15 @@ mod tests {
         db.upsert_fire(&fire).unwrap();
 
         // Thread existence is checked by the caller (reconciler), not by reclaim_fire.
-        // reclaim_fire just checks the fire's own DB state.
+        // reclaim_fire clears the old execution id so redispatch mints the current
+        // canonical thread id for this fire.
         let reclaimed = db.reclaim_fire("sched@1000").unwrap();
         assert!(
             reclaimed,
             "dispatched fire should be reclaimable even with thread_id set"
         );
+        let reclaimed_fire = db.get_fire("sched@1000").unwrap().unwrap();
+        assert_eq!(reclaimed_fire.thread_id, None);
     }
 
     #[test]
