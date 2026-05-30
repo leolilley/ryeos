@@ -15,6 +15,8 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::{EffectiveItemRequest, Engine};
 use serde_json::Value;
 
+use crate::node_descriptors::LoadedAliasDescriptor;
+
 /// Print top-level help. Best-effort: includes dynamic alias discovery
 /// from the system space if accessible, no daemon required.
 pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
@@ -108,47 +110,30 @@ fn discover_aliases_from_disk(
 ) -> Vec<(String, String, bool)> {
     let mut results = Vec::new();
 
-    for bundle_root in bundle_roots {
-        let aliases_dir = bundle_root.join(".ai").join("node").join("aliases");
-        if !aliases_dir.is_dir() {
+    let Ok(aliases) = crate::node_descriptors::load_alias_descriptors(bundle_roots) else {
+        return results;
+    };
+
+    for alias in aliases {
+        if alias.def.tokens == ["status"] {
             continue;
         }
-        let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
+        // Skip short aliases (s, f) — they're abbreviations.
+        if alias.def.tokens.len() == 1 && alias.def.tokens[0].len() <= 1 {
             continue;
-        };
+        }
 
-        for alias_file in alias_files.flatten() {
-            let path = alias_file.path();
-            if !matches!(
-                path.extension().and_then(|s| s.to_str()),
-                Some("yaml") | Some("yml")
-            ) {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(alias) = serde_yaml::from_str::<AliasHelpRecord>(&content) else {
-                continue;
-            };
-
-            if alias.tokens == ["status"] {
-                continue;
-            }
-            // Skip short aliases (s, f) — they're abbreviations.
-            if alias.tokens.len() == 1 && alias.tokens[0].len() <= 1 {
-                continue;
-            }
-
-            let metadata = read_verb_help_from_roots(bundle_roots, &alias.verb).and_then(|verb| {
+        let metadata = crate::node_descriptors::load_verb_descriptor(bundle_roots, &alias.def.verb)
+            .ok()
+            .flatten()
+            .and_then(|verb| {
                 engine
                     .and_then(|engine| resolve_effective_help(engine, &verb.execute, project_path))
             });
-            let is_offline = metadata
-                .as_ref()
-                .is_some_and(ItemHelpMetadata::is_offline_dispatch);
-            results.push((alias.tokens.join(" "), alias.description, is_offline));
-        }
+        let is_offline = metadata
+            .as_ref()
+            .is_some_and(ItemHelpMetadata::is_offline_dispatch);
+        results.push((alias.def.tokens.join(" "), alias.description, is_offline));
     }
 
     results.sort_by(|a, b| a.0.cmp(&b.0));
@@ -221,27 +206,6 @@ pub async fn print_verb_help(
     println!("{pretty}");
 
     Ok(())
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AliasHelpRecord {
-    tokens: Vec<String>,
-    verb: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    positional_field: Option<String>,
-    #[serde(default)]
-    positional_forms: Vec<ryeos_runtime::PositionalForm>,
-    #[serde(default)]
-    project_resolution: ryeos_runtime::ProjectResolution,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct VerbHelpRecord {
-    #[serde(default)]
-    description: String,
-    execute: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -335,7 +299,9 @@ fn print_installed_verb_help(
     let Some(alias) = find_alias_help_from_roots(verb_tokens, &bundle_roots) else {
         return Ok(false);
     };
-    let verb = read_verb_help_from_roots(&bundle_roots, &alias.verb);
+    let verb = crate::node_descriptors::load_verb_descriptor(&bundle_roots, &alias.def.verb)
+        .ok()
+        .flatten();
     let engine = build_help_engine(system_space_dir, project_path, &bundle_roots).ok();
     let item = verb.as_ref().and_then(|v| {
         engine
@@ -344,7 +310,7 @@ fn print_installed_verb_help(
     });
 
     let mut out = std::io::stdout();
-    let command = alias.tokens.join(" ");
+    let command = alias.def.tokens.join(" ");
     let description = item
         .as_ref()
         .map(|s| s.description.as_str())
@@ -374,14 +340,14 @@ fn print_installed_verb_help(
         usage_tail(&alias, item.as_ref())
     )?;
 
-    if alias.project_resolution != ryeos_runtime::ProjectResolution::None {
+    if alias.def.project_resolution != ryeos_runtime::ProjectResolution::None {
         writeln!(out)?;
         writeln!(out, "PROJECT:")?;
         writeln!(
             out,
             "  --project <DIR>       Project root; accepted before or after the verb"
         )?;
-        if alias.project_resolution == ryeos_runtime::ProjectResolution::Optional {
+        if alias.def.project_resolution == ryeos_runtime::ProjectResolution::Optional {
             writeln!(
                 out,
                 "  --no-project          Resolve against user/system space only"
@@ -410,10 +376,10 @@ fn print_installed_verb_help(
     Ok(true)
 }
 
-fn usage_tail(alias: &AliasHelpRecord, item: Option<&ItemHelpMetadata>) -> String {
+fn usage_tail(alias: &LoadedAliasDescriptor, item: Option<&ItemHelpMetadata>) -> String {
     let mut parts = Vec::new();
-    if !alias.positional_forms.is_empty() {
-        for form in &alias.positional_forms {
+    if !alias.def.positional_forms.is_empty() {
+        for form in &alias.def.positional_forms {
             let shape = form
                 .slots
                 .iter()
@@ -424,7 +390,7 @@ fn usage_tail(alias: &AliasHelpRecord, item: Option<&ItemHelpMetadata>) -> Strin
                 parts.push(shape);
             }
         }
-    } else if let Some(field) = &alias.positional_field {
+    } else if let Some(field) = &alias.def.positional_field {
         parts.push(format!("<{}>", field.replace('_', "-")));
     }
 
@@ -457,46 +423,11 @@ fn usage_tail(alias: &AliasHelpRecord, item: Option<&ItemHelpMetadata>) -> Strin
 fn find_alias_help_from_roots(
     verb_tokens: &[String],
     bundle_roots: &[PathBuf],
-) -> Option<AliasHelpRecord> {
-    for bundle_root in bundle_roots {
-        let aliases_dir = bundle_root.join(".ai/node/aliases");
-        let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
-            continue;
-        };
-        for alias_file in alias_files.flatten() {
-            let path = alias_file.path();
-            if !matches!(
-                path.extension().and_then(|s| s.to_str()),
-                Some("yaml") | Some("yml")
-            ) {
-                continue;
-            }
-            let Some(alias) = read_yaml::<AliasHelpRecord>(&path) else {
-                continue;
-            };
-            if alias.tokens == verb_tokens {
-                return Some(alias);
-            }
-        }
-    }
-    None
-}
-
-fn read_verb_help_from_roots(bundle_roots: &[PathBuf], verb: &str) -> Option<VerbHelpRecord> {
-    for bundle_root in bundle_roots {
-        let path = bundle_root
-            .join(".ai/node/verbs")
-            .join(format!("{verb}.yaml"));
-        if let Some(record) = read_yaml::<VerbHelpRecord>(&path) {
-            return Some(record);
-        }
-    }
-    None
-}
-
-fn read_yaml<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_yaml::from_str(&content).ok()
+) -> Option<LoadedAliasDescriptor> {
+    crate::node_descriptors::load_alias_descriptors(bundle_roots)
+        .ok()?
+        .into_iter()
+        .find(|alias| alias.def.tokens == verb_tokens)
 }
 
 fn help_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
@@ -676,23 +607,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle_root = tmp.path().join(".ai/bundles/core");
         let bundle = bundle_root.join(".ai");
-        std::fs::create_dir_all(bundle.join("node/aliases")).unwrap();
         std::fs::create_dir_all(bundle.join("node/verbs")).unwrap();
-        std::fs::write(
-            bundle.join("node/aliases/remote-doctor.yaml"),
-            r#"
-category: aliases
-section: aliases
-tokens: ["remote", "doctor"]
-verb: remote-doctor
-description: Diagnose remote setup
-project_resolution: optional
-positional_forms:
-  - slots:
-      - field: remote
-"#,
-        )
-        .unwrap();
         std::fs::write(
             bundle.join("node/verbs/remote-doctor.yaml"),
             r#"
@@ -701,6 +616,12 @@ section: verbs
 name: remote-doctor
 description: Diagnose remote setup
 execute: tool:remote/doctor
+aliases:
+  - tokens: ["remote", "doctor"]
+    project_resolution: optional
+    positional_forms:
+      - slots:
+          - field: remote
 "#,
         )
         .unwrap();
@@ -708,12 +629,14 @@ execute: tool:remote/doctor
         let tokens = vec!["remote".to_string(), "doctor".to_string()];
         let roots = vec![bundle_root];
         let alias = find_alias_help_from_roots(&tokens, &roots).unwrap();
-        assert_eq!(alias.verb, "remote-doctor");
+        assert_eq!(alias.def.verb, "remote-doctor");
         assert_eq!(
-            alias.project_resolution,
+            alias.def.project_resolution,
             ryeos_runtime::ProjectResolution::Optional
         );
-        let verb = read_verb_help_from_roots(&roots, &alias.verb).unwrap();
+        let verb = crate::node_descriptors::load_verb_descriptor(&roots, &alias.def.verb)
+            .unwrap()
+            .unwrap();
         assert_eq!(verb.execute, "tool:remote/doctor");
 
         let item = ItemHelpMetadata::from_composed(&serde_json::json!({

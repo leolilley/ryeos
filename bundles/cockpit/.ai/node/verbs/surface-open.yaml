@@ -1,6 +1,12 @@
-# ryeos:signed:2026-05-25T06:23:39Z:e40144bc355ab8a7020a76a39679b920616cfe8d9e3a5d11236bbd6a1c84fa35:ycbqOQnR8YRq+uQJALjLj09rEf4syvq0HJO+K61mz32jaYrEnVp2rNONX3GllEnCXvLrLrFRy2GjG33qaykbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:32Z:1b409951acf0213ccea2994fc924392c352c1ad5198d0dc6a03c0631b7ebee92:OyLl8dMOMxYbye0XilxOppRW1oXh6DeXGO4o2+7pPL6mqfIOOMsL9wSlPFG+rVxuQ9D4T2qe81IPuhhm9mfLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: surface-open
-description: "Open a surface in the selected renderer"
+description: Open a surface in the selected renderer
 execute: client:ryeos/tui
+aliases:
+- tokens:
+  - surface
+  - open
+  positional_field: surface
+  project_resolution: optional

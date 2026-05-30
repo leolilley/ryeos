@@ -1,6 +1,11 @@
-# ryeos:signed:2026-05-23T12:06:24Z:32ced82e7c315df491a18f597c4b27897e921cbb4828e6c3913e415ae57ec469:bY/9GR6IGPdnQnlli48leKBthWdD6BVVRdSnhFtkl+7WLRDAtsS7PbrG34sYVu8nH9lONw5iidrOqtEZAvfhDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:363d8ce4a6bd28acac8cee1f539af02293ec7b9e05d07d6c25cc34b4b2da76bb:YhKSxmrOSuiXA36+FpIABER4+MNF5zpu0quUW6bZ2+2glNN2IRwbqLlWpWx15lPm88fiYEZns/4pqKefO2k/BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-list
-description: "List configured remote nodes"
+description: List configured remote nodes
 execute: service:remote/list
+aliases:
+- tokens:
+  - remote
+  - list
+  project_resolution: optional

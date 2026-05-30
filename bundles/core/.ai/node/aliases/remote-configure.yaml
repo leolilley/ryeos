@@ -1,8 +1,0 @@
-# ryeos:signed:2026-05-25T08:26:41Z:ea76baf07483377e91631525b3ef7c7f28a29dcf743dc828590721f09e0483e0:jMTx6wE2d5jcu8E1vzTH301BtnXpeVaEbNYo+jB2JnmEXYufyKhtz4aqM0gCf2cDeQ5ecbKUDyLth4Uobc2uBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["remote", "configure"]
-verb: remote-configure
-description: "Add or update a remote node configuration"
-project_resolution: optional
-positional_field: remote

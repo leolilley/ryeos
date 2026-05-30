@@ -1,6 +1,0 @@
-# ryeos:signed:2026-05-23T12:06:25Z:a9c0ba48436925604a443d33b794c9e70b0dd925303921874ef1f297c0b59f77:/wWRle12potXKCTDkAAYuNkYX5J+ta+6P3CgxZyI2u8z0Tb/rjgCiEp0pcJEfZ+5sZ7qH9y94wj+sePG9l+KBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["authorize-key"]
-verb: authorize-key
-description: "Authorize a key with scoped capabilities"

@@ -1,6 +1,0 @@
-# ryeos:signed:2026-05-23T12:06:25Z:15804216e92ba738286176a064bbcd57d9e020dd2b27d5976d709563bc6085a5:dV7cPHlAJ0RNJA4kaFqH8fIkDSn0vMx1mCfneSxsArxJhz1pbsSUomKfP1RgclAKqxLaodjxUzUMq7zEDdDnCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["bundle", "verify"]
-verb: bundle-verify
-description: "Validate all bundle items, signatures, and manifest"

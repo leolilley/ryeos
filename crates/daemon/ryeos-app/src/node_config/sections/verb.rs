@@ -5,7 +5,39 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::node_config::sections::alias::{
+    validate_alias_tokens, validate_positional_forms, PositionalForm, ProjectResolution,
+};
 use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerbAliasRecord {
+    /// Token sequence that triggers this alias (e.g. `["sign"]` or `["bundle", "install"]`).
+    pub tokens: Vec<String>,
+    /// Human-readable description for this spelling. Defaults to the parent verb description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether this alias is deprecated. Deprecated aliases still resolve
+    /// but callers should warn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+    /// If deprecated, the suggested replacement token sequence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement_tokens: Option<Vec<String>>,
+    /// If deprecated, the version in which this alias will be removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed_in: Option<String>,
+    /// If present, binds a lone positional argument in the tail to this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub positional_field: Option<String>,
+    /// Ordered alternative positional forms.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub positional_forms: Vec<PositionalForm>,
+    /// CLI project canonicalisation policy for this alias.
+    #[serde(default)]
+    pub project_resolution: ProjectResolution,
+}
 
 /// A parsed verb definition loaded from `.ai/node/verbs/<name>.yaml`.
 ///
@@ -29,6 +61,9 @@ pub struct VerbRecord {
     /// `None` for abstract verbs like `execute` (generic dispatcher).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execute: Option<String>,
+    /// CLI spellings that route to this verb.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<VerbAliasRecord>,
     /// Path to the YAML file that declared this record. Set by loader.
     #[serde(skip)]
     pub source_file: std::path::PathBuf,
@@ -82,6 +117,19 @@ impl NodeConfigSection for VerbSection {
                 .with_context(|| format!("invalid execute ref '{}' in verb record", execute_ref))?;
         }
 
+        if record.execute.is_none() && !record.aliases.is_empty() {
+            bail!(
+                "verb '{}' is abstract and cannot declare aliases",
+                record.name
+            );
+        }
+
+        for (idx, alias) in record.aliases.iter().enumerate() {
+            let label = format!("{} aliases[{idx}]", record.name);
+            validate_alias_tokens(&label, &alias.tokens)?;
+            validate_positional_forms(&label, &alias.positional_forms)?;
+        }
+
         Ok(Box::new(record))
     }
 }
@@ -129,6 +177,40 @@ mod tests {
     }
 
     #[test]
+    fn nested_aliases_parse() {
+        let section = VerbSection;
+        let mut body = valid_body();
+        body["aliases"] = serde_json::json!([
+            {
+                "tokens": ["sign"],
+                "positional_field": "item_ref"
+            },
+            {
+                "tokens": ["s"],
+                "description": "Sign short form",
+                "project_resolution": "optional"
+            }
+        ]);
+
+        let result = section.parse("sign", &body).unwrap();
+        let record = result.as_any().downcast_ref::<VerbRecord>().unwrap();
+        assert_eq!(record.aliases.len(), 2);
+        assert_eq!(record.aliases[0].tokens, vec!["sign"]);
+        assert_eq!(
+            record.aliases[0].positional_field.as_deref(),
+            Some("item_ref")
+        );
+        assert_eq!(
+            record.aliases[1].description.as_deref(),
+            Some("Sign short form")
+        );
+        assert!(matches!(
+            record.aliases[1].project_resolution,
+            ProjectResolution::Optional
+        ));
+    }
+
+    #[test]
     fn abstract_verb_no_execute() {
         let section = VerbSection;
         let body = serde_json::json!({
@@ -142,6 +224,22 @@ mod tests {
         let binding = result.unwrap();
         let record = binding.as_any().downcast_ref::<VerbRecord>().unwrap();
         assert!(record.execute.is_none());
+    }
+
+    #[test]
+    fn abstract_verb_with_alias_rejected() {
+        let section = VerbSection;
+        let body = serde_json::json!({
+            "category": "verbs",
+            "section": "verbs",
+            "name": "execute",
+            "description": "Execute an item",
+            "aliases": [{ "tokens": ["run"] }]
+        });
+        let result = section.parse("execute", &body);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("abstract"), "got: {msg}");
     }
 
     #[test]

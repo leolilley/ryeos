@@ -1,6 +1,17 @@
-# ryeos:signed:2026-05-23T12:06:24Z:7bf804474903641a36f3109bee998ddccffff35ee5cf3a8f9b6a723745505683:v2SdhsofH1OQoX/DSCv7O4ojBEyhAi4Q1x0cCdt3BG2oSJjPYEYN223aUGGCzBjYXkA1GsJqNj35sZInQnlpBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:95b982cbbef6242f9ad371fa9c96a86b8ec8b673f31de5fd5055e39828cc155b:n9omnt2Bv9NmxGXP40oj/mPSo+M03HGv8cwu/SLd5O8eBZZiUahPL86Ofz9qQ/rudVDoHYardqi8p+u8JZ0PCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: fetch
-description: "Fetch/resolve an item (read-only)"
+description: Fetch/resolve an item (read-only)
 execute: tool:ryeos/core/fetch
+aliases:
+- tokens:
+  - f
+  description: Fetch (short form)
+  positional_field: item_ref
+  project_resolution: optional
+- tokens:
+  - fetch
+  description: Fetch a resource from the daemon
+  positional_field: item_ref
+  project_resolution: optional

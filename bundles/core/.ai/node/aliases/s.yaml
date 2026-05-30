@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-23T12:06:25Z:4733d6fab5ecf37888cc565a8f9c443d0cdc2e46b175ddbd7c56592157b9bf92:+XYT+nYOKJ2Qz9Goq4F0qL19qDpPWoQe11aRlr4QUYNBthihMMrdAlHWgYI9sPswuBTc+St4EOiRxnOjTycCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["s"]
-verb: sign
-description: "Sign (short form)"
-positional_field: item_ref

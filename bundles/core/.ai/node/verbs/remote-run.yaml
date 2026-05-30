@@ -1,6 +1,20 @@
-# ryeos:signed:2026-05-23T12:06:24Z:e58ce9f1583ae59cfc7d2952514088251b36c50d1cb6339f43397807875e29e1:7XvqdZ+0sQjmlmfgPkfp6b3IJ5Uj21UE0wv+ZTCg7wpfZZKbSJ5OYwhtqnmbS2NP3QpV0D8JGehttgVc5nICAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:31Z:d6926e3f13d5ff5f796131671950a44913d7b51d867c981eef9d1b1b2655e246:SH7bpYi6VatKEKeNN0oTmbVwV+b9spvS/b1EPqCSEQcE/FagQqwYQtFdkqJYPjlvq0LK9Cx+3czut0Sfl9HEBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-run
-description: "Execute an item against a configured remote project"
+description: Execute an item against a configured remote project
 execute: service:remote/run
+aliases:
+- tokens:
+  - remote
+  - run
+  positional_field: item_ref
+  project_resolution: required
+  positional_forms:
+  - slots:
+    - field: remote
+    - field: item_ref
+      matcher: canonical_ref
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref

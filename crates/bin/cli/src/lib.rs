@@ -6,6 +6,7 @@ pub mod arg_bind;
 pub mod error;
 pub mod exit;
 pub mod help;
+pub mod node_descriptors;
 pub mod offline_dispatch;
 pub mod project_resolve;
 #[cfg(test)]

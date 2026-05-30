@@ -35,7 +35,6 @@ pub const PROJECT_AI_SYNC_DIRS: &[&str] = &[
     ".ai/protocols",
     ".ai/node/engine/kinds",
     ".ai/node/verbs",
-    ".ai/node/aliases",
     ".ai/config/agent",
     ".ai/config/keys/trusted",
 ];

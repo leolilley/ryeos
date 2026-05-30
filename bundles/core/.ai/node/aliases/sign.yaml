@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-23T12:06:25Z:1556b566671bb4d10dc854ecbae20945e7cb76d3664b51051dbf7f139919f483:fvRir9an092AYsuC85R9eHwnLteFdfraRtlcM/wy3ahPFHuyFIEzm5eNDly9ljG8EOFO2/padSTzdx1+nwMGCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["sign"]
-verb: sign
-description: "Cryptographically sign an item by canonical ref"
-positional_field: item_ref

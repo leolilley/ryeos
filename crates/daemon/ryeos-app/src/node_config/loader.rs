@@ -7,7 +7,7 @@
 //!
 //!   .ai/node/routes/ui/cockpit/snapshot.yaml
 //!   .ai/node/routes/ui/cockpit/items/list.yaml
-//!   .ai/node/aliases/web.yaml
+//!   .ai/node/verbs/web.yaml
 //!
 //! The section invariant requires:
 //! - The file lives under `.ai/node/<section>/` (any depth)
@@ -281,7 +281,7 @@ impl<'a> BootstrapLoader<'a> {
 
     /// Phase 2: full node-config scan across all sections and sources.
     ///
-    /// For sections with `EffectiveBundleRootsAndState` policy (routes, verbs, aliases),
+    /// For sections with `EffectiveBundleRootsAndState` policy (routes, verbs),
     /// scans recursively into subdirectories. For `SystemAndState` (bundles), scans flat.
     pub fn load_full(
         &self,
@@ -291,7 +291,6 @@ impl<'a> BootstrapLoader<'a> {
         let mut loaded_bundles: Vec<BundleRecord> = Vec::new();
         let mut routes: Vec<RawRouteSpec> = Vec::new();
         let mut verbs: Vec<VerbRecord> = Vec::new();
-        let mut aliases: Vec<AliasRecord> = Vec::new();
 
         for section_name in section_table.section_names() {
             let section = section_table.get(section_name).context(format!(
@@ -320,7 +319,7 @@ impl<'a> BootstrapLoader<'a> {
                     continue;
                 }
 
-                // Routes, verbs, aliases: recursive scan.
+                // Routes and verbs: recursive scan.
                 // Bundles: flat scan (enforced by policy type, but we handle
                 // both for correctness — bundles don't actually reach here
                 // with subdirectories).
@@ -433,23 +432,6 @@ impl<'a> BootstrapLoader<'a> {
                             .clone();
                         record.source_file = verified.path.clone();
                         verbs.push(record);
-                    } else if section_name == "aliases" {
-                        let record =
-                            section
-                                .parse(&verified.name, &verified.body)
-                                .with_context(|| {
-                                    format!(
-                                        "failed to parse alias record {}",
-                                        verified.path.display()
-                                    )
-                                })?;
-                        let mut record: AliasRecord = record
-                            .as_any()
-                            .downcast_ref::<AliasRecord>()
-                            .context("AliasSection::parse returned wrong type")?
-                            .clone();
-                        record.source_file = verified.path.clone();
-                        aliases.push(record);
                     }
                 }
             }
@@ -459,6 +441,9 @@ impl<'a> BootstrapLoader<'a> {
             }
         }
 
+        let aliases = synthesize_aliases_from_verbs(&verbs);
+        check_alias_collisions(&aliases)?;
+
         Ok(NodeConfigSnapshot {
             bundles: loaded_bundles,
             routes,
@@ -466,6 +451,55 @@ impl<'a> BootstrapLoader<'a> {
             aliases,
         })
     }
+}
+
+fn synthesize_aliases_from_verbs(verbs: &[VerbRecord]) -> Vec<AliasRecord> {
+    let mut aliases = Vec::new();
+
+    for verb in verbs {
+        for alias in &verb.aliases {
+            aliases.push(AliasRecord {
+                category: "aliases".into(),
+                section: "aliases".into(),
+                tokens: alias.tokens.clone(),
+                verb: verb.name.clone(),
+                description: alias
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| verb.description.clone()),
+                deprecated: alias.deprecated,
+                replacement_tokens: alias.replacement_tokens.clone(),
+                removed_in: alias.removed_in.clone(),
+                positional_field: alias.positional_field.clone(),
+                positional_forms: alias.positional_forms.clone(),
+                project_resolution: alias.project_resolution,
+                source_file: verb.source_file.clone(),
+            });
+        }
+    }
+
+    aliases
+}
+
+fn check_alias_collisions(records: &[AliasRecord]) -> Result<()> {
+    let mut by_tokens: HashMap<Vec<String>, &AliasRecord> = HashMap::new();
+
+    for record in records {
+        if let Some(prev) = by_tokens.get(&record.tokens) {
+            bail!(
+                "node config aliases have duplicate tokens {:?}: \
+                 first routes to '{}' from '{}', second routes to '{}' from '{}'",
+                record.tokens,
+                prev.verb,
+                prev.source_file.display(),
+                record.verb,
+                record.source_file.display(),
+            );
+        }
+        by_tokens.insert(record.tokens.clone(), record);
+    }
+
+    Ok(())
 }
 
 /// Strip the signature line(s) from the top of a file.
@@ -870,5 +904,65 @@ mod tests {
                 .any(|route| route.path == "/ui/api/items/effective"),
             "browser-session effective item route should load from nested route directory"
         );
+    }
+
+    #[test]
+    fn synthesize_aliases_from_verbs_inherits_description_and_source() {
+        let verb = VerbRecord {
+            category: "verbs".into(),
+            section: "verbs".into(),
+            name: "sign".into(),
+            description: "Sign an item".into(),
+            execute: Some("tool:ryeos/core/sign".into()),
+            aliases: vec![crate::node_config::sections::verb::VerbAliasRecord {
+                tokens: vec!["sign".into()],
+                description: None,
+                deprecated: None,
+                replacement_tokens: None,
+                removed_in: None,
+                positional_field: Some("item_ref".into()),
+                positional_forms: Vec::new(),
+                project_resolution: crate::node_config::sections::alias::ProjectResolution::None,
+            }],
+            source_file: PathBuf::from("/bundle/.ai/node/verbs/sign.yaml"),
+        };
+
+        let aliases = synthesize_aliases_from_verbs(&[verb]);
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].tokens, vec!["sign"]);
+        assert_eq!(aliases[0].verb, "sign");
+        assert_eq!(aliases[0].description, "Sign an item");
+        assert_eq!(aliases[0].positional_field.as_deref(), Some("item_ref"));
+        assert_eq!(
+            aliases[0].source_file,
+            PathBuf::from("/bundle/.ai/node/verbs/sign.yaml")
+        );
+    }
+
+    #[test]
+    fn check_alias_collisions_errors_on_duplicate_tokens() {
+        let first = AliasRecord {
+            category: "aliases".into(),
+            section: "aliases".into(),
+            tokens: vec!["sign".into()],
+            verb: "sign".into(),
+            description: "Sign".into(),
+            deprecated: None,
+            replacement_tokens: None,
+            removed_in: None,
+            positional_field: None,
+            positional_forms: Vec::new(),
+            project_resolution: crate::node_config::sections::alias::ProjectResolution::None,
+            source_file: PathBuf::from("/a.yaml"),
+        };
+        let mut second = first.clone();
+        second.verb = "other".into();
+        second.source_file = PathBuf::from("/b.yaml");
+
+        let err = check_alias_collisions(&[first, second]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("duplicate tokens"), "got: {msg}");
+        assert!(msg.contains("/a.yaml"), "got: {msg}");
+        assert!(msg.contains("/b.yaml"), "got: {msg}");
     }
 }

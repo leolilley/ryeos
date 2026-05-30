@@ -183,8 +183,8 @@ async fn cli_execute_defaults_project_path_to_dot() {
     let ryeos = ryeos_binary();
 
     // The CLI sends raw tokens (`["status"]`) to the daemon's /execute
-    // endpoint. The daemon resolves via its AliasRegistry (loaded from
-    // the core bundle's `node/aliases/`). RYEOS_SYSTEM_SPACE_DIR locates
+    // endpoint. The daemon resolves via its AliasRegistry (synthesized from
+    // the core bundle's verb aliases). RYEOS_SYSTEM_SPACE_DIR locates
     // the daemon's bind socket. HOME points the user tier at the harness
     // user space (where `populate_user_space` pre-loaded the
     // trusted-signers fixture).

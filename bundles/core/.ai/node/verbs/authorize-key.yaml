@@ -1,6 +1,9 @@
-# ryeos:signed:2026-05-23T12:06:24Z:8fbf6345599826a8f65af6db5b3928a6ea35350301cde956bfe33e1d3a351d95:jSx6g8ZhyVp08QdGvIG1H2sDnNs3/vCwDG2o9B1X0fBUBPyhQmpT65+MshlpoS60WwcmbVln+j8qPgVjbGyCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:e53f7a3925965146419dd8b9cbad1c5b81c6ffe22189dc4e7b07d68e7b6a6ed1:JHsf7xcZobOzfein0O7ILGiPttSGtya5flfqOhvIwxXQUZOgVsblotAziquk+sbsn/qzSVMP/8yX/pSNNqaSAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: authorize-key
-description: "Authorize a key with scoped capabilities"
+description: Authorize a key with scoped capabilities
 execute: service:identity/authorize-key
+aliases:
+- tokens:
+  - authorize-key

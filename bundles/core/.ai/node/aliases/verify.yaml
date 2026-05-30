@@ -1,8 +1,0 @@
-# ryeos:signed:2026-05-25T07:00:32Z:ae6792e05db69abec30a3ef834a29e7b793e60b30b368b2bfa38e635d20041bc:ydm/P3MfdOF1WhR+keyg13RvHvwvE8mZibPjyDdyypuPgjK+kTjPLsAQvEnjiPyJg1NtWysN8Ts7J2l5VXOKDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["verify"]
-verb: verify
-description: "Verify an item's signature and integrity"
-positional_field: item_ref
-project_resolution: optional

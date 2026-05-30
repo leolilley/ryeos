@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-25T07:57:17Z:30edb678b5594557af0d95e3e53a7dacfb6ddf1d95a1efdc5d22ebb81cc710dd:3qMs1DdHgV+ncsctLIf0yu9nA5tTMW7zcEDt426R3ujJPtsZF/TdelV6BFm5fL8rbScJAZWFTFGp/0cD8KoIAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["remote", "list"]
-verb: remote-list
-description: "List configured remote nodes"
-project_resolution: optional

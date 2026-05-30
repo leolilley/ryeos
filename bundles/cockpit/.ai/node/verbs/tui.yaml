@@ -1,6 +1,11 @@
-# ryeos:signed:2026-05-25T06:23:39Z:e48057a1c503578698ad28ec33844ad1620c5908ef4165e3dbbd1a0636ac961a:PkKqFYXDeXCk+kJDyPYJ39CJ+bwo7lyIYpnJDzQ9GBzu85tJ/nxubye+74Kr578keDrZaMxVyabnLfTRV0CpAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:32Z:a375115e9704914d36f19e08baf1bdcdbca6a7d704a1b6cfe1995d1d62ded5df:R32l2OVmqoSeS9ust3KdVHDVX6XmmCFpM7sIg2E7yg72nNbIJ9u3lIx+jbolyl3w9rFgYNBAOmlwTJ437aznBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: tui
-description: "Open the terminal RyeOS cockpit"
+description: Open the terminal RyeOS cockpit
 execute: client:ryeos/tui
+aliases:
+- tokens:
+  - tui
+  positional_field: surface
+  project_resolution: optional

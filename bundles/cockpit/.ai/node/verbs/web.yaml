@@ -1,6 +1,11 @@
-# ryeos:signed:2026-05-25T06:23:39Z:5b4300f0c9ddf7e9e01199ff84ac29fc1dbb6e3a2777bd35024a2112828da28d:XLlLyZy9EDq6YRLg0ajZkFntLmk8St4m68sAVTKKRPeHkPbPxeg7/nld+/Y+Z4+S8VCvlGoFrJzYsvh/0U2ZAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:32Z:0c88bad304ea30230959183fe9fb4fe04de11eb52c1a21b90f29316b2b8fc39a:fLaCcJSxcAMa4dPa+8drdp2VvcrCek5H5Mlz75swvedomNoNbpjSZeP5A1ENDUmFIOQDswwcU0u/xElbXGH9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: web
-description: "Open the browser RyeOS cockpit"
+description: Open the browser RyeOS cockpit
 execute: client:ryeos/web
+aliases:
+- tokens:
+  - web
+  positional_field: surface
+  project_resolution: optional

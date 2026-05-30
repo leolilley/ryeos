@@ -1,8 +1,0 @@
-# ryeos:signed:2026-05-23T14:30:40Z:b8be4cc5af270dcc8e9a894cda8e1e858a67a0cb13002cfc7b0990996bcc884c:lcz/qtaMxdO0ltwWmJNNYGv1lUnnAm6T5mCHzuGEUYZ/BhTHkiFpuzw+unnWbjhT5ir1+f/1/1BRWdLT5wlQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["web"]
-verb: web
-description: "Open the browser RyeOS cockpit"
-positional_field: surface
-project_resolution: optional

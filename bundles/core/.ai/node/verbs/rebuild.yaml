@@ -1,6 +1,10 @@
-# ryeos:signed:2026-05-23T12:06:24Z:40dd740e5be91af7347951387ab64ebdf5017c8b5326a6385ee776385027d2ad:SzCvPO7StzlA3RzJSiJMk/BrPzyfC/A6AqCQMDJAf4+cYf2RNKqygJU54mLyITaahSbsPWqfW1Z0d87p/E6OCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:07a8797dedaf09cd56932ae1c22f44afc214f9784eb4ff16889ce20fd25d7983:BS4OMVGIkvWIeininQFs8oBJr8rtyP91SV2TUwKZOxf1rMfA5UhWjQ7EWaizvApcrJreZRZzgFOF5MZnyViDDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: rebuild
-description: "Rebuild the daemon's projection database"
+description: Rebuild the daemon's projection database
 execute: service:rebuild
+aliases:
+- tokens:
+  - rebuild
+  description: Rebuild the daemon's CAS and manifest

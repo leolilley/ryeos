@@ -4,11 +4,11 @@
 //! Each declares `section: <name>` which must match the section it was
 //! loaded under.
 //!
-//! Section directories (routes, verbs, aliases) support recursive subfolders:
+//! Section directories (routes, verbs) support recursive subfolders:
 //!
 //!   .ai/node/routes/ui/cockpit/snapshot.yaml
 //!   .ai/node/routes/ui/cockpit/items/list.yaml
-//!   .ai/node/aliases/web.yaml
+//!   .ai/node/verbs/web.yaml
 //!
 //! The `bundles` section remains flat (no subdirectories).
 //!
@@ -16,7 +16,7 @@
 //! - **Phase 1 (bootstrap):** load only the `bundles` section from
 //!   `system_space_dir` to determine effective bundle roots.
 //! - **Phase 2 (full pass):** build the engine with effective roots, then
-//!   scan all sections from all sources (recursive for routes/verbs/aliases).
+//!   scan all sections from all sources (recursive for routes/verbs).
 //!
 //! Trust model: signed-required, fail-closed. Unsigned, tampered, or
 //! untrusted-signer items are startup errors.
@@ -66,7 +66,7 @@ pub struct NodeConfigSnapshot {
     pub routes: Vec<RawRouteSpec>,
     /// All loaded verb definitions (security-canonical).
     pub verbs: Vec<VerbRecord>,
-    /// All loaded alias definitions (routing sugar).
+    /// Alias definitions synthesized from verb descriptors (routing sugar).
     pub aliases: Vec<AliasRecord>,
 }
 
@@ -103,7 +103,6 @@ impl SectionTable {
     /// Build the section table with all known sections.
     pub fn new() -> Self {
         let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
-        sections.insert("aliases", Box::new(sections::alias::AliasSection));
         sections.insert("bundles", Box::new(sections::bundle::BundleSection));
         sections.insert("routes", Box::new(sections::route::RouteSection));
         sections.insert("verbs", Box::new(sections::verb::VerbSection));

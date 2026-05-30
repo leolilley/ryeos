@@ -1,6 +1,15 @@
-# ryeos:signed:2026-05-23T12:06:24Z:b1a62e158846efc50722ab045013444ab0966a3fcb81ef368a98bfa7c1c34793:aRzqFRxfiEPTNjEkMjsqNqAI0taPeTIeU6QGJTPagnVJ91RxocH0yfe2rs2ITBiTH8f1tnI4oNgj/Dwl9VgWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:31Z:41cb5577f05cd5a342c3ea509f1ca7579e1cc7fb2bf0c2816d80c4e4b28eaf53:djOPe35rDWTBINcAauM8CE2PmH4Z/Fl/KaF2F3OLBzUFajArG+ADNdUKrZQzkrQc2XMncsQ729n6E5lVBzkhBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-status
-description: "Check a remote node's status and public key"
+description: Check a remote node's status and public key
 execute: service:remote/status
+aliases:
+- tokens:
+  - remote
+  - status
+  project_resolution: optional
+  positional_field: remote
+  positional_forms:
+  - slots:
+    - field: remote
