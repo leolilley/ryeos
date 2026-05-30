@@ -117,6 +117,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                                 name: req.remote.clone(),
                                 url: client.base_url().to_string(),
                                 principal_id: String::new(),
+                                signing_key: String::new(),
                                 site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
                                 vault_fingerprint: String::new(),
                                 ingest_ignore: fetched.clone(),

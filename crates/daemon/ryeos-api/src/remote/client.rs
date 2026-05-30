@@ -95,6 +95,10 @@ impl RemoteClient {
                 .as_str()
                 .context("missing fingerprint in /public-key response")?
                 .to_string(),
+            signing_key: body["signing_key"]
+                .as_str()
+                .context("missing signing_key in /public-key response; re-run remote configure against an updated remote daemon")?
+                .to_string(),
             vault_fingerprint: body["vault_fingerprint"]
                 .as_str()
                 .context("missing vault_fingerprint in /public-key response")?
@@ -780,6 +784,8 @@ fn canonicalize_path(path_and_query: &str) -> String {
 pub struct PublicKeyResponse {
     pub principal_id: String,
     pub fingerprint: String,
+    /// Remote daemon Ed25519 verifying key in `ed25519:<base64>` form.
+    pub signing_key: String,
     pub vault_fingerprint: String,
     /// Daemon site identity (e.g. `"site:my-hostname"`).
     /// Discovered from the remote's `/public-key` response.

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-30T05:09:03Z:aca0533c480372961954375f6e1085456240310e1c7417a94c2889cd079120fc:mUmGoCvkzc8PPThcTiL2mgCNanZisyjvO75DwndAWGWPDs5zEI6DXp4FNTT5WRNaGj5mUQw2IwejC+9twH1gCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-30T05:28:40Z:230403db167eda4d6ed1d7c90d0579f123fdc69534e69ebe29535aacd4215fec:EnmtQs8AHQqDaOywTw0rzCfnFI42VE4k+5WbQXZ2CqJLx846Zwb8/oeERz+VMA0kcgdED6YsnX+CFBIroIugAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: service
 endpoint: remote.import-admitted-root
 required_caps: ["ryeos.execute.service.remote.import-admitted-root"]
@@ -7,7 +7,7 @@ schema:
   project: string?
   subject_hash: string
   policy: string?
-  expected_signing_key: string
+  expected_signing_key: string?
   max_objects: number?
   max_blobs: number?
   max_object_bytes: number?

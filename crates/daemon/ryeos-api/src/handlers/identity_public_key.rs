@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use base64::Engine as _;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -20,10 +21,15 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let principal_id = state.identity.principal_id();
     let fingerprint = state.identity.fingerprint().to_string();
+    let signing_key = format!(
+        "ed25519:{}",
+        base64::engine::general_purpose::STANDARD.encode(state.identity.verifying_key().as_bytes())
+    );
     let site_id = state.threads.site_id().to_string();
     let mut resp = serde_json::json!({
         "principal_id": principal_id,
         "fingerprint": fingerprint,
+        "signing_key": signing_key,
         "site_id": site_id,
     });
     if let Some(ref vfp) = state.vault_fingerprint {

@@ -56,12 +56,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let mut remotes = config::load_remotes_at(&config::remotes_config_path(&target_root))?;
     let vault_fp = pubkey.vault_fingerprint.clone();
+    let signing_key = pubkey.signing_key.clone();
     remotes.insert(
         req.remote.clone(),
         config::RemoteConfig {
             name: req.remote.clone(),
             url: req.url.clone(),
             principal_id: pubkey.principal_id.clone(),
+            signing_key: pubkey.signing_key,
             site_id: pubkey.site_id.clone(),
             vault_fingerprint: pubkey.vault_fingerprint,
             ingest_ignore,
@@ -79,6 +81,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "config_path": config::remotes_config_path(&target_root),
         "url": req.url,
         "principal_id": pubkey.principal_id,
+        "signing_key": signing_key,
         "fingerprint": pubkey.fingerprint,
         "vault_fingerprint": vault_fp,
         "site_id": pubkey.site_id,

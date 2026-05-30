@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use base64::Engine as _;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -26,10 +25,10 @@ pub struct Request {
     pub subject_hash: String,
     #[serde(default = "default_policy")]
     pub policy: String,
-    /// Expected remote Ed25519 signing key in `ed25519:<base64>` form.
-    /// This is intentionally explicit until remote config stores pinned
-    /// daemon signing keys.
-    pub expected_signing_key: String,
+    /// Optional override for the configured pinned remote Ed25519 signing key.
+    /// When omitted, the remote config's pinned `signing_key` is used.
+    #[serde(default)]
+    pub expected_signing_key: Option<String>,
     #[serde(default)]
     pub max_objects: Option<usize>,
     #[serde(default)]
@@ -63,7 +62,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         config::get_remote(&remotes, &req.remote)?
     };
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
-    let expected_key = decode_expected_signing_key(&req.expected_signing_key)?;
+    let expected_key = match req.expected_signing_key.as_deref() {
+        Some(input) => decode_expected_signing_key(input)?,
+        None => remote_cfg.pinned_signing_key().with_context(|| {
+            format!(
+                "remote '{}' has no valid pinned signing_key; run `ryeos remote configure --remote {}`",
+                remote_cfg.name, remote_cfg.name,
+            )
+        })?,
+    };
     let expected_issuer = format!("fp:{}", lillux::crypto::fingerprint(&expected_key));
 
     let result = import::import_admitted_root_with_job(
@@ -106,16 +113,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 }
 
 fn decode_expected_signing_key(input: &str) -> Result<lillux::crypto::VerifyingKey> {
-    let b64 = input
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| anyhow::anyhow!("expected_signing_key must start with ed25519:"))?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .context("failed to decode expected_signing_key")?;
-    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
-        anyhow::anyhow!("expected_signing_key must contain 32 raw Ed25519 public key bytes")
-    })?;
-    Ok(lillux::crypto::VerifyingKey::from_bytes(&bytes)?)
+    config::decode_signing_key(input).context("invalid expected_signing_key")
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -134,6 +132,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn decode_expected_signing_key_requires_ed25519_prefix() {

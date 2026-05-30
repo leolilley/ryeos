@@ -825,6 +825,7 @@ fn map_forward_error_to_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
 
     fn make_raw(auth: &str, body: RawRequestBody) -> RawRouteSpec {
@@ -953,10 +954,16 @@ mod tests {
     }
 
     fn make_remote(name: &str, site_id: &str) -> RemoteConfig {
+        let signing_key = lillux::crypto::SigningKey::from_bytes(&[name.as_bytes()[0]; 32]);
+        let verifying_key = signing_key.verifying_key();
         RemoteConfig {
             name: name.to_string(),
             url: format!("https://{name}.example.com"),
-            principal_id: format!("fp:{name}"),
+            principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
+            signing_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes())
+            ),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".into(),
             ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
