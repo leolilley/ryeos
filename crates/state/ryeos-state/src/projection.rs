@@ -1154,7 +1154,6 @@ pub struct SyncJobUpdate {
     pub fetched_hashes: Vec<String>,
     pub last_error: Option<String>,
     pub result: Option<serde_json::Value>,
-    pub increment_attempts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1524,7 +1523,7 @@ impl ProjectionDb {
                 state = ?, phase = ?,
                 roots_json = COALESCE(?, roots_json), heads_json = COALESCE(?, heads_json),
                 uploaded_hashes_json = ?, fetched_hashes_json = ?,
-                attempt_count = attempt_count + ?, last_error = ?, result_json = ?,
+                last_error = ?, result_json = ?,
                 updated_at = ?, finished_at = ?
              WHERE job_id = ?",
                 rusqlite::params![
@@ -1534,11 +1533,6 @@ impl ProjectionDb {
                     heads_json,
                     uploaded_json,
                     fetched_json,
-                    if update.increment_attempts {
-                        1_i64
-                    } else {
-                        0_i64
-                    },
                     &update.last_error,
                     result_json,
                     &now,
@@ -2507,7 +2501,6 @@ mod tests {
                 fetched_hashes: vec![fetched_hash.clone()],
                 last_error: None,
                 result: None,
-                increment_attempts: true,
             },
         )
         .unwrap();
@@ -2517,7 +2510,7 @@ mod tests {
         assert_eq!(running.phase, "fetching_closure");
         assert_eq!(running.uploaded_hashes, vec![uploaded_hash]);
         assert_eq!(running.fetched_hashes, vec![fetched_hash]);
-        assert_eq!(running.attempt_count, 1);
+        assert_eq!(running.attempt_count, 0);
         assert!(running.finished_at.is_none());
 
         db.update_sync_job(
@@ -2531,7 +2524,6 @@ mod tests {
                 fetched_hashes: running.fetched_hashes,
                 last_error: None,
                 result: Some(serde_json::json!({"accepted": true})),
-                increment_attempts: false,
             },
         )
         .unwrap();
@@ -2539,7 +2531,7 @@ mod tests {
         let completed = db.get_sync_job("job:alpha").unwrap().unwrap();
         assert_eq!(completed.state, SyncJobState::Completed);
         assert_eq!(completed.phase, "done");
-        assert_eq!(completed.attempt_count, 1);
+        assert_eq!(completed.attempt_count, 0);
         assert_eq!(
             completed.result,
             Some(serde_json::json!({"accepted": true}))
@@ -2655,7 +2647,6 @@ mod tests {
                     fetched_hashes: vec![],
                     last_error: None,
                     result: None,
-                    increment_attempts: false,
                 },
             )
             .unwrap_err();
@@ -2732,7 +2723,6 @@ mod tests {
                 fetched_hashes: vec![],
                 last_error: None,
                 result: None,
-                increment_attempts: false,
             },
         )
         .unwrap();
@@ -2747,7 +2737,6 @@ mod tests {
                 fetched_hashes: vec![],
                 last_error: None,
                 result: None,
-                increment_attempts: false,
             },
         )
         .unwrap();
@@ -2797,7 +2786,6 @@ mod tests {
                 fetched_hashes: vec![],
                 last_error: None,
                 result: None,
-                increment_attempts: true,
             },
         )
         .unwrap();
@@ -2812,7 +2800,6 @@ mod tests {
                 fetched_hashes: vec![],
                 last_error: None,
                 result: None,
-                increment_attempts: false,
             },
         )
         .unwrap();
@@ -2848,7 +2835,6 @@ mod tests {
                     fetched_hashes: vec![],
                     last_error: None,
                     result: None,
-                    increment_attempts: false,
                 },
             )
             .unwrap_err();
@@ -2867,7 +2853,6 @@ mod tests {
                 fetched_hashes: vec![],
                 last_error: None,
                 result: None,
-                increment_attempts: true,
             },
         )
         .unwrap();
@@ -2882,7 +2867,6 @@ mod tests {
                 fetched_hashes: vec![],
                 last_error: Some("boom".to_string()),
                 result: None,
-                increment_attempts: false,
             },
         )
         .unwrap();
@@ -2899,7 +2883,6 @@ mod tests {
                     fetched_hashes: vec![],
                     last_error: None,
                     result: None,
-                    increment_attempts: false,
                 },
             )
             .unwrap_err();

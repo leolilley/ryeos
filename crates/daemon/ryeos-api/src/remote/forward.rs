@@ -183,7 +183,6 @@ pub async fn execute_unary_forward(
             fetched_hashes: Vec::new(),
             last_error: None,
             result: None,
-            increment_attempts: false,
         },
     )?;
 
@@ -218,7 +217,6 @@ pub async fn execute_unary_forward(
                     fetched_hashes: Vec::new(),
                     last_error: Some(message.clone()),
                     result: None,
-                    increment_attempts: false,
                 },
             );
             RemoteForwardError::PushFailed(message)
@@ -247,7 +245,6 @@ pub async fn execute_unary_forward(
                             fetched_hashes: Vec::new(),
                             last_error: Some(err.to_string()),
                             result: None,
-                            increment_attempts: false,
                         },
                     );
                     return Err(err);
@@ -268,7 +265,6 @@ pub async fn execute_unary_forward(
             fetched_hashes: Vec::new(),
             last_error: None,
             result: None,
-            increment_attempts: false,
         },
     )?;
 
@@ -306,7 +302,6 @@ pub async fn execute_unary_forward(
                     fetched_hashes: Vec::new(),
                     last_error: Some(message.clone()),
                     result: None,
-                    increment_attempts: false,
                 },
             )?;
             return Err(RemoteForwardError::ExecuteFailed(message));
@@ -334,7 +329,6 @@ pub async fn execute_unary_forward(
                 fetched_hashes: Vec::new(),
                 last_error: Some("remote result missing snapshot hash".to_string()),
                 result: Some(remote_result.clone()),
-                increment_attempts: false,
             },
         )?;
         return Err(RemoteForwardError::MissingSnapshotHash);
@@ -351,7 +345,6 @@ pub async fn execute_unary_forward(
             fetched_hashes: vec![result_snapshot_hash.clone()],
             last_error: None,
             result: None,
-            increment_attempts: false,
         },
     )?;
 
@@ -397,7 +390,6 @@ pub async fn execute_unary_forward(
                 fetched_hashes: vec![result_snapshot_hash.clone()],
                 last_error: Some(err.to_string()),
                 result: Some(remote_result.clone()),
-                increment_attempts: false,
             },
         );
         err
@@ -430,7 +422,6 @@ pub async fn execute_unary_forward(
             fetched_hashes: vec![result_snapshot_hash.clone()],
             last_error: None,
             result: Some(completed_result),
-            increment_attempts: false,
         },
     )?;
 
