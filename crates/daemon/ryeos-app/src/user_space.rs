@@ -61,14 +61,72 @@ pub fn write_yaml_atomic<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize,
 {
+    ensure_private_parent_dirs(path)?;
     let body = serde_yaml::to_string(value)
         .with_context(|| format!("failed to serialize {}", path.display()))?;
-    crate::io::atomic::atomic_write(path, body.as_bytes())
+    crate::io::atomic::atomic_write(path, body.as_bytes())?;
+    set_private_file_permissions(path)?;
+    Ok(())
+}
+
+fn ensure_private_parent_dirs(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
+        let mut dirs = Vec::new();
+        let mut current = Some(parent);
+        let mut found_ai_dir = false;
+        while let Some(dir) = current {
+            dirs.push(dir);
+            if dir.file_name().is_some_and(|name| name == ".ai") {
+                found_ai_dir = true;
+                break;
+            }
+            current = dir.parent();
+        }
+        let dirs_to_chmod: Vec<&Path> = if found_ai_dir {
+            dirs.into_iter().rev().collect()
+        } else {
+            vec![parent]
+        };
+        for dir in dirs_to_chmod {
+            set_private_dir_permissions(dir)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to chmod 0700 {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to chmod 0600 {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[derive(Debug, Default, Serialize, serde::Deserialize, PartialEq)]
     struct Demo {
@@ -101,5 +159,46 @@ mod tests {
         let loaded: Demo = read_yaml_or_default(&path).unwrap();
         assert_eq!(loaded.value, "ok");
         assert!(!path.with_extension("tmp~").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn yaml_helpers_write_private_files_and_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested/config.yaml");
+
+        write_yaml_atomic(&path, &Demo { value: "ok".into() }).unwrap();
+
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn yaml_helpers_make_ai_dir_chain_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(".ai")
+            .join("state")
+            .join("studio")
+            .join("recent.yaml");
+
+        write_yaml_atomic(&path, &Demo { value: "ok".into() }).unwrap();
+
+        for dir in [".ai", ".ai/state", ".ai/state/studio"] {
+            let mode = std::fs::metadata(tmp.path().join(dir))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "{dir} should be private");
+        }
     }
 }
