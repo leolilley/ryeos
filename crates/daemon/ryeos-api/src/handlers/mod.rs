@@ -54,6 +54,7 @@ pub mod remote_pull;
 pub mod remote_push;
 pub mod remote_run;
 pub mod remote_status;
+pub mod remote_sync_admitted_heads;
 pub mod remote_sync_project_ai;
 pub mod remote_thread_status;
 pub mod remote_threads;
@@ -139,6 +140,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_execute::DESCRIPTOR,
     remote_import_admitted_head::DESCRIPTOR,
     remote_import_admitted_root::DESCRIPTOR,
+    remote_sync_admitted_heads::DESCRIPTOR,
     remote_run::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
     remote_threads::DESCRIPTOR,

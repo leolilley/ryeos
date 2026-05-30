@@ -15,18 +15,22 @@ use tokio::net::TcpListener;
 
 use ryeos_api::handlers::{
     admission_attestations_for_subject, admission_submit, federation_heads_list,
-    objects_closure_get, remote_import_admitted_head,
+    objects_closure_get, remote_import_admitted_head, remote_sync_admitted_heads,
 };
 use ryeos_api::remote::config::{self, RemoteConfig};
 use ryeos_app::state::AppState;
 use ryeos_state::{CasEntryKind, CasEntryState};
 
 fn store_subject(state: &AppState) -> String {
+    store_subject_with_root(state, "T-remote-import-e2e")
+}
+
+fn store_subject_with_root(state: &AppState, chain_root_id: &str) -> String {
     let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
     cas.store_object(&json!({
         "kind": "chain_state",
         "schema": 1,
-        "chain_root_id": "T-remote-import-e2e",
+        "chain_root_id": chain_root_id,
         "prev_chain_state_hash": null,
         "last_event_hash": null,
         "last_chain_seq": 0,
@@ -216,6 +220,26 @@ fn install_remote(local: &AppState, cfg: RemoteConfig) {
     config::save_remotes(&local.config.system_space_dir, &remotes).unwrap();
 }
 
+async fn admit_subject(state: Arc<AppState>, subject_hash: String) -> String {
+    let admitted = admission_submit::handle(
+        admission_submit::Request {
+            subject_hash,
+            policy: "local-node-v1".to_string(),
+            claim: "accepted".to_string(),
+            max_objects: 16,
+            max_blobs: 16,
+            max_object_bytes: 4096,
+            max_blob_bytes: 4096,
+            max_total_blob_bytes: 4096,
+            max_links_per_object: 16,
+        },
+        state,
+    )
+    .await
+    .unwrap();
+    admitted["attestation_hash"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn import_admitted_head_mirrors_remote_closure_and_records_job() {
     let (_remote_tmp, remote_state) = test_state::build_test_state();
@@ -305,6 +329,127 @@ async fn import_admitted_head_mirrors_remote_closure_and_records_job() {
 }
 
 #[tokio::test]
+async fn sync_admitted_heads_mirrors_missing_heads_and_is_idempotent() {
+    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let subject_a = store_subject_with_root(&remote_state, "T-remote-import-e2e-a");
+    let subject_b = store_item_subject_with_blob(&remote_state);
+    let subject_c = store_subject_with_root(&remote_state, "T-remote-import-e2e-c");
+    let remote_state = Arc::new(remote_state);
+    let attestation_a = admit_subject(remote_state.clone(), subject_a.clone()).await;
+    let attestation_b = admit_subject(remote_state.clone(), subject_b.clone()).await;
+    let attestation_c = admit_subject(remote_state.clone(), subject_c.clone()).await;
+
+    let (base_url, server) = start_remote_server(remote_state.clone()).await.unwrap();
+    let (_local_tmp, local_state) = test_state::build_test_state();
+    install_remote(
+        &local_state,
+        remote_config("upstream", &base_url, &remote_state),
+    );
+    let local_state = Arc::new(local_state);
+
+    let first = remote_sync_admitted_heads::handle(
+        remote_sync_admitted_heads::Request {
+            remote: "upstream".to_string(),
+            project: None,
+            policy: "local-node-v1".to_string(),
+            limit: 100,
+            max_imports: Some(2),
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_response_bytes: Some(64 * 1024),
+            max_links_per_object: Some(16),
+        },
+        local_state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["listed"].as_u64().unwrap(), 3);
+    assert_eq!(first["imported_heads"].as_u64().unwrap(), 2);
+    assert_eq!(first["skipped"].as_u64().unwrap(), 1);
+
+    let second = remote_sync_admitted_heads::handle(
+        remote_sync_admitted_heads::Request {
+            remote: "upstream".to_string(),
+            project: None,
+            policy: "local-node-v1".to_string(),
+            limit: 100,
+            max_imports: None,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_response_bytes: Some(64 * 1024),
+            max_links_per_object: Some(16),
+        },
+        local_state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second["listed"].as_u64().unwrap(), 3);
+    assert_eq!(second["imported_heads"].as_u64().unwrap(), 1);
+    assert_eq!(second["skipped"].as_u64().unwrap(), 2);
+
+    let third = remote_sync_admitted_heads::handle(
+        remote_sync_admitted_heads::Request {
+            remote: "upstream".to_string(),
+            project: None,
+            policy: "local-node-v1".to_string(),
+            limit: 100,
+            max_imports: None,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_response_bytes: Some(64 * 1024),
+            max_links_per_object: Some(16),
+        },
+        local_state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(third["listed"].as_u64().unwrap(), 3);
+    assert_eq!(third["imported_heads"].as_u64().unwrap(), 0);
+    assert_eq!(third["skipped"].as_u64().unwrap(), 3);
+
+    local_state
+        .state_store
+        .with_state_db(|db| {
+            for hash in [&subject_a, &subject_b, &subject_c] {
+                let entry = db
+                    .get_cas_entry(CasEntryKind::Object, hash)?
+                    .expect("subject should be mirrored");
+                assert_eq!(entry.state, CasEntryState::Mirrored);
+                assert_eq!(entry.source_peer.as_deref(), Some("upstream"));
+            }
+            for hash in [&attestation_a, &attestation_b, &attestation_c] {
+                let entry = db
+                    .get_cas_entry(CasEntryKind::Object, hash)?
+                    .expect("attestation should be mirrored");
+                assert_eq!(entry.state, CasEntryState::Mirrored);
+                assert_eq!(entry.source_peer.as_deref(), Some("upstream"));
+            }
+            let job = db
+                .get_sync_job(first["job_id"].as_str().unwrap())?
+                .expect("batch sync job should be recorded");
+            assert_eq!(job.state.as_str(), "completed");
+            assert_eq!(job.peer.as_deref(), Some("upstream"));
+            assert_eq!(job.operation_type, "remote_sync_admitted_heads");
+            Ok::<_, anyhow::Error>(())
+        })
+        .unwrap();
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn import_admitted_head_rejects_wrong_pinned_key() {
     let (_remote_tmp, remote_state) = test_state::build_test_state();
     let subject_hash = store_subject(&remote_state);
@@ -363,6 +508,63 @@ async fn import_admitted_head_rejects_wrong_pinned_key() {
         format!("{err:#}").contains("failed to verify federated head"),
         "unexpected error: {err:#}"
     );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn sync_admitted_heads_rejects_wrong_pinned_key_before_importing() {
+    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let subject_hash = store_subject(&remote_state);
+    let remote_state = Arc::new(remote_state);
+    admit_subject(remote_state.clone(), subject_hash.clone()).await;
+
+    let (base_url, server) = start_remote_server(remote_state.clone()).await.unwrap();
+    let (_local_tmp, local_state) = test_state::build_test_state();
+    let mut cfg = remote_config("upstream", &base_url, &remote_state);
+    let wrong_key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
+    cfg.signing_key = format!(
+        "ed25519:{}",
+        base64::engine::general_purpose::STANDARD.encode(wrong_key.as_bytes())
+    );
+    cfg.principal_id = format!("fp:{}", lillux::crypto::fingerprint(&wrong_key));
+    install_remote(&local_state, cfg);
+    let local_state = Arc::new(local_state);
+
+    let err = remote_sync_admitted_heads::handle(
+        remote_sync_admitted_heads::Request {
+            remote: "upstream".to_string(),
+            project: None,
+            policy: "local-node-v1".to_string(),
+            limit: 100,
+            max_imports: None,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_response_bytes: Some(64 * 1024),
+            max_links_per_object: Some(16),
+        },
+        local_state.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("failed to verify federated head"),
+        "unexpected error: {err:#}"
+    );
+    local_state
+        .state_store
+        .with_state_db(|db| {
+            assert!(db
+                .get_cas_entry(CasEntryKind::Object, &subject_hash)?
+                .is_none());
+            Ok::<_, anyhow::Error>(())
+        })
+        .unwrap();
 
     server.abort();
 }
@@ -456,6 +658,14 @@ fn import_services_expose_safe_default_and_admin_escape_hatch() {
     assert_eq!(
         ryeos_api::handlers::remote_import_admitted_root::DESCRIPTOR.required_caps,
         &["ryeos.execute.service.remote.admin"]
+    );
+    assert_eq!(
+        remote_sync_admitted_heads::DESCRIPTOR.endpoint,
+        "remote.sync-admitted-heads"
+    );
+    assert_eq!(
+        remote_sync_admitted_heads::DESCRIPTOR.required_caps,
+        &["ryeos.execute.service.remote.sync-admitted-heads"]
     );
     assert!(!ryeos_api::handlers::ALL
         .iter()
