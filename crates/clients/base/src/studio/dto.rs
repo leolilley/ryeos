@@ -137,6 +137,26 @@ pub struct StudioKnownProjectDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioOpenProjectDto {
+    #[serde(default)]
+    pub project: StudioKnownProjectDto,
+    #[serde(default)]
+    pub session: StudioOpenProjectSessionDto,
+    #[serde(default)]
+    pub recent: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioOpenProjectSessionDto {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StudioRemoteDto {
     #[serde(default)]
     pub name: String,

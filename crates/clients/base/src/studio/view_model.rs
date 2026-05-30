@@ -346,7 +346,7 @@ fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm
         ViewSpec::Projects => StudioViewVm::Rows {
             title: "Projects".to_string(),
             columns: vec!["Name".to_string(), "Root".to_string(), "Status".to_string()],
-            rows: project_rows(core),
+            rows: rows_for(core, &tile.view, Some(tile_id)),
         },
         ViewSpec::Trust => StudioViewVm::Placeholder {
             title: "Trust".to_string(),
@@ -392,7 +392,7 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
         .collect()
 }
 
-fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 7] {
+fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 8] {
     [
         (
             "Graph",
@@ -404,6 +404,7 @@ fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 7] {
             "RyeOS objects",
             ViewSpec::SpaceBrowser { project: None },
         ),
+        ("Projects", "Known local roots", ViewSpec::Projects),
         ("Files", "Project files", ViewSpec::Files),
         ("Threads", "Runs and events", ViewSpec::ThreadList),
         ("Services", "Daemon endpoints", ViewSpec::Services),
@@ -558,8 +559,9 @@ fn project_rows(core: &StudioCore) -> Vec<StudioRowVm> {
         .unwrap_or_default()
         .into_iter()
         .map(|project| {
+            let local_id = project.local_id.clone();
             row(
-                project.local_id,
+                local_id.clone(),
                 if project.name.is_empty() {
                     project.root.clone()
                 } else {
@@ -574,7 +576,9 @@ fn project_rows(core: &StudioCore) -> Vec<StudioRowVm> {
                     }
                     .to_string(),
                 ),
-                None,
+                project
+                    .exists
+                    .then_some(StudioAction::OpenProject { local_id }),
             )
         })
         .collect()
@@ -687,6 +691,7 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
                 )
             })
             .collect(),
+        ViewSpec::Projects => project_rows(core),
         _ => Vec::new(),
     };
     if let Some(cursor) = tile_id.and_then(|tile_id| selected_cursor(core, tile_id)) {

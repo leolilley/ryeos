@@ -1,6 +1,7 @@
 use super::dto::{
     StudioFileReadDto, StudioFilesDto, StudioGcStatusDto, StudioItemInspectionDto, StudioItemsDto,
-    StudioSchedulesDto, StudioSnapshotDto, StudioThreadInspectionDto, StudioThreadsDto,
+    StudioOpenProjectDto, StudioSchedulesDto, StudioSnapshotDto, StudioThreadInspectionDto,
+    StudioThreadsDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::event::{StudioAction, StudioEvent, StudioFilterField, StudioUiEvent};
@@ -236,6 +237,14 @@ impl StudioCore {
                 self.bump_generation();
                 Vec::new()
             }
+            StudioAction::OpenProject { local_id } => {
+                if self.is_read_only() {
+                    self.notice("This Studio session is read-only.", StudioTone::Warn);
+                    Vec::new()
+                } else {
+                    vec![self.emit(StudioEffectKind::OpenProject { local_id })]
+                }
+            }
             StudioAction::ListFiles {
                 tile_id,
                 root,
@@ -456,11 +465,11 @@ impl StudioCore {
             }
             ViewSpec::Schedules => vec![self.emit(StudioEffectKind::FetchSchedules)],
             ViewSpec::GcStatus => vec![self.emit(StudioEffectKind::FetchGcStatus)],
+            ViewSpec::Projects => vec![self.emit(StudioEffectKind::FetchProjects)],
             ViewSpec::Overview
             | ViewSpec::Remotes
             | ViewSpec::Services
             | ViewSpec::ItemInspector
-            | ViewSpec::Projects
             | ViewSpec::Trust
             | ViewSpec::Graph { .. }
             | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchSnapshot)],
@@ -509,6 +518,51 @@ impl StudioCore {
                         core.data.projects = Some(projects);
                     },
                 );
+            }
+            StudioEffectResultKind::ProjectOpened => {
+                let opened = match serde_json::from_value::<StudioOpenProjectDto>(data) {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        self.notice(
+                            format!("Studio could not read project_open response: {error}"),
+                            StudioTone::Danger,
+                        );
+                        return Vec::new();
+                    }
+                };
+                let project_root = opened.session.project_root.or_else(|| {
+                    (!opened.project.root.is_empty()).then_some(opened.project.root.clone())
+                });
+                if let Some(session) = &mut self.data.session {
+                    if !opened.session.session_id.is_empty() {
+                        session.session_id = opened.session.session_id;
+                    }
+                    session.project_path = project_root;
+                    session.read_only = opened.session.read_only;
+                }
+                if let Some(projects) = &mut self.data.projects {
+                    for project in &mut projects.projects {
+                        if project.local_id == opened.project.local_id {
+                            *project = opened.project.clone();
+                            break;
+                        }
+                    }
+                }
+                self.data.snapshot = None;
+                self.data.items = None;
+                self.data.tile_items.clear();
+                self.data.files = None;
+                self.data.tile_files.clear();
+                self.data.file_read = None;
+                self.data.item_inspection = None;
+                self.ui.inspector = StudioInspectorState::Snapshot;
+                self.pending_effects
+                    .retain(|_, kind| !effect_depends_on_project_binding(kind));
+                self.notice(
+                    format!("Opened project {}.", opened.project.name),
+                    StudioTone::Good,
+                );
+                return self.initial_effects();
             }
             StudioEffectResultKind::Threads => {
                 self.apply_parsed::<StudioThreadsDto>(data, "threads", |core, threads| {
@@ -699,6 +753,9 @@ fn effect_result_kind_matches(
             StudioEffectKind::FetchProjects,
             StudioEffectResultKind::Projects
         ) | (
+            StudioEffectKind::OpenProject { .. },
+            StudioEffectResultKind::ProjectOpened
+        ) | (
             StudioEffectKind::FetchThreads { .. },
             StudioEffectResultKind::Threads
         ) | (
@@ -735,6 +792,17 @@ fn effect_result_kind_matches(
     )
 }
 
+fn effect_depends_on_project_binding(kind: &StudioEffectKind) -> bool {
+    matches!(
+        kind,
+        StudioEffectKind::FetchSnapshot
+            | StudioEffectKind::FetchItems { .. }
+            | StudioEffectKind::ListFiles { .. }
+            | StudioEffectKind::ReadFile { .. }
+            | StudioEffectKind::InspectItem { .. }
+    )
+}
+
 fn view_from_route(route: &str) -> Option<ViewSpec> {
     match route.trim_start_matches('#') {
         "" | "graph" => Some(ViewSpec::Graph { graph_id: None }),
@@ -742,6 +810,7 @@ fn view_from_route(route: &str) -> Option<ViewSpec> {
         "threads" => Some(ViewSpec::ThreadList),
         "items" => Some(ViewSpec::SpaceBrowser { project: None }),
         "files" => Some(ViewSpec::Files),
+        "projects" => Some(ViewSpec::Projects),
         "schedules" => Some(ViewSpec::Schedules),
         "gc" => Some(ViewSpec::GcStatus),
         "remotes" => Some(ViewSpec::Remotes),
@@ -757,13 +826,13 @@ fn route_for_view(view: &ViewSpec) -> Option<&'static str> {
         ViewSpec::ThreadList => Some("threads"),
         ViewSpec::SpaceBrowser { project: None } => Some("items"),
         ViewSpec::Files => Some("files"),
+        ViewSpec::Projects => Some("projects"),
         ViewSpec::Schedules => Some("schedules"),
         ViewSpec::GcStatus => Some("gc"),
         ViewSpec::Remotes => Some("remotes"),
         ViewSpec::Services => Some("services"),
         ViewSpec::Thread { .. }
         | ViewSpec::ItemInspector
-        | ViewSpec::Projects
         | ViewSpec::SpaceBrowser { project: Some(_) }
         | ViewSpec::Trust
         | ViewSpec::Graph { graph_id: Some(_) }
@@ -882,6 +951,13 @@ mod tests {
         }
     }
 
+    fn writable_session() -> BrowserSession {
+        BrowserSession {
+            read_only: false,
+            ..session()
+        }
+    }
+
     fn item_tile_id(core: &StudioCore) -> TileId {
         core.workspace
             .tiles
@@ -912,8 +988,143 @@ mod tests {
             now_ms: 0,
         });
 
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(effects[0].kind, StudioEffectKind::FetchSnapshot));
+        assert_eq!(effects.len(), 2);
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
+    }
+
+    #[test]
+    fn open_project_requires_writable_session() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenProject {
+                    local_id: "prj_1".to_string(),
+                },
+            },
+        });
+
+        assert!(effects.is_empty());
+        assert_eq!(core.ui.notices.len(), 1);
+    }
+
+    #[test]
+    fn open_project_effect_result_rebinds_session_and_reloads() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenProject {
+                    local_id: "prj_1".to_string(),
+                },
+            },
+        });
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::OpenProject { local_id }) if local_id == "prj_1"
+        ));
+
+        let reloads = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effects[0].id,
+                ok: true,
+                kind: StudioEffectResultKind::ProjectOpened,
+                data: Some(serde_json::json!({
+                    "project": {
+                        "local_id": "prj_1",
+                        "name": "next",
+                        "root": "/tmp/next",
+                        "exists": true
+                    },
+                    "session": {
+                        "session_id": "session-1",
+                        "project_root": "/tmp/next",
+                        "read_only": false
+                    },
+                    "recent": []
+                })),
+                error: None,
+            },
+        });
+
+        assert_eq!(
+            core.data
+                .session
+                .as_ref()
+                .and_then(|s| s.project_path.as_deref()),
+            Some("/tmp/next")
+        );
+        assert!(reloads
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot)));
+        assert!(reloads
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
+    }
+
+    #[test]
+    fn open_project_invalidates_pending_project_bound_effects() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        let stale = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetFilter {
+                tile_id: tile_id.0.to_string(),
+                field: StudioFilterField::ItemsQuery,
+                value: "old".to_string(),
+            },
+        });
+        let open = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenProject {
+                    local_id: "prj_1".to_string(),
+                },
+            },
+        });
+
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: open[0].id,
+                ok: true,
+                kind: StudioEffectResultKind::ProjectOpened,
+                data: Some(serde_json::json!({
+                    "project": {
+                        "local_id": "prj_1",
+                        "name": "next",
+                        "root": "/tmp/next",
+                        "exists": true
+                    },
+                    "session": {
+                        "session_id": "session-1",
+                        "project_root": "/tmp/next",
+                        "read_only": false
+                    },
+                    "recent": []
+                })),
+                error: None,
+            },
+        });
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: stale[0].id,
+                ok: true,
+                kind: StudioEffectResultKind::Items,
+                data: Some(serde_json::json!({
+                    "items": [{
+                        "canonical_ref": "tool:old/run",
+                        "item_kind": "tool",
+                        "bare_id": "old/run",
+                        "label": "old/run"
+                    }]
+                })),
+                error: None,
+            },
+        });
+
+        assert!(core.data.items.is_none());
+        assert!(core.data.tile_items.is_empty());
     }
 
     #[test]
@@ -930,6 +1141,68 @@ mod tests {
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::FetchItems { limit: 1000, .. })
+        ));
+    }
+
+    #[test]
+    fn projects_view_fetches_projects() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Projects,
+                },
+            },
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::FetchProjects)
+        ));
+    }
+
+    #[test]
+    fn projects_focused_activation_uses_selected_row() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.data.projects = Some(
+            serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "projects": [
+                    {
+                        "local_id": "first",
+                        "name": "first",
+                        "root": "/tmp/first",
+                        "exists": true
+                    },
+                    {
+                        "local_id": "second",
+                        "name": "second",
+                        "root": "/tmp/second",
+                        "exists": true
+                    }
+                ]
+            }))
+            .expect("projects dto should parse"),
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Projects,
+                },
+            },
+        });
+        let tile_id = core.workspace.focused_tile.0.to_string();
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id, index: 1 },
+        });
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::ActivateFocused,
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::OpenProject { local_id }) if local_id == "second"
         ));
     }
 

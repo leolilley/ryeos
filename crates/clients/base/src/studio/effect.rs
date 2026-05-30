@@ -11,6 +11,9 @@ pub struct StudioEffect {
 pub enum StudioEffectKind {
     FetchSnapshot,
     FetchProjects,
+    OpenProject {
+        local_id: String,
+    },
     FetchThreads {
         limit: usize,
     },
@@ -67,6 +70,7 @@ pub struct StudioEffectResult {
 pub enum StudioEffectResultKind {
     Snapshot,
     Projects,
+    ProjectOpened,
     Threads,
     Items,
     Schedules,

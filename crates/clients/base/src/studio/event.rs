@@ -45,6 +45,9 @@ pub enum StudioAction {
         title: String,
         detail: serde_json::Value,
     },
+    OpenProject {
+        local_id: String,
+    },
     ListFiles {
         tile_id: String,
         root: String,

@@ -129,15 +129,14 @@ impl ViewSpec {
             | ViewSpec::ItemInspector
             | ViewSpec::Schedules
             | ViewSpec::GcStatus
+            | ViewSpec::Projects
             | ViewSpec::EventInspector => ViewLocalState::GenericList {
                 cursor: 0,
                 scroll: 0,
             },
-            ViewSpec::Overview
-            | ViewSpec::Remotes
-            | ViewSpec::Projects
-            | ViewSpec::Trust
-            | ViewSpec::Graph { .. } => ViewLocalState::None,
+            ViewSpec::Overview | ViewSpec::Remotes | ViewSpec::Trust | ViewSpec::Graph { .. } => {
+                ViewLocalState::None
+            }
         }
     }
 
