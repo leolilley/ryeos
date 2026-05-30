@@ -36,6 +36,18 @@ fn store_subject(state: &AppState) -> String {
     .unwrap()
 }
 
+fn store_item_subject_with_blob(state: &AppState) -> String {
+    let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
+    let blob_hash = cas.store_blob(b"remote import dependency").unwrap();
+    cas.store_object(&json!({
+        "kind": "item_source",
+        "item_ref": "directive:test/remote-import",
+        "content_blob_hash": blob_hash,
+        "integrity": "none"
+    }))
+    .unwrap()
+}
+
 async fn json_handler<T, Fut>(
     state: Arc<AppState>,
     body: Value,
@@ -61,6 +73,13 @@ where
 
 async fn start_remote_server(
     state: Arc<AppState>,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
+    start_remote_server_with_closure(state, false).await
+}
+
+async fn start_remote_server_with_closure(
+    state: Arc<AppState>,
+    lie_about_closure: bool,
 ) -> Result<(String, tokio::task::JoinHandle<()>)> {
     let app = Router::new()
         .route(
@@ -92,7 +111,10 @@ async fn start_remote_server(
         .route(
             "/objects/closure/get",
             post(
-                |State(state): State<Arc<AppState>>, Json(body): Json<Value>| async move {
+                move |State(state): State<Arc<AppState>>, Json(body): Json<Value>| async move {
+                    if lie_about_closure {
+                        return incomplete_closure_response(state, body).await;
+                    }
                     json_handler::<ryeos_api::handlers::objects_closure_describe::Request, _>(
                         state,
                         body,
@@ -110,6 +132,65 @@ async fn start_remote_server(
         let _ = axum::serve(listener, app).await;
     });
     Ok((format!("http://{addr}"), handle))
+}
+
+async fn incomplete_closure_response(
+    state: Arc<AppState>,
+    body: Value,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let roots = body.get("roots").and_then(Value::as_array).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "roots must be an array" })),
+        )
+    })?;
+    let root = roots
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "missing root" })),
+            )
+        })?
+        .to_string();
+    let cas = lillux::cas::CasStore::new(state.state_store.cas_root().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{e:#}") })),
+        )
+    })?);
+    let value = cas.get_object(&root).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{e:#}") })),
+        )
+    })?;
+    let Some(value) = value else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "root not found" })),
+        ));
+    };
+    Ok(Json(json!({
+        "closure": {
+            "roots": [root.clone()],
+            "complete": true,
+            "object_hashes": [root.clone()],
+            "blob_hashes": [],
+            "missing_objects": [],
+            "missing_blobs": [],
+            "malformed_objects": [],
+            "unsupported_objects": []
+        },
+        "object_bytes": 0,
+        "blob_bytes": 0,
+        "entries": [{
+            "hash": root,
+            "kind": "object",
+            "value": value,
+        }]
+    })))
 }
 
 fn remote_config(name: &str, url: &str, remote: &AppState) -> RemoteConfig {
@@ -284,4 +365,99 @@ async fn import_admitted_head_rejects_wrong_pinned_key() {
     );
 
     server.abort();
+}
+
+#[tokio::test]
+async fn import_admitted_head_rejects_remote_closure_completeness_lie_before_mirroring() {
+    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let subject_hash = store_item_subject_with_blob(&remote_state);
+    let remote_state = Arc::new(remote_state);
+    admission_submit::handle(
+        admission_submit::Request {
+            subject_hash: subject_hash.clone(),
+            policy: "local-node-v1".to_string(),
+            claim: "accepted".to_string(),
+            max_objects: 16,
+            max_blobs: 16,
+            max_object_bytes: 4096,
+            max_blob_bytes: 4096,
+            max_total_blob_bytes: 4096,
+            max_links_per_object: 16,
+        },
+        remote_state.clone(),
+    )
+    .await
+    .unwrap();
+
+    let (base_url, server) = start_remote_server_with_closure(remote_state.clone(), true)
+        .await
+        .unwrap();
+    let (_local_tmp, local_state) = test_state::build_test_state();
+    install_remote(
+        &local_state,
+        remote_config("upstream", &base_url, &remote_state),
+    );
+    let local_state = Arc::new(local_state);
+
+    let err = remote_import_admitted_head::handle(
+        remote_import_admitted_head::Request {
+            remote: "upstream".to_string(),
+            project: None,
+            policy: "local-node-v1".to_string(),
+            subject_hash: Some(subject_hash.clone()),
+            limit: 100,
+            max_objects: Some(16),
+            max_blobs: Some(16),
+            max_object_bytes: Some(4096),
+            max_total_object_bytes: Some(4096),
+            max_blob_bytes: Some(4096),
+            max_total_blob_bytes: Some(4096),
+            max_response_bytes: Some(64 * 1024),
+            max_links_per_object: Some(16),
+        },
+        local_state.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("incomplete after local verification"),
+        "unexpected error: {err:#}"
+    );
+
+    local_state
+        .state_store
+        .with_state_db(|db| {
+            let subject = db
+                .get_cas_entry(CasEntryKind::Object, &subject_hash)?
+                .expect("subject should be staged before local closure verification fails");
+            assert_eq!(subject.state, CasEntryState::Staged);
+            Ok::<_, anyhow::Error>(())
+        })
+        .unwrap();
+
+    server.abort();
+}
+
+#[test]
+fn import_services_expose_safe_default_and_admin_escape_hatch() {
+    assert_eq!(
+        remote_import_admitted_head::DESCRIPTOR.endpoint,
+        "remote.import-admitted-head"
+    );
+    assert_eq!(
+        remote_import_admitted_head::DESCRIPTOR.required_caps,
+        &["ryeos.execute.service.remote.import-admitted-head"]
+    );
+    assert_eq!(
+        ryeos_api::handlers::remote_import_admitted_root::DESCRIPTOR.endpoint,
+        "remote.import-admitted-root-advanced"
+    );
+    assert_eq!(
+        ryeos_api::handlers::remote_import_admitted_root::DESCRIPTOR.required_caps,
+        &["ryeos.execute.service.remote.admin"]
+    );
+    assert!(!ryeos_api::handlers::ALL
+        .iter()
+        .any(|descriptor| descriptor.endpoint == "remote.import-admitted-root"));
 }

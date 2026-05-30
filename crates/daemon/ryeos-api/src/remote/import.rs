@@ -14,6 +14,7 @@ use crate::remote::client::{
     AdmissionAttestationRemoteRecord, ObjectsClosureRequestOptions, RemoteClient,
 };
 use ryeos_app::state::AppState;
+use ryeos_state::object_closure::ObjectClosureLimits;
 use ryeos_state::sync::{ExportPayload, ImportAttribution, SyncEntry};
 use ryeos_state::{
     CasEntryKind, CasEntryState, FinishSyncJobAttempt, NewSyncJob, NewSyncJobAttempt,
@@ -221,6 +222,7 @@ pub async fn import_admitted_root(
         &req.expected_key,
     )?;
 
+    let closure_options = req.closure_options.clone();
     let closure = client
         .objects_closure_get(&[req.subject_hash.clone()], req.closure_options)
         .await?;
@@ -242,6 +244,10 @@ pub async fn import_admitted_root(
         source_peer: req.source_peer.clone(),
         job_id: req.job_id.clone(),
     };
+    let _permit = state
+        .write_barrier
+        .try_acquire()
+        .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
     let import = state
         .state_store
         .with_state_db(|db| ryeos_state::sync::import_objects_staged(db, &payload, &attribution))?;
@@ -251,6 +257,7 @@ pub async fn import_admitted_root(
             import.hash_mismatches
         );
     }
+    verify_local_imported_closure(state, &req.subject_hash, &closure_options)?;
 
     let object_hashes = payload
         .entries
@@ -284,6 +291,51 @@ pub async fn import_admitted_root(
         mirrored_objects: object_hashes.len(),
         mirrored_blobs: blob_hashes.len(),
     })
+}
+
+fn verify_local_imported_closure(
+    state: &Arc<AppState>,
+    subject_hash: &str,
+    options: &ObjectsClosureRequestOptions,
+) -> Result<()> {
+    let defaults = ObjectClosureLimits::default();
+    let limits = ObjectClosureLimits {
+        max_objects: options.max_objects.unwrap_or(defaults.max_objects),
+        max_blobs: options.max_blobs.unwrap_or(defaults.max_blobs),
+        max_object_bytes: options
+            .max_object_bytes
+            .unwrap_or(defaults.max_object_bytes),
+        max_blob_bytes: options.max_blob_bytes.unwrap_or(defaults.max_blob_bytes),
+        max_total_blob_bytes: options
+            .max_total_blob_bytes
+            .unwrap_or(defaults.max_total_blob_bytes),
+        max_links_per_object: options
+            .max_links_per_object
+            .unwrap_or(defaults.max_links_per_object),
+    };
+    let cas_root = state.state_store.cas_root()?;
+    let report = ryeos_state::object_closure::collect_object_closure_with_limits(
+        &cas_root,
+        [subject_hash.to_string()],
+        limits,
+    )?;
+    if !report.is_complete() {
+        anyhow::bail!(
+            "imported remote closure is incomplete after local verification: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
+            report.missing_objects.len(),
+            report.missing_blobs.len(),
+            report.malformed_objects.len(),
+            report.unsupported_objects.len(),
+        );
+    }
+    if report.blob_hashes.len() > options.max_blobs.unwrap_or(defaults.max_blobs) {
+        anyhow::bail!(
+            "imported remote closure exceeds max_blobs after local verification: {} > {}",
+            report.blob_hashes.len(),
+            options.max_blobs.unwrap_or(defaults.max_blobs),
+        );
+    }
+    Ok(())
 }
 
 pub fn verify_remote_attestation_record(
