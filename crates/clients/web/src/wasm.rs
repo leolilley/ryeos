@@ -1,7 +1,8 @@
-//! WASM bridge — the shared RyeOS client core running in the browser.
+//! WASM bridge for RyeOS browser clients.
 //!
-//! The browser shell owns transport and DOM events. WASM owns the
-//! `AppModel`, surface layout, reducer, effects, and shared frame rendering.
+//! Studio exports expose the Rust-owned product model, reducer, effects,
+//! semantic view model, and scene model. The older text-surface exports remain
+//! in this module for non-Studio surfaces while Studio is built out.
 
 use wasm_bindgen::prelude::*;
 
@@ -10,6 +11,10 @@ use ryeos_client_base::ids::{RemoteId, ThreadId};
 use ryeos_client_base::input::{InputEvent, Key};
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::model::AppModel;
+use ryeos_client_base::studio::{
+    BrowserSession as StudioBrowserSession, BrowserViewport, StudioCore, StudioEffectResult,
+    StudioEvent,
+};
 use ryeos_client_base::surface::LoadedSurface;
 use ryeos_client_base::update::{
     self, AppEvent, CockpitFileRead, CockpitFilesList, CockpitGcStatus, CockpitItemInspection,
@@ -27,11 +32,20 @@ use serde::Deserialize;
 
 thread_local! {
     static STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
+    static STUDIO: RefCell<Option<StudioCore>> = const { RefCell::new(None) };
 }
 
 struct AppState {
     model: AppModel,
     effects: Vec<ryeos_client_base::effects::Effect>,
+}
+
+fn studio_envelope(
+    core: &StudioCore,
+    effects: Vec<ryeos_client_base::studio::StudioEffect>,
+) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&core.envelope(effects))
+        .map_err(|e| JsValue::from_str(&format!("serialize Studio envelope: {e}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +113,88 @@ fn default_true() -> bool {
 // ---------------------------------------------------------------------------
 // WASM exports — JS calls these
 // ---------------------------------------------------------------------------
+
+/// Start RyeOS Studio, returning the semantic view/scene models and initial effects.
+#[wasm_bindgen]
+pub fn studio_start(
+    session_json: JsValue,
+    viewport_json: JsValue,
+    now_ms: u64,
+) -> Result<JsValue, JsValue> {
+    let session: StudioBrowserSession = serde_wasm_bindgen::from_value(session_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid Studio browser session: {e}")))?;
+    let viewport: BrowserViewport = serde_wasm_bindgen::from_value(viewport_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid Studio viewport: {e}")))?;
+
+    let mut core = StudioCore::new(session, viewport, now_ms);
+    core.bump_generation();
+    let effects = core.initial_effects();
+    let response = studio_envelope(&core, effects)?;
+
+    STUDIO.with(|state| {
+        *state.borrow_mut() = Some(core);
+    });
+
+    Ok(response)
+}
+
+/// Dispatch a browser-neutral Studio event into the Rust reducer.
+#[wasm_bindgen]
+pub fn studio_dispatch(event_json: JsValue) -> Result<JsValue, JsValue> {
+    let event: StudioEvent = serde_wasm_bindgen::from_value(event_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid Studio event: {e}")))?;
+
+    STUDIO.with(|state| {
+        let mut state = state.borrow_mut();
+        let core = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+        let effects = core.dispatch(event);
+        studio_envelope(core, effects)
+    })
+}
+
+/// Apply a browser/daemon effect result to Studio.
+#[wasm_bindgen]
+pub fn studio_apply_effect_result(result_json: JsValue) -> Result<JsValue, JsValue> {
+    let result: StudioEffectResult = serde_wasm_bindgen::from_value(result_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid Studio effect result: {e}")))?;
+
+    STUDIO.with(|state| {
+        let mut state = state.borrow_mut();
+        let core = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+        let effects = core.dispatch(StudioEvent::EffectResult { result });
+        studio_envelope(core, effects)
+    })
+}
+
+/// Return the current Studio view model without mutating state.
+#[wasm_bindgen]
+pub fn studio_view_model() -> Result<JsValue, JsValue> {
+    STUDIO.with(|state| {
+        let state = state.borrow();
+        let core = state
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+        serde_wasm_bindgen::to_value(&core.envelope(Vec::new()).view_model)
+            .map_err(|e| JsValue::from_str(&format!("serialize Studio view model: {e}")))
+    })
+}
+
+/// Return the current Studio scene model without mutating state.
+#[wasm_bindgen]
+pub fn studio_scene_model() -> Result<JsValue, JsValue> {
+    STUDIO.with(|state| {
+        let state = state.borrow();
+        let core = state
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+        serde_wasm_bindgen::to_value(&core.envelope(Vec::new()).scene_model)
+            .map_err(|e| JsValue::from_str(&format!("serialize Studio scene model: {e}")))
+    })
+}
 
 /// Initialize the browser client from the daemon-resolved effective surface.
 #[wasm_bindgen]

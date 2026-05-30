@@ -199,6 +199,71 @@ export function start_with_surface(session_json, effective_surface_json, width, 
 }
 
 /**
+ * Apply a browser/daemon effect result to Studio.
+ * @param {any} result_json
+ * @returns {any}
+ */
+export function studio_apply_effect_result(result_json) {
+    const ret = wasm.studio_apply_effect_result(result_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Dispatch a browser-neutral Studio event into the Rust reducer.
+ * @param {any} event_json
+ * @returns {any}
+ */
+export function studio_dispatch(event_json) {
+    const ret = wasm.studio_dispatch(event_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Return the current Studio scene model without mutating state.
+ * @returns {any}
+ */
+export function studio_scene_model() {
+    const ret = wasm.studio_scene_model();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Start RyeOS Studio, returning the semantic view/scene models and initial effects.
+ * @param {any} session_json
+ * @param {any} viewport_json
+ * @param {bigint} now_ms
+ * @returns {any}
+ */
+export function studio_start(session_json, viewport_json, now_ms) {
+    const ret = wasm.studio_start(session_json, viewport_json, now_ms);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Return the current Studio view model without mutating state.
+ * @returns {any}
+ */
+export function studio_view_model() {
+    const ret = wasm.studio_view_model();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Drain platform effects produced by the shared reducer.
  * @returns {any}
  */

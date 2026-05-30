@@ -1,4 +1,4 @@
-//! `web` — mints a launch token and opens the browser.
+//! `web` — mints a RyeOS Studio launch token and opens the browser.
 //!
 //! This binary is the `cli_exec` target for `client:ryeos/web`. It:
 //! 1. Parses launch args (surface, project, read_only).
@@ -16,10 +16,12 @@ use base64::Engine;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_STUDIO_SURFACE_REF: &str = "surface:ryeos/studio/base";
+
 #[derive(Parser)]
 #[command(name = "web", about = "Launch RyeOS in the browser")]
 struct Cli {
-    /// Surface ref to open (e.g. surface:ryeos/cockpit/base)
+    /// Surface ref backing Studio. Defaults to the current packaged Studio surface id.
     #[arg(long = "surface")]
     surface: Option<String>,
 
@@ -32,7 +34,7 @@ struct Cli {
     read_only: bool,
 
     /// Allow browser actions that can mutate daemon/project state.
-    /// The cockpit defaults to read-only unless this is explicit.
+    /// Studio defaults to read-only unless this is explicit.
     #[arg(long = "allow-actions")]
     allow_actions: bool,
 
@@ -90,11 +92,13 @@ async fn main() -> Result<()> {
     // Build the mint request with parsed args.
     let surface_ref = cli
         .surface
-        .unwrap_or_else(|| "surface:ryeos/cockpit/base".to_string());
+        .unwrap_or_else(|| DEFAULT_STUDIO_SURFACE_REF.to_string());
+
+    let project_path = cli.project.or_else(project_from_cli_env);
 
     let mint_req = MintRequest {
         surface_ref,
-        project_path: cli.project.map(|p| p.to_string_lossy().to_string()),
+        project_path: project_path.map(|p| p.to_string_lossy().to_string()),
         read_only: cli.read_only || !cli.allow_actions,
     };
 
@@ -325,6 +329,15 @@ async fn discover_audience(daemon_url: &str) -> Result<String> {
         .context("public-key response missing 'principal_id'")
 }
 
+fn project_from_cli_env() -> Option<PathBuf> {
+    let value = std::env::var_os("RYEOS_PROJECT_PATH")?;
+    if value.is_empty() || value == "." {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
 // ── Browser launch ─────────────────────────────────────────────────────
 
 fn open_browser(url: &str) -> Result<()> {
@@ -368,12 +381,12 @@ mod tests {
     #[test]
     fn mint_request_serializes_surface() {
         let req = MintRequest {
-            surface_ref: "surface:ryeos/cockpit/base".to_string(),
+            surface_ref: "surface:ryeos/studio/base".to_string(),
             project_path: Some("/tmp/proj".to_string()),
             read_only: false,
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["surface_ref"], "surface:ryeos/cockpit/base");
+        assert_eq!(json["surface_ref"], "surface:ryeos/studio/base");
         assert_eq!(json["project_path"], "/tmp/proj");
         assert_eq!(json["read_only"], false);
     }

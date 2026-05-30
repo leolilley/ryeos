@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-30T04:42:28Z:f07b000284b620f5fc463c11e5f6c22b84b711025aacf583dc0f290ca1439b09:iPhr5rgVcaudU2CiDz+d68mof79OMywOFj4PNPTR86sMgtcF8oYcJ0rVKG08RRskILqrU6BmZ50Ja1mjpsiXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: studio/snapshot
+version: "1.0.0"
+description: Returns a single aggregated snapshot for RyeOS Studio — node identity, health, spaces, bundles, remotes, threads, schedules, and GC state.
+endpoint: ui.studio.snapshot
+availability: daemon_only

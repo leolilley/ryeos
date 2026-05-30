@@ -175,6 +175,7 @@ impl ViewKindSpec {
             ViewKindSpec::SpaceBrowser => ViewLocalState::SpaceBrowser {
                 cursor: 0,
                 query: String::new(),
+                kind: String::new(),
                 scroll: 0,
             },
             ViewKindSpec::Overview
