@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 pub use ryeos_state::project_sync::ProjectSyncScope;
@@ -39,6 +41,9 @@ pub struct RemoteConfig {
     pub url: String,
     /// Pinned principal_id of the remote node (from `/public-key`).
     pub principal_id: String,
+    /// Pinned remote daemon Ed25519 verifying key in `ed25519:<base64>` form.
+    /// This is the trust anchor for verified federation/import surfaces.
+    pub signing_key: String,
     /// Remote node's daemon site identity (e.g. `"site:gpu-node"`).
     /// Discovered from the remote's `/public-key` response during
     /// `remote configure`. Used by target-site forwarding to resolve
@@ -54,6 +59,43 @@ pub struct RemoteConfig {
     /// Canonical local project path -> remote project binding.
     #[serde(default)]
     pub project_bindings: HashMap<String, RemoteProjectBinding>,
+}
+
+impl RemoteConfig {
+    /// Decode and validate the pinned daemon signing key against the
+    /// remote's pinned principal/fingerprint identity.
+    pub fn pinned_signing_key(&self) -> Result<lillux::crypto::VerifyingKey> {
+        let key = decode_signing_key(&self.signing_key)?;
+        let fingerprint = lillux::crypto::fingerprint(&key);
+        let expected_principal = format!("fp:{fingerprint}");
+        if self.principal_id != expected_principal {
+            anyhow::bail!(
+                "remote '{}' principal_id '{}' does not match signing_key fingerprint '{}'",
+                self.name,
+                self.principal_id,
+                expected_principal,
+            );
+        }
+        Ok(key)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            anyhow::bail!("remote name must not be empty");
+        }
+        validate_url(&self.url)?;
+        self.pinned_signing_key()?;
+        if self.site_id.trim().is_empty() {
+            anyhow::bail!("remote '{}' site_id must not be empty", self.name);
+        }
+        if self.vault_fingerprint.trim().is_empty() {
+            anyhow::bail!("remote '{}' vault_fingerprint must not be empty", self.name);
+        }
+        for binding in self.project_bindings.values() {
+            validate_remote_project_path(&binding.remote_project_path)?;
+        }
+        Ok(())
+    }
 }
 
 /// Resolved local/remote project path binding.
@@ -111,7 +153,17 @@ pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
         .with_context(|| format!("invalid remotes config: {}", path.display()))?;
     let mut out = HashMap::with_capacity(file.remotes.len());
     for (name, raw) in file.remotes {
-        match serde_yaml::from_value::<RemoteConfig>(raw) {
+        match serde_yaml::from_value::<RemoteConfig>(raw).and_then(|cfg| {
+            if cfg.name != name {
+                return Err(serde_yaml::Error::custom(format!(
+                    "remote map key '{}' does not match remote.name '{}'",
+                    name, cfg.name,
+                )));
+            }
+            cfg.validate()
+                .map_err(|e| serde_yaml::Error::custom(e.to_string()))?;
+            Ok(cfg)
+        }) {
             Ok(cfg) => {
                 out.insert(name, cfg);
             }
@@ -260,19 +312,48 @@ pub fn validate_url(url: &str) -> Result<()> {
         .parse()
         .with_context(|| format!("invalid URL: {}", url))?;
 
-    let scheme = parsed.scheme();
-    if scheme != "https" {
-        let host = parsed.host_str().unwrap_or("");
-        let is_loopback =
-            host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
-        if !is_loopback {
+    let host = parsed.host_str().unwrap_or("");
+    let is_loopback = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_loopback => {}
+        other => {
             anyhow::bail!(
-                "remote URL must use HTTPS (got '{}'). Loopback addresses are allowed without TLS.",
+                "remote URL must use HTTPS except HTTP loopback (got scheme '{}' in '{}')",
+                other,
                 url
             );
         }
     }
     Ok(())
+}
+
+pub fn decode_signing_key(input: &str) -> Result<lillux::crypto::VerifyingKey> {
+    let b64 = input
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| anyhow::anyhow!("signing_key must start with ed25519:"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .context("failed to decode signing_key")?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signing_key must contain 32 raw Ed25519 public key bytes"))?;
+    Ok(lillux::crypto::VerifyingKey::from_bytes(&bytes)?)
+}
+
+#[cfg(test)]
+fn test_signing_key(seed: u8) -> String {
+    let signing_key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
+    format!(
+        "ed25519:{}",
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes())
+    )
+}
+
+#[cfg(test)]
+fn test_principal_id(seed: u8) -> String {
+    let key = decode_signing_key(&test_signing_key(seed)).unwrap();
+    format!("fp:{}", lillux::crypto::fingerprint(&key))
 }
 
 // ── Target-site forwarding lookup ────────────────────────────────────
@@ -389,6 +470,11 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_non_http_loopback_scheme() {
+        assert!(validate_url("ftp://localhost:7400").is_err());
+    }
+
+    #[test]
     fn roundtrip() {
         let tmpdir = tempfile::tempdir().unwrap();
         let mut remotes = HashMap::new();
@@ -397,7 +483,8 @@ mod tests {
             RemoteConfig {
                 name: "default".into(),
                 url: "https://example.com".into(),
-                principal_id: "fp:abc123".into(),
+                principal_id: test_principal_id(1),
+                signing_key: test_signing_key(1),
                 site_id: "site:example".into(),
                 vault_fingerprint: "sha256:def456".into(),
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig {
@@ -437,7 +524,8 @@ mod tests {
             RemoteConfig {
                 name: "railway".into(),
                 url: "https://example.com".into(),
-                principal_id: "fp:abc123".into(),
+                principal_id: test_principal_id(2),
+                signing_key: test_signing_key(2),
                 site_id: "site:railway".into(),
                 vault_fingerprint: "sha256:def456".into(),
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig {
@@ -457,10 +545,12 @@ mod tests {
     // ── resolve_remote_by_site_id tests ─────────────────────────
 
     fn make_remote(name: &str, site_id: &str) -> RemoteConfig {
+        let seed = name.as_bytes().first().copied().unwrap_or(1);
         RemoteConfig {
             name: name.to_string(),
             url: format!("https://{}.example.com", name),
-            principal_id: format!("fp:{}", name),
+            principal_id: test_principal_id(seed),
+            signing_key: test_signing_key(seed),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".to_string(),
             ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
@@ -524,7 +614,8 @@ mod tests {
             RemoteConfig {
                 name: "old".into(),
                 url: "https://example.com".into(),
-                principal_id: "fp:old".into(),
+                principal_id: test_principal_id(3),
+                signing_key: test_signing_key(3),
                 site_id: MISSING_SITE_ID_SENTINEL.to_string(),
                 vault_fingerprint: "sha256:old".into(),
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
@@ -560,7 +651,8 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            r#"
+            format!(
+                r#"
 remotes:
   legacy:
     name: legacy
@@ -572,12 +664,16 @@ remotes:
   good:
     name: good
     url: https://good.example.com
-    principal_id: fp:good
+    principal_id: {}
+    signing_key: {}
     site_id: site:good
     vault_fingerprint: sha256:good
     ingest_ignore:
       patterns: []
 "#,
+                test_principal_id(4),
+                test_signing_key(4),
+            ),
         )
         .unwrap();
         let loaded = load_remotes(tmpdir.path()).expect(
@@ -603,12 +699,14 @@ remotes:
         std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
         std::fs::write(
             &user_path,
-            r#"
+            format!(
+                r#"
 remotes:
   v2:
     name: v2
     url: https://user-level.example.com
-    principal_id: fp:user
+    principal_id: {}
+    signing_key: {}
     site_id: site:user
     vault_fingerprint: sha256:user
     ingest_ignore:
@@ -616,12 +714,18 @@ remotes:
   user-only:
     name: user-only
     url: https://user-only.example.com
-    principal_id: fp:user-only
+    principal_id: {}
+    signing_key: {}
     site_id: site:user-only
     vault_fingerprint: sha256:user-only
     ingest_ignore:
       patterns: []
 "#,
+                test_principal_id(5),
+                test_signing_key(5),
+                test_principal_id(6),
+                test_signing_key(6),
+            ),
         )
         .unwrap();
 
@@ -629,12 +733,14 @@ remotes:
         std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
         std::fs::write(
             &project_path,
-            r#"
+            format!(
+                r#"
 remotes:
   v2:
     name: v2
     url: https://project-level.example.com
-    principal_id: fp:project
+    principal_id: {}
+    signing_key: {}
     site_id: site:project
     vault_fingerprint: sha256:project
     ingest_ignore:
@@ -642,12 +748,18 @@ remotes:
   project-only:
     name: project-only
     url: https://project-only.example.com
-    principal_id: fp:project-only
+    principal_id: {}
+    signing_key: {}
     site_id: site:project-only
     vault_fingerprint: sha256:project-only
     ingest_ignore:
       patterns: []
 "#,
+                test_principal_id(7),
+                test_signing_key(7),
+                test_principal_id(8),
+                test_signing_key(8),
+            ),
         )
         .unwrap();
 
@@ -686,17 +798,22 @@ remotes:
         std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
         std::fs::write(
             &project_path,
-            r#"
+            format!(
+                r#"
 remotes:
   v2:
     name: v2
     url: https://project-level.example.com
-    principal_id: fp:project
+    principal_id: {}
+    signing_key: {}
     site_id: site:project
     vault_fingerprint: sha256:project
     ingest_ignore:
       patterns: []
 "#,
+                test_principal_id(9),
+                test_signing_key(9),
+            ),
         )
         .unwrap();
 

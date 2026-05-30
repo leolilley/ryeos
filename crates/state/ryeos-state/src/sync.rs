@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::reachability;
 use crate::rebuild;
-use crate::StateDb;
+use crate::{CasEntryKind, CasEntryState, NewCasEntryAttribution, StateDb};
 
 /// A single entry in a sync payload (object or blob).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +59,18 @@ pub struct ImportResult {
     pub bytes_written: usize,
 }
 
+/// Attribution attached to an imported CAS payload.
+///
+/// This is not trust admission. It records where entries came from so later
+/// admission, mirroring, GC, and operator inspection can make deterministic
+/// decisions from the same local index.
+#[derive(Debug, Clone, Default)]
+pub struct ImportAttribution {
+    pub source_principal: Option<String>,
+    pub source_peer: Option<String>,
+    pub job_id: Option<String>,
+}
+
 /// Export all reachable objects for a chain + linked projects.
 ///
 /// Walks the object graph from the signed chain head, collecting every
@@ -73,11 +85,8 @@ pub fn export_chain(
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let head_path = refs_root
-            .join("generic/chains")
-            .join(chain_root_id)
-            .join("head");
-        let signed_ref = crate::refs::read_signed_ref(&head_path)
+        let signed_ref = crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("missing chain head ref for {chain_root_id}"))
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
     };
@@ -139,11 +148,8 @@ pub fn reconcile_export(
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let head_path = refs_root
-            .join("generic/chains")
-            .join(chain_root_id)
-            .join("head");
-        let signed_ref = crate::refs::read_signed_ref(&head_path)
+        let signed_ref = crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("missing chain head ref for {chain_root_id}"))
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
     };
@@ -229,6 +235,7 @@ pub fn import_objects(cas_root: &Path, payload: &ExportPayload) -> Result<Import
 
         // Skip if already present
         if path.exists() {
+            verify_existing_cas_path(&path, &entry.hash)?;
             result.already_present += 1;
             continue;
         }
@@ -247,6 +254,82 @@ pub fn import_objects(cas_root: &Path, payload: &ExportPayload) -> Result<Import
     }
 
     Ok(result)
+}
+
+/// Import objects and record every verified entry in the CAS attribution index.
+///
+/// Newly imported and already-present entries are both recorded as `staged` by
+/// default. A later admission pass can promote them to `accepted`, `mirrored`,
+/// or `rejected` without re-reading the transfer payload.
+pub fn import_objects_staged(
+    db: &StateDb,
+    payload: &ExportPayload,
+    attribution: &ImportAttribution,
+) -> Result<ImportResult> {
+    let mut result = ImportResult::default();
+
+    for entry in &payload.entries {
+        let computed = lillux::sha256_hex(&entry.data);
+        if computed != entry.hash {
+            result.hash_mismatches += 1;
+            continue;
+        }
+
+        let (namespace, ext, entry_kind) = if entry.is_blob {
+            ("blobs", "", CasEntryKind::Blob)
+        } else {
+            ("objects", ".json", CasEntryKind::Object)
+        };
+
+        let path = lillux::shard_path(db.cas_root(), namespace, &entry.hash, ext);
+        if path.exists() {
+            verify_existing_cas_path(&path, &entry.hash)?;
+            result.already_present += 1;
+        } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create parent dir for {}", entry.hash))?;
+            }
+
+            lillux::atomic_write(&path, &entry.data)
+                .with_context(|| format!("failed to write CAS object {}", entry.hash))?;
+
+            result.imported += 1;
+            result.bytes_written += entry.data.len();
+        }
+
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: entry.hash.clone(),
+            entry_kind,
+            bytes: entry.data.len() as u64,
+            source_principal: attribution.source_principal.clone(),
+            source_peer: attribution.source_peer.clone(),
+            job_id: attribution.job_id.clone(),
+            state: CasEntryState::Staged,
+        })
+        .with_context(|| format!("failed to record CAS attribution for {}", entry.hash))?;
+    }
+
+    Ok(result)
+}
+
+fn verify_existing_cas_path(path: &Path, expected_hash: &str) -> Result<()> {
+    let existing = std::fs::read(path).with_context(|| {
+        format!(
+            "failed to read existing CAS entry {} for verification",
+            path.display()
+        )
+    })?;
+    let actual = lillux::sha256_hex(&existing);
+    if actual != expected_hash {
+        anyhow::bail!(
+            "CAS corruption: existing entry at {} hashes to {}, expected {}",
+            path.display(),
+            actual,
+            expected_hash
+        );
+    }
+    Ok(())
 }
 
 /// Finalize an import: sign a local chain head ref and catch up projection.
@@ -278,18 +361,13 @@ pub fn finalize_import(
     }
 
     // Step 2: Sign and write local chain head ref
-    let ref_path = format!("chains/{}/head", chain_root_id);
-    let signed_ref = crate::refs::SignedRef::new(
-        ref_path,
-        chain_head_hash.to_string(),
-        lillux::time::iso8601_now(),
-        signer.fingerprint().to_string(),
-    );
-    let head_ref_path = refs_root
-        .join("generic/chains")
-        .join(chain_root_id)
-        .join("head");
-    crate::refs::write_signed_ref(&head_ref_path, signed_ref, signer)?;
+    crate::refs::write_generic_head_ref(
+        refs_root,
+        "chains",
+        chain_root_id,
+        chain_head_hash,
+        signer,
+    )?;
 
     tracing::info!(
         chain_root_id,
@@ -356,6 +434,11 @@ mod tests {
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 
+    fn object_hash(value: &serde_json::Value) -> String {
+        let canonical = lillux::canonical_json(value);
+        lillux::sha256_hex(canonical.as_bytes())
+    }
+
     fn write_signed_head(refs_root: &Path, chain_root_id: &str, target_hash: &str) {
         let signer = crate::signer::TestSigner::default();
         let ref_path = format!("chains/{}/head", chain_root_id);
@@ -380,25 +463,6 @@ mod tests {
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&refs_root).unwrap();
 
-        let cs_hash = make_hash("cs");
-        let snap_hash = make_hash("snap");
-        let cs = serde_json::json!({
-            "kind": "chain_state",
-            "schema": 1,
-            "chain_root_id": "T-root",
-            "prev_chain_state_hash": null,
-            "last_event_hash": null,
-            "last_chain_seq": 0,
-            "updated_at": "2026-04-23T00:00:00Z",
-            "threads": {
-                "T-root": {
-                    "snapshot_hash": snap_hash,
-                    "last_event_hash": null,
-                    "last_thread_seq": 0,
-                    "status": "created"
-                }
-            }
-        });
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
             "schema": 1,
@@ -428,6 +492,25 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
         });
+        let snap_hash = object_hash(&snap);
+        let cs = serde_json::json!({
+            "kind": "chain_state",
+            "schema": 1,
+            "chain_root_id": "T-root",
+            "prev_chain_state_hash": null,
+            "last_event_hash": null,
+            "last_chain_seq": 0,
+            "updated_at": "2026-04-23T00:00:00Z",
+            "threads": {
+                "T-root": {
+                    "snapshot_hash": snap_hash,
+                    "last_event_hash": null,
+                    "last_thread_seq": 0,
+                    "status": "created"
+                }
+            }
+        });
+        let cs_hash = object_hash(&cs);
 
         write_object(&cas_root, &cs_hash, &cs);
         write_object(&cas_root, &snap_hash, &snap);
@@ -474,6 +557,51 @@ mod tests {
 
         // Re-import should be a no-op (already present)
         let result2 = import_objects(&cas_root, &payload).unwrap();
+        assert_eq!(result2.imported, 0);
+        assert_eq!(result2.already_present, 1);
+    }
+
+    #[test]
+    fn import_objects_staged_records_attribution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(tmp.path()).unwrap();
+
+        let data = b"{\"kind\":\"test\",\"value\":42}";
+        let hash = lillux::sha256_hex(data);
+
+        let payload = ExportPayload {
+            chain_root_id: "T-test".to_string(),
+            chain_head_hash: hash.clone(),
+            entries: vec![SyncEntry {
+                hash: hash.clone(),
+                is_blob: false,
+                data: data.to_vec(),
+            }],
+            total_bytes: data.len(),
+        };
+
+        let attribution = ImportAttribution {
+            source_principal: Some("fp:remote".to_string()),
+            source_peer: Some("remote-a".to_string()),
+            job_id: Some("job-a".to_string()),
+        };
+
+        let result = import_objects_staged(&db, &payload, &attribution).unwrap();
+        assert_eq!(result.imported, 1);
+
+        let entry = db
+            .get_cas_entry(CasEntryKind::Object, &hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.hash, hash);
+        assert_eq!(entry.entry_kind, CasEntryKind::Object);
+        assert_eq!(entry.bytes, data.len() as u64);
+        assert_eq!(entry.state, CasEntryState::Staged);
+        assert_eq!(entry.source_principal.as_deref(), Some("fp:remote"));
+        assert_eq!(entry.source_peer.as_deref(), Some("remote-a"));
+        assert_eq!(entry.job_id.as_deref(), Some("job-a"));
+
+        let result2 = import_objects_staged(&db, &payload, &attribution).unwrap();
         assert_eq!(result2.imported, 0);
         assert_eq!(result2.already_present, 1);
     }
@@ -536,25 +664,6 @@ mod tests {
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&refs_root).unwrap();
 
-        let cs_hash = make_hash("cs");
-        let snap_hash = make_hash("snap");
-        let cs = serde_json::json!({
-            "kind": "chain_state",
-            "schema": 1,
-            "chain_root_id": "T-root",
-            "prev_chain_state_hash": null,
-            "last_event_hash": null,
-            "last_chain_seq": 0,
-            "updated_at": "2026-04-23T00:00:00Z",
-            "threads": {
-                "T-root": {
-                    "snapshot_hash": snap_hash,
-                    "last_event_hash": null,
-                    "last_thread_seq": 0,
-                    "status": "created"
-                }
-            }
-        });
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
             "schema": 1,
@@ -584,6 +693,25 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
         });
+        let snap_hash = object_hash(&snap);
+        let cs = serde_json::json!({
+            "kind": "chain_state",
+            "schema": 1,
+            "chain_root_id": "T-root",
+            "prev_chain_state_hash": null,
+            "last_event_hash": null,
+            "last_chain_seq": 0,
+            "updated_at": "2026-04-23T00:00:00Z",
+            "threads": {
+                "T-root": {
+                    "snapshot_hash": snap_hash,
+                    "last_event_hash": null,
+                    "last_thread_seq": 0,
+                    "status": "created"
+                }
+            }
+        });
+        let cs_hash = object_hash(&cs);
 
         write_object(&cas_root, &cs_hash, &cs);
         write_object(&cas_root, &snap_hash, &snap);

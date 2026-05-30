@@ -1,0 +1,8 @@
+# ryeos:signed:2026-05-30T02:37:54Z:a76fcfeb1986abeca3f7eb523e1d9b77e0f0b7804deebde9e32f348e94d19d13:ygALylj72Pcpqx7u9S3PS41u7YgB1y1Nkdsv5+/l8wehvSZKZ8JkTClfISYIFX2GkYaa+45WTsrNKJUGEJN2Bg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: sync.jobs.list
+required_caps: ["ryeos.execute.service.sync.jobs.list"]
+schema:
+  state: string?
+  limit: number?
+description: "List durable distributed sync jobs with optional state filtering"

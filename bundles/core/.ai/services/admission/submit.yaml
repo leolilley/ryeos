@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-30T02:26:35Z:f419732d3428d9ffde512510bd1762e0d28d696b2616dd31e7c76efcd1282777:MLZFv6AU2NFaZBC/I8B/MFi1emPHnlMSXf9bIHuMZYV4Swc7e2ogIHyqdV9JtvSBjeFnJZZY5VggoVWEJP5kDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: admission.submit
+required_caps: ["ryeos.execute.service.admission.submit"]
+schema:
+  subject_hash: string
+  policy: string
+  claim: string?
+  max_objects: number?
+  max_blobs: number?
+  max_object_bytes: number?
+  max_blob_bytes: number?
+  max_total_blob_bytes: number?
+  max_links_per_object: number?
+description: "Validate a local CAS closure and sign a node admission attestation for its root (claim must be accepted)"

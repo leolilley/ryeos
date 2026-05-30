@@ -258,6 +258,7 @@ pub(crate) async fn upload_missing(
     all_hashes: &[String],
 ) -> Result<(usize, usize)> {
     let has_resp = client.objects_has(all_hashes).await?;
+    let skipped = has_resp.found.len();
     let missing: Vec<String> = has_resp.missing;
 
     let uploaded = if !missing.is_empty() {
@@ -281,7 +282,7 @@ pub(crate) async fn upload_missing(
         0
     };
 
-    Ok((uploaded, all_hashes.len() - missing.len()))
+    Ok((uploaded, skipped))
 }
 
 /// Reject project paths that would walk the entire home directory
