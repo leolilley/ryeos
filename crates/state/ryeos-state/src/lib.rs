@@ -39,7 +39,8 @@ pub use objects::{
 };
 pub use projection::{
     CasEntriesByStateSummary, CasEntryAttribution, CasEntryKind, CasEntryState,
-    NewCasEntryAttribution, NewSyncJob, ProjectionDb, SyncJobRecord, SyncJobState, SyncJobUpdate,
+    FinishSyncJobAttempt, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt, ProjectionDb,
+    SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState, SyncJobUpdate,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore};
 pub use signer::Signer;

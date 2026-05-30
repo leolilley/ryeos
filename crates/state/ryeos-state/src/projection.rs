@@ -173,6 +173,25 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_state ON sync_jobs(state);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_operation_type ON sync_jobs(operation_type);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_peer ON sync_jobs(peer);
+
+CREATE TABLE IF NOT EXISTS sync_job_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+    worker_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled')),
+    phase TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    error TEXT,
+    result_json BLOB,
+    UNIQUE(job_id, attempt_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_job_id ON sync_job_attempts(job_id);
+CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_state ON sync_job_attempts(state);
+CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_worker_id ON sync_job_attempts(worker_id);
 "#;
 
 use crate::sqlite_schema;
@@ -723,6 +742,77 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "sync_job_attempts",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "job_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_number",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "started_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "finished_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "error",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "result_json",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -845,6 +935,24 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["peer"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_sync_job_attempts_job_id",
+                table: "sync_job_attempts",
+                columns: &["job_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_sync_job_attempts_state",
+                table: "sync_job_attempts",
+                columns: &["state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_sync_job_attempts_worker_id",
+                table: "sync_job_attempts",
+                columns: &["worker_id"],
+                unique: false,
+            },
         ],
     }
 }
@@ -948,6 +1056,39 @@ pub enum SyncJobState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncJobAttemptState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl SyncJobAttemptState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            other => anyhow::bail!("unknown sync job attempt state: {other}"),
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
 impl SyncJobState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1014,6 +1155,37 @@ pub struct SyncJobUpdate {
     pub last_error: Option<String>,
     pub result: Option<serde_json::Value>,
     pub increment_attempts: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncJobAttemptRecord {
+    pub attempt_id: String,
+    pub job_id: String,
+    pub attempt_number: u64,
+    pub worker_id: Option<String>,
+    pub state: SyncJobAttemptState,
+    pub phase: String,
+    pub started_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+    pub error: Option<String>,
+    pub result: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSyncJobAttempt {
+    pub attempt_id: String,
+    pub job_id: String,
+    pub worker_id: Option<String>,
+    pub phase: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinishSyncJobAttempt {
+    pub state: SyncJobAttemptState,
+    pub phase: String,
+    pub error: Option<String>,
+    pub result: Option<serde_json::Value>,
 }
 
 impl ProjectionDb {
@@ -1339,6 +1511,196 @@ impl ProjectionDb {
         Ok(())
     }
 
+    pub fn create_sync_job_attempt(
+        &self,
+        attempt: &NewSyncJobAttempt,
+    ) -> anyhow::Result<SyncJobAttemptRecord> {
+        validate_sync_job_id(&attempt.job_id)?;
+        validate_sync_job_id(&attempt.attempt_id)?;
+        validate_non_empty_label("phase", &attempt.phase)?;
+        if let Some(worker_id) = attempt.worker_id.as_deref() {
+            validate_non_empty_label("worker_id", worker_id)?;
+        }
+
+        let (job_state, attempt_count, max_attempts) = self
+            .conn
+            .query_row(
+                "SELECT state, attempt_count, max_attempts FROM sync_jobs WHERE job_id = ?",
+                [&attempt.job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to load sync job state for attempt")?
+            .ok_or_else(|| anyhow::anyhow!("sync job not found: {}", attempt.job_id))?;
+        let job_state = SyncJobState::from_str(&job_state)?;
+        if !matches!(
+            job_state,
+            SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable
+        ) {
+            anyhow::bail!(
+                "cannot create attempt for terminal sync job {} in state {}",
+                attempt.job_id,
+                job_state.as_str()
+            );
+        }
+        if attempt_count >= max_attempts {
+            anyhow::bail!(
+                "sync job {} has exhausted attempts ({attempt_count}/{max_attempts})",
+                attempt.job_id
+            );
+        }
+        let running_attempts: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
+                [&attempt.job_id],
+                |row| row.get(0),
+            )
+            .context("failed to count running sync job attempts")?;
+        if running_attempts > 0 {
+            anyhow::bail!("sync job {} already has a running attempt", attempt.job_id);
+        }
+
+        let attempt_number: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM sync_job_attempts WHERE job_id = ?",
+                [&attempt.job_id],
+                |row| row.get(0),
+            )
+            .context("failed to compute next sync job attempt number")?;
+        let now = lillux::time::iso8601_now();
+        self.conn
+            .execute(
+                "INSERT INTO sync_job_attempts (
+                    attempt_id, job_id, attempt_number, worker_id, state, phase,
+                    started_at, updated_at, finished_at, error, result_json
+                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, NULL, NULL, NULL)",
+                rusqlite::params![
+                    &attempt.attempt_id,
+                    &attempt.job_id,
+                    attempt_number,
+                    &attempt.worker_id,
+                    &attempt.phase,
+                    &now,
+                    &now,
+                ],
+            )
+            .context("failed to create sync job attempt")?;
+        self.conn
+            .execute(
+                "UPDATE sync_jobs SET attempt_count = attempt_count + 1, updated_at = ? WHERE job_id = ?",
+                rusqlite::params![&now, &attempt.job_id],
+            )
+            .context("failed to increment sync job attempt count")?;
+
+        self.get_sync_job_attempt(&attempt.attempt_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("created sync job attempt {} not found", attempt.attempt_id)
+            })
+    }
+
+    pub fn finish_sync_job_attempt(
+        &self,
+        attempt_id: &str,
+        finish: &FinishSyncJobAttempt,
+    ) -> anyhow::Result<()> {
+        validate_sync_job_id(attempt_id)?;
+        validate_non_empty_label("phase", &finish.phase)?;
+        if !finish.state.is_terminal() {
+            anyhow::bail!(
+                "finish_sync_job_attempt requires terminal state, got {}",
+                finish.state.as_str()
+            );
+        }
+        let current_state = self
+            .conn
+            .query_row(
+                "SELECT state FROM sync_job_attempts WHERE attempt_id = ?",
+                [attempt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to load sync job attempt state")?
+            .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
+        let current_state = SyncJobAttemptState::from_str(&current_state)?;
+        if current_state.is_terminal() {
+            anyhow::bail!(
+                "sync job attempt {attempt_id} is already terminal in state {}",
+                current_state.as_str()
+            );
+        }
+        let result_json = finish
+            .result
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .context("failed to serialize sync job attempt result")?;
+        let now = lillux::time::iso8601_now();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sync_job_attempts SET
+                    state = ?, phase = ?, updated_at = ?, finished_at = ?, error = ?, result_json = ?
+                 WHERE attempt_id = ?",
+                rusqlite::params![
+                    finish.state.as_str(),
+                    &finish.phase,
+                    &now,
+                    &now,
+                    &finish.error,
+                    result_json,
+                    attempt_id,
+                ],
+            )
+            .context("failed to finish sync job attempt")?;
+        debug_assert_eq!(changed, 1);
+        Ok(())
+    }
+
+    pub fn get_sync_job_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> anyhow::Result<Option<SyncJobAttemptRecord>> {
+        validate_sync_job_id(attempt_id)?;
+        self.conn
+            .query_row(
+                "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
+                    started_at, updated_at, finished_at, error, result_json
+                 FROM sync_job_attempts WHERE attempt_id = ?",
+                [attempt_id],
+                sync_job_attempt_from_row,
+            )
+            .optional()
+            .context("failed to get sync job attempt")
+    }
+
+    pub fn list_sync_job_attempts(
+        &self,
+        job_id: &str,
+    ) -> anyhow::Result<Vec<SyncJobAttemptRecord>> {
+        validate_sync_job_id(job_id)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
+                    started_at, updated_at, finished_at, error, result_json
+                 FROM sync_job_attempts WHERE job_id = ? ORDER BY attempt_number ASC",
+            )
+            .context("failed to prepare sync job attempt list query")?;
+        let rows = stmt
+            .query_map([job_id], sync_job_attempt_from_row)
+            .context("failed to query sync job attempts")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect sync job attempts")
+    }
+
     pub fn get_sync_job(&self, job_id: &str) -> anyhow::Result<Option<SyncJobRecord>> {
         validate_sync_job_id(job_id)?;
         self.conn
@@ -1443,6 +1805,27 @@ fn validate_non_empty_label(label: &str, value: &str) -> anyhow::Result<()> {
         anyhow::bail!("invalid {label}: {value}");
     }
     Ok(())
+}
+
+fn sync_job_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobAttemptRecord> {
+    let state: String = row.get("state")?;
+    let attempt_number: i64 = row.get("attempt_number")?;
+    let result_json: Option<Vec<u8>> = row.get("result_json")?;
+    Ok(SyncJobAttemptRecord {
+        attempt_id: row.get("attempt_id")?,
+        job_id: row.get("job_id")?,
+        attempt_number: u64::try_from(attempt_number).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        worker_id: row.get("worker_id")?,
+        state: SyncJobAttemptState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        phase: row.get("phase")?,
+        started_at: row.get("started_at")?,
+        updated_at: row.get("updated_at")?,
+        finished_at: row.get("finished_at")?,
+        error: row.get("error")?,
+        result: result_json
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| rusqlite::Error::InvalidQuery))
+            .transpose()?,
+    })
 }
 
 fn sync_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobRecord> {
@@ -2096,6 +2479,197 @@ mod tests {
         assert_eq!(completed_jobs.len(), 1);
         assert_eq!(completed_jobs[0].job_id, "job:alpha");
         assert_eq!(db.count_active_sync_jobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn sync_job_attempt_lifecycle_is_persisted() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:attempts".to_string(),
+            operation_type: "remote_execute".to_string(),
+            peer: Some("node-a".to_string()),
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 2,
+        })
+        .unwrap();
+
+        let first = db
+            .create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: "attempt:one".to_string(),
+                job_id: "job:attempts".to_string(),
+                worker_id: Some("worker-a".to_string()),
+                phase: "pushing".to_string(),
+            })
+            .unwrap();
+        assert_eq!(first.attempt_number, 1);
+        assert_eq!(first.state, SyncJobAttemptState::Running);
+        assert_eq!(first.phase, "pushing");
+        assert_eq!(first.worker_id.as_deref(), Some("worker-a"));
+        assert!(first.finished_at.is_none());
+        assert_eq!(
+            db.get_sync_job("job:attempts")
+                .unwrap()
+                .unwrap()
+                .attempt_count,
+            1
+        );
+
+        let err = db
+            .create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: "attempt:concurrent".to_string(),
+                job_id: "job:attempts".to_string(),
+                worker_id: None,
+                phase: "pushing".to_string(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("already has a running attempt"));
+
+        db.finish_sync_job_attempt(
+            "attempt:one",
+            &FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "push_failed".to_string(),
+                error: Some("network".to_string()),
+                result: Some(serde_json::json!({"retryable": true})),
+            },
+        )
+        .unwrap();
+        let finished = db.get_sync_job_attempt("attempt:one").unwrap().unwrap();
+        assert_eq!(finished.state, SyncJobAttemptState::Failed);
+        assert_eq!(finished.phase, "push_failed");
+        assert_eq!(finished.error.as_deref(), Some("network"));
+        assert_eq!(
+            finished.result,
+            Some(serde_json::json!({"retryable": true}))
+        );
+        assert!(finished.finished_at.is_some());
+
+        let err = db
+            .finish_sync_job_attempt(
+                "attempt:one",
+                &FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Completed,
+                    phase: "done".to_string(),
+                    error: None,
+                    result: None,
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("already terminal"));
+
+        let second = db
+            .create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: "attempt:two".to_string(),
+                job_id: "job:attempts".to_string(),
+                worker_id: Some("worker-b".to_string()),
+                phase: "retrying".to_string(),
+            })
+            .unwrap();
+        assert_eq!(second.attempt_number, 2);
+        assert_eq!(
+            db.list_sync_job_attempts("job:attempts")
+                .unwrap()
+                .into_iter()
+                .map(|attempt| attempt.attempt_id)
+                .collect::<Vec<_>>(),
+            vec!["attempt:one".to_string(), "attempt:two".to_string()]
+        );
+    }
+
+    #[test]
+    fn sync_job_attempts_respect_parent_limits_and_state() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:limited".to_string(),
+            operation_type: "remote_execute".to_string(),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 1,
+        })
+        .unwrap();
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:limited:one".to_string(),
+            job_id: "job:limited".to_string(),
+            worker_id: None,
+            phase: "running".to_string(),
+        })
+        .unwrap();
+        db.finish_sync_job_attempt(
+            "attempt:limited:one",
+            &FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "failed".to_string(),
+                error: None,
+                result: None,
+            },
+        )
+        .unwrap();
+        let err = db
+            .create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: "attempt:limited:two".to_string(),
+                job_id: "job:limited".to_string(),
+                worker_id: None,
+                phase: "retrying".to_string(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("has exhausted attempts"));
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:terminal".to_string(),
+            operation_type: "remote_execute".to_string(),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 1,
+        })
+        .unwrap();
+        db.update_sync_job(
+            "job:terminal",
+            &SyncJobUpdate {
+                state: SyncJobState::Running,
+                phase: "running".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![],
+                fetched_hashes: vec![],
+                last_error: None,
+                result: None,
+                increment_attempts: false,
+            },
+        )
+        .unwrap();
+        db.update_sync_job(
+            "job:terminal",
+            &SyncJobUpdate {
+                state: SyncJobState::Completed,
+                phase: "done".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![],
+                fetched_hashes: vec![],
+                last_error: None,
+                result: None,
+                increment_attempts: false,
+            },
+        )
+        .unwrap();
+        let err = db
+            .create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: "attempt:terminal".to_string(),
+                job_id: "job:terminal".to_string(),
+                worker_id: None,
+                phase: "too_late".to_string(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot create attempt"));
     }
 
     #[test]

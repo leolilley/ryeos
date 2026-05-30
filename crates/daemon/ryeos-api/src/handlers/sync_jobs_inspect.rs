@@ -25,10 +25,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             "status": "missing",
         }));
     };
+    let attempts = state
+        .state_store
+        .with_state_db(|db| db.list_sync_job_attempts(&job.job_id))?;
 
     Ok(serde_json::json!({
         "status": "found",
         "job": crate::handlers::sync_jobs_list::sync_job_to_json(job),
+        "attempts": attempts
+            .into_iter()
+            .map(crate::handlers::sync_jobs_list::sync_job_attempt_to_json)
+            .collect::<Vec<_>>(),
     }))
 }
 

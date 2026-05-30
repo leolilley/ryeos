@@ -1134,6 +1134,8 @@ pub struct SyncJobsInspectResponse {
     pub status: String,
     pub job_id: Option<String>,
     pub job: Option<SyncJobRemoteRecord>,
+    #[serde(default)]
+    pub attempts: Vec<SyncJobAttemptRemoteRecord>,
 }
 
 impl SyncJobsInspectResponse {
@@ -1142,6 +1144,9 @@ impl SyncJobsInspectResponse {
             "missing" => {
                 if self.job.is_some() {
                     anyhow::bail!("missing sync job response must not include job data");
+                }
+                if !self.attempts.is_empty() {
+                    anyhow::bail!("missing sync job response must not include attempts");
                 }
                 if self.job_id.as_deref() != Some(job_id) {
                     anyhow::bail!("sync job inspect missing response id mismatch");
@@ -1158,6 +1163,17 @@ impl SyncJobsInspectResponse {
                         job_id,
                         job.job_id
                     );
+                }
+                for attempt in &self.attempts {
+                    attempt.validate()?;
+                    if attempt.job_id != job_id {
+                        anyhow::bail!(
+                            "sync job inspect attempt id mismatch: expected {}, got {} for {}",
+                            job_id,
+                            attempt.job_id,
+                            attempt.attempt_id
+                        );
+                    }
                 }
             }
             other => anyhow::bail!("unknown sync job inspect status: {other}"),
@@ -1217,10 +1233,54 @@ impl SyncJobRemoteRecord {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SyncJobAttemptRemoteRecord {
+    pub attempt_id: String,
+    pub job_id: String,
+    pub attempt_number: u64,
+    pub worker_id: Option<String>,
+    pub state: String,
+    pub phase: String,
+    pub started_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+    pub error: Option<String>,
+    pub result: Option<Value>,
+}
+
+impl SyncJobAttemptRemoteRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.attempt_id.is_empty() {
+            anyhow::bail!("sync job attempt response missing attempt_id");
+        }
+        if self.job_id.is_empty() {
+            anyhow::bail!("sync job attempt response missing job_id");
+        }
+        if self.attempt_number == 0 {
+            anyhow::bail!("sync job attempt response has zero attempt_number");
+        }
+        parse_remote_sync_job_attempt_state(&self.state)?;
+        if self.phase.is_empty() {
+            anyhow::bail!("sync job attempt response missing phase");
+        }
+        if self.started_at.is_empty() || self.updated_at.is_empty() {
+            anyhow::bail!("sync job attempt response missing timestamps");
+        }
+        Ok(())
+    }
+}
+
 fn parse_remote_sync_job_state(value: &str) -> Result<()> {
     match value {
         "planned" | "running" | "completed" | "failed" | "retryable" | "cancelled" => Ok(()),
         other => anyhow::bail!("unknown sync job state: {other}"),
+    }
+}
+
+fn parse_remote_sync_job_attempt_state(value: &str) -> Result<()> {
+    match value {
+        "running" | "completed" | "failed" | "cancelled" => Ok(()),
+        other => anyhow::bail!("unknown sync job attempt state: {other}"),
     }
 }
 
@@ -1450,12 +1510,65 @@ mod tests {
                 "created_at": "2026-05-30T00:00:00Z",
                 "updated_at": "2026-05-30T00:00:01Z",
                 "finished_at": "2026-05-30T00:00:01Z"
-            }
+            },
+            "attempts": [{
+                "attempt_id": "attempt-a",
+                "job_id": "job-a",
+                "attempt_number": 1,
+                "worker_id": "worker-a",
+                "state": "completed",
+                "phase": "done",
+                "started_at": "2026-05-30T00:00:00Z",
+                "updated_at": "2026-05-30T00:00:01Z",
+                "finished_at": "2026-05-30T00:00:01Z",
+                "error": null,
+                "result": {"ok": true}
+            }]
         }))
         .unwrap();
 
         response.validate_against_request("job-a").unwrap();
         assert!(response.validate_against_request("job-b").is_err());
+
+        let mismatched_attempt: SyncJobsInspectResponse =
+            serde_json::from_value(serde_json::json!({
+                "status": "found",
+                "job": {
+                    "job_id": "job-a",
+                    "operation_type": "mirror_pull",
+                    "peer": null,
+                    "state": "completed",
+                    "phase": "done",
+                    "roots": [],
+                    "heads": [],
+                    "uploaded_hashes": [],
+                    "fetched_hashes": [],
+                    "attempt_count": 1,
+                    "max_attempts": 3,
+                    "last_error": null,
+                    "result": null,
+                    "created_at": "2026-05-30T00:00:00Z",
+                    "updated_at": "2026-05-30T00:00:01Z",
+                    "finished_at": "2026-05-30T00:00:01Z"
+                },
+                "attempts": [{
+                    "attempt_id": "attempt-b",
+                    "job_id": "job-b",
+                    "attempt_number": 1,
+                    "worker_id": null,
+                    "state": "completed",
+                    "phase": "done",
+                    "started_at": "2026-05-30T00:00:00Z",
+                    "updated_at": "2026-05-30T00:00:01Z",
+                    "finished_at": "2026-05-30T00:00:01Z",
+                    "error": null,
+                    "result": null
+                }]
+            }))
+            .unwrap();
+        assert!(mismatched_attempt
+            .validate_against_request("job-a")
+            .is_err());
     }
 
     #[test]

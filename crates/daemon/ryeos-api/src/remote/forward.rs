@@ -26,7 +26,10 @@ use crate::remote::pull::{extract_snapshot_hash, pull_results, PullResultsError}
 use crate::remote::push::{push_project, PushResult};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
-use ryeos_state::{NewSyncJob, SyncJobState, SyncJobUpdate};
+use ryeos_state::{
+    FinishSyncJobAttempt, NewSyncJob, NewSyncJobAttempt, SyncJobAttemptState, SyncJobState,
+    SyncJobUpdate,
+};
 
 /// Request shape for the shared unary forward helper.
 ///
@@ -147,6 +150,7 @@ pub async fn execute_unary_forward(
     req: RemoteForwardRequest<'_>,
 ) -> Result<RemoteForwardResult, RemoteForwardError> {
     let job_id = format!("remote-execute:{}", uuid::Uuid::new_v4());
+    let attempt_id = format!("remote-execute-attempt:{}", uuid::Uuid::new_v4());
     record_sync_job(
         state,
         &NewSyncJob {
@@ -156,6 +160,15 @@ pub async fn execute_unary_forward(
             roots: Vec::new(),
             heads: Vec::new(),
             max_attempts: 1,
+        },
+    )?;
+    record_sync_job_attempt(
+        state,
+        &NewSyncJobAttempt {
+            attempt_id: attempt_id.clone(),
+            job_id: job_id.clone(),
+            worker_id: Some("remote-forward".to_string()),
+            phase: "push_uploading".to_string(),
         },
     )?;
     update_sync_job(
@@ -170,7 +183,7 @@ pub async fn execute_unary_forward(
             fetched_hashes: Vec::new(),
             last_error: None,
             result: None,
-            increment_attempts: true,
+            increment_attempts: false,
         },
     )?;
 
@@ -201,6 +214,16 @@ pub async fn execute_unary_forward(
                     increment_attempts: false,
                 },
             );
+            let _ = finish_sync_job_attempt(
+                state,
+                &attempt_id,
+                FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "push_failed".to_string(),
+                    error: Some(message.clone()),
+                    result: None,
+                },
+            );
             RemoteForwardError::PushFailed(message)
         })?,
         None => {
@@ -221,6 +244,16 @@ pub async fn execute_unary_forward(
                             last_error: Some(err.to_string()),
                             result: None,
                             increment_attempts: false,
+                        },
+                    );
+                    let _ = finish_sync_job_attempt(
+                        state,
+                        &attempt_id,
+                        FinishSyncJobAttempt {
+                            state: SyncJobAttemptState::Failed,
+                            phase: "push_failed".to_string(),
+                            error: Some(err.to_string()),
+                            result: None,
                         },
                     );
                     return Err(err);
@@ -275,6 +308,16 @@ pub async fn execute_unary_forward(
                     increment_attempts: false,
                 },
             )?;
+            finish_sync_job_attempt(
+                state,
+                &attempt_id,
+                FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "remote_execute_failed".to_string(),
+                    error: Some(message.clone()),
+                    result: None,
+                },
+            )?;
             return Err(RemoteForwardError::ExecuteFailed(message));
         }
     };
@@ -294,6 +337,16 @@ pub async fn execute_unary_forward(
                 last_error: Some("remote result missing snapshot hash".to_string()),
                 result: Some(remote_result.clone()),
                 increment_attempts: false,
+            },
+        )?;
+        finish_sync_job_attempt(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "missing_snapshot_hash".to_string(),
+                error: Some("remote result missing snapshot hash".to_string()),
+                result: Some(remote_result.clone()),
             },
         )?;
         return Err(RemoteForwardError::MissingSnapshotHash);
@@ -352,6 +405,16 @@ pub async fn execute_unary_forward(
                 increment_attempts: false,
             },
         );
+        let _ = finish_sync_job_attempt(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "pull_results_failed".to_string(),
+                error: Some(err.to_string()),
+                result: Some(remote_result.clone()),
+            },
+        );
         err
     })?;
 
@@ -375,6 +438,23 @@ pub async fn execute_unary_forward(
                 "user_files_deleted": pull_result.user_files_deleted,
             })),
             increment_attempts: false,
+        },
+    )?;
+    finish_sync_job_attempt(
+        state,
+        &attempt_id,
+        FinishSyncJobAttempt {
+            state: SyncJobAttemptState::Completed,
+            phase: "completed".to_string(),
+            error: None,
+            result: Some(serde_json::json!({
+                "snapshot_hash": pull_result.snapshot_hash,
+                "cas_objects_fetched": pull_result.cas_objects_fetched,
+                "files_updated": pull_result.files_updated,
+                "files_deleted": pull_result.files_deleted,
+                "user_files_updated": pull_result.user_files_updated,
+                "user_files_deleted": pull_result.user_files_deleted,
+            })),
         },
     )?;
 
@@ -406,6 +486,28 @@ fn record_sync_job(
         .state_store
         .with_state_db(|db| db.create_sync_job(job))
         .map(|_| ())
+        .map_err(|err| RemoteForwardError::JobLedgerFailed(format!("{err:#}")))
+}
+
+fn record_sync_job_attempt(
+    state: &std::sync::Arc<AppState>,
+    attempt: &NewSyncJobAttempt,
+) -> Result<(), RemoteForwardError> {
+    state
+        .state_store
+        .with_state_db(|db| db.create_sync_job_attempt(attempt))
+        .map(|_| ())
+        .map_err(|err| RemoteForwardError::JobLedgerFailed(format!("{err:#}")))
+}
+
+fn finish_sync_job_attempt(
+    state: &std::sync::Arc<AppState>,
+    attempt_id: &str,
+    finish: FinishSyncJobAttempt,
+) -> Result<(), RemoteForwardError> {
+    state
+        .state_store
+        .with_state_db(|db| db.finish_sync_job_attempt(attempt_id, &finish))
         .map_err(|err| RemoteForwardError::JobLedgerFailed(format!("{err:#}")))
 }
 

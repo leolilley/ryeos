@@ -66,6 +66,22 @@ pub(crate) fn sync_job_to_json(job: ryeos_state::SyncJobRecord) -> Value {
     })
 }
 
+pub(crate) fn sync_job_attempt_to_json(attempt: ryeos_state::SyncJobAttemptRecord) -> Value {
+    serde_json::json!({
+        "attempt_id": attempt.attempt_id,
+        "job_id": attempt.job_id,
+        "attempt_number": attempt.attempt_number,
+        "worker_id": attempt.worker_id,
+        "state": attempt.state.as_str(),
+        "phase": attempt.phase,
+        "started_at": attempt.started_at,
+        "updated_at": attempt.updated_at,
+        "finished_at": attempt.finished_at,
+        "error": attempt.error,
+        "result": attempt.result,
+    })
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:sync/jobs/list",
     endpoint: "sync.jobs.list",

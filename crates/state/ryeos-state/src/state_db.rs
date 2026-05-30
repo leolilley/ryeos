@@ -15,7 +15,8 @@ use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
 use crate::projection::{
     self, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState, NewCasEntryAttribution,
-    NewSyncJob, ProjectionDb, SyncJobRecord, SyncJobState, SyncJobUpdate,
+    NewSyncJob, NewSyncJobAttempt, ProjectionDb, SyncJobAttemptRecord, SyncJobRecord, SyncJobState,
+    SyncJobUpdate,
 };
 use crate::queries;
 use crate::refs::{GenericHeadRef, SignedRef};
@@ -337,6 +338,35 @@ impl StateDb {
 
     pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
         self.projection.update_sync_job(job_id, update)
+    }
+
+    pub fn create_sync_job_attempt(
+        &self,
+        attempt: &NewSyncJobAttempt,
+    ) -> anyhow::Result<SyncJobAttemptRecord> {
+        self.projection.create_sync_job_attempt(attempt)
+    }
+
+    pub fn finish_sync_job_attempt(
+        &self,
+        attempt_id: &str,
+        finish: &crate::projection::FinishSyncJobAttempt,
+    ) -> anyhow::Result<()> {
+        self.projection.finish_sync_job_attempt(attempt_id, finish)
+    }
+
+    pub fn get_sync_job_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> anyhow::Result<Option<SyncJobAttemptRecord>> {
+        self.projection.get_sync_job_attempt(attempt_id)
+    }
+
+    pub fn list_sync_job_attempts(
+        &self,
+        job_id: &str,
+    ) -> anyhow::Result<Vec<SyncJobAttemptRecord>> {
+        self.projection.list_sync_job_attempts(job_id)
     }
 
     pub fn get_sync_job(&self, job_id: &str) -> anyhow::Result<Option<SyncJobRecord>> {
