@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-30T11:07:40Z:336e8e7b486de9c0eb8f9246c55466bdbef4d889442bc15896a78b20c0fd037f:8jD9zAaHAFL+iC88seXBooQ1FzUmbpQtBuCXDGJTppvCCXSN/d5Qcw25dBRplHddirqgkPiA24h5e/8TCjhuBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/projects/open
+path: /ui/api/studio/projects/open
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/studio/projects/open"

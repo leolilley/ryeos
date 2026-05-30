@@ -146,6 +146,26 @@ impl BrowserSessionStore {
         }
     }
 
+    /// Update the project root bound to an active session.
+    ///
+    /// Returns the updated session. Expired, unknown, or read-only sessions return `None`.
+    pub fn set_project_root(
+        &self,
+        session_id: &str,
+        project_root: Option<String>,
+    ) -> Option<BrowserSession> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id)?;
+        if session.expires_at < Instant::now() {
+            return None;
+        }
+        if session.read_only {
+            return None;
+        }
+        session.project_root = project_root;
+        Some(session.clone())
+    }
+
     /// Evict expired sessions and launch tokens. Called periodically.
     pub fn evict_expired(&self) {
         let now = Instant::now();
@@ -207,6 +227,42 @@ mod tests {
         assert_eq!(session.surface_ref, "surface:ryeos/test/ro");
         assert!(session.read_only);
         assert!(session.project_root.is_none());
+    }
+
+    #[test]
+    fn set_project_root_updates_active_session() {
+        let store = BrowserSessionStore::new();
+        let (session_id, _token) = store.mint_token(test_context());
+
+        let updated = store
+            .set_project_root(&session_id, Some("/tmp/other-project".into()))
+            .expect("active session should update");
+
+        assert_eq!(updated.project_root, Some("/tmp/other-project".into()));
+        assert_eq!(
+            store.get_session(&session_id).unwrap().project_root,
+            Some("/tmp/other-project".into())
+        );
+    }
+
+    #[test]
+    fn set_project_root_rejects_read_only_session() {
+        let store = BrowserSessionStore::new();
+        let (session_id, _token) = store.mint_token(LaunchContext {
+            surface_ref: "surface:ryeos/test/ro".into(),
+            project_path: None,
+            read_only: true,
+            granted_caps: vec![],
+        });
+
+        let updated = store.set_project_root(&session_id, Some("/tmp/project".into()));
+
+        assert!(updated.is_none());
+        assert!(store
+            .get_session(&session_id)
+            .unwrap()
+            .project_root
+            .is_none());
     }
 
     #[test]

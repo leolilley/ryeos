@@ -35,6 +35,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_studio_projects::PROJECTS_ADD_DESCRIPTOR,
     ui_studio_projects::PROJECTS_FORGET_DESCRIPTOR,
     ui_studio_projects::PROJECTS_RESOLVE_DESCRIPTOR,
+    ui_studio_projects::PROJECTS_OPEN_DESCRIPTOR,
     ui_studio_projects::RECENT_TOUCH_DESCRIPTOR,
     ui_studio_projects::RECENT_LIST_DESCRIPTOR,
     ui_studio_projects::CONFIG_GET_DESCRIPTOR,

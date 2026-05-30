@@ -7,13 +7,16 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::{parse_request, HandlerError};
 use ryeos_app::state::AppState;
-use ryeos_app::user_space::{read_yaml_or_default, write_yaml_atomic, UserSpacePaths};
+use ryeos_app::user_space::{
+    read_yaml_or_default, write_yaml_atomic, LocalUserSpaceResolver, UserSpacePaths,
+    UserSpaceResolver, LOCAL_PRINCIPAL_ID,
+};
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::state::get_ui_state;
@@ -123,6 +126,12 @@ pub struct ResolveProjectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct OpenProjectRequest {
+    pub local_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TouchRecentRequest {
     pub local_id: String,
 }
@@ -144,8 +153,8 @@ pub async fn handle_projects_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let paths = UserSpacePaths::resolve()?;
-    let projects = load_projects(&paths)?;
+    let store = UserSpaceStore::resolve(&ctx)?;
+    let projects = store.load_projects()?;
     Ok(json!({
         "version": projects.version,
         "projects": projects.projects.into_iter().map(project_view).collect::<Vec<_>>()
@@ -158,12 +167,11 @@ pub async fn handle_projects_add(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_writable_session(&ctx, &state)?;
-    let _guard = user_space_yaml_lock().lock().await;
     let req: AddProjectRequest = parse_request(params)?;
     let root = canonical_project_root(&req.root)?;
     let root_text = root.display().to_string();
-    let paths = UserSpacePaths::resolve()?;
-    let mut projects = load_projects(&paths)?;
+    let store = UserSpaceStore::locked(&ctx).await?;
+    let mut projects = store.load_projects()?;
 
     if let Some(existing) = projects.projects.iter_mut().find(|p| p.root == root_text) {
         if let Some(name) = req.name.filter(|s| !s.trim().is_empty()) {
@@ -173,7 +181,7 @@ pub async fn handle_projects_add(
             existing.tags = tags;
         }
         let entry = existing.clone();
-        write_yaml_atomic(&paths.projects_config(), &projects)?;
+        store.write_projects(&projects)?;
         return Ok(json!({ "project": project_view(entry), "created": false }));
     }
 
@@ -189,7 +197,7 @@ pub async fn handle_projects_add(
     };
     projects.projects.push(entry.clone());
     projects.projects.sort_by(|a, b| a.name.cmp(&b.name));
-    write_yaml_atomic(&paths.projects_config(), &projects)?;
+    store.write_projects(&projects)?;
 
     Ok(json!({ "project": project_view(entry), "created": true }))
 }
@@ -200,7 +208,6 @@ pub async fn handle_projects_forget(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_writable_session(&ctx, &state)?;
-    let _guard = user_space_yaml_lock().lock().await;
     let req: ForgetProjectRequest = parse_request(params)?;
     if req.local_id.is_none() && req.root.is_none() {
         return Err(HandlerError::BadRequest("local_id or root is required".into()).into());
@@ -211,8 +218,8 @@ pub async fn handle_projects_forget(
         (None, None) => None,
     };
 
-    let paths = UserSpacePaths::resolve()?;
-    let mut projects = load_projects(&paths)?;
+    let store = UserSpaceStore::locked(&ctx).await?;
+    let mut projects = store.load_projects()?;
     let before = projects.projects.len();
     projects.projects.retain(|p| {
         if let Some(local_id) = req.local_id.as_deref() {
@@ -222,16 +229,16 @@ pub async fn handle_projects_forget(
         }
     });
     let removed = before - projects.projects.len();
-    write_yaml_atomic(&paths.projects_config(), &projects)?;
+    store.write_projects(&projects)?;
 
-    let mut recent = load_recent(&paths)?;
+    let mut recent = store.load_recent()?;
     recent.recent_projects.retain(|r| {
         projects
             .projects
             .iter()
             .any(|project| project.local_id == r.local_id)
     });
-    write_yaml_atomic(&paths.studio_recent(), &recent)?;
+    store.write_recent(&recent)?;
 
     Ok(json!({ "removed": removed }))
 }
@@ -243,8 +250,8 @@ pub async fn handle_projects_resolve(
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
     let req: ResolveProjectRequest = parse_request(params)?;
-    let paths = UserSpacePaths::resolve()?;
-    let projects = load_projects(&paths)?;
+    let store = UserSpaceStore::resolve(&ctx)?;
+    let projects = store.load_projects()?;
     let project = projects
         .projects
         .into_iter()
@@ -253,33 +260,58 @@ pub async fn handle_projects_resolve(
     Ok(json!({ "project": project_view(project) }))
 }
 
+pub async fn handle_projects_open(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    ensure_writable_session(&ctx, &state)?;
+    let req: OpenProjectRequest = parse_request(params)?;
+    let session_id = session_id_from_context(&ctx)
+        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
+    let store = UserSpaceStore::locked(&ctx).await?;
+    let projects = store.load_projects()?;
+    let project = projects
+        .projects
+        .into_iter()
+        .find(|p| p.local_id == req.local_id)
+        .ok_or(HandlerError::NotFound)?;
+
+    let canonical = canonical_project_root(&project.root)?;
+    let root = canonical.display().to_string();
+    let updated_session = get_ui_state(&state)
+        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
+        .browser_sessions
+        .set_project_root(session_id, Some(root.clone()))
+        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+
+    let recent = store.touch_recent_project(&project.local_id)?;
+
+    Ok(json!({
+        "project": project_view(ProjectEntry { root, ..project }),
+        "session": {
+            "session_id": updated_session.session_id,
+            "project_root": updated_session.project_root,
+            "read_only": updated_session.read_only,
+        },
+        "recent": recent.recent_projects,
+    }))
+}
+
 pub async fn handle_recent_touch(
     params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_writable_session(&ctx, &state)?;
-    let _guard = user_space_yaml_lock().lock().await;
     let req: TouchRecentRequest = parse_request(params)?;
-    let paths = UserSpacePaths::resolve()?;
-    let projects = load_projects(&paths)?;
+    let store = UserSpaceStore::locked(&ctx).await?;
+    let projects = store.load_projects()?;
     if !projects.projects.iter().any(|p| p.local_id == req.local_id) {
         return Err(HandlerError::NotFound.into());
     }
 
-    let mut recent = load_recent(&paths)?;
-    recent
-        .recent_projects
-        .retain(|p| p.local_id != req.local_id);
-    recent.recent_projects.insert(
-        0,
-        RecentProject {
-            local_id: req.local_id,
-            opened_at: lillux::time::iso8601_now(),
-        },
-    );
-    recent.recent_projects.truncate(50);
-    write_yaml_atomic(&paths.studio_recent(), &recent)?;
+    let recent = store.touch_recent_project(&req.local_id)?;
     Ok(json!({ "recent": recent.recent_projects }))
 }
 
@@ -289,8 +321,8 @@ pub async fn handle_recent_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let paths = UserSpacePaths::resolve()?;
-    let recent = load_recent(&paths)?;
+    let store = UserSpaceStore::resolve(&ctx)?;
+    let recent = store.load_recent()?;
     Ok(json!(recent))
 }
 
@@ -300,8 +332,8 @@ pub async fn handle_config_get(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let paths = UserSpacePaths::resolve()?;
-    let config = load_studio_config(&paths)?;
+    let store = UserSpaceStore::resolve(&ctx)?;
+    let config = store.load_studio_config()?;
     Ok(json!(config))
 }
 
@@ -311,27 +343,32 @@ pub async fn handle_config_update(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_writable_session(&ctx, &state)?;
-    let _guard = user_space_yaml_lock().lock().await;
     let req: UpdateConfigRequest = parse_request(params)?;
-    let paths = UserSpacePaths::resolve()?;
-    let mut config = load_studio_config(&paths)?;
+    if let Some(theme) = req.theme.as_deref() {
+        validate_choice("theme", theme, &["system", "light", "dark"])?;
+    }
+    if let Some(landing_view) = req.landing_view.as_deref() {
+        validate_choice("landing_view", landing_view, &["projects"])?;
+    }
+    if let Some(default_open_mode) = req.default_open_mode.as_deref() {
+        validate_choice(
+            "default_open_mode",
+            default_open_mode,
+            &["normal", "read_only"],
+        )?;
+    }
+    let store = UserSpaceStore::locked(&ctx).await?;
+    let mut config = store.load_studio_config()?;
     if let Some(theme) = req.theme {
-        validate_choice("theme", &theme, &["system", "light", "dark"])?;
         config.theme = theme;
     }
     if let Some(landing_view) = req.landing_view {
-        validate_choice("landing_view", &landing_view, &["projects"])?;
         config.landing_view = landing_view;
     }
     if let Some(default_open_mode) = req.default_open_mode {
-        validate_choice(
-            "default_open_mode",
-            &default_open_mode,
-            &["normal", "read_only"],
-        )?;
         config.default_open_mode = default_open_mode;
     }
-    write_yaml_atomic(&paths.studio_config(), &config)?;
+    store.write_studio_config(&config)?;
     Ok(json!(config))
 }
 
@@ -364,22 +401,94 @@ fn user_space_yaml_lock() -> &'static Mutex<()> {
     USER_SPACE_YAML_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn load_projects(paths: &UserSpacePaths) -> Result<ProjectsFile> {
-    let projects: ProjectsFile = read_yaml_or_default(&paths.projects_config())?;
-    ensure_version("projects.yaml", projects.version, PROJECTS_VERSION)?;
-    Ok(projects)
+struct UserSpaceStore {
+    paths: UserSpacePaths,
 }
 
-fn load_studio_config(paths: &UserSpacePaths) -> Result<StudioConfigFile> {
-    let config: StudioConfigFile = read_yaml_or_default(&paths.studio_config())?;
-    ensure_version("studio.yaml", config.version, STUDIO_CONFIG_VERSION)?;
-    Ok(config)
+struct LockedUserSpaceStore {
+    store: UserSpaceStore,
+    _guard: MutexGuard<'static, ()>,
 }
 
-fn load_recent(paths: &UserSpacePaths) -> Result<RecentFile> {
-    let recent: RecentFile = read_yaml_or_default(&paths.studio_recent())?;
-    ensure_version("recent.yaml", recent.version, RECENT_VERSION)?;
-    Ok(recent)
+impl UserSpaceStore {
+    fn resolve(ctx: &HandlerContext) -> Result<Self> {
+        Ok(Self {
+            paths: resolve_user_space_paths(ctx)?,
+        })
+    }
+
+    async fn locked(ctx: &HandlerContext) -> Result<LockedUserSpaceStore> {
+        let guard = user_space_yaml_lock().lock().await;
+        Ok(LockedUserSpaceStore {
+            store: Self::resolve(ctx)?,
+            _guard: guard,
+        })
+    }
+
+    fn load_projects(&self) -> Result<ProjectsFile> {
+        let projects: ProjectsFile = read_yaml_or_default(&self.paths.projects_config())?;
+        ensure_version("projects.yaml", projects.version, PROJECTS_VERSION)?;
+        Ok(projects)
+    }
+
+    fn load_studio_config(&self) -> Result<StudioConfigFile> {
+        let config: StudioConfigFile = read_yaml_or_default(&self.paths.studio_config())?;
+        ensure_version("studio.yaml", config.version, STUDIO_CONFIG_VERSION)?;
+        Ok(config)
+    }
+
+    fn load_recent(&self) -> Result<RecentFile> {
+        let recent: RecentFile = read_yaml_or_default(&self.paths.studio_recent())?;
+        ensure_version("recent.yaml", recent.version, RECENT_VERSION)?;
+        Ok(recent)
+    }
+}
+
+impl LockedUserSpaceStore {
+    fn write_projects(&self, projects: &ProjectsFile) -> Result<()> {
+        ensure_version("projects.yaml", projects.version, PROJECTS_VERSION)?;
+        write_yaml_atomic(&self.store.paths.projects_config(), projects)
+    }
+
+    fn write_studio_config(&self, config: &StudioConfigFile) -> Result<()> {
+        ensure_version("studio.yaml", config.version, STUDIO_CONFIG_VERSION)?;
+        write_yaml_atomic(&self.store.paths.studio_config(), config)
+    }
+
+    fn write_recent(&self, recent: &RecentFile) -> Result<()> {
+        ensure_version("recent.yaml", recent.version, RECENT_VERSION)?;
+        write_yaml_atomic(&self.store.paths.studio_recent(), recent)
+    }
+
+    fn touch_recent_project(&self, local_id: &str) -> Result<RecentFile> {
+        let mut recent = self.load_recent()?;
+        recent.recent_projects.retain(|p| p.local_id != local_id);
+        recent.recent_projects.insert(
+            0,
+            RecentProject {
+                local_id: local_id.to_string(),
+                opened_at: lillux::time::iso8601_now(),
+            },
+        );
+        recent.recent_projects.truncate(50);
+        self.write_recent(&recent)?;
+        Ok(recent)
+    }
+}
+
+impl std::ops::Deref for LockedUserSpaceStore {
+    type Target = UserSpaceStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+fn resolve_user_space_paths(_ctx: &HandlerContext) -> Result<UserSpacePaths> {
+    // Local install is single-principal. The resolver call is the tenancy seam:
+    // hosted mode should derive a real principal from the caller/session here
+    // and swap in a principal-aware resolver.
+    LocalUserSpaceResolver.resolve(LOCAL_PRINCIPAL_ID)
 }
 
 fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
@@ -489,6 +598,12 @@ descriptor!(
     "service:ui/studio/projects/resolve",
     "ui.studio.projects.resolve",
     handle_projects_resolve
+);
+descriptor!(
+    PROJECTS_OPEN_DESCRIPTOR,
+    "service:ui/studio/projects/open",
+    "ui.studio.projects.open",
+    handle_projects_open
 );
 descriptor!(
     RECENT_TOUCH_DESCRIPTOR,

@@ -9,6 +9,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 
+/// Synthetic principal for the current local single-user install.
+///
+/// Hosted/multi-principal mode should derive a real principal from the
+/// authenticated caller and resolve through [`UserSpaceResolver`] without
+/// changing callers that operate on [`UserSpacePaths`].
+pub const LOCAL_PRINCIPAL_ID: &str = "local";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSpacePaths {
     pub root: PathBuf,
@@ -16,6 +23,10 @@ pub struct UserSpacePaths {
 
 impl UserSpacePaths {
     pub fn resolve() -> Result<Self> {
+        LocalUserSpaceResolver.resolve(LOCAL_PRINCIPAL_ID)
+    }
+
+    fn resolve_local() -> Result<Self> {
         let root = ryeos_engine::roots::user_root().context("failed to resolve user space root")?;
         Ok(Self { root })
     }
@@ -42,6 +53,27 @@ impl UserSpacePaths {
 
     pub fn studio_recent(&self) -> PathBuf {
         self.state("studio/recent.yaml")
+    }
+}
+
+/// Resolves logical user-space storage for a principal.
+///
+/// Local RyeOS maps every caller to the same local user space. Future hosted
+/// mode can replace this with a resolver backed by per-principal filesystem,
+/// database, or object storage while preserving the logical config/state paths.
+pub trait UserSpaceResolver {
+    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LocalUserSpaceResolver;
+
+impl UserSpaceResolver for LocalUserSpaceResolver {
+    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+        if principal_id.trim().is_empty() {
+            anyhow::bail!("principal id is required to resolve user space");
+        }
+        UserSpacePaths::resolve_local()
     }
 }
 
@@ -144,6 +176,17 @@ mod tests {
             paths.studio_recent(),
             PathBuf::from("/tmp/user/.ai/state/studio/recent.yaml")
         );
+    }
+
+    #[test]
+    fn local_resolver_requires_a_principal_but_keeps_local_storage() {
+        let err = LocalUserSpaceResolver.resolve("").unwrap_err();
+        assert!(err.to_string().contains("principal id is required"));
+
+        let resolved = LocalUserSpaceResolver
+            .resolve("fp:test")
+            .expect("local resolver should ignore principal storage partitioning");
+        assert_eq!(resolved, UserSpacePaths::resolve().unwrap());
     }
 
     #[test]
