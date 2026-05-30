@@ -18,6 +18,7 @@ use crate::projection::{
     ProjectionDb,
 };
 use crate::queries;
+use crate::refs::{GenericHeadRef, SignedRef};
 use crate::signer::Signer;
 
 /// High-level state database.
@@ -239,6 +240,50 @@ impl StateDb {
             expected_current_hash,
             signer,
         )
+    }
+
+    /// Write a namespace-neutral signed head under `refs/generic`.
+    pub fn write_generic_head_ref(
+        &self,
+        namespace: &str,
+        name: &str,
+        target_hash: &str,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<()> {
+        crate::refs::write_generic_head_ref(&self.refs_root, namespace, name, target_hash, signer)
+    }
+
+    /// Read a namespace-neutral signed head from `refs/generic`.
+    pub fn read_generic_head_ref(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<SignedRef>> {
+        crate::refs::read_generic_head_ref(&self.refs_root, namespace, name)
+    }
+
+    /// Advance a namespace-neutral signed head with compare-and-swap semantics.
+    pub fn advance_generic_head_ref(
+        &self,
+        namespace: &str,
+        name: &str,
+        new_target_hash: &str,
+        expected_current_hash: Option<&str>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<()> {
+        crate::refs::advance_generic_head_ref(
+            &self.refs_root,
+            namespace,
+            name,
+            new_target_hash,
+            expected_current_hash,
+            signer,
+        )
+    }
+
+    /// List namespace-neutral signed heads beneath `refs/generic/<prefix>`.
+    pub fn list_generic_head_refs(&self, prefix: &str) -> anyhow::Result<Vec<GenericHeadRef>> {
+        crate::refs::list_generic_head_refs(&self.refs_root, prefix)
     }
 
     // ── Query helpers ──────────────────────────────────────────────

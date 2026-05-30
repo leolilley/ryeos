@@ -39,7 +39,7 @@ pub use projection::{
     CasEntriesByStateSummary, CasEntryAttribution, CasEntryKind, CasEntryState,
     NewCasEntryAttribution, ProjectionDb,
 };
-pub use refs::{SignedRef, TrustStore};
+pub use refs::{GenericHeadRef, SignedRef, TrustStore};
 pub use signer::Signer;
 pub use state_db::StateDb;
 pub use sync::ImportAttribution;
