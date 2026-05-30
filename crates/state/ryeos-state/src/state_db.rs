@@ -13,7 +13,10 @@ use crate::chain::{self, AppendResult, CreateResult, SnapshotUpdate};
 use crate::head_cache::HeadCache;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
-use crate::projection::{self, ProjectionDb};
+use crate::projection::{
+    self, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState, NewCasEntryAttribution,
+    ProjectionDb,
+};
 use crate::queries;
 use crate::signer::Signer;
 
@@ -249,6 +252,29 @@ impl StateDb {
         chain_root_id: &str,
     ) -> anyhow::Result<Vec<queries::ThreadRow>> {
         queries::list_threads_by_chain(&self.projection, chain_root_id)
+    }
+
+    pub fn record_cas_entry(&self, entry: &NewCasEntryAttribution) -> anyhow::Result<()> {
+        self.projection.record_cas_entry(entry)
+    }
+
+    pub fn set_cas_entry_state(&self, hash: &str, state: CasEntryState) -> anyhow::Result<()> {
+        self.projection.set_cas_entry_state(hash, state)
+    }
+
+    pub fn get_cas_entry(&self, hash: &str) -> anyhow::Result<Option<CasEntryAttribution>> {
+        self.projection.get_cas_entry(hash)
+    }
+
+    pub fn list_cas_entries_by_state(
+        &self,
+        state: CasEntryState,
+    ) -> anyhow::Result<Vec<CasEntryAttribution>> {
+        self.projection.list_cas_entries_by_state(state)
+    }
+
+    pub fn cas_entries_by_state_summary(&self) -> anyhow::Result<Vec<CasEntriesByStateSummary>> {
+        self.projection.cas_entries_by_state_summary()
     }
 }
 

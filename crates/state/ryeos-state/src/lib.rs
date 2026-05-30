@@ -35,7 +35,11 @@ pub use objects::{
     thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
     Attestation, ChainState,
 };
-pub use projection::ProjectionDb;
+pub use projection::{
+    CasEntriesByStateSummary, CasEntryAttribution, CasEntryKind, CasEntryState,
+    NewCasEntryAttribution, ProjectionDb,
+};
 pub use refs::{SignedRef, TrustStore};
 pub use signer::Signer;
 pub use state_db::StateDb;
+pub use sync::ImportAttribution;

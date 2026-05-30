@@ -130,6 +130,24 @@ CREATE TABLE IF NOT EXISTS thread_facets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
+
+-- CAS entry attribution: why a CAS object/blob is present locally.
+CREATE TABLE IF NOT EXISTS cas_entries (
+    hash TEXT PRIMARY KEY,
+    entry_kind TEXT NOT NULL CHECK (entry_kind IN ('object', 'blob')),
+    bytes INTEGER NOT NULL CHECK (bytes >= 0),
+    first_seen_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    source_principal TEXT,
+    source_peer TEXT,
+    job_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('local', 'staged', 'accepted', 'mirrored', 'rejected'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cas_entries_state ON cas_entries(state);
+CREATE INDEX IF NOT EXISTS idx_cas_entries_source_principal ON cas_entries(source_principal);
+CREATE INDEX IF NOT EXISTS idx_cas_entries_source_peer ON cas_entries(source_peer);
+CREATE INDEX IF NOT EXISTS idx_cas_entries_job_id ON cas_entries(job_id);
 "#;
 
 use crate::sqlite_schema;
@@ -520,6 +538,65 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "cas_entries",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "hash",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "entry_kind",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "first_seen_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "source_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "source_peer",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "job_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -600,6 +677,30 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["thread_id"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_cas_entries_state",
+                table: "cas_entries",
+                columns: &["state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_cas_entries_source_principal",
+                table: "cas_entries",
+                columns: &["source_principal"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_cas_entries_source_peer",
+                table: "cas_entries",
+                columns: &["source_peer"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_cas_entries_job_id",
+                table: "cas_entries",
+                columns: &["job_id"],
+                unique: false,
+            },
         ],
     }
 }
@@ -613,6 +714,84 @@ pub struct ProjectionMeta {
 /// Projection database connection wrapper.
 pub struct ProjectionDb {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasEntryKind {
+    Object,
+    Blob,
+}
+
+impl CasEntryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Object => "object",
+            Self::Blob => "blob",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasEntryState {
+    Local,
+    Staged,
+    Accepted,
+    Mirrored,
+    Rejected,
+}
+
+impl CasEntryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Staged => "staged",
+            Self::Accepted => "accepted",
+            Self::Mirrored => "mirrored",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "local" => Ok(Self::Local),
+            "staged" => Ok(Self::Staged),
+            "accepted" => Ok(Self::Accepted),
+            "mirrored" => Ok(Self::Mirrored),
+            "rejected" => Ok(Self::Rejected),
+            other => anyhow::bail!("unknown CAS entry state: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CasEntryAttribution {
+    pub hash: String,
+    pub entry_kind: CasEntryKind,
+    pub bytes: u64,
+    pub first_seen_at: String,
+    pub updated_at: String,
+    pub source_principal: Option<String>,
+    pub source_peer: Option<String>,
+    pub job_id: Option<String>,
+    pub state: CasEntryState,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewCasEntryAttribution {
+    pub hash: String,
+    pub entry_kind: CasEntryKind,
+    pub bytes: u64,
+    pub source_principal: Option<String>,
+    pub source_peer: Option<String>,
+    pub job_id: Option<String>,
+    pub state: CasEntryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CasEntriesByStateSummary {
+    pub state: CasEntryState,
+    pub count: u64,
+    pub total_bytes: u64,
 }
 
 impl ProjectionDb {
@@ -682,6 +861,138 @@ impl ProjectionDb {
 
         Ok(())
     }
+
+    pub fn record_cas_entry(&self, entry: &NewCasEntryAttribution) -> anyhow::Result<()> {
+        if !lillux::valid_hash(&entry.hash) {
+            anyhow::bail!("invalid CAS entry hash: {}", entry.hash);
+        }
+        let bytes = i64::try_from(entry.bytes).context("CAS entry byte count exceeds i64")?;
+        let now = lillux::time::iso8601_now();
+        self.conn
+            .execute(
+                "INSERT INTO cas_entries (
+                    hash, entry_kind, bytes, first_seen_at, updated_at,
+                    source_principal, source_peer, job_id, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hash) DO UPDATE SET
+                    entry_kind = excluded.entry_kind,
+                    bytes = excluded.bytes,
+                    updated_at = excluded.updated_at,
+                    source_principal = COALESCE(excluded.source_principal, cas_entries.source_principal),
+                    source_peer = COALESCE(excluded.source_peer, cas_entries.source_peer),
+                    job_id = COALESCE(excluded.job_id, cas_entries.job_id),
+                    state = excluded.state",
+                rusqlite::params![
+                    &entry.hash,
+                    entry.entry_kind.as_str(),
+                    bytes,
+                    &now,
+                    &now,
+                    &entry.source_principal,
+                    &entry.source_peer,
+                    &entry.job_id,
+                    entry.state.as_str(),
+                ],
+            )
+            .context("failed to record CAS entry attribution")?;
+        Ok(())
+    }
+
+    pub fn set_cas_entry_state(&self, hash: &str, state: CasEntryState) -> anyhow::Result<()> {
+        if !lillux::valid_hash(hash) {
+            anyhow::bail!("invalid CAS entry hash: {hash}");
+        }
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE cas_entries SET state = ?, updated_at = ? WHERE hash = ?",
+                rusqlite::params![state.as_str(), lillux::time::iso8601_now(), hash],
+            )
+            .context("failed to update CAS entry attribution state")?;
+        if changed == 0 {
+            anyhow::bail!("CAS entry attribution not found for hash {hash}");
+        }
+        Ok(())
+    }
+
+    pub fn get_cas_entry(&self, hash: &str) -> anyhow::Result<Option<CasEntryAttribution>> {
+        if !lillux::valid_hash(hash) {
+            anyhow::bail!("invalid CAS entry hash: {hash}");
+        }
+        self.conn
+            .query_row(
+                "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
+                    source_principal, source_peer, job_id, state
+                 FROM cas_entries WHERE hash = ?",
+                [hash],
+                cas_entry_from_row,
+            )
+            .optional()
+            .context("failed to get CAS entry attribution")
+    }
+
+    pub fn list_cas_entries_by_state(
+        &self,
+        state: CasEntryState,
+    ) -> anyhow::Result<Vec<CasEntryAttribution>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
+                    source_principal, source_peer, job_id, state
+                 FROM cas_entries WHERE state = ? ORDER BY first_seen_at, hash",
+            )
+            .context("failed to prepare CAS entry attribution query")?;
+        let rows = stmt
+            .query_map([state.as_str()], cas_entry_from_row)
+            .context("failed to query CAS entry attribution by state")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect CAS entry attribution rows")
+    }
+
+    pub fn cas_entries_by_state_summary(&self) -> anyhow::Result<Vec<CasEntriesByStateSummary>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT state, COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS total_bytes FROM cas_entries GROUP BY state ORDER BY state")
+            .context("failed to prepare CAS entry attribution summary")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let state: String = row.get("state")?;
+                let count: i64 = row.get("count")?;
+                let total_bytes: i64 = row.get("total_bytes")?;
+                Ok(CasEntriesByStateSummary {
+                    state: CasEntryState::from_str(&state)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    count: u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    total_bytes: u64::try_from(total_bytes)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            })
+            .context("failed to query CAS entry attribution summary")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect CAS entry attribution summary")
+    }
+}
+
+fn cas_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CasEntryAttribution> {
+    let entry_kind: String = row.get("entry_kind")?;
+    let state: String = row.get("state")?;
+    let bytes: i64 = row.get("bytes")?;
+    Ok(CasEntryAttribution {
+        hash: row.get("hash")?,
+        entry_kind: match entry_kind.as_str() {
+            "object" => CasEntryKind::Object,
+            "blob" => CasEntryKind::Blob,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
+        bytes: u64::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        first_seen_at: row.get("first_seen_at")?,
+        updated_at: row.get("updated_at")?,
+        source_principal: row.get("source_principal")?,
+        source_peer: row.get("source_peer")?,
+        job_id: row.get("job_id")?,
+        state: CasEntryState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
+    })
 }
 
 // ============= Write operations =============
@@ -996,6 +1307,119 @@ mod tests {
 
         let result = db.get_projection_meta("T-missing").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn record_cas_entry_preserves_first_seen_and_updates_state() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        let hash = "ab".repeat(32);
+
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 128,
+            source_principal: Some("fp:source".to_string()),
+            source_peer: Some("peer-a".to_string()),
+            job_id: Some("job-a".to_string()),
+            state: CasEntryState::Staged,
+        })
+        .unwrap();
+
+        let first = db.get_cas_entry(&hash).unwrap().unwrap();
+        assert_eq!(first.hash, hash);
+        assert_eq!(first.entry_kind, CasEntryKind::Object);
+        assert_eq!(first.bytes, 128);
+        assert_eq!(first.state, CasEntryState::Staged);
+        assert_eq!(first.source_principal.as_deref(), Some("fp:source"));
+
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 256,
+            source_principal: None,
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Accepted,
+        })
+        .unwrap();
+
+        let updated = db.get_cas_entry(&hash).unwrap().unwrap();
+        assert_eq!(updated.first_seen_at, first.first_seen_at);
+        assert_eq!(updated.bytes, 256);
+        assert_eq!(updated.state, CasEntryState::Accepted);
+        assert_eq!(updated.source_principal.as_deref(), Some("fp:source"));
+        assert_eq!(updated.source_peer.as_deref(), Some("peer-a"));
+        assert_eq!(updated.job_id.as_deref(), Some("job-a"));
+    }
+
+    #[test]
+    fn cas_entry_state_queries_are_deterministic() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        let staged_hash = "cd".repeat(32);
+        let mirrored_hash = "ef".repeat(32);
+
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: staged_hash.clone(),
+            entry_kind: CasEntryKind::Blob,
+            bytes: 11,
+            source_principal: None,
+            source_peer: Some("peer-b".to_string()),
+            job_id: Some("job-b".to_string()),
+            state: CasEntryState::Staged,
+        })
+        .unwrap();
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: mirrored_hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 22,
+            source_principal: None,
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Mirrored,
+        })
+        .unwrap();
+        db.set_cas_entry_state(&staged_hash, CasEntryState::Accepted)
+            .unwrap();
+
+        let accepted = db
+            .list_cas_entries_by_state(CasEntryState::Accepted)
+            .unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].hash, staged_hash);
+        assert_eq!(accepted[0].entry_kind, CasEntryKind::Blob);
+
+        let summary = db.cas_entries_by_state_summary().unwrap();
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0].state, CasEntryState::Accepted);
+        assert_eq!(summary[0].count, 1);
+        assert_eq!(summary[0].total_bytes, 11);
+        assert_eq!(summary[1].state, CasEntryState::Mirrored);
+        assert_eq!(summary[1].count, 1);
+        assert_eq!(summary[1].total_bytes, 22);
+    }
+
+    #[test]
+    fn record_cas_entry_rejects_invalid_hash() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        let err = db
+            .record_cas_entry(&NewCasEntryAttribution {
+                hash: "not-a-hash".to_string(),
+                entry_kind: CasEntryKind::Object,
+                bytes: 1,
+                source_principal: None,
+                source_peer: None,
+                job_id: None,
+                state: CasEntryState::Local,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid CAS entry hash"));
     }
 
     #[test]
