@@ -1085,9 +1085,7 @@ impl ProjectionDb {
     }
 
     pub fn record_cas_entry(&self, entry: &NewCasEntryAttribution) -> anyhow::Result<()> {
-        if !lillux::valid_hash(&entry.hash) {
-            anyhow::bail!("invalid CAS entry hash: {}", entry.hash);
-        }
+        validate_canonical_hash("CAS entry hash", &entry.hash)?;
         let bytes = i64::try_from(entry.bytes).context("CAS entry byte count exceeds i64")?;
         let now = lillux::time::iso8601_now();
         self.conn
@@ -1135,9 +1133,7 @@ impl ProjectionDb {
         hash: &str,
         state: CasEntryState,
     ) -> anyhow::Result<()> {
-        if !lillux::valid_hash(hash) {
-            anyhow::bail!("invalid CAS entry hash: {hash}");
-        }
+        validate_canonical_hash("CAS entry hash", hash)?;
         let changed = self
             .conn
             .execute(
@@ -1164,9 +1160,7 @@ impl ProjectionDb {
         entry_kind: CasEntryKind,
         hash: &str,
     ) -> anyhow::Result<Option<CasEntryAttribution>> {
-        if !lillux::valid_hash(hash) {
-            anyhow::bail!("invalid CAS entry hash: {hash}");
-        }
+        validate_canonical_hash("CAS entry hash", hash)?;
         self.conn
             .query_row(
                 "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
@@ -1225,9 +1219,7 @@ impl ProjectionDb {
         validate_sync_job_id(&job.job_id)?;
         validate_non_empty_label("operation_type", &job.operation_type)?;
         for hash in job.roots.iter().chain(job.heads.iter()) {
-            if !lillux::valid_hash(hash) {
-                anyhow::bail!("invalid sync job root/head hash: {hash}");
-            }
+            validate_canonical_hash("sync job root/head hash", hash)?;
         }
         let max_attempts = i64::try_from(job.max_attempts).context("max_attempts exceeds i64")?;
         let now = lillux::time::iso8601_now();
@@ -1270,9 +1262,7 @@ impl ProjectionDb {
             .chain(update.uploaded_hashes.iter())
             .chain(update.fetched_hashes.iter())
         {
-            if !lillux::valid_hash(hash) {
-                anyhow::bail!("invalid sync job transfer hash: {hash}");
-            }
+            validate_canonical_hash("sync job transfer hash", hash)?;
         }
         let roots_json = update
             .roots
@@ -1409,6 +1399,13 @@ fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
     {
         anyhow::bail!("invalid sync job id: {job_id}");
+    }
+    Ok(())
+}
+
+fn validate_canonical_hash(label: &str, hash: &str) -> anyhow::Result<()> {
+    if !lillux::valid_hash(hash) || hash.bytes().any(|b| b.is_ascii_uppercase()) {
+        anyhow::bail!("invalid {label}: {hash}");
     }
     Ok(())
 }
@@ -1968,6 +1965,19 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("invalid CAS entry hash"));
+
+        let err = db
+            .record_cas_entry(&NewCasEntryAttribution {
+                hash: "AB".repeat(32),
+                entry_kind: CasEntryKind::Object,
+                bytes: 1,
+                source_principal: None,
+                source_peer: None,
+                job_id: None,
+                state: CasEntryState::Local,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid CAS entry hash"));
     }
 
     #[test]
@@ -2115,6 +2125,19 @@ mod tests {
                 operation_type: "mirror_pull".to_string(),
                 peer: None,
                 roots: vec!["not-a-hash".to_string()],
+                heads: vec![],
+                max_attempts: 1,
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("invalid sync job root/head hash"));
+
+        let err = db
+            .create_sync_job(&NewSyncJob {
+                job_id: "job-uppercase".to_string(),
+                operation_type: "mirror_pull".to_string(),
+                peer: None,
+                roots: vec!["AA".repeat(32)],
                 heads: vec![],
                 max_attempts: 1,
             })

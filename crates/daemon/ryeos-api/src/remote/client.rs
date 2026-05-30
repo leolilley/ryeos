@@ -1209,7 +1209,7 @@ impl SyncJobRemoteRecord {
             .chain(self.uploaded_hashes.iter())
             .chain(self.fetched_hashes.iter())
         {
-            if !lillux::valid_hash(hash) {
+            if !lillux::valid_hash(hash) || hash.bytes().any(|b| b.is_ascii_uppercase()) {
                 anyhow::bail!("invalid sync job response hash: {hash}");
             }
         }
@@ -1456,5 +1456,32 @@ mod tests {
 
         response.validate_against_request("job-a").unwrap();
         assert!(response.validate_against_request("job-b").is_err());
+    }
+
+    #[test]
+    fn sync_job_remote_record_rejects_uppercase_hashes() {
+        let response: SyncJobsListResponse = serde_json::from_value(serde_json::json!({
+            "jobs": [{
+                "job_id": "job-a",
+                "operation_type": "mirror_pull",
+                "peer": null,
+                "state": "running",
+                "phase": "fetching",
+                "roots": ["AA".repeat(32)],
+                "heads": [],
+                "uploaded_hashes": [],
+                "fetched_hashes": [],
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "last_error": null,
+                "result": null,
+                "created_at": "2026-05-30T00:00:00Z",
+                "updated_at": "2026-05-30T00:00:01Z",
+                "finished_at": null
+            }]
+        }))
+        .unwrap();
+
+        assert!(response.validate(Some("running")).is_err());
     }
 }
