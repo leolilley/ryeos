@@ -104,6 +104,16 @@ fn read_search_params() -> anyhow::Result<SearchParams> {
 }
 
 fn search_web(query: &str, num_results: usize) -> anyhow::Result<(String, Vec<SearchResult>)> {
+    if is_cjk_query(query) {
+        match search_google_news_rss(query, num_results) {
+            Ok(results) if !results.is_empty() => {
+                return Ok(("google_news_rss".to_string(), results));
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+
     match search_bing_web_rss(query, num_results) {
         Ok(results) if !results.is_empty() => Ok(("bing_web_rss".to_string(), results)),
         Ok(_) => search_secondary_fallback(query, num_results)
@@ -199,15 +209,15 @@ fn search_rss_fallback(
 
 fn search_google_news_rss(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
     let client = http_client(PRIMARY_TIMEOUT_SECS)?;
+    let (hl, gl, ceid) = if is_cjk_query(query) {
+        ("zh-HK", "HK", "HK:zh-Hant")
+    } else {
+        ("en-US", "US", "US:en")
+    };
 
     let xml = client
         .get("https://news.google.com/rss/search")
-        .query(&[
-            ("q", query),
-            ("hl", "en-US"),
-            ("gl", "US"),
-            ("ceid", "US:en"),
-        ])
+        .query(&[("q", query), ("hl", hl), ("gl", gl), ("ceid", ceid)])
         .send()
         .context("Google News RSS request failed")?
         .error_for_status()
@@ -251,6 +261,16 @@ fn is_duckduckgo_challenge(html: &str) -> bool {
     html.contains("anomaly-modal")
         || html.contains("anomaly-modal__image")
         || html.contains("/assets/anomaly/images/challenge/")
+}
+
+fn is_cjk_query(query: &str) -> bool {
+    query.chars().any(|ch| {
+        ('\u{3400}'..='\u{4dbf}').contains(&ch)
+            || ('\u{4e00}'..='\u{9fff}').contains(&ch)
+            || ('\u{f900}'..='\u{faff}').contains(&ch)
+            || ('\u{3040}'..='\u{30ff}').contains(&ch)
+            || ('\u{ac00}'..='\u{d7af}').contains(&ch)
+    })
 }
 
 fn parse_duckduckgo_html(html: &str, num_results: usize) -> Vec<SearchResult> {
@@ -345,6 +365,7 @@ fn clean_html_fragment(value: &str) -> String {
 fn html_unescape(value: &str) -> String {
     value
         .replace("&amp;", "&")
+        .replace("&nbsp;", " ")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
         .replace("&#x27;", "'")
