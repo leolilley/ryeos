@@ -11,7 +11,12 @@ fn request(root: String, max_objects: usize) -> objects_closure_describe::Reques
         roots: vec![root],
         max_objects,
         max_blobs: 16,
+        max_object_bytes: 1024,
+        max_total_object_bytes: 4096,
         max_blob_bytes: 1024,
+        max_response_bytes: 8192,
+        max_links_per_object: 16,
+        allow_incomplete: false,
     }
 }
 
@@ -110,6 +115,32 @@ async fn closure_get_enforces_blob_byte_budget() {
         .unwrap_err();
 
     assert!(err.to_string().contains("exceeds max_blob_bytes"));
+}
+
+#[tokio::test]
+async fn closure_get_enforces_object_byte_budget() {
+    let (_tmp, state) = test_state::build_test_state();
+    let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
+    let mut req = request(snapshot_hash, 16);
+    req.max_total_object_bytes = 1;
+
+    let err = objects_closure_get::handle(req, Arc::new(state))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("exceeds max_total_object_bytes"));
+}
+
+#[tokio::test]
+async fn closure_get_rejects_incomplete_by_default() {
+    let (_tmp, state) = test_state::build_test_state();
+    let missing = "12".repeat(32);
+
+    let err = objects_closure_get::handle(request(missing, 16), Arc::new(state))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("object closure is incomplete"));
 }
 
 #[tokio::test]

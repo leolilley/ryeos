@@ -7,9 +7,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
 
 use crate::object_closure::collect_object_closure;
+use crate::refs::read_signed_ref;
 
 /// Complete set of reachable hashes from all signed heads.
 #[derive(Debug, Clone, Default)]
@@ -52,7 +52,8 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                 let chain_root_id = entry.file_name().to_string_lossy().to_string();
                 let head_path = entry.path().join("head");
                 if head_path.exists() {
-                    if let Some(target) = read_ref_target(&head_path)? {
+                    let expected_ref_path = format!("chains/{chain_root_id}/head");
+                    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
                         roots.push(target);
                         set.chain_root_ids.push(chain_root_id);
                     }
@@ -71,6 +72,7 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
             let principal_entry =
                 principal_entry.context("failed to read project principal entry")?;
             if principal_entry.file_type()?.is_dir() {
+                let principal_key = principal_entry.file_name().to_string_lossy().to_string();
                 for project_entry in std::fs::read_dir(principal_entry.path())
                     .context("failed to read principal project refs directory")?
                 {
@@ -80,7 +82,9 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                         let project_hash = project_entry.file_name().to_string_lossy().to_string();
                         let head_path = project_entry.path().join("head");
                         if head_path.exists() {
-                            if let Some(target) = read_ref_target(&head_path)? {
+                            let expected_ref_path =
+                                format!("projects/{principal_key}/{project_hash}");
+                            if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
                                 roots.push(target);
                                 set.project_hashes.push(project_hash);
                             }
@@ -104,7 +108,8 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                 let project_hash = project_entry.file_name().to_string_lossy().to_string();
                 let head_path = project_entry.path().join("head");
                 if head_path.exists() {
-                    if let Some(target) = read_ref_target(&head_path)? {
+                    let expected_ref_path = format!("deployed/projects/{project_hash}");
+                    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
                         roots.push(target);
                         set.project_hashes.push(project_hash);
                     }
@@ -119,14 +124,20 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
 }
 
 /// Read the target hash from a signed ref file.
-fn read_ref_target(path: &Path) -> Result<Option<String>> {
-    let content = std::fs::read_to_string(path)?;
-    let value: Value = serde_json::from_str(&content)?;
-    let target = value
-        .get("target_hash")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    Ok(target)
+fn read_ref_target(path: &Path, expected_ref_path: &str) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let signed_ref = read_signed_ref(path)?;
+    if signed_ref.ref_path != expected_ref_path {
+        anyhow::bail!(
+            "signed ref path mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected_ref_path,
+            signed_ref.ref_path
+        );
+    }
+    Ok(Some(signed_ref.target_hash))
 }
 
 /// Collect reachable objects for a single chain only.
@@ -144,7 +155,8 @@ pub fn collect_chain_reachable(
         .join("generic/chains")
         .join(chain_root_id)
         .join("head");
-    if let Some(target) = read_ref_target(&head_path)? {
+    let expected_ref_path = format!("chains/{chain_root_id}/head");
+    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
         roots.push(target);
         set.chain_root_ids.push(chain_root_id.to_string());
     }
@@ -156,6 +168,14 @@ pub fn collect_chain_reachable(
 
 fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut ReachableSet) -> Result<()> {
     let closure = collect_object_closure(cas_root, roots)?;
+    if !closure.is_complete() {
+        anyhow::bail!(
+            "reachable closure incomplete: missing={}, malformed={}, unsupported={}",
+            closure.missing_objects.len(),
+            closure.malformed_objects.len(),
+            closure.unsupported_objects.len()
+        );
+    }
     set.object_hashes.extend(closure.object_hashes);
     set.blob_hashes.extend(closure.blob_hashes);
     Ok(())
@@ -164,6 +184,7 @@ fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut Reachable
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
 

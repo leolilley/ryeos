@@ -10,6 +10,10 @@ use std::path::Path;
 use anyhow::Context;
 use serde_json::Value;
 
+const DEFAULT_MAX_OBJECTS: usize = 10_000;
+const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
+const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
+
 /// Transitive closure for one or more CAS object roots.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectClosureReport {
@@ -61,12 +65,43 @@ pub struct ObjectLinks {
     pub unsupported_kind: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectClosureLimits {
+    pub max_objects: usize,
+    pub max_object_bytes: u64,
+    pub max_links_per_object: usize,
+}
+
+impl Default for ObjectClosureLimits {
+    fn default() -> Self {
+        Self {
+            max_objects: DEFAULT_MAX_OBJECTS,
+            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            max_links_per_object: DEFAULT_MAX_LINKS_PER_OBJECT,
+        }
+    }
+}
+
+impl ObjectClosureLimits {
+    pub fn unbounded_for_local_maintenance() -> Self {
+        Self {
+            max_objects: usize::MAX,
+            max_object_bytes: u64::MAX,
+            max_links_per_object: usize::MAX,
+        }
+    }
+}
+
 /// Collect the schema-defined object/blob closure reachable from `roots`.
 pub fn collect_object_closure(
     cas_root: &Path,
     roots: impl IntoIterator<Item = String>,
 ) -> anyhow::Result<ObjectClosureReport> {
-    collect_object_closure_with_limit(cas_root, roots, None)
+    collect_object_closure_with_limits(
+        cas_root,
+        roots,
+        ObjectClosureLimits::unbounded_for_local_maintenance(),
+    )
 }
 
 /// Collect the schema-defined object/blob closure reachable from `roots`,
@@ -75,6 +110,20 @@ pub fn collect_object_closure_with_limit(
     cas_root: &Path,
     roots: impl IntoIterator<Item = String>,
     max_objects: Option<usize>,
+) -> anyhow::Result<ObjectClosureReport> {
+    let mut limits = ObjectClosureLimits::unbounded_for_local_maintenance();
+    if let Some(max_objects) = max_objects {
+        limits.max_objects = max_objects;
+    }
+    collect_object_closure_with_limits(cas_root, roots, limits)
+}
+
+/// Collect the schema-defined object/blob closure reachable from `roots`,
+/// enforcing object-count, per-object-byte, and per-object-link limits.
+pub fn collect_object_closure_with_limits(
+    cas_root: &Path,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
 ) -> anyhow::Result<ObjectClosureReport> {
     let mut report = ObjectClosureReport::default();
     let mut queue: VecDeque<(String, Option<String>)> = VecDeque::new();
@@ -97,17 +146,28 @@ pub fn collect_object_closure_with_limit(
             continue;
         }
 
-        if let Some(max_objects) = max_objects {
-            if report.object_hashes.len() > max_objects {
-                anyhow::bail!(
-                    "object closure exceeds max_objects: {} > {}",
-                    report.object_hashes.len(),
-                    max_objects
-                );
-            }
+        if report.object_hashes.len() > limits.max_objects {
+            anyhow::bail!(
+                "object closure exceeds max_objects: {} > {}",
+                report.object_hashes.len(),
+                limits.max_objects
+            );
         }
 
         let object_path = lillux::shard_path(cas_root, "objects", &hash, ".json");
+        match std::fs::metadata(&object_path) {
+            Ok(metadata) if metadata.len() > limits.max_object_bytes => {
+                anyhow::bail!(
+                    "object {hash} exceeds max_object_bytes: {} > {}",
+                    metadata.len(),
+                    limits.max_object_bytes
+                );
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("stat object {hash}")),
+        }
+
         let content = match std::fs::read_to_string(&object_path) {
             Ok(content) => content,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -140,6 +200,18 @@ pub fn collect_object_closure_with_limit(
                 continue;
             }
         };
+
+        let link_count = links
+            .object_hashes
+            .len()
+            .saturating_add(links.blob_hashes.len());
+        if link_count > limits.max_links_per_object {
+            anyhow::bail!(
+                "object {hash} exceeds max_links_per_object: {} > {}",
+                link_count,
+                limits.max_links_per_object
+            );
+        }
 
         if let Some(kind) = links.unsupported_kind {
             report
@@ -426,5 +498,55 @@ mod tests {
 
         let err = collect_object_closure_with_limit(&cas_root, [snapshot], Some(2)).unwrap_err();
         assert!(err.to_string().contains("exceeds max_objects"));
+    }
+
+    #[test]
+    fn traversal_rejects_oversized_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let value = json!({ "kind": "future_kind", "padding": "x".repeat(256) });
+        let hash = write_object(&cas_root, &value);
+
+        let err = collect_object_closure_with_limits(
+            &cas_root,
+            [hash],
+            ObjectClosureLimits {
+                max_objects: 8,
+                max_object_bytes: 32,
+                max_links_per_object: 8,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("exceeds max_object_bytes"));
+    }
+
+    #[test]
+    fn traversal_rejects_too_many_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let manifest = write_object(
+            &cas_root,
+            &json!({
+                "kind": "source_manifest",
+                "item_source_hashes": {
+                    "directive:a": h("11"),
+                    "directive:b": h("22"),
+                }
+            }),
+        );
+
+        let err = collect_object_closure_with_limits(
+            &cas_root,
+            [manifest],
+            ObjectClosureLimits {
+                max_objects: 8,
+                max_object_bytes: 1024,
+                max_links_per_object: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("exceeds max_links_per_object"));
     }
 }

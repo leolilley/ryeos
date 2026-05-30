@@ -264,9 +264,9 @@ impl RemoteClient {
     pub async fn objects_closure_describe(
         &self,
         roots: &[String],
-        max_objects: Option<usize>,
+        options: ObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureDescribeResponse> {
-        let body = closure_request_body(roots, max_objects);
+        let body = closure_request_body(roots, &options);
         let resp = self.signed_post("/objects/closure/describe", &body).await?;
         serde_json::from_value(resp).context("failed to parse objects/closure/describe response")
     }
@@ -275,11 +275,14 @@ impl RemoteClient {
     pub async fn objects_closure_get(
         &self,
         roots: &[String],
-        max_objects: Option<usize>,
+        options: ObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureGetResponse> {
-        let body = closure_request_body(roots, max_objects);
+        let body = closure_request_body(roots, &options);
         let resp = self.signed_post("/objects/closure/get", &body).await?;
-        serde_json::from_value(resp).context("failed to parse objects/closure/get response")
+        let response: ObjectsClosureGetResponse =
+            serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
+        response.validate()?;
+        Ok(response)
     }
 
     /// POST /push-head (authenticated).
@@ -696,7 +699,45 @@ pub struct ObjectsClosureDescribeResponse {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ObjectsClosureGetResponse {
     pub closure: ObjectsClosureSummary,
+    #[serde(default)]
+    pub object_bytes: u64,
+    #[serde(default)]
+    pub blob_bytes: u64,
     pub entries: Vec<CasEntry>,
+}
+
+impl ObjectsClosureGetResponse {
+    pub fn validate(&self) -> Result<()> {
+        if !self.closure.complete {
+            anyhow::bail!("remote returned incomplete object closure");
+        }
+        for hash in self
+            .closure
+            .object_hashes
+            .iter()
+            .chain(self.closure.blob_hashes.iter())
+        {
+            if !lillux::valid_hash(hash) {
+                anyhow::bail!("invalid closure hash {hash}");
+            }
+        }
+        for entry in &self.entries {
+            if !lillux::valid_hash(&entry.hash) {
+                anyhow::bail!("invalid closure entry hash {}", entry.hash);
+            }
+            match entry.kind.as_str() {
+                "object" if entry.value.is_some() && entry.data.is_none() => {}
+                "blob" if entry.data.is_some() && entry.value.is_none() => {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(entry.data.as_ref().expect("data checked above"))
+                        .context("invalid base64 in closure blob entry")?;
+                }
+                "missing" if entry.value.is_none() && entry.data.is_none() => {}
+                other => anyhow::bail!("invalid closure entry kind/shape: {other}"),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -728,10 +769,43 @@ pub struct ClosureUnsupportedObject {
     pub kind: String,
 }
 
-fn closure_request_body(roots: &[String], max_objects: Option<usize>) -> Value {
+#[derive(Debug, Clone, Default)]
+pub struct ObjectsClosureRequestOptions {
+    pub max_objects: Option<usize>,
+    pub max_blobs: Option<usize>,
+    pub max_object_bytes: Option<u64>,
+    pub max_total_object_bytes: Option<u64>,
+    pub max_blob_bytes: Option<u64>,
+    pub max_response_bytes: Option<u64>,
+    pub max_links_per_object: Option<usize>,
+    pub allow_incomplete: bool,
+}
+
+fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions) -> Value {
     let mut body = serde_json::json!({ "roots": roots });
-    if let Some(limit) = max_objects {
+    if let Some(limit) = options.max_objects {
         body["max_objects"] = serde_json::json!(limit);
+    }
+    if let Some(limit) = options.max_blobs {
+        body["max_blobs"] = serde_json::json!(limit);
+    }
+    if let Some(limit) = options.max_object_bytes {
+        body["max_object_bytes"] = serde_json::json!(limit);
+    }
+    if let Some(limit) = options.max_total_object_bytes {
+        body["max_total_object_bytes"] = serde_json::json!(limit);
+    }
+    if let Some(limit) = options.max_blob_bytes {
+        body["max_blob_bytes"] = serde_json::json!(limit);
+    }
+    if let Some(limit) = options.max_response_bytes {
+        body["max_response_bytes"] = serde_json::json!(limit);
+    }
+    if let Some(limit) = options.max_links_per_object {
+        body["max_links_per_object"] = serde_json::json!(limit);
+    }
+    if options.allow_incomplete {
+        body["allow_incomplete"] = serde_json::json!(true);
     }
     body
 }
