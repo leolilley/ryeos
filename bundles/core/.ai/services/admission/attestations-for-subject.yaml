@@ -1,0 +1,8 @@
+# ryeos:signed:2026-05-30T04:04:50Z:932f08084f5f1d1a55bdb7c361f832e7bc1ef1f0faa3b94077a7c4abf644254f:h30MdtUuxF7bq6rTbWHhRL19Fcht6ew4Iz9gAxmuNRR9w3NUTE6Gj07rhfh56d7GFoXwjq0yNrxXRp/Pm+MjBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: admission.attestations-for-subject
+required_caps: ["ryeos.execute.service.admission.attestations-for-subject"]
+schema:
+  subject_hash: string
+  policy: string?
+description: "List indexed admission attestations for a CAS subject hash"

@@ -38,9 +38,11 @@ pub use objects::{
     Attestation, ChainState,
 };
 pub use projection::{
-    CasEntriesByStateSummary, CasEntryAttribution, CasEntryKind, CasEntryState,
-    FinishSyncJobAttempt, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt, ProjectionDb,
-    SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState, SyncJobUpdate,
+    AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
+    CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
+    NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
+    ProjectionDb, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState,
+    SyncJobUpdate,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore};
 pub use signer::Signer;

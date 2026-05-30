@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use crate::object_closure::{collect_object_closure_with_limits, ObjectClosureLimits};
-use crate::{Attestation, CasEntryKind, CasEntryState, NewCasEntryAttribution, Signer, StateDb};
+use crate::{
+    AdmissionAttestationState, Attestation, CasEntryKind, CasEntryState,
+    NewAdmissionAttestationRecord, NewCasEntryAttribution, Signer, StateDb,
+};
 
 const DEFAULT_ADMISSION_CLAIM: &str = "accepted";
 
@@ -85,6 +88,17 @@ pub fn admit_root(
             );
         }
         existing_attestation.verify_with_key(issuer_key)?;
+        db.record_admission_attestation(&NewAdmissionAttestationRecord {
+            attestation_hash: existing.target_hash.clone(),
+            subject_hash: existing_attestation.subject_hash.clone(),
+            policy: existing_attestation.policy.clone(),
+            claim: existing_attestation.claim.clone(),
+            issuer: existing_attestation.issuer.clone(),
+            issued_at: existing_attestation.issued_at.clone(),
+            expires_at: existing_attestation.expires_at.clone(),
+            head_ref_path: Some(existing.ref_path.clone()),
+            state: AdmissionAttestationState::Accepted,
+        })?;
         return Ok(AdmissionResult {
             subject_hash: request.subject_hash.clone(),
             policy: request.policy.clone(),
@@ -195,6 +209,20 @@ pub fn admit_root(
         None,
         signer,
     )?;
+    db.record_admission_attestation(&NewAdmissionAttestationRecord {
+        attestation_hash: attestation_hash.clone(),
+        subject_hash: attestation.subject_hash.clone(),
+        policy: attestation.policy.clone(),
+        claim: attestation.claim.clone(),
+        issuer: attestation.issuer.clone(),
+        issued_at: attestation.issued_at.clone(),
+        expires_at: attestation.expires_at.clone(),
+        head_ref_path: Some(format!(
+            "admissions/{}/{}/head",
+            request.policy, request.subject_hash
+        )),
+        state: AdmissionAttestationState::Accepted,
+    })?;
 
     Ok(AdmissionResult {
         subject_hash: request.subject_hash.clone(),
@@ -323,6 +351,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(attestation_row.state, CasEntryState::Local);
+        let indexed = db
+            .list_admission_attestations_for_subject(&subject_hash, Some("test.policy.v1"))
+            .unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].attestation_hash, result.attestation_hash);
+        assert_eq!(indexed[0].claim, "accepted");
+        assert_eq!(indexed[0].state, AdmissionAttestationState::Accepted);
 
         let second = admit_root(
             &db,

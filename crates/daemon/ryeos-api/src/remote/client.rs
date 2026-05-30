@@ -351,6 +351,25 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// POST /admission/attestations-for-subject (authenticated).
+    pub async fn admission_attestations_for_subject(
+        &self,
+        subject_hash: &str,
+        policy: Option<&str>,
+    ) -> Result<AdmissionAttestationsForSubjectResponse> {
+        let mut body = serde_json::json!({ "subject_hash": subject_hash });
+        if let Some(policy) = policy {
+            body["policy"] = serde_json::json!(policy);
+        }
+        let resp = self
+            .signed_post("/admission/attestations-for-subject", &body)
+            .await?;
+        let response: AdmissionAttestationsForSubjectResponse = serde_json::from_value(resp)
+            .context("failed to parse admission/attestations-for-subject response")?;
+        response.validate_against_request(subject_hash, policy)?;
+        Ok(response)
+    }
+
     /// POST /federation/capabilities (authenticated identity handshake).
     pub async fn federation_capabilities(&self) -> Result<FederationCapabilitiesResponse> {
         let resp = self
@@ -1186,6 +1205,28 @@ pub struct AdmissionStatusResponse {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+pub struct AdmissionAttestationsForSubjectResponse {
+    pub subject_hash: String,
+    pub policy: Option<String>,
+    #[serde(default)]
+    pub attestations: Vec<AdmissionAttestationRemoteRecord>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AdmissionAttestationRemoteRecord {
+    pub attestation_hash: String,
+    pub subject_hash: String,
+    pub policy: String,
+    pub claim: String,
+    pub issuer: String,
+    pub issued_at: String,
+    pub expires_at: Option<String>,
+    pub head_ref_path: Option<String>,
+    pub indexed_at: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct SyncJobsListResponse {
     #[serde(default)]
     pub jobs: Vec<SyncJobRemoteRecord>,
@@ -1610,6 +1651,74 @@ impl AdmissionStatusResponse {
     }
 }
 
+impl AdmissionAttestationsForSubjectResponse {
+    pub fn validate_against_request(&self, subject_hash: &str, policy: Option<&str>) -> Result<()> {
+        if self.subject_hash != subject_hash {
+            anyhow::bail!(
+                "admission attestations subject mismatch: expected {}, got {}",
+                subject_hash,
+                self.subject_hash
+            );
+        }
+        if self.policy.as_deref() != policy {
+            anyhow::bail!("admission attestations policy mismatch");
+        }
+        for attestation in &self.attestations {
+            attestation.validate()?;
+            if attestation.subject_hash != subject_hash {
+                anyhow::bail!(
+                    "admission attestation subject mismatch: expected {}, got {}",
+                    subject_hash,
+                    attestation.subject_hash
+                );
+            }
+            if let Some(policy) = policy {
+                if attestation.policy != policy {
+                    anyhow::bail!(
+                        "admission attestation policy mismatch: expected {}, got {}",
+                        policy,
+                        attestation.policy
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AdmissionAttestationRemoteRecord {
+    fn validate(&self) -> Result<()> {
+        if !lillux::valid_hash(&self.attestation_hash)
+            || self
+                .attestation_hash
+                .bytes()
+                .any(|b| b.is_ascii_uppercase())
+        {
+            anyhow::bail!(
+                "invalid admission attestation hash: {}",
+                self.attestation_hash
+            );
+        }
+        if !lillux::valid_hash(&self.subject_hash)
+            || self.subject_hash.bytes().any(|b| b.is_ascii_uppercase())
+        {
+            anyhow::bail!("invalid admission subject hash: {}", self.subject_hash);
+        }
+        if self.policy.is_empty()
+            || self.claim.is_empty()
+            || self.issuer.is_empty()
+            || self.issued_at.is_empty()
+            || self.indexed_at.is_empty()
+        {
+            anyhow::bail!("admission attestation response contains empty required field");
+        }
+        match self.state.as_str() {
+            "accepted" | "rejected" => Ok(()),
+            other => anyhow::bail!("unknown admission attestation state: {other}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AuthorizeKeyResponse {
     pub fingerprint: String,
@@ -1757,6 +1866,39 @@ mod tests {
         }))
         .unwrap();
         assert!(response.validate_against_request(&[root]).is_err());
+    }
+
+    #[test]
+    fn admission_attestations_response_validates_subject_and_policy() {
+        let subject = "11".repeat(32);
+        let attestation = "22".repeat(32);
+        let response: AdmissionAttestationsForSubjectResponse =
+            serde_json::from_value(serde_json::json!({
+                "subject_hash": subject,
+                "policy": "local-node-v1",
+                "attestations": [{
+                    "attestation_hash": attestation,
+                    "subject_hash": "11".repeat(32),
+                    "policy": "local-node-v1",
+                    "claim": "accepted",
+                    "issuer": "fp:issuer",
+                    "issued_at": "2026-05-30T00:00:00Z",
+                    "expires_at": null,
+                    "head_ref_path": "admissions/local-node-v1/subject/head",
+                    "indexed_at": "2026-05-30T00:00:01Z",
+                    "state": "accepted"
+                }]
+            }))
+            .unwrap();
+        response
+            .validate_against_request(&"11".repeat(32), Some("local-node-v1"))
+            .unwrap();
+        assert!(response
+            .validate_against_request(&"33".repeat(32), Some("local-node-v1"))
+            .is_err());
+        assert!(response
+            .validate_against_request(&"11".repeat(32), Some("other"))
+            .is_err());
     }
 
     #[test]

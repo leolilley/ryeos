@@ -192,6 +192,26 @@ CREATE TABLE IF NOT EXISTS sync_job_attempts (
 CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_job_id ON sync_job_attempts(job_id);
 CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_state ON sync_job_attempts(state);
 CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_worker_id ON sync_job_attempts(worker_id);
+
+-- Admission attestation lookup index. Attestations remain immutable CAS objects;
+-- this projection makes subject/policy/issuer lookup efficient.
+CREATE TABLE IF NOT EXISTS admission_attestations (
+    attestation_hash TEXT PRIMARY KEY,
+    subject_hash TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT,
+    head_ref_path TEXT,
+    indexed_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('accepted', 'rejected'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_admission_attestations_subject ON admission_attestations(subject_hash);
+CREATE INDEX IF NOT EXISTS idx_admission_attestations_policy ON admission_attestations(policy);
+CREATE INDEX IF NOT EXISTS idx_admission_attestations_issuer ON admission_attestations(issuer);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admission_attestations_subject_policy_claim ON admission_attestations(subject_hash, policy, claim);
 "#;
 
 use crate::sqlite_schema;
@@ -813,6 +833,71 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "admission_attestations",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "attestation_hash",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "subject_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "policy",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "claim",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "issuer",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "issued_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "expires_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "head_ref_path",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "indexed_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -953,6 +1038,30 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["worker_id"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_admission_attestations_subject",
+                table: "admission_attestations",
+                columns: &["subject_hash"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_admission_attestations_policy",
+                table: "admission_attestations",
+                columns: &["policy"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_admission_attestations_issuer",
+                table: "admission_attestations",
+                columns: &["issuer"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_admission_attestations_subject_policy_claim",
+                table: "admission_attestations",
+                columns: &["subject_hash", "policy", "claim"],
+                unique: true,
+            },
         ],
     }
 }
@@ -1044,6 +1153,56 @@ pub struct CasEntriesByStateSummary {
     pub state: CasEntryState,
     pub count: u64,
     pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionAttestationState {
+    Accepted,
+    Rejected,
+}
+
+impl AdmissionAttestationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "accepted" => Ok(Self::Accepted),
+            "rejected" => Ok(Self::Rejected),
+            other => anyhow::bail!("unknown admission attestation state: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionAttestationRecord {
+    pub attestation_hash: String,
+    pub subject_hash: String,
+    pub policy: String,
+    pub claim: String,
+    pub issuer: String,
+    pub issued_at: String,
+    pub expires_at: Option<String>,
+    pub head_ref_path: Option<String>,
+    pub indexed_at: String,
+    pub state: AdmissionAttestationState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewAdmissionAttestationRecord {
+    pub attestation_hash: String,
+    pub subject_hash: String,
+    pub policy: String,
+    pub claim: String,
+    pub issuer: String,
+    pub issued_at: String,
+    pub expires_at: Option<String>,
+    pub head_ref_path: Option<String>,
+    pub state: AdmissionAttestationState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1406,6 +1565,105 @@ impl ProjectionDb {
             .context("failed to query CAS entry attribution summary")?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to collect CAS entry attribution summary")
+    }
+
+    pub fn record_admission_attestation(
+        &self,
+        record: &NewAdmissionAttestationRecord,
+    ) -> anyhow::Result<()> {
+        validate_canonical_hash("admission attestation hash", &record.attestation_hash)?;
+        validate_canonical_hash("admission subject hash", &record.subject_hash)?;
+        validate_non_empty_label("admission policy", &record.policy)?;
+        validate_non_empty_label("admission claim", &record.claim)?;
+        validate_non_empty_label("admission issuer", &record.issuer)?;
+        validate_non_empty_label("admission issued_at", &record.issued_at)?;
+        if let Some(head_ref_path) = record.head_ref_path.as_deref() {
+            if head_ref_path.is_empty()
+                || head_ref_path.len() > 512
+                || head_ref_path.starts_with('/')
+                || head_ref_path.contains("..")
+            {
+                anyhow::bail!("invalid admission head_ref_path: {head_ref_path}");
+            }
+        }
+        let now = lillux::time::iso8601_now();
+        self.conn
+            .execute(
+                "INSERT INTO admission_attestations (
+                    attestation_hash, subject_hash, policy, claim, issuer, issued_at,
+                    expires_at, head_ref_path, indexed_at, state
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(attestation_hash) DO UPDATE SET
+                    subject_hash = excluded.subject_hash,
+                    policy = excluded.policy,
+                    claim = excluded.claim,
+                    issuer = excluded.issuer,
+                    issued_at = excluded.issued_at,
+                    expires_at = excluded.expires_at,
+                    head_ref_path = excluded.head_ref_path,
+                    indexed_at = excluded.indexed_at,
+                    state = excluded.state",
+                rusqlite::params![
+                    &record.attestation_hash,
+                    &record.subject_hash,
+                    &record.policy,
+                    &record.claim,
+                    &record.issuer,
+                    &record.issued_at,
+                    &record.expires_at,
+                    &record.head_ref_path,
+                    &now,
+                    record.state.as_str(),
+                ],
+            )
+            .context("failed to record admission attestation index")?;
+        Ok(())
+    }
+
+    pub fn list_admission_attestations_for_subject(
+        &self,
+        subject_hash: &str,
+        policy: Option<&str>,
+    ) -> anyhow::Result<Vec<AdmissionAttestationRecord>> {
+        validate_canonical_hash("admission subject hash", subject_hash)?;
+        if let Some(policy) = policy {
+            validate_non_empty_label("admission policy", policy)?;
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
+                        expires_at, head_ref_path, indexed_at, state
+                     FROM admission_attestations
+                     WHERE subject_hash = ? AND policy = ?
+                     ORDER BY indexed_at DESC, attestation_hash DESC",
+                )
+                .context("failed to prepare admission attestation subject/policy query")?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![subject_hash, policy],
+                    admission_attestation_from_row,
+                )
+                .context("failed to query admission attestations by subject/policy")?;
+            return rows
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to collect admission attestations by subject/policy");
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
+                    expires_at, head_ref_path, indexed_at, state
+                 FROM admission_attestations
+                 WHERE subject_hash = ?
+                 ORDER BY indexed_at DESC, attestation_hash DESC",
+            )
+            .context("failed to prepare admission attestation subject query")?;
+        let rows = stmt
+            .query_map([subject_hash], admission_attestation_from_row)
+            .context("failed to query admission attestations by subject")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect admission attestations by subject")
     }
 
     pub fn create_sync_job(&self, job: &NewSyncJob) -> anyhow::Result<SyncJobRecord> {
@@ -1872,6 +2130,25 @@ fn validate_non_empty_label(label: &str, value: &str) -> anyhow::Result<()> {
         anyhow::bail!("invalid {label}: {value}");
     }
     Ok(())
+}
+
+fn admission_attestation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AdmissionAttestationRecord> {
+    let state: String = row.get("state")?;
+    Ok(AdmissionAttestationRecord {
+        attestation_hash: row.get("attestation_hash")?,
+        subject_hash: row.get("subject_hash")?,
+        policy: row.get("policy")?,
+        claim: row.get("claim")?,
+        issuer: row.get("issuer")?,
+        issued_at: row.get("issued_at")?,
+        expires_at: row.get("expires_at")?,
+        head_ref_path: row.get("head_ref_path")?,
+        indexed_at: row.get("indexed_at")?,
+        state: AdmissionAttestationState::from_str(&state)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    })
 }
 
 fn sync_job_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobAttemptRecord> {
@@ -2423,6 +2700,45 @@ mod tests {
         assert_eq!(object.state, CasEntryState::Local);
         assert_eq!(blob.bytes, 20);
         assert_eq!(blob.state, CasEntryState::Accepted);
+    }
+
+    #[test]
+    fn admission_attestation_index_is_queryable_by_subject_and_policy() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        let subject = "11".repeat(32);
+        let attestation = "22".repeat(32);
+
+        db.record_admission_attestation(&NewAdmissionAttestationRecord {
+            attestation_hash: attestation.clone(),
+            subject_hash: subject.clone(),
+            policy: "local-node-v1".to_string(),
+            claim: "accepted".to_string(),
+            issuer: "fp:issuer".to_string(),
+            issued_at: "2026-05-30T00:00:00Z".to_string(),
+            expires_at: None,
+            head_ref_path: Some(format!("admissions/local-node-v1/{subject}/head")),
+            state: AdmissionAttestationState::Accepted,
+        })
+        .unwrap();
+
+        let by_subject = db
+            .list_admission_attestations_for_subject(&subject, None)
+            .unwrap();
+        assert_eq!(by_subject.len(), 1);
+        assert_eq!(by_subject[0].attestation_hash, attestation);
+        assert_eq!(by_subject[0].policy, "local-node-v1");
+        assert_eq!(by_subject[0].state, AdmissionAttestationState::Accepted);
+
+        let by_policy = db
+            .list_admission_attestations_for_subject(&subject, Some("local-node-v1"))
+            .unwrap();
+        assert_eq!(by_policy.len(), 1);
+        let other_policy = db
+            .list_admission_attestations_for_subject(&subject, Some("other-policy"))
+            .unwrap();
+        assert!(other_policy.is_empty());
     }
 
     #[test]

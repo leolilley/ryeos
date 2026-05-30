@@ -14,9 +14,9 @@ use crate::head_cache::HeadCache;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
 use crate::projection::{
-    self, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState, NewCasEntryAttribution,
-    NewSyncJob, NewSyncJobAttempt, ProjectionDb, SyncJobAttemptRecord, SyncJobRecord, SyncJobState,
-    SyncJobUpdate,
+    self, AdmissionAttestationRecord, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState,
+    NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
+    ProjectionDb, SyncJobAttemptRecord, SyncJobRecord, SyncJobState, SyncJobUpdate,
 };
 use crate::queries;
 use crate::refs::{GenericHeadRef, SignedRef};
@@ -330,6 +330,22 @@ impl StateDb {
 
     pub fn cas_entries_by_state_summary(&self) -> anyhow::Result<Vec<CasEntriesByStateSummary>> {
         self.projection.cas_entries_by_state_summary()
+    }
+
+    pub fn record_admission_attestation(
+        &self,
+        record: &NewAdmissionAttestationRecord,
+    ) -> anyhow::Result<()> {
+        self.projection.record_admission_attestation(record)
+    }
+
+    pub fn list_admission_attestations_for_subject(
+        &self,
+        subject_hash: &str,
+        policy: Option<&str>,
+    ) -> anyhow::Result<Vec<AdmissionAttestationRecord>> {
+        self.projection
+            .list_admission_attestations_for_subject(subject_hash, policy)
     }
 
     pub fn create_sync_job(&self, job: &NewSyncJob) -> anyhow::Result<SyncJobRecord> {

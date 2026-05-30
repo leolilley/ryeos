@@ -44,7 +44,7 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
             "admission": {
                 "submit": true,
                 "status": true,
-                "attestations_for_subject": false,
+                "attestations_for_subject": true,
                 "policies": ["local-node-v1"],
             },
             "sync_jobs": {
