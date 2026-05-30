@@ -56,15 +56,13 @@ pub fn admit_root(
     signer: &dyn Signer,
     issuer_key: &lillux::crypto::VerifyingKey,
 ) -> Result<AdmissionResult> {
-    if !lillux::valid_hash(&request.subject_hash) {
+    if !lillux::valid_hash(&request.subject_hash)
+        || request.subject_hash.bytes().any(|b| b.is_ascii_uppercase())
+    {
         anyhow::bail!("invalid admission subject hash: {}", request.subject_hash);
     }
-    if request.policy.is_empty() {
-        anyhow::bail!("admission policy must not be empty");
-    }
-    if request.claim.is_empty() {
-        anyhow::bail!("admission claim must not be empty");
-    }
+    validate_admission_label("admission policy", &request.policy)?;
+    validate_admission_label("admission claim", &request.claim)?;
     if request.claim != DEFAULT_ADMISSION_CLAIM {
         anyhow::bail!(
             "unsupported admission claim '{}': only '{}' is currently supported",
@@ -233,6 +231,20 @@ pub fn admit_root(
     })
 }
 
+fn validate_admission_label(field: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.bytes().any(|b| b.is_ascii_control())
+    {
+        anyhow::bail!("invalid {field}: {value}");
+    }
+    Ok(())
+}
+
 fn read_attestation(db: &StateDb, hash: &str) -> Result<Attestation> {
     let path = lillux::shard_path(db.cas_root(), "objects", hash, ".json");
     let bytes = std::fs::read(&path)
@@ -384,5 +396,38 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("admission closure incomplete"));
+    }
+
+    #[test]
+    fn admit_root_rejects_unsafe_policy_before_writing_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(tmp.path()).unwrap();
+        let signer = TestSigner::default();
+        let subject_hash = write_object(
+            &db,
+            &json!({
+                "kind": "chain_state",
+                "schema": 1,
+                "chain_root_id": "T-admit-unsafe",
+                "prev_chain_state_hash": null,
+                "last_event_hash": null,
+                "last_chain_seq": 0,
+                "updated_at": "2026-05-30T00:00:00Z",
+                "threads": {}
+            }),
+        );
+
+        let err = admit_root(
+            &db,
+            &AdmissionRequest::accepted(subject_hash.clone(), "bad/../policy"),
+            &signer,
+            &signer.verifying_key(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid admission policy"));
+        assert!(db
+            .list_admission_attestations_for_subject(&subject_hash, None)
+            .unwrap()
+            .is_empty());
     }
 }

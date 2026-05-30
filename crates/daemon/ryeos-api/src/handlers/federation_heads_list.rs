@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::TrustStore;
 
 fn default_limit() -> usize {
     100
@@ -43,12 +44,33 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let heads = state
         .state_store
         .with_state_db(|db| db.list_generic_head_refs(&req.prefix))?;
-    let truncated = heads.len() > limit;
+    let expected_signer = state.identity.fingerprint().to_string();
+    let mut trust_store = TrustStore::new();
+    trust_store.insert(
+        expected_signer.clone(),
+        state.identity.verifying_key().clone(),
+    );
+    let verified_heads = heads
+        .into_iter()
+        .map(|head| {
+            if head.signer != expected_signer {
+                anyhow::bail!(
+                    "ref {} is signed by {}, not local node {}",
+                    head.ref_path,
+                    head.signer,
+                    expected_signer
+                );
+            }
+            ryeos_state::verify_signed_ref(&head.signed_ref, &trust_store)?;
+            Ok(head)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let truncated = verified_heads.len() > limit;
     Ok(serde_json::json!({
         "prefix": req.prefix,
         "limit": limit,
         "truncated": truncated,
-        "heads": heads
+        "heads": verified_heads
             .into_iter()
             .take(limit)
             .map(generic_head_to_json)

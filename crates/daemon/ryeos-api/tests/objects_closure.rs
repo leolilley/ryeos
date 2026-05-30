@@ -14,6 +14,7 @@ fn request(root: String, max_objects: usize) -> objects_closure_describe::Reques
         max_object_bytes: 1024,
         max_total_object_bytes: 4096,
         max_blob_bytes: 1024,
+        max_total_blob_bytes: 4096,
         max_response_bytes: 8192,
         max_links_per_object: 16,
         allow_incomplete: false,

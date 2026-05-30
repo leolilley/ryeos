@@ -66,11 +66,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         let path = lillux::shard_path(&cas_root, "blobs", hash, "");
         if let Ok(metadata) = std::fs::metadata(&path) {
             total_blob_bytes = total_blob_bytes.saturating_add(metadata.len());
-            if total_blob_bytes > req.max_blob_bytes {
+            if total_blob_bytes > req.max_total_blob_bytes {
                 bail!(
-                    "object closure exceeds max_blob_bytes: {} > {}",
+                    "object closure exceeds max_total_blob_bytes: {} > {}",
                     total_blob_bytes,
-                    req.max_blob_bytes
+                    req.max_total_blob_bytes
                 );
             }
             let encoded_bytes = encoded_len(metadata.len());

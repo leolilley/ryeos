@@ -73,6 +73,7 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
             "default_max_object_bytes": 1024 * 1024,
             "default_max_total_object_bytes": 32 * 1024 * 1024,
             "default_max_blob_bytes": 32 * 1024 * 1024,
+            "default_max_total_blob_bytes": 512 * 1024 * 1024,
             "default_max_response_bytes": 64 * 1024 * 1024,
             "default_max_links_per_object": 10000,
         },

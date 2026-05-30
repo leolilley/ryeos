@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use lillux::crypto::Verifier;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -1374,7 +1375,7 @@ pub struct RemoteSignedRef {
 }
 
 impl RemoteSignedRef {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.schema != 1 {
             anyhow::bail!("unsupported signed ref schema: {}", self.schema);
         }
@@ -1400,6 +1401,42 @@ impl RemoteSignedRef {
             anyhow::bail!("invalid signed ref target hash: {}", self.target_hash);
         }
         Ok(())
+    }
+
+    /// Verify this remote signed ref against an expected signer key.
+    ///
+    /// Structural validation alone is only discovery; callers must use this
+    /// before importing or treating a federated head as authoritative.
+    pub fn verify_with_key(
+        &self,
+        expected_signer: &str,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> Result<()> {
+        self.validate()?;
+        if self.signer != expected_signer {
+            anyhow::bail!(
+                "signed ref signer mismatch: expected {}, got {}",
+                expected_signer,
+                self.signer
+            );
+        }
+        let unsigned = serde_json::json!({
+            "schema": self.schema,
+            "kind": self.kind,
+            "ref_path": self.ref_path,
+            "target_hash": self.target_hash,
+            "updated_at": self.updated_at,
+            "signer": self.signer,
+        });
+        let canonical = lillux::canonical_json(&unsigned);
+        let sig_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.signature)
+            .context("failed to decode signed ref signature")?;
+        let signature = lillux::crypto::Signature::from_slice(&sig_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse signed ref signature: {e}"))?;
+        verifying_key
+            .verify(canonical.as_bytes(), &signature)
+            .map_err(|e| anyhow::anyhow!("signed ref signature verification failed: {e}"))
     }
 }
 

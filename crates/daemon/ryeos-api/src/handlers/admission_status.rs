@@ -17,7 +17,9 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    if !lillux::valid_hash(&req.subject_hash) {
+    if !lillux::valid_hash(&req.subject_hash)
+        || req.subject_hash.bytes().any(|b| b.is_ascii_uppercase())
+    {
         anyhow::bail!("invalid admission subject hash: {}", req.subject_hash);
     }
     if req.policy.is_empty() {

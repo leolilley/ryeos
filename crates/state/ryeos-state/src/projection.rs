@@ -211,7 +211,7 @@ CREATE TABLE IF NOT EXISTS admission_attestations (
 CREATE INDEX IF NOT EXISTS idx_admission_attestations_subject ON admission_attestations(subject_hash);
 CREATE INDEX IF NOT EXISTS idx_admission_attestations_policy ON admission_attestations(policy);
 CREATE INDEX IF NOT EXISTS idx_admission_attestations_issuer ON admission_attestations(issuer);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_admission_attestations_subject_policy_claim ON admission_attestations(subject_hash, policy, claim);
+CREATE INDEX IF NOT EXISTS idx_admission_attestations_subject_policy_claim_issuer ON admission_attestations(subject_hash, policy, claim, issuer);
 "#;
 
 use crate::sqlite_schema;
@@ -1057,10 +1057,10 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
-                name: "idx_admission_attestations_subject_policy_claim",
+                name: "idx_admission_attestations_subject_policy_claim_issuer",
                 table: "admission_attestations",
-                columns: &["subject_hash", "policy", "claim"],
-                unique: true,
+                columns: &["subject_hash", "policy", "claim", "issuer"],
+                unique: false,
             },
         ],
     }
@@ -1448,7 +1448,10 @@ impl ProjectionDb {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(entry_kind, hash) DO UPDATE SET
                     bytes = CASE
-                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored', 'rejected')
+                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored')
+                            AND excluded.state IN ('staged', 'rejected')
+                            THEN cas_entries.bytes
+                        WHEN cas_entries.state = 'rejected'
                             AND excluded.state = 'staged'
                             THEN cas_entries.bytes
                         ELSE excluded.bytes
@@ -1458,7 +1461,10 @@ impl ProjectionDb {
                     source_peer = COALESCE(excluded.source_peer, cas_entries.source_peer),
                     job_id = COALESCE(excluded.job_id, cas_entries.job_id),
                     state = CASE
-                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored', 'rejected')
+                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored')
+                            AND excluded.state IN ('staged', 'rejected')
+                            THEN cas_entries.state
+                        WHEN cas_entries.state = 'rejected'
                             AND excluded.state = 'staged'
                             THEN cas_entries.state
                         ELSE excluded.state
@@ -1983,6 +1989,21 @@ impl ProjectionDb {
         update: &SyncJobUpdate,
     ) -> anyhow::Result<()> {
         self.immediate_transaction("finish sync job attempt and update job", || {
+            let attempt_job_id: String = self
+                .conn
+                .query_row(
+                    "SELECT job_id FROM sync_job_attempts WHERE attempt_id = ?",
+                    [attempt_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("failed to load sync job attempt owner")?
+                .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
+            if attempt_job_id != job_id {
+                anyhow::bail!(
+                    "sync job attempt {attempt_id} belongs to job {attempt_job_id}, not {job_id}"
+                );
+            }
             self.finish_sync_job_attempt_inner(attempt_id, finish)?;
             self.update_sync_job(job_id, update)?;
             Ok(())
@@ -2607,6 +2628,62 @@ mod tests {
             .unwrap();
         assert_eq!(still_accepted.bytes, 256);
         assert_eq!(still_accepted.state, CasEntryState::Accepted);
+
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 1024,
+            source_principal: Some("fp:rejected".to_string()),
+            source_peer: Some("peer-rejected".to_string()),
+            job_id: Some("job-rejected".to_string()),
+            state: CasEntryState::Rejected,
+        })
+        .unwrap();
+
+        let not_downgraded = db
+            .get_cas_entry(CasEntryKind::Object, &hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(not_downgraded.bytes, 256);
+        assert_eq!(not_downgraded.state, CasEntryState::Accepted);
+
+        let rejected_hash = "ac".repeat(32);
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: rejected_hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 10,
+            source_principal: None,
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Staged,
+        })
+        .unwrap();
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: rejected_hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 20,
+            source_principal: None,
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Rejected,
+        })
+        .unwrap();
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: rejected_hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 30,
+            source_principal: None,
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Staged,
+        })
+        .unwrap();
+        let stays_rejected = db
+            .get_cas_entry(CasEntryKind::Object, &rejected_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stays_rejected.bytes, 20);
+        assert_eq!(stays_rejected.state, CasEntryState::Rejected);
     }
 
     #[test]
@@ -2735,6 +2812,24 @@ mod tests {
             .list_admission_attestations_for_subject(&subject, Some("local-node-v1"))
             .unwrap();
         assert_eq!(by_policy.len(), 1);
+
+        db.record_admission_attestation(&NewAdmissionAttestationRecord {
+            attestation_hash: "33".repeat(32),
+            subject_hash: subject.clone(),
+            policy: "local-node-v1".to_string(),
+            claim: "accepted".to_string(),
+            issuer: "fp:other-issuer".to_string(),
+            issued_at: "2026-05-30T00:01:00Z".to_string(),
+            expires_at: None,
+            head_ref_path: Some(format!("admissions/local-node-v1/{subject}/head")),
+            state: AdmissionAttestationState::Accepted,
+        })
+        .unwrap();
+        let multi_issuer = db
+            .list_admission_attestations_for_subject(&subject, Some("local-node-v1"))
+            .unwrap();
+        assert_eq!(multi_issuer.len(), 2);
+
         let other_policy = db
             .list_admission_attestations_for_subject(&subject, Some("other-policy"))
             .unwrap();
@@ -2975,6 +3070,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["attempt:one".to_string(), "attempt:two".to_string()]
         );
+    }
+
+    #[test]
+    fn sync_job_attempt_completion_must_match_parent_job() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        for job_id in ["job:attempt-owner-a", "job:attempt-owner-b"] {
+            db.create_sync_job(&NewSyncJob {
+                job_id: job_id.to_string(),
+                operation_type: "remote_execute".to_string(),
+                peer: None,
+                roots: vec![],
+                heads: vec![],
+                max_attempts: 1,
+            })
+            .unwrap();
+        }
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:owner".to_string(),
+            job_id: "job:attempt-owner-a".to_string(),
+            worker_id: None,
+            phase: "running".to_string(),
+        })
+        .unwrap();
+
+        let err = db
+            .finish_sync_job_attempt_and_update_job(
+                "attempt:owner",
+                &FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Completed,
+                    phase: "done".to_string(),
+                    error: None,
+                    result: None,
+                },
+                "job:attempt-owner-b",
+                &SyncJobUpdate {
+                    state: SyncJobState::Completed,
+                    phase: "done".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: vec![],
+                    fetched_hashes: vec![],
+                    last_error: None,
+                    result: None,
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("belongs to job"));
+
+        let attempt = db.get_sync_job_attempt("attempt:owner").unwrap().unwrap();
+        assert_eq!(attempt.state, SyncJobAttemptState::Running);
+        let wrong_job = db.get_sync_job("job:attempt-owner-b").unwrap().unwrap();
+        assert_eq!(wrong_job.state, SyncJobState::Planned);
     }
 
     #[test]

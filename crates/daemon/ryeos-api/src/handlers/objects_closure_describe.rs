@@ -14,6 +14,7 @@ const DEFAULT_MAX_BLOBS: usize = 10_000;
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_TOTAL_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
 const MAX_OBJECTS_LIMIT: usize = 100_000;
@@ -21,6 +22,7 @@ const MAX_BLOBS_LIMIT: usize = 100_000;
 const MAX_OBJECT_BYTES_LIMIT: u64 = 32 * 1024 * 1024;
 const MAX_TOTAL_OBJECT_BYTES_LIMIT: u64 = 512 * 1024 * 1024;
 const MAX_BLOB_BYTES_LIMIT: u64 = 512 * 1024 * 1024;
+const MAX_TOTAL_BLOB_BYTES_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_RESPONSE_BYTES_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_LINKS_PER_OBJECT_LIMIT: usize = 100_000;
 const MAX_ROOTS: usize = 1_024;
@@ -39,6 +41,8 @@ pub struct Request {
     pub max_total_object_bytes: u64,
     #[serde(default = "default_max_blob_bytes")]
     pub max_blob_bytes: u64,
+    #[serde(default = "default_max_total_blob_bytes")]
+    pub max_total_blob_bytes: u64,
     #[serde(default = "default_max_response_bytes")]
     pub max_response_bytes: u64,
     #[serde(default = "default_max_links_per_object")]
@@ -67,6 +71,10 @@ fn default_max_blob_bytes() -> u64 {
     DEFAULT_MAX_BLOB_BYTES
 }
 
+fn default_max_total_blob_bytes() -> u64 {
+    DEFAULT_MAX_TOTAL_BLOB_BYTES
+}
+
 fn default_max_response_bytes() -> u64 {
     DEFAULT_MAX_RESPONSE_BYTES
 }
@@ -90,6 +98,11 @@ pub(crate) fn collect_limited_closure(
     if req.roots.len() > MAX_ROOTS {
         bail!("too many roots: max {MAX_ROOTS}");
     }
+    for root in &req.roots {
+        if !lillux::valid_hash(root) || root.bytes().any(|b| b.is_ascii_uppercase()) {
+            bail!("invalid closure root hash: {root}");
+        }
+    }
     if req.max_objects == 0 || req.max_objects > MAX_OBJECTS_LIMIT {
         bail!("max_objects must be between 1 and {MAX_OBJECTS_LIMIT}");
     }
@@ -104,6 +117,9 @@ pub(crate) fn collect_limited_closure(
     }
     if req.max_blob_bytes > MAX_BLOB_BYTES_LIMIT {
         bail!("max_blob_bytes must not exceed {MAX_BLOB_BYTES_LIMIT}");
+    }
+    if req.max_total_blob_bytes > MAX_TOTAL_BLOB_BYTES_LIMIT {
+        bail!("max_total_blob_bytes must not exceed {MAX_TOTAL_BLOB_BYTES_LIMIT}");
     }
     if req.max_response_bytes > MAX_RESPONSE_BYTES_LIMIT {
         bail!("max_response_bytes must not exceed {MAX_RESPONSE_BYTES_LIMIT}");
@@ -121,7 +137,7 @@ pub(crate) fn collect_limited_closure(
             max_blobs: req.max_blobs,
             max_object_bytes: req.max_object_bytes,
             max_blob_bytes: req.max_blob_bytes,
-            max_total_blob_bytes: req.max_blob_bytes,
+            max_total_blob_bytes: req.max_total_blob_bytes,
             max_links_per_object: req.max_links_per_object,
         },
     )?;

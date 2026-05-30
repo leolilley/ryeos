@@ -44,7 +44,7 @@ pub use projection::{
     ProjectionDb, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState,
     SyncJobUpdate,
 };
-pub use refs::{GenericHeadRef, SignedRef, TrustStore};
+pub use refs::{verify_signed_ref, GenericHeadRef, SignedRef, TrustStore};
 pub use signer::Signer;
 pub use state_db::StateDb;
 pub use sync::ImportAttribution;

@@ -21,6 +21,7 @@ const MAX_OBJECT_BYTES_LIMIT: u64 = 32 * 1024 * 1024;
 const MAX_BLOB_BYTES_LIMIT: u64 = 512 * 1024 * 1024;
 const MAX_TOTAL_BLOB_BYTES_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_LINKS_PER_OBJECT_LIMIT: usize = 100_000;
+const LOCAL_ADMISSION_POLICY: &str = "local-node-v1";
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +73,15 @@ fn default_max_links_per_object() -> usize {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    if !is_canonical_hash(&req.subject_hash) {
+        bail!("invalid admission subject hash: {}", req.subject_hash);
+    }
+    if req.policy != LOCAL_ADMISSION_POLICY {
+        bail!("unsupported admission policy: {}", req.policy);
+    }
+    if req.claim != "accepted" {
+        bail!("unsupported admission claim: {}", req.claim);
+    }
     if req.max_objects == 0 || req.max_objects > MAX_OBJECTS_LIMIT {
         bail!("max_objects must be between 1 and {MAX_OBJECTS_LIMIT}");
     }
@@ -121,6 +131,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "attestation_hash": result.attestation_hash,
         "reused_existing": result.reused_existing,
     }))
+}
+
+fn is_canonical_hash(hash: &str) -> bool {
+    lillux::valid_hash(hash) && !hash.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
