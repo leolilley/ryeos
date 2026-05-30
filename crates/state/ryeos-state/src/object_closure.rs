@@ -11,7 +11,10 @@ use anyhow::Context;
 use serde_json::Value;
 
 const DEFAULT_MAX_OBJECTS: usize = 10_000;
+const DEFAULT_MAX_BLOBS: usize = 10_000;
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
+const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_MAX_LINKS_PER_OBJECT: usize = 10_000;
 
 /// Transitive closure for one or more CAS object roots.
@@ -71,7 +74,10 @@ pub struct ObjectLinks {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectClosureLimits {
     pub max_objects: usize,
+    pub max_blobs: usize,
     pub max_object_bytes: u64,
+    pub max_blob_bytes: u64,
+    pub max_total_blob_bytes: u64,
     pub max_links_per_object: usize,
 }
 
@@ -79,7 +85,10 @@ impl Default for ObjectClosureLimits {
     fn default() -> Self {
         Self {
             max_objects: DEFAULT_MAX_OBJECTS,
+            max_blobs: DEFAULT_MAX_BLOBS,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
+            max_total_blob_bytes: DEFAULT_MAX_TOTAL_BLOB_BYTES,
             max_links_per_object: DEFAULT_MAX_LINKS_PER_OBJECT,
         }
     }
@@ -89,7 +98,10 @@ impl ObjectClosureLimits {
     pub fn unbounded_for_local_maintenance() -> Self {
         Self {
             max_objects: usize::MAX,
+            max_blobs: usize::MAX,
             max_object_bytes: u64::MAX,
+            max_blob_bytes: u64::MAX,
+            max_total_blob_bytes: u64::MAX,
             max_links_per_object: usize::MAX,
         }
     }
@@ -130,6 +142,7 @@ pub fn collect_object_closure_with_limits(
 ) -> anyhow::Result<ObjectClosureReport> {
     let mut report = ObjectClosureReport::default();
     let mut queue: VecDeque<(String, Option<String>)> = VecDeque::new();
+    let mut total_blob_bytes = 0_u64;
 
     for root in roots {
         report.roots.push(root.clone());
@@ -229,7 +242,32 @@ pub fn collect_object_closure_with_limits(
             if lillux::valid_hash(&blob) {
                 let blob_path = lillux::shard_path(cas_root, "blobs", &blob, "");
                 match std::fs::metadata(&blob_path) {
-                    Ok(_) => {}
+                    Ok(metadata) => {
+                        if metadata.len() > limits.max_blob_bytes {
+                            anyhow::bail!(
+                                "blob {blob} exceeds max_blob_bytes: {} > {}",
+                                metadata.len(),
+                                limits.max_blob_bytes
+                            );
+                        }
+                        if !report.blob_hashes.contains(&blob) {
+                            if report.blob_hashes.len() + 1 > limits.max_blobs {
+                                anyhow::bail!(
+                                    "object closure exceeds max_blobs: {} > {}",
+                                    report.blob_hashes.len() + 1,
+                                    limits.max_blobs
+                                );
+                            }
+                            total_blob_bytes = total_blob_bytes.saturating_add(metadata.len());
+                            if total_blob_bytes > limits.max_total_blob_bytes {
+                                anyhow::bail!(
+                                    "object closure exceeds max_total_blob_bytes: {} > {}",
+                                    total_blob_bytes,
+                                    limits.max_total_blob_bytes
+                                );
+                            }
+                        }
+                    }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                         report.missing_blobs.push(MissingDependency {
                             hash: blob,
@@ -558,7 +596,10 @@ mod tests {
             [hash],
             ObjectClosureLimits {
                 max_objects: 8,
+                max_blobs: 8,
                 max_object_bytes: 32,
+                max_blob_bytes: 32,
+                max_total_blob_bytes: 32,
                 max_links_per_object: 8,
             },
         )
@@ -587,7 +628,10 @@ mod tests {
             [manifest],
             ObjectClosureLimits {
                 max_objects: 8,
+                max_blobs: 8,
                 max_object_bytes: 1024,
+                max_blob_bytes: 1024,
+                max_total_blob_bytes: 1024,
                 max_links_per_object: 1,
             },
         )

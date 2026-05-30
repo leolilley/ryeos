@@ -257,7 +257,9 @@ impl RemoteClient {
                 })
             })
             .collect();
-        Ok(ObjectsGetResponse { entries })
+        let response = ObjectsGetResponse { entries };
+        response.validate_against_request(hashes)?;
+        Ok(response)
     }
 
     /// POST /objects/closure/describe (authenticated).
@@ -302,8 +304,17 @@ impl RemoteClient {
         if let Some(limit) = options.max_objects {
             body["max_objects"] = serde_json::json!(limit);
         }
+        if let Some(limit) = options.max_blobs {
+            body["max_blobs"] = serde_json::json!(limit);
+        }
         if let Some(limit) = options.max_object_bytes {
             body["max_object_bytes"] = serde_json::json!(limit);
+        }
+        if let Some(limit) = options.max_blob_bytes {
+            body["max_blob_bytes"] = serde_json::json!(limit);
+        }
+        if let Some(limit) = options.max_total_blob_bytes {
+            body["max_total_blob_bytes"] = serde_json::json!(limit);
         }
         if let Some(limit) = options.max_links_per_object {
             body["max_links_per_object"] = serde_json::json!(limit);
@@ -717,6 +728,58 @@ pub struct ObjectsGetResponse {
 }
 
 impl ObjectsGetResponse {
+    pub fn validate_against_request(&self, requested: &[String]) -> Result<()> {
+        let requested: std::collections::BTreeSet<&str> =
+            requested.iter().map(String::as_str).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in &self.entries {
+            if !lillux::valid_hash(&entry.hash) {
+                anyhow::bail!("invalid objects/get entry hash {}", entry.hash);
+            }
+            if !requested.contains(entry.hash.as_str()) {
+                anyhow::bail!("objects/get returned unexpected hash {}", entry.hash);
+            }
+            if !seen.insert(entry.hash.as_str()) {
+                anyhow::bail!("objects/get returned duplicate hash {}", entry.hash);
+            }
+            match entry.kind.as_str() {
+                "object" if entry.value.is_some() && entry.data.is_none() => {
+                    let canonical =
+                        lillux::canonical_json(entry.value.as_ref().expect("value checked above"));
+                    let actual = lillux::sha256_hex(canonical.as_bytes());
+                    if actual != entry.hash {
+                        anyhow::bail!(
+                            "objects/get object hash mismatch: expected {}, got {}",
+                            entry.hash,
+                            actual
+                        );
+                    }
+                }
+                "blob" if entry.data.is_some() && entry.value.is_none() => {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(entry.data.as_ref().expect("data checked above"))
+                        .context("invalid base64 in objects/get blob entry")?;
+                    let actual = lillux::sha256_hex(&bytes);
+                    if actual != entry.hash {
+                        anyhow::bail!(
+                            "objects/get blob hash mismatch: expected {}, got {}",
+                            entry.hash,
+                            actual
+                        );
+                    }
+                }
+                "missing" if entry.value.is_none() && entry.data.is_none() => {}
+                other => anyhow::bail!("invalid objects/get entry kind/shape: {other}"),
+            }
+        }
+        for hash in requested {
+            if !seen.contains(hash) {
+                anyhow::bail!("objects/get response missing requested hash {hash}");
+            }
+        }
+        Ok(())
+    }
+
     /// Find an entry by hash, returning its value (for objects) or
     /// decoded blob data.
     pub fn find_object(&self, hash: &str) -> Option<Value> {
@@ -918,7 +981,10 @@ fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions
 pub struct AdmissionSubmitOptions {
     pub claim: Option<String>,
     pub max_objects: Option<usize>,
+    pub max_blobs: Option<usize>,
     pub max_object_bytes: Option<u64>,
+    pub max_blob_bytes: Option<u64>,
+    pub max_total_blob_bytes: Option<u64>,
     pub max_links_per_object: Option<usize>,
 }
 
@@ -1008,6 +1074,15 @@ impl AdmissionStatusResponse {
                 let Some(attestation) = self.attestation.as_ref() else {
                     anyhow::bail!("accepted admission status missing attestation object");
                 };
+                let canonical = lillux::canonical_json(attestation);
+                let actual = lillux::sha256_hex(canonical.as_bytes());
+                if actual != hash {
+                    anyhow::bail!(
+                        "admission status attestation hash mismatch: expected {}, got {}",
+                        hash,
+                        actual
+                    );
+                }
                 let attestation = ryeos_state::Attestation::from_value(attestation)?;
                 if attestation.subject_hash != subject_hash
                     || attestation.policy != policy

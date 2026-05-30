@@ -118,7 +118,10 @@ pub(crate) fn collect_limited_closure(
         req.roots.clone(),
         ryeos_state::object_closure::ObjectClosureLimits {
             max_objects: req.max_objects,
+            max_blobs: req.max_blobs,
             max_object_bytes: req.max_object_bytes,
+            max_blob_bytes: req.max_blob_bytes,
+            max_total_blob_bytes: req.max_blob_bytes,
             max_links_per_object: req.max_links_per_object,
         },
     )?;

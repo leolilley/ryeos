@@ -51,6 +51,7 @@ pub fn admit_root(
     db: &StateDb,
     request: &AdmissionRequest,
     signer: &dyn Signer,
+    issuer_key: &lillux::crypto::VerifyingKey,
 ) -> Result<AdmissionResult> {
     if !lillux::valid_hash(&request.subject_hash) {
         anyhow::bail!("invalid admission subject hash: {}", request.subject_hash);
@@ -83,6 +84,7 @@ pub fn admit_root(
                 existing.target_hash
             );
         }
+        existing_attestation.verify_with_key(issuer_key)?;
         return Ok(AdmissionResult {
             subject_hash: request.subject_hash.clone(),
             policy: request.policy.clone(),
@@ -133,6 +135,7 @@ pub fn admit_root(
     )
     .sign(signer)
     .context("failed to sign admission attestation")?;
+    attestation.verify_with_key(issuer_key)?;
 
     let attestation_value = attestation.to_value();
     let canonical = lillux::canonical_json(&attestation_value);
@@ -291,6 +294,7 @@ mod tests {
             &db,
             &AdmissionRequest::accepted(subject_hash.clone(), "test.policy.v1"),
             &signer,
+            &signer.verifying_key(),
         )
         .unwrap();
         assert!(!result.reused_existing);
@@ -318,6 +322,7 @@ mod tests {
             &db,
             &AdmissionRequest::accepted(subject_hash, "test.policy.v1"),
             &signer,
+            &signer.verifying_key(),
         )
         .unwrap();
         assert!(second.reused_existing);
@@ -334,6 +339,7 @@ mod tests {
             &db,
             &AdmissionRequest::accepted("aa".repeat(32), "test.policy.v1"),
             &signer,
+            &signer.verifying_key(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("admission closure incomplete"));
