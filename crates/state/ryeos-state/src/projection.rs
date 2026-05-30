@@ -1254,6 +1254,18 @@ impl ProjectionDb {
     pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
         validate_sync_job_id(job_id)?;
         validate_non_empty_label("phase", &update.phase)?;
+        let current_state = self
+            .conn
+            .query_row(
+                "SELECT state FROM sync_jobs WHERE job_id = ?",
+                [job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to load sync job state")?
+            .ok_or_else(|| anyhow::anyhow!("sync job not found: {job_id}"))?;
+        let current_state = SyncJobState::from_str(&current_state)?;
+        validate_sync_job_transition(current_state, update.state)?;
         for hash in update
             .roots
             .iter()
@@ -1323,9 +1335,7 @@ impl ProjectionDb {
                 ],
             )
             .context("failed to update sync job")?;
-        if changed == 0 {
-            anyhow::bail!("sync job not found: {job_id}");
-        }
+        debug_assert_eq!(changed, 1);
         Ok(())
     }
 
@@ -1406,6 +1416,24 @@ fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
 fn validate_canonical_hash(label: &str, hash: &str) -> anyhow::Result<()> {
     if !lillux::valid_hash(hash) || hash.bytes().any(|b| b.is_ascii_uppercase()) {
         anyhow::bail!("invalid {label}: {hash}");
+    }
+    Ok(())
+}
+
+fn validate_sync_job_transition(from: SyncJobState, to: SyncJobState) -> anyhow::Result<()> {
+    use SyncJobState::*;
+    let allowed = match from {
+        Planned => matches!(to, Planned | Running | Failed | Cancelled),
+        Running => matches!(to, Running | Completed | Failed | Retryable | Cancelled),
+        Retryable => matches!(to, Retryable | Running | Failed | Cancelled),
+        Completed | Failed | Cancelled => false,
+    };
+    if !allowed {
+        anyhow::bail!(
+            "invalid sync job state transition: {} -> {}",
+            from.as_str(),
+            to.as_str()
+        );
     }
     Ok(())
 }
@@ -2097,6 +2125,21 @@ mod tests {
         db.update_sync_job(
             "job-completed",
             &SyncJobUpdate {
+                state: SyncJobState::Running,
+                phase: "running".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![],
+                fetched_hashes: vec![],
+                last_error: None,
+                result: None,
+                increment_attempts: true,
+            },
+        )
+        .unwrap();
+        db.update_sync_job(
+            "job-completed",
+            &SyncJobUpdate {
                 state: SyncJobState::Completed,
                 phase: "done".to_string(),
                 roots: None,
@@ -2111,6 +2154,94 @@ mod tests {
         .unwrap();
 
         assert_eq!(db.count_active_sync_jobs().unwrap(), 1);
+    }
+
+    #[test]
+    fn sync_job_rejects_illegal_and_terminal_transitions() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job-transition".to_string(),
+            operation_type: "mirror_pull".to_string(),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 3,
+        })
+        .unwrap();
+
+        let err = db
+            .update_sync_job(
+                "job-transition",
+                &SyncJobUpdate {
+                    state: SyncJobState::Completed,
+                    phase: "done".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: vec![],
+                    fetched_hashes: vec![],
+                    last_error: None,
+                    result: None,
+                    increment_attempts: false,
+                },
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid sync job state transition"));
+
+        db.update_sync_job(
+            "job-transition",
+            &SyncJobUpdate {
+                state: SyncJobState::Running,
+                phase: "running".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![],
+                fetched_hashes: vec![],
+                last_error: None,
+                result: None,
+                increment_attempts: true,
+            },
+        )
+        .unwrap();
+        db.update_sync_job(
+            "job-transition",
+            &SyncJobUpdate {
+                state: SyncJobState::Failed,
+                phase: "failed".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![],
+                fetched_hashes: vec![],
+                last_error: Some("boom".to_string()),
+                result: None,
+                increment_attempts: false,
+            },
+        )
+        .unwrap();
+
+        let err = db
+            .update_sync_job(
+                "job-transition",
+                &SyncJobUpdate {
+                    state: SyncJobState::Running,
+                    phase: "reactivated".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: vec![],
+                    fetched_hashes: vec![],
+                    last_error: None,
+                    result: None,
+                    increment_attempts: false,
+                },
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid sync job state transition"));
     }
 
     #[test]

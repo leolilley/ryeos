@@ -241,7 +241,7 @@ pub async fn execute_unary_forward(
             fetched_hashes: Vec::new(),
             last_error: None,
             result: None,
-            increment_attempts: true,
+            increment_attempts: false,
         },
     )?;
 
