@@ -56,12 +56,12 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
             },
             "heads": {
                 "generic_refs": true,
-                "federated_list": false,
+                "federated_list": true,
                 "anti_replay_sequence": false,
             },
             "federation": {
                 "capabilities": true,
-                "head_exchange": false,
+                "head_exchange": true,
                 "subscriptions": false,
             },
         },

@@ -359,6 +359,23 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// POST /federation/heads/list (authenticated).
+    pub async fn federation_heads_list(
+        &self,
+        prefix: &str,
+        limit: Option<usize>,
+    ) -> Result<FederationHeadsListResponse> {
+        let mut body = serde_json::json!({ "prefix": prefix });
+        if let Some(limit) = limit {
+            body["limit"] = serde_json::json!(limit);
+        }
+        let resp = self.signed_post("/federation/heads/list", &body).await?;
+        let response: FederationHeadsListResponse = serde_json::from_value(resp)
+            .context("failed to parse federation/heads/list response")?;
+        response.validate(prefix)?;
+        Ok(response)
+    }
+
     /// POST /sync/jobs/list (authenticated).
     pub async fn sync_jobs_list(
         &self,
@@ -1164,6 +1181,81 @@ impl FederationCapabilitiesResponse {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FederationHeadsListResponse {
+    pub prefix: String,
+    pub limit: usize,
+    pub truncated: bool,
+    #[serde(default)]
+    pub heads: Vec<FederationHeadRemoteRecord>,
+}
+
+impl FederationHeadsListResponse {
+    pub fn validate(&self, requested_prefix: &str) -> Result<()> {
+        if self.prefix != requested_prefix {
+            anyhow::bail!(
+                "federation heads prefix mismatch: expected {}, got {}",
+                requested_prefix,
+                self.prefix
+            );
+        }
+        if self.limit > 500 {
+            anyhow::bail!("federation heads response limit exceeds protocol maximum");
+        }
+        if !self.truncated && self.heads.len() > self.limit {
+            anyhow::bail!("federation heads response exceeds declared limit");
+        }
+        for head in &self.heads {
+            head.validate()?;
+            if !requested_prefix.is_empty()
+                && !head.ref_path.starts_with(&format!("{requested_prefix}/"))
+            {
+                anyhow::bail!(
+                    "federation head {} escaped requested prefix {}",
+                    head.ref_path,
+                    requested_prefix
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FederationHeadRemoteRecord {
+    pub namespace: String,
+    pub name: String,
+    pub ref_path: String,
+    pub target_hash: String,
+    pub signer: String,
+    pub updated_at: String,
+}
+
+impl FederationHeadRemoteRecord {
+    fn validate(&self) -> Result<()> {
+        if self.namespace.is_empty()
+            || self.name.is_empty()
+            || self.ref_path.is_empty()
+            || self.signer.is_empty()
+            || self.updated_at.is_empty()
+        {
+            anyhow::bail!("federation head response contains empty required field");
+        }
+        if !self.ref_path.ends_with("/head") {
+            anyhow::bail!("federation head response ref_path missing /head suffix");
+        }
+        if self.ref_path.contains("..") || self.ref_path.starts_with('/') {
+            anyhow::bail!("federation head response has unsafe ref_path");
+        }
+        if !lillux::valid_hash(&self.target_hash)
+            || self.target_hash.bytes().any(|b| b.is_ascii_uppercase())
+        {
+            anyhow::bail!("invalid federation head target hash: {}", self.target_hash);
+        }
+        Ok(())
+    }
+}
+
 impl SyncJobsListResponse {
     pub fn validate(&self, requested_state: Option<&str>) -> Result<()> {
         if let Some(state) = requested_state {
@@ -1588,6 +1680,42 @@ mod tests {
         }))
         .unwrap();
         assert!(response.validate().is_err());
+    }
+
+    #[test]
+    fn federation_heads_list_response_validates_prefix_and_hashes() {
+        let response: FederationHeadsListResponse = serde_json::from_value(serde_json::json!({
+            "prefix": "admissions",
+            "limit": 10,
+            "truncated": false,
+            "heads": [{
+                "namespace": "admissions/policy-a",
+                "name": "subject-a",
+                "ref_path": "admissions/policy-a/subject-a/head",
+                "target_hash": "11".repeat(32),
+                "signer": "fp:node",
+                "updated_at": "2026-05-30T00:00:01Z"
+            }]
+        }))
+        .unwrap();
+        response.validate("admissions").unwrap();
+        assert!(response.validate("collections").is_err());
+
+        let response: FederationHeadsListResponse = serde_json::from_value(serde_json::json!({
+            "prefix": "admissions",
+            "limit": 10,
+            "truncated": false,
+            "heads": [{
+                "namespace": "admissions/policy-a",
+                "name": "subject-a",
+                "ref_path": "admissions/policy-a/subject-a/head",
+                "target_hash": "AA".repeat(32),
+                "signer": "fp:node",
+                "updated_at": "2026-05-30T00:00:01Z"
+            }]
+        }))
+        .unwrap();
+        assert!(response.validate("admissions").is_err());
     }
 
     #[test]

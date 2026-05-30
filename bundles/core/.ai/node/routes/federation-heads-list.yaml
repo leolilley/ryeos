@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-30T03:29:57Z:6a43b14ff5f06c2e8a3c370473be8e01a8182840c6632b55cdc697974a5cf1ed:H9RWZfrjuUf42yz+b4QQJsKU4uWWOu20NaShCoTZjehj3wuUxGV0WJwz+ZE/1cX9B+yCIBN5EyCTgGXsgJZ4CQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes
+section: routes
+id: federation/heads/list
+path: /federation/heads/list
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:federation/heads/list
