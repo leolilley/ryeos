@@ -303,12 +303,21 @@ impl StateDb {
         self.projection.record_cas_entry(entry)
     }
 
-    pub fn set_cas_entry_state(&self, hash: &str, state: CasEntryState) -> anyhow::Result<()> {
-        self.projection.set_cas_entry_state(hash, state)
+    pub fn set_cas_entry_state(
+        &self,
+        entry_kind: crate::projection::CasEntryKind,
+        hash: &str,
+        state: CasEntryState,
+    ) -> anyhow::Result<()> {
+        self.projection.set_cas_entry_state(entry_kind, hash, state)
     }
 
-    pub fn get_cas_entry(&self, hash: &str) -> anyhow::Result<Option<CasEntryAttribution>> {
-        self.projection.get_cas_entry(hash)
+    pub fn get_cas_entry(
+        &self,
+        entry_kind: crate::projection::CasEntryKind,
+        hash: &str,
+    ) -> anyhow::Result<Option<CasEntryAttribution>> {
+        self.projection.get_cas_entry(entry_kind, hash)
     }
 
     pub fn list_cas_entries_by_state(

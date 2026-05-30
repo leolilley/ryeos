@@ -313,9 +313,15 @@ mod tests {
         assert_eq!(attestation.claim, "accepted");
         assert_eq!(attestation.policy, "test.policy.v1");
 
-        let subject_row = db.get_cas_entry(&subject_hash).unwrap().unwrap();
+        let subject_row = db
+            .get_cas_entry(CasEntryKind::Object, &subject_hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(subject_row.state, CasEntryState::Accepted);
-        let attestation_row = db.get_cas_entry(&result.attestation_hash).unwrap().unwrap();
+        let attestation_row = db
+            .get_cas_entry(CasEntryKind::Object, &result.attestation_hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(attestation_row.state, CasEntryState::Local);
 
         let second = admit_root(

@@ -589,7 +589,10 @@ mod tests {
         let result = import_objects_staged(&db, &payload, &attribution).unwrap();
         assert_eq!(result.imported, 1);
 
-        let entry = db.get_cas_entry(&hash).unwrap().unwrap();
+        let entry = db
+            .get_cas_entry(CasEntryKind::Object, &hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(entry.hash, hash);
         assert_eq!(entry.entry_kind, CasEntryKind::Object);
         assert_eq!(entry.bytes, data.len() as u64);

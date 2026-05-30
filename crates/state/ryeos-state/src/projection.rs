@@ -1129,24 +1129,41 @@ impl ProjectionDb {
         Ok(())
     }
 
-    pub fn set_cas_entry_state(&self, hash: &str, state: CasEntryState) -> anyhow::Result<()> {
+    pub fn set_cas_entry_state(
+        &self,
+        entry_kind: CasEntryKind,
+        hash: &str,
+        state: CasEntryState,
+    ) -> anyhow::Result<()> {
         if !lillux::valid_hash(hash) {
             anyhow::bail!("invalid CAS entry hash: {hash}");
         }
         let changed = self
             .conn
             .execute(
-                "UPDATE cas_entries SET state = ?, updated_at = ? WHERE hash = ?",
-                rusqlite::params![state.as_str(), lillux::time::iso8601_now(), hash],
+                "UPDATE cas_entries SET state = ?, updated_at = ? WHERE entry_kind = ? AND hash = ?",
+                rusqlite::params![
+                    state.as_str(),
+                    lillux::time::iso8601_now(),
+                    entry_kind.as_str(),
+                    hash,
+                ],
             )
             .context("failed to update CAS entry attribution state")?;
         if changed == 0 {
-            anyhow::bail!("CAS entry attribution not found for hash {hash}");
+            anyhow::bail!(
+                "CAS entry attribution not found for {} hash {hash}",
+                entry_kind.as_str()
+            );
         }
         Ok(())
     }
 
-    pub fn get_cas_entry(&self, hash: &str) -> anyhow::Result<Option<CasEntryAttribution>> {
+    pub fn get_cas_entry(
+        &self,
+        entry_kind: CasEntryKind,
+        hash: &str,
+    ) -> anyhow::Result<Option<CasEntryAttribution>> {
         if !lillux::valid_hash(hash) {
             anyhow::bail!("invalid CAS entry hash: {hash}");
         }
@@ -1154,8 +1171,8 @@ impl ProjectionDb {
             .query_row(
                 "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
                     source_principal, source_peer, job_id, state
-                 FROM cas_entries WHERE hash = ?",
-                [hash],
+                 FROM cas_entries WHERE entry_kind = ? AND hash = ?",
+                rusqlite::params![entry_kind.as_str(), hash],
                 cas_entry_from_row,
             )
             .optional()
@@ -1789,7 +1806,10 @@ mod tests {
         })
         .unwrap();
 
-        let first = db.get_cas_entry(&hash).unwrap().unwrap();
+        let first = db
+            .get_cas_entry(CasEntryKind::Object, &hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(first.hash, hash);
         assert_eq!(first.entry_kind, CasEntryKind::Object);
         assert_eq!(first.bytes, 128);
@@ -1807,7 +1827,10 @@ mod tests {
         })
         .unwrap();
 
-        let updated = db.get_cas_entry(&hash).unwrap().unwrap();
+        let updated = db
+            .get_cas_entry(CasEntryKind::Object, &hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.first_seen_at, first.first_seen_at);
         assert_eq!(updated.bytes, 256);
         assert_eq!(updated.state, CasEntryState::Accepted);
@@ -1826,7 +1849,10 @@ mod tests {
         })
         .unwrap();
 
-        let still_accepted = db.get_cas_entry(&hash).unwrap().unwrap();
+        let still_accepted = db
+            .get_cas_entry(CasEntryKind::Object, &hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(still_accepted.bytes, 256);
         assert_eq!(still_accepted.state, CasEntryState::Accepted);
     }
@@ -1859,7 +1885,7 @@ mod tests {
             state: CasEntryState::Mirrored,
         })
         .unwrap();
-        db.set_cas_entry_state(&staged_hash, CasEntryState::Accepted)
+        db.set_cas_entry_state(CasEntryKind::Blob, &staged_hash, CasEntryState::Accepted)
             .unwrap();
 
         let accepted = db
@@ -1877,6 +1903,51 @@ mod tests {
         assert_eq!(summary[1].state, CasEntryState::Mirrored);
         assert_eq!(summary[1].count, 1);
         assert_eq!(summary[1].total_bytes, 22);
+    }
+
+    #[test]
+    fn cas_entry_lookup_is_keyed_by_kind_and_hash() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        let hash = "99".repeat(32);
+
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: 10,
+            source_principal: None,
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Local,
+        })
+        .unwrap();
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Blob,
+            bytes: 20,
+            source_principal: None,
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Staged,
+        })
+        .unwrap();
+
+        db.set_cas_entry_state(CasEntryKind::Blob, &hash, CasEntryState::Accepted)
+            .unwrap();
+
+        let object = db
+            .get_cas_entry(CasEntryKind::Object, &hash)
+            .unwrap()
+            .unwrap();
+        let blob = db
+            .get_cas_entry(CasEntryKind::Blob, &hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(object.bytes, 10);
+        assert_eq!(object.state, CasEntryState::Local);
+        assert_eq!(blob.bytes, 20);
+        assert_eq!(blob.state, CasEntryState::Accepted);
     }
 
     #[test]
