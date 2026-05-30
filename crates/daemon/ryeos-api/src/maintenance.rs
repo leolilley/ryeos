@@ -63,6 +63,26 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         .await
         .context("write barrier quiesce timed out (GC aborted)")?;
 
+    if !params.dry_run {
+        let active_sync_jobs = state
+            .state_store
+            .with_state_db(|db| db.count_active_sync_jobs())
+            .context("failed to inspect active sync jobs before GC");
+        match active_sync_jobs {
+            Ok(0) => {}
+            Ok(active_sync_jobs) => {
+                state.write_barrier.resume();
+                anyhow::bail!(
+                    "GC refused: {active_sync_jobs} active sync job(s) may pin staged CAS roots"
+                );
+            }
+            Err(err) => {
+                state.write_barrier.resume();
+                return Err(err);
+            }
+        }
+    }
+
     // Step 3: Run GC in a blocking task (CPU/disk I/O heavy)
     // Extract all data from AppState before spawning, since the closure
     // must be 'static + Send.

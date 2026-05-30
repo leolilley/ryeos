@@ -1,6 +1,10 @@
-# ryeos:signed:2026-05-23T12:06:24Z:458b7dd6efeef2a93c6e96af5e0c554fcc36b38f81187457ff4995d241958588:U44SkCYhkfV/ne3ST6/fLioX8Z9YYlvzIoFWf1/Kfj9eszpdgGzbf6PaNy8W53PPdlJrnBm9I3MdZ6llujCqAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:31Z:1e4ae988ead3f52ab35af77dc288c504cca31c54615736fa3951b0a50096dafc:oLywKw9ATB1H1zBy5ms4gbcN8GCFeeaFzwQngcmkw60PHmZIvrzCcUidNhPLbJquWN0vKpzP8gfqmlY/8XNzBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: vault-set
-description: "Set a secret in the node vault"
+description: Set a secret in the node vault
 execute: service:vault/set
+aliases:
+- tokens:
+  - vault
+  - set

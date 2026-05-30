@@ -1,6 +1,13 @@
-# ryeos:signed:2026-05-23T12:06:24Z:29977d59fad0075752b0f36e6b082c0933555e536919ee966de19f49ef81e6bc:T8d6hBk6mDjAbGMlbzmRXVC6EC7njq+ypiIGYMIwHc/S/+631frcjyp7QZT0X7uoXmHVlowzsQ0FGWfgezknAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:31Z:0d1600d43ef124b49970ae58c36ef7a84cde39a862131eccbc51fad40041b593:wn8Y1qmerdgMXn1OYthwr1WAcammG1pGp2ZJ20ISUkE2N+jn10GodJWuQAH6nA17j6CcE+5bCRzWHL7odgwHCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-threads
-description: "List threads on a remote node"
+description: List threads on a remote node
 execute: service:remote/threads
+aliases:
+- tokens:
+  - remote
+  - threads
+  positional_forms:
+  - slots:
+    - field: remote

@@ -1,6 +1,11 @@
-# ryeos:signed:2026-05-23T12:11:51Z:d413dd76b70da0be4f3329155b6a5856bea963aba93219a183a3259360249234:QPAA8OdOx7A/D94ixAXvXdLKvXzgf2CiD2WcE3S9J/okuHkU6EzSfIfagfUk8xGRtIgSQGCM/C3629JmF+seAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:31Z:24f07b6b732c8902f0e27f6f87243ad4c2d52df3790b789e534f2f88d2e8212a:/6jedbbtXyWG0or+ciX0fqdnTttwaQb2Qqk7JpsJaH62TGSKn+SCE8HPwM6Fx8+YmpBeDqDh649x8BX2JaCoDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: thread-chain
-description: "Get the parent chain for a thread (root -> ... -> thread)"
+description: Get the parent chain for a thread (root -> ... -> thread)
 execute: service:threads/chain
+aliases:
+- tokens:
+  - thread
+  - chain
+  description: Get a thread's chain

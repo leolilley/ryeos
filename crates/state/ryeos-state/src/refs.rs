@@ -22,7 +22,7 @@ use lillux::crypto::Verifier;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use crate::signer::Signer;
 
@@ -30,7 +30,7 @@ const SIGNED_REF_SCHEMA: u32 = 1;
 const SIGNED_REF_KIND: &str = "signed_ref";
 
 /// A signed reference — an authoritative mutable pointer to a CAS object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedRef {
     pub schema: u32,
@@ -76,7 +76,7 @@ impl SignedRef {
         if self.ref_path.is_empty() {
             anyhow::bail!("ref_path must not be empty");
         }
-        if !lillux::valid_hash(&self.target_hash) {
+        if !is_canonical_hash(&self.target_hash) {
             anyhow::bail!("invalid target_hash: {}", self.target_hash);
         }
         if self.updated_at.is_empty() {
@@ -202,6 +202,10 @@ pub fn verify_signed_ref(
 /// Trust store — map of fingerprint → public key.
 pub type TrustStore = std::collections::HashMap<String, lillux::crypto::VerifyingKey>;
 
+fn is_canonical_hash(hash: &str) -> bool {
+    lillux::valid_hash(hash) && !hash.bytes().any(|b| b.is_ascii_uppercase())
+}
+
 /// Canonical principal storage key — raw fingerprint hex, no `fp:` prefix.
 ///
 /// Used for HEAD ref paths and any other per-principal filesystem keys.
@@ -303,6 +307,205 @@ pub fn advance_project_head_ref(
         new_snapshot_hash,
         signer,
     )
+}
+
+/// A namespace-neutral signed head discovered under `refs/generic`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericHeadRef {
+    pub namespace: String,
+    pub name: String,
+    pub ref_path: String,
+    pub target_hash: String,
+    pub signer: String,
+    pub updated_at: String,
+    pub signed_ref: SignedRef,
+}
+
+fn validate_relative_ref_component_path(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        anyhow::bail!("{label} must be relative");
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(part) if !part.is_empty() => {}
+            _ => anyhow::bail!("{label} contains unsafe path component: {value}"),
+        }
+    }
+    Ok(())
+}
+
+fn generic_head_ref_path(namespace: &str, name: &str) -> anyhow::Result<String> {
+    validate_relative_ref_component_path("head namespace", namespace)?;
+    validate_relative_ref_component_path("head name", name)?;
+    Ok(format!("{namespace}/{name}/head"))
+}
+
+fn generic_head_file_path(
+    refs_root: &Path,
+    namespace: &str,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
+    let ref_path = generic_head_ref_path(namespace, name)?;
+    Ok(refs_root.join("generic").join(ref_path))
+}
+
+/// Write a namespace-neutral signed head under `refs/generic/<namespace>/<name>/head`.
+pub fn write_generic_head_ref(
+    refs_root: &Path,
+    namespace: &str,
+    name: &str,
+    target_hash: &str,
+    signer: &dyn Signer,
+) -> anyhow::Result<()> {
+    if !is_canonical_hash(target_hash) {
+        anyhow::bail!("invalid generic head target hash: {target_hash}");
+    }
+    let ref_path = generic_head_ref_path(namespace, name)?;
+    let signed_ref = SignedRef::new(
+        ref_path.clone(),
+        target_hash.to_string(),
+        lillux::time::iso8601_now(),
+        signer.fingerprint().to_string(),
+    );
+    let path = refs_root.join("generic").join(&ref_path);
+    write_signed_ref(&path, signed_ref, signer)
+}
+
+/// Read a namespace-neutral signed head.
+pub fn read_generic_head_ref(
+    refs_root: &Path,
+    namespace: &str,
+    name: &str,
+) -> anyhow::Result<Option<SignedRef>> {
+    let head_path = generic_head_file_path(refs_root, namespace, name)?;
+    if !head_path.exists() {
+        return Ok(None);
+    }
+    let signed_ref = read_signed_ref(&head_path)?;
+    let expected_ref_path = generic_head_ref_path(namespace, name)?;
+    if signed_ref.ref_path != expected_ref_path {
+        anyhow::bail!(
+            "generic head ref_path mismatch: expected {}, got {}",
+            expected_ref_path,
+            signed_ref.ref_path
+        );
+    }
+    Ok(Some(signed_ref))
+}
+
+/// Advance a namespace-neutral signed head with compare-and-swap semantics.
+///
+/// `expected_current_hash = None` means the head must not exist yet.
+pub fn advance_generic_head_ref(
+    refs_root: &Path,
+    namespace: &str,
+    name: &str,
+    new_target_hash: &str,
+    expected_current_hash: Option<&str>,
+    signer: &dyn Signer,
+) -> anyhow::Result<()> {
+    let current = read_generic_head_ref(refs_root, namespace, name)?;
+    match (current.as_ref(), expected_current_hash) {
+        (None, None) => {}
+        (Some(_), None) => anyhow::bail!(
+            "generic head conflict for {}/{}: expected no current head",
+            namespace,
+            name
+        ),
+        (None, Some(expected)) => anyhow::bail!(
+            "generic head conflict for {}/{}: expected {}, got no current head",
+            namespace,
+            name,
+            expected
+        ),
+        (Some(current), Some(expected)) if current.target_hash == expected => {}
+        (Some(current), Some(expected)) => anyhow::bail!(
+            "generic head conflict for {}/{}: expected {}, got {}",
+            namespace,
+            name,
+            expected,
+            current.target_hash
+        ),
+    }
+
+    write_generic_head_ref(refs_root, namespace, name, new_target_hash, signer)
+}
+
+/// List namespace-neutral signed heads beneath `refs/generic/<prefix>`.
+pub fn list_generic_head_refs(
+    refs_root: &Path,
+    prefix: &str,
+) -> anyhow::Result<Vec<GenericHeadRef>> {
+    if !prefix.is_empty() {
+        validate_relative_ref_component_path("head prefix", prefix)?;
+    }
+    let root = if prefix.is_empty() {
+        refs_root.join("generic")
+    } else {
+        refs_root.join("generic").join(prefix)
+    };
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut found = Vec::new();
+    collect_generic_head_refs(refs_root, &root, &mut found)?;
+    found.sort_by(|a, b| a.ref_path.cmp(&b.ref_path));
+    Ok(found)
+}
+
+fn collect_generic_head_refs(
+    refs_root: &Path,
+    dir: &Path,
+    found: &mut Vec<GenericHeadRef>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry.context("failed to read generic ref directory entry")?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .context("failed to inspect generic ref directory entry")?;
+        if file_type.is_dir() {
+            collect_generic_head_refs(refs_root, &path, found)?;
+            continue;
+        }
+        if !file_type.is_file() || entry.file_name() != "head" {
+            continue;
+        }
+        let signed_ref = read_signed_ref(&path)
+            .with_context(|| format!("failed to read generic head {}", path.display()))?;
+        let rel = path
+            .strip_prefix(refs_root.join("generic"))
+            .context("generic head path escaped refs root")?;
+        let expected_ref_path = rel.to_string_lossy().replace('\\', "/");
+        if signed_ref.ref_path != expected_ref_path {
+            anyhow::bail!(
+                "generic head ref_path mismatch: expected {}, got {}",
+                expected_ref_path,
+                signed_ref.ref_path
+            );
+        }
+        let without_head = expected_ref_path
+            .strip_suffix("/head")
+            .ok_or_else(|| anyhow!("generic head path missing /head suffix"))?;
+        let (namespace, name) = without_head.split_once('/').ok_or_else(|| {
+            anyhow!("generic head path must contain namespace and name: {expected_ref_path}")
+        })?;
+        found.push(GenericHeadRef {
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+            ref_path: signed_ref.ref_path.clone(),
+            target_hash: signed_ref.target_hash.clone(),
+            signer: signed_ref.signer.clone(),
+            updated_at: signed_ref.updated_at.clone(),
+            signed_ref,
+        });
+    }
+    Ok(())
 }
 
 /// Canonical deployed-project storage key derived from the remote live
@@ -480,6 +683,86 @@ mod tests {
     #[test]
     fn principal_storage_key_strips_prefix() {
         assert_eq!(super::principal_storage_key("fp:abc123"), "abc123");
+    }
+
+    #[test]
+    fn generic_head_write_read_advance_and_list() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let first = "11".repeat(32);
+        let second = "22".repeat(32);
+
+        advance_generic_head_ref(
+            &refs_root,
+            "admissions/policy-a",
+            "subject-a",
+            &first,
+            None,
+            &signer,
+        )
+        .unwrap();
+
+        let read = read_generic_head_ref(&refs_root, "admissions/policy-a", "subject-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.ref_path, "admissions/policy-a/subject-a/head");
+        assert_eq!(read.target_hash, first);
+
+        let conflict = advance_generic_head_ref(
+            &refs_root,
+            "admissions/policy-a",
+            "subject-a",
+            &second,
+            Some(&"33".repeat(32)),
+            &signer,
+        )
+        .unwrap_err();
+        assert!(conflict.to_string().contains("generic head conflict"));
+
+        advance_generic_head_ref(
+            &refs_root,
+            "admissions/policy-a",
+            "subject-a",
+            &second,
+            Some(&first),
+            &signer,
+        )
+        .unwrap();
+
+        write_generic_head_ref(
+            &refs_root,
+            "collections",
+            "accepted/root-b",
+            &"44".repeat(32),
+            &signer,
+        )
+        .unwrap();
+
+        let admissions = list_generic_head_refs(&refs_root, "admissions").unwrap();
+        assert_eq!(admissions.len(), 1);
+        assert_eq!(admissions[0].namespace, "admissions");
+        assert_eq!(admissions[0].name, "policy-a/subject-a");
+        assert_eq!(admissions[0].target_hash, second);
+
+        let all = list_generic_head_refs(&refs_root, "").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].ref_path, "admissions/policy-a/subject-a/head");
+        assert_eq!(all[1].ref_path, "collections/accepted/root-b/head");
+    }
+
+    #[test]
+    fn generic_head_rejects_unsafe_paths() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let target = "11".repeat(32);
+
+        assert!(write_generic_head_ref(&refs_root, "../escape", "name", &target, &signer).is_err());
+        assert!(
+            write_generic_head_ref(&refs_root, "namespace", "../escape", &target, &signer).is_err()
+        );
+        assert!(list_generic_head_refs(&refs_root, "../escape").is_err());
     }
 
     #[test]

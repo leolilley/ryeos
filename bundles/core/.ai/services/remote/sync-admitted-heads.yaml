@@ -1,0 +1,19 @@
+# ryeos:signed:2026-05-30T07:14:32Z:050515d13467d956a12f026723351e72131ff98fac07bcaca9693cc2313896d9:neGSOkuBBSycULGaOevMc1Fr1RGRyfh7XRvLcvCSgNGcA6gkEIuTljJovQHk4234Desv3rmXYGWsA2MvsN5hAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: remote.sync-admitted-heads
+required_caps: ["ryeos.execute.service.remote.sync-admitted-heads"]
+schema:
+  remote: string?
+  project: string?
+  policy: string?
+  limit: number?
+  max_imports: number?
+  max_objects: number?
+  max_blobs: number?
+  max_object_bytes: number?
+  max_total_object_bytes: number?
+  max_blob_bytes: number?
+  max_total_blob_bytes: number?
+  max_response_bytes: number?
+  max_links_per_object: number?
+description: "Mirror missing verified admission heads from a pinned remote under a policy; defaults to at most 50 imports per batch"

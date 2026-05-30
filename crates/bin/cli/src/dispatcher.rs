@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use ryeos_runtime::alias_registry::{AliasDef, PositionalForm, ProjectResolution};
-use serde::Deserialize;
+use ryeos_runtime::alias_registry::{AliasDef, ProjectResolution};
 use serde_json::Value;
 
 use crate::error::CliError;
@@ -294,71 +293,11 @@ fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct AliasYaml {
-    tokens: Vec<String>,
-    verb: String,
-    #[serde(default)]
-    deprecated: Option<bool>,
-    #[serde(default)]
-    replacement_tokens: Option<Vec<String>>,
-    #[serde(default)]
-    removed_in: Option<String>,
-    #[serde(default)]
-    positional_field: Option<String>,
-    #[serde(default)]
-    positional_forms: Vec<PositionalForm>,
-    #[serde(default)]
-    project_resolution: ProjectResolution,
-}
-
 fn load_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<AliasDef> {
-    let mut out = Vec::new();
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
-    let Ok(bundle_entries) = std::fs::read_dir(&bundles_dir) else {
-        return out;
-    };
-    for bundle_entry in bundle_entries.flatten() {
-        let name = bundle_entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Skip non-bundle artifacts: hidden dirs (e.g. .staging),
-        // backup dirs (e.g. core.backup.prev), and staging dirs.
-        if name_str.starts_with('.') || name_str.ends_with(".backup.prev") {
-            continue;
-        }
-
-        let aliases_dir = bundle_entry.path().join(".ai/node/aliases");
-        let Ok(alias_files) = std::fs::read_dir(aliases_dir) else {
-            continue;
-        };
-        for alias_file in alias_files.flatten() {
-            let path = alias_file.path();
-            if !matches!(
-                path.extension().and_then(|s| s.to_str()),
-                Some("yaml") | Some("yml")
-            ) {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(alias) = serde_yaml::from_str::<AliasYaml>(&content) else {
-                continue;
-            };
-            out.push(AliasDef {
-                tokens: alias.tokens,
-                verb: alias.verb,
-                deprecated: alias.deprecated.unwrap_or(false),
-                replacement_tokens: alias.replacement_tokens,
-                removed_in: alias.removed_in,
-                positional_field: alias.positional_field,
-                positional_forms: alias.positional_forms,
-                project_resolution: alias.project_resolution,
-            });
-        }
-    }
-    out
+    let bundle_roots = crate::node_descriptors::direct_bundle_roots(system_space_dir);
+    crate::node_descriptors::load_alias_descriptors(&bundle_roots)
+        .map(|aliases| aliases.into_iter().map(|alias| alias.def).collect())
+        .unwrap_or_default()
 }
 
 /// POST a JSON body to the daemon's /execute endpoint and return the response.
@@ -437,7 +376,7 @@ fn discover_system_space_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::{PositionalMatcher, PositionalSlot};
+    use ryeos_runtime::{PositionalForm, PositionalMatcher, PositionalSlot};
     fn with_user_space<T>(f: impl FnOnce() -> T) -> T {
         let _g = crate::test_env::lock();
         let saved = std::env::var_os("USER_SPACE");

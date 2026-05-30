@@ -1,6 +1,10 @@
-# ryeos:signed:2026-05-23T12:06:24Z:0d658dc6697a8b601d82e1d07acedc8f734dbc2724ac68d47ead126de9acef16:MbpCZrKS6Nz7NxeqcEU4vGkZlRRIOEVAlDUsz3NsQlC5H1MUzzoV088uADRhQZT4d2PT0onWAioCqAxIwZkoAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:903dca433e4bab2ab7a9f92aae3b59cdc9ca247818479f830fc659d4dead9b4d:6Zs55eCaB3le7tuZ6nY4SOHV61DLJDN04j4Y4z/U08vcG/fK/6Mee2D/1xshfqp771yt5h/fnUIZTcAp/2neCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: bundle-verify
-description: "Validate all bundle items, signatures, and manifest"
+description: Validate all bundle items, signatures, and manifest
 execute: service:bundle/verify
+aliases:
+- tokens:
+  - bundle
+  - verify

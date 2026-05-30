@@ -1,6 +1,10 @@
-# ryeos:signed:2026-05-23T12:06:24Z:9115f2b4be4ffe52225e704f0917cf03a46e8ba903b8f239d43496202f1450b3:ZmKYwJXyPld4fYbP9nQ1AYotVRBYMyuNmZsle9yKMxqwDZ0mucHJFG7kPYG+IPDEPXcrn7hxyht7Pa1q2Oy2AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:7954ece7a7f695f2874f09f32b432cddb8b18dd63a42650bd2bf1be77c42f99f:KBy+S6sjJwlPmFV//z1Fj/gU5mBtl68aOi7hFitYrT9xLi36O+SN/Rbq6zhPOANgXB/qombKKrX16qND33hFDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: bundle-list
-description: "List installed bundles"
+description: List installed bundles
 execute: service:bundle/list
+aliases:
+- tokens:
+  - bundle
+  - list

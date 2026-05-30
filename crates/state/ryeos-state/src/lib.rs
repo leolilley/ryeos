@@ -7,11 +7,13 @@
 //! The crate does NOT own the signing key (daemon passes a [`Signer`] trait),
 //! item resolution (engine), or low-level CAS primitives (lillux).
 
+pub mod admission;
 pub mod chain;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
 pub mod locators;
+pub mod object_closure;
 pub mod objects;
 pub mod project_discovery;
 pub mod project_sync;
@@ -27,14 +29,22 @@ pub mod sync;
 pub mod user_sync;
 pub mod verify;
 
+pub use admission::{admit_root, AdmissionRequest, AdmissionResult};
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;
 pub use objects::{
     thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
-    ChainState,
+    Attestation, ChainState,
 };
-pub use projection::ProjectionDb;
-pub use refs::{SignedRef, TrustStore};
+pub use projection::{
+    AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
+    CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
+    NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
+    ProjectionDb, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState,
+    SyncJobUpdate,
+};
+pub use refs::{verify_signed_ref, GenericHeadRef, SignedRef, TrustStore};
 pub use signer::Signer;
 pub use state_db::StateDb;
+pub use sync::ImportAttribution;

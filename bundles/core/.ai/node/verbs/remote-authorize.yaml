@@ -1,6 +1,10 @@
-# ryeos:signed:2026-05-23T12:06:24Z:8992325391677dc48f60ab7e58bc7868b7bc7843ed7c203a51d345ac3b5debeb:bCKsZ1PazCZn/9+I+krNFBty5qEgb2YPtg4BF9tO2wuDUfffXsncWzfFYEBORrQ+7i8A/m7NHW6lesGDBhgcAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:a5160ec1c7503781d610b6dafd466c0b1d080d445c456c425eca3822ed1e34a3:i15bVMEtlTb+3l9+MAtIBfvGDdQS860YkQGEgaL/r49v+dZEsvj5wm2dsZOQb9RsM5QAIvzmj7d0OH+B/uBKDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-authorize
-description: "Authorize a key on a remote node"
+description: Authorize a key on a remote node
 execute: service:remote/authorize
+aliases:
+- tokens:
+  - remote
+  - authorize

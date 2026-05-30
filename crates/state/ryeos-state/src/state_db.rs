@@ -13,8 +13,13 @@ use crate::chain::{self, AppendResult, CreateResult, SnapshotUpdate};
 use crate::head_cache::HeadCache;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
-use crate::projection::{self, ProjectionDb};
+use crate::projection::{
+    self, AdmissionAttestationRecord, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState,
+    NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
+    ProjectionDb, SyncJobAttemptRecord, SyncJobRecord, SyncJobState, SyncJobUpdate,
+};
 use crate::queries;
+use crate::refs::{GenericHeadRef, SignedRef};
 use crate::signer::Signer;
 
 /// High-level state database.
@@ -238,6 +243,50 @@ impl StateDb {
         )
     }
 
+    /// Write a namespace-neutral signed head under `refs/generic`.
+    pub fn write_generic_head_ref(
+        &self,
+        namespace: &str,
+        name: &str,
+        target_hash: &str,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<()> {
+        crate::refs::write_generic_head_ref(&self.refs_root, namespace, name, target_hash, signer)
+    }
+
+    /// Read a namespace-neutral signed head from `refs/generic`.
+    pub fn read_generic_head_ref(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<SignedRef>> {
+        crate::refs::read_generic_head_ref(&self.refs_root, namespace, name)
+    }
+
+    /// Advance a namespace-neutral signed head with compare-and-swap semantics.
+    pub fn advance_generic_head_ref(
+        &self,
+        namespace: &str,
+        name: &str,
+        new_target_hash: &str,
+        expected_current_hash: Option<&str>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<()> {
+        crate::refs::advance_generic_head_ref(
+            &self.refs_root,
+            namespace,
+            name,
+            new_target_hash,
+            expected_current_hash,
+            signer,
+        )
+    }
+
+    /// List namespace-neutral signed heads beneath `refs/generic/<prefix>`.
+    pub fn list_generic_head_refs(&self, prefix: &str) -> anyhow::Result<Vec<GenericHeadRef>> {
+        crate::refs::list_generic_head_refs(&self.refs_root, prefix)
+    }
+
     // ── Query helpers ──────────────────────────────────────────────
 
     pub fn get_thread(&self, thread_id: &str) -> anyhow::Result<Option<queries::ThreadRow>> {
@@ -249,6 +298,118 @@ impl StateDb {
         chain_root_id: &str,
     ) -> anyhow::Result<Vec<queries::ThreadRow>> {
         queries::list_threads_by_chain(&self.projection, chain_root_id)
+    }
+
+    pub fn record_cas_entry(&self, entry: &NewCasEntryAttribution) -> anyhow::Result<()> {
+        self.projection.record_cas_entry(entry)
+    }
+
+    pub fn set_cas_entry_state(
+        &self,
+        entry_kind: crate::projection::CasEntryKind,
+        hash: &str,
+        state: CasEntryState,
+    ) -> anyhow::Result<()> {
+        self.projection.set_cas_entry_state(entry_kind, hash, state)
+    }
+
+    pub fn get_cas_entry(
+        &self,
+        entry_kind: crate::projection::CasEntryKind,
+        hash: &str,
+    ) -> anyhow::Result<Option<CasEntryAttribution>> {
+        self.projection.get_cas_entry(entry_kind, hash)
+    }
+
+    pub fn list_cas_entries_by_state(
+        &self,
+        state: CasEntryState,
+    ) -> anyhow::Result<Vec<CasEntryAttribution>> {
+        self.projection.list_cas_entries_by_state(state)
+    }
+
+    pub fn cas_entries_by_state_summary(&self) -> anyhow::Result<Vec<CasEntriesByStateSummary>> {
+        self.projection.cas_entries_by_state_summary()
+    }
+
+    pub fn record_admission_attestation(
+        &self,
+        record: &NewAdmissionAttestationRecord,
+    ) -> anyhow::Result<()> {
+        self.projection.record_admission_attestation(record)
+    }
+
+    pub fn list_admission_attestations_for_subject(
+        &self,
+        subject_hash: &str,
+        policy: Option<&str>,
+    ) -> anyhow::Result<Vec<AdmissionAttestationRecord>> {
+        self.projection
+            .list_admission_attestations_for_subject(subject_hash, policy)
+    }
+
+    pub fn create_sync_job(&self, job: &NewSyncJob) -> anyhow::Result<SyncJobRecord> {
+        self.projection.create_sync_job(job)
+    }
+
+    pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
+        self.projection.update_sync_job(job_id, update)
+    }
+
+    pub fn create_sync_job_attempt(
+        &self,
+        attempt: &NewSyncJobAttempt,
+    ) -> anyhow::Result<SyncJobAttemptRecord> {
+        self.projection.create_sync_job_attempt(attempt)
+    }
+
+    pub fn finish_sync_job_attempt(
+        &self,
+        attempt_id: &str,
+        finish: &crate::projection::FinishSyncJobAttempt,
+    ) -> anyhow::Result<()> {
+        self.projection.finish_sync_job_attempt(attempt_id, finish)
+    }
+
+    pub fn finish_sync_job_attempt_and_update_job(
+        &self,
+        attempt_id: &str,
+        finish: &crate::projection::FinishSyncJobAttempt,
+        job_id: &str,
+        update: &SyncJobUpdate,
+    ) -> anyhow::Result<()> {
+        self.projection
+            .finish_sync_job_attempt_and_update_job(attempt_id, finish, job_id, update)
+    }
+
+    pub fn get_sync_job_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> anyhow::Result<Option<SyncJobAttemptRecord>> {
+        self.projection.get_sync_job_attempt(attempt_id)
+    }
+
+    pub fn list_sync_job_attempts(
+        &self,
+        job_id: &str,
+    ) -> anyhow::Result<Vec<SyncJobAttemptRecord>> {
+        self.projection.list_sync_job_attempts(job_id)
+    }
+
+    pub fn get_sync_job(&self, job_id: &str) -> anyhow::Result<Option<SyncJobRecord>> {
+        self.projection.get_sync_job(job_id)
+    }
+
+    pub fn list_sync_jobs_by_state(
+        &self,
+        state: Option<SyncJobState>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.projection.list_sync_jobs_by_state(state, limit)
+    }
+
+    pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {
+        self.projection.count_active_sync_jobs()
     }
 }
 

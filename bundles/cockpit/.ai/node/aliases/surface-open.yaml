@@ -1,8 +1,0 @@
-# ryeos:signed:2026-05-23T12:11:51Z:ddeaefe3180c95eda3875b5e6859a48db84bba300e92ef7d0202e47bdbd09332:Xm5WeyHG1TsQsPr3QE/E0p90C5mXQOVR58wDEM3uicvpGDUHvGQUHXy0z2mnDhrxUuIrchfKOVInskvyOoflDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["surface", "open"]
-verb: surface-open
-description: "Open a surface in the selected renderer"
-positional_field: surface
-project_resolution: optional

@@ -19,43 +19,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItem;
-use ryeos_runtime::alias_registry::{AliasDef, PositionalForm, ProjectResolution};
-use serde::Deserialize;
+use ryeos_runtime::alias_registry::{AliasDef, ProjectResolution};
 use serde_json::Value;
 
 use crate::error::CliError;
+use crate::node_descriptors::{LoadedAliasDescriptor, LoadedVerbDescriptor};
 
 // ---------------------------------------------------------------------------
 // Alias / verb types (node configuration, not engine kinds)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct LoadedAlias {
-    def: AliasDef,
-}
-
-#[derive(Debug, Deserialize)]
-struct AliasYaml {
-    tokens: Vec<String>,
-    verb: String,
-    #[serde(default)]
-    deprecated: Option<bool>,
-    #[serde(default)]
-    replacement_tokens: Option<Vec<String>>,
-    #[serde(default)]
-    removed_in: Option<String>,
-    #[serde(default)]
-    positional_field: Option<String>,
-    #[serde(default)]
-    positional_forms: Vec<PositionalForm>,
-    #[serde(default)]
-    project_resolution: ProjectResolution,
-}
-
-#[derive(Debug, Deserialize)]
-struct VerbDescriptor {
-    execute: String,
-}
 
 #[derive(Debug)]
 pub enum OfflineDispatchOutcome {
@@ -92,11 +64,14 @@ pub fn try_offline_dispatch(
     }
 
     // 2. Load aliases + verbs from bundles
-    let aliases = load_aliases(&bundle_roots).map_err(local_err)?;
+    let aliases =
+        crate::node_descriptors::load_alias_descriptors(&bundle_roots).map_err(local_err)?;
     let Some((alias, consumed)) = match_alias(argv, &aliases).map_err(local_err)? else {
         return Ok(None);
     };
-    let Some(verb) = load_verb(&bundle_roots, &alias.def.verb).map_err(local_err)? else {
+    let Some(verb) = crate::node_descriptors::load_verb_descriptor(&bundle_roots, &alias.def.verb)
+        .map_err(local_err)?
+    else {
         return Ok(None);
     };
 
@@ -506,7 +481,7 @@ fn dispatch_service(
     engine: &ryeos_engine::engine::Engine,
     item: EffectiveItem,
     alias_def: &AliasDef,
-    verb: &VerbDescriptor,
+    verb: &LoadedVerbDescriptor,
     tail: &[String],
     system_space_dir: &Path,
     project_path: &str,
@@ -853,67 +828,13 @@ fn exec_inherited(
 // Alias / verb loading from bundle roots
 // ---------------------------------------------------------------------------
 
-fn load_aliases(bundle_roots: &[PathBuf]) -> anyhow::Result<Vec<LoadedAlias>> {
-    let mut out = Vec::new();
-    for root in bundle_roots {
-        let aliases_dir = root.join(ryeos_engine::AI_DIR).join("node").join("aliases");
-        let Ok(files) = std::fs::read_dir(&aliases_dir) else {
-            continue;
-        };
-        for file in files {
-            let path = file?.path();
-            if !is_yaml_file(&path) {
-                continue;
-            }
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("read alias {}", path.display()))?;
-            let body = lillux::signature::strip_signature_lines(&content);
-            let alias: AliasYaml = serde_yaml::from_str(&body)
-                .with_context(|| format!("parse alias YAML {}", path.display()))?;
-            out.push(LoadedAlias {
-                def: AliasDef {
-                    tokens: alias.tokens,
-                    verb: alias.verb,
-                    deprecated: alias.deprecated.unwrap_or(false),
-                    replacement_tokens: alias.replacement_tokens,
-                    removed_in: alias.removed_in,
-                    positional_field: alias.positional_field,
-                    positional_forms: alias.positional_forms,
-                    project_resolution: alias.project_resolution,
-                },
-            });
-        }
-    }
-    Ok(out)
-}
-
-fn load_verb(bundle_roots: &[PathBuf], verb_name: &str) -> anyhow::Result<Option<VerbDescriptor>> {
-    let rel = Path::new(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("verbs")
-        .join(format!("{verb_name}.yaml"));
-
-    for root in bundle_roots {
-        let path = root.join(&rel);
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("read verb {}", path.display()))?;
-            let body = lillux::signature::strip_signature_lines(&content);
-            let verb: VerbDescriptor = serde_yaml::from_str(&body)
-                .with_context(|| format!("parse verb YAML {}", path.display()))?;
-            return Ok(Some(verb));
-        }
-    }
-    Ok(None)
-}
-
 fn match_alias<'a>(
     argv: &[String],
-    aliases: &'a [LoadedAlias],
-) -> anyhow::Result<Option<(&'a LoadedAlias, usize)>> {
+    aliases: &'a [LoadedAliasDescriptor],
+) -> anyhow::Result<Option<(&'a LoadedAliasDescriptor, usize)>> {
     for len in (1..=argv.len()).rev() {
         let prefix = &argv[..len];
-        let matches: Vec<&LoadedAlias> = aliases
+        let matches: Vec<&LoadedAliasDescriptor> = aliases
             .iter()
             .filter(|alias| alias.def.tokens == prefix)
             .collect();
@@ -926,13 +847,6 @@ fn match_alias<'a>(
         }
     }
     Ok(None)
-}
-
-fn is_yaml_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("yaml") | Some("yml")
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,18 +945,9 @@ mod tests {
                     .bundle
                     .join(ryeos_engine::AI_DIR)
                     .join("node")
-                    .join("aliases")
-                    .join("custom.yaml"),
-                "tokens: [\"custom\"]\nverb: custom\npositional_field: name\n",
-            );
-            self.write_signed(
-                &self
-                    .bundle
-                    .join(ryeos_engine::AI_DIR)
-                    .join("node")
                     .join("verbs")
                     .join("custom.yaml"),
-                "name: custom\nexecute: service:custom\n",
+                "name: custom\nexecute: service:custom\naliases:\n  - tokens: [\"custom\"]\n    positional_field: name\n",
             );
             let offline_execute_line = offline_execute_line.unwrap_or("");
             self.write_signed(
@@ -1327,9 +1232,9 @@ mod tests {
             &second_bundle
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
-                .join("aliases")
+                .join("verbs")
                 .join("custom.yaml"),
-            "tokens: [\"custom\"]\nverb: other\n",
+            "name: other\nexecute: service:other\naliases:\n  - tokens: [\"custom\"]\n",
         );
 
         let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
@@ -1406,18 +1311,9 @@ mod tests {
                 .bundle
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
-                .join("aliases")
-                .join("capture.yaml"),
-            "tokens: [\"capture\"]\nverb: capture\n",
-        );
-        fixture.write_signed(
-            &fixture
-                .bundle
-                .join(ryeos_engine::AI_DIR)
-                .join("node")
                 .join("verbs")
                 .join("capture.yaml"),
-            "name: capture\nexecute: client:custom/capture\n",
+            "name: capture\nexecute: client:custom/capture\naliases:\n  - tokens: [\"capture\"]\n",
         );
         fixture.write_signed(
             &fixture

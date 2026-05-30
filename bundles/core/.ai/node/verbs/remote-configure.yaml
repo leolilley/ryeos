@@ -1,6 +1,12 @@
-# ryeos:signed:2026-05-23T12:06:24Z:ed245f3bcdbba3d81cef0a0763e856d02036dd569cd2281cdad2e9dc0d2e218b:yyeRPwDHN3uOXxN2RtxBc91/qcvENOjmQFdB9cOm8wPu2ftGqnUwMqLkaC/w11U6ODPaXBH8gak3f6Ci98qkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:da371652ff24125a053deb44fb0a5dd95c92fe5d4eeced79c5b3f1962a48530e:szNDp3wSTzBict0bJqLLa7MBfX2T+hfq5Jyhn1xii0CEtZG1pP3mPkf2tMZvKUs2+p1dcPtiZ260KjnToRArBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-configure
-description: "Add or update a remote node configuration"
+description: Add or update a remote node configuration
 execute: service:remote/configure
+aliases:
+- tokens:
+  - remote
+  - configure
+  project_resolution: optional
+  positional_field: remote

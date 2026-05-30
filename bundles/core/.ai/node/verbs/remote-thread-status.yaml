@@ -1,6 +1,16 @@
-# ryeos:signed:2026-05-23T12:06:24Z:6d7ab7e5a894028953d7ccdb31bfd1d1e1beb3d113b5a94a1a0d80f1d3c74267:snuYUDoMOnQHQB6lfmYx6mIdY2/LXIh5uX1To7xM2cokK4VKM7FLPoHjRJlOreFhIzHtD+jrvfZF1TFaTyWjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:31Z:9b732e5e8cc095b26fa75cade74772bede20781fc70bc35be961104243003007:pKPCVy5Fk2MbJAFVQopHNZF++yK9Z5Z2Kf4nlFZA6ttlsxMNQ5rfrHgRnzyHjAcrJMumYPyoz3wtfIqpsU1GAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-thread-status
-description: "Get thread detail on a remote node"
+description: Get thread detail on a remote node
 execute: service:remote/thread-status
+aliases:
+- tokens:
+  - remote
+  - thread-status
+  positional_forms:
+  - slots:
+    - field: remote
+    - field: thread_id
+  - slots:
+    - field: thread_id

@@ -1,6 +1,11 @@
-# ryeos:signed:2026-05-23T12:11:51Z:4d5409da4150b4d62472a60787b2b2644ff57d4b4ed5bc9631f8d13ac503e308:7qmBX40bT8neHHjyFrqb3EtrGVfs/+9YqC+8eJ5y2zAqJ3RGSl3sumfDZFe1S0yT+RQdABliCSDR8+UAaD/RBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:31Z:bdcb104aca8816e6a8c423f42cf55a2f40fef85dbd71ccb6a32c43d95313cb60:8O7ClHiZX3j+iQ7ICOj1flMn2Nv7t8gJwn06TiZUieuy7E6PAeVbcA2Cm0ckW85pmodkLW6DGqStCT4NV5LfAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: thread-get
-description: "Get a single thread's metadata by id"
+description: Get a single thread's metadata by id
 execute: service:threads/get
+aliases:
+- tokens:
+  - thread
+  - get
+  description: Get a thread's details

@@ -1,6 +1,0 @@
-# ryeos:signed:2026-05-23T12:06:25Z:cf119b7140c106845c2d58ec07d61987da6f8666097a974e0cfc6bfe70810015:o9kcp4m743ejkIFoPT0oOrDkQZWiG18UElyqb1/AR0d66GprqI/HDtVaK49bfgz/Lh2cDCaga809O5hmpz9SCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["bundle", "install"]
-verb: bundle-install
-description: "Install a bundle into the daemon's state"

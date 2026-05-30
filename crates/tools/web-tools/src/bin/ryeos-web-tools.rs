@@ -105,9 +105,11 @@ fn read_search_params() -> anyhow::Result<SearchParams> {
 
 fn search_web(query: &str, num_results: usize) -> anyhow::Result<(String, Vec<SearchResult>)> {
     match search_bing_web_rss(query, num_results) {
-        Ok(results) if !results.is_empty() => Ok(("bing_web_rss".to_string(), results)),
+        Ok(results) if has_relevant_result(query, &results) => {
+            Ok(("bing_web_rss".to_string(), results))
+        }
         Ok(_) => search_secondary_fallback(query, num_results)
-            .context("Bing Web RSS returned no results and secondary fallback failed"),
+            .context("Bing Web RSS returned no relevant results and secondary fallback failed"),
         Err(bing_err) => search_secondary_fallback(query, num_results).with_context(|| {
             format!("Bing Web RSS failed ({bing_err:#}) and secondary fallback failed")
         }),
@@ -251,6 +253,29 @@ fn is_duckduckgo_challenge(html: &str) -> bool {
     html.contains("anomaly-modal")
         || html.contains("anomaly-modal__image")
         || html.contains("/assets/anomaly/images/challenge/")
+}
+
+fn has_relevant_result(query: &str, results: &[SearchResult]) -> bool {
+    let terms = query_terms(query);
+    if terms.is_empty() {
+        return !results.is_empty();
+    }
+
+    results.iter().any(|result| {
+        let haystack = format!("{} {} {}", result.title, result.url, result.snippet).to_lowercase();
+        terms.iter().any(|term| haystack.contains(term))
+    })
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|term| term.chars().count() >= 3)
+        .collect()
 }
 
 fn parse_duckduckgo_html(html: &str, num_results: usize) -> Vec<SearchResult> {
@@ -462,5 +487,27 @@ mod tests {
         assert_eq!(results[0].title, "TVB & Hong Kong TV");
         assert_eq!(results[0].url, "https://www.tvb.com/");
         assert_eq!(results[0].snippet, "Official television site.");
+    }
+
+    #[test]
+    fn relevance_check_rejects_unrelated_results() {
+        let results = vec![SearchResult {
+            title: "Quote of the Day".to_string(),
+            url: "https://example.com/quotes".to_string(),
+            snippet: "Inspirational sayings".to_string(),
+        }];
+
+        assert!(!has_relevant_result("TVB 正義女神", &results));
+    }
+
+    #[test]
+    fn relevance_check_accepts_matching_results() {
+        let results = vec![SearchResult {
+            title: "正義女神｜最新 TVB 劇情".to_string(),
+            url: "https://example.com/themis".to_string(),
+            snippet: String::new(),
+        }];
+
+        assert!(has_relevant_result("TVB 正義女神", &results));
     }
 }

@@ -3,11 +3,13 @@
 //! Walks all signed heads (chains + projects) and collects every reachable
 //! CAS object hash via BFS. Used by rebuild, verify, sync, and GC.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+
+use crate::object_closure::collect_object_closure;
+use crate::refs::read_signed_ref;
 
 /// Complete set of reachable hashes from all signed heads.
 #[derive(Debug, Clone, Default)]
@@ -37,7 +39,7 @@ pub struct ReachableSet {
 ///   project_snapshot.parent_hashes → walk history
 pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableSet> {
     let mut set = ReachableSet::default();
-    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut roots: Vec<String> = Vec::new();
 
     // Seed from chain heads
     let chains_dir = refs_root.join("generic/chains");
@@ -50,8 +52,9 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                 let chain_root_id = entry.file_name().to_string_lossy().to_string();
                 let head_path = entry.path().join("head");
                 if head_path.exists() {
-                    if let Some(target) = read_ref_target(&head_path)? {
-                        queue.push_back(target);
+                    let expected_ref_path = format!("chains/{chain_root_id}/head");
+                    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
+                        roots.push(target);
                         set.chain_root_ids.push(chain_root_id);
                     }
                 }
@@ -69,6 +72,7 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
             let principal_entry =
                 principal_entry.context("failed to read project principal entry")?;
             if principal_entry.file_type()?.is_dir() {
+                let principal_key = principal_entry.file_name().to_string_lossy().to_string();
                 for project_entry in std::fs::read_dir(principal_entry.path())
                     .context("failed to read principal project refs directory")?
                 {
@@ -78,8 +82,10 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                         let project_hash = project_entry.file_name().to_string_lossy().to_string();
                         let head_path = project_entry.path().join("head");
                         if head_path.exists() {
-                            if let Some(target) = read_ref_target(&head_path)? {
-                                queue.push_back(target);
+                            let expected_ref_path =
+                                format!("projects/{principal_key}/{project_hash}");
+                            if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
+                                roots.push(target);
                                 set.project_hashes.push(project_hash);
                             }
                         }
@@ -102,8 +108,9 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                 let project_hash = project_entry.file_name().to_string_lossy().to_string();
                 let head_path = project_entry.path().join("head");
                 if head_path.exists() {
-                    if let Some(target) = read_ref_target(&head_path)? {
-                        queue.push_back(target);
+                    let expected_ref_path = format!("deployed/projects/{project_hash}");
+                    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
+                        roots.push(target);
                         set.project_hashes.push(project_hash);
                     }
                 }
@@ -111,173 +118,26 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
         }
     }
 
-    // BFS through the object graph
-    while let Some(hash) = queue.pop_front() {
-        if set.object_hashes.contains(&hash) {
-            continue;
-        }
-        set.object_hashes.insert(hash.clone());
-
-        let object_path = lillux::shard_path(cas_root, "objects", &hash, ".json");
-        let content = match std::fs::read_to_string(&object_path) {
-            Ok(c) => c,
-            Err(_) => continue, // Object referenced but missing — skip
-        };
-
-        let value: Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-
-        let children = extract_child_hashes(kind, &value);
-        for child in children {
-            if set.object_hashes.contains(&child) {
-                continue;
-            }
-            queue.push_back(child);
-        }
-
-        // For item_source, extract blob hash
-        if kind == "item_source" {
-            if let Some(blob_hash) = value.get("content_blob_hash").and_then(|v| v.as_str()) {
-                if !blob_hash.is_empty() && lillux::valid_hash(blob_hash) {
-                    set.blob_hashes.insert(blob_hash.to_string());
-                }
-            }
-        }
-    }
+    merge_object_closure(cas_root, roots, &mut set)?;
 
     Ok(set)
 }
 
 /// Read the target hash from a signed ref file.
-fn read_ref_target(path: &Path) -> Result<Option<String>> {
-    let content = std::fs::read_to_string(path)?;
-    let value: Value = serde_json::from_str(&content)?;
-    let target = value
-        .get("target_hash")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    Ok(target)
-}
-
-/// Extract child object hashes from a CAS object, dispatching on kind.
-fn extract_child_hashes(kind: &str, value: &Value) -> Vec<String> {
-    let mut children = Vec::new();
-
-    match kind {
-        "chain_state" => {
-            // prev_chain_state_hash
-            if let Some(hash) = value.get("prev_chain_state_hash").and_then(|v| v.as_str()) {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-            // threads map → snapshot_hash + last_event_hash per entry
-            if let Some(threads) = value.get("threads").and_then(|v| v.as_object()) {
-                for (_thread_id, entry) in threads {
-                    if let Some(hash) = entry.get("snapshot_hash").and_then(|v| v.as_str()) {
-                        if !hash.is_empty() {
-                            children.push(hash.to_string());
-                        }
-                    }
-                    if let Some(hash) = entry.get("last_event_hash").and_then(|v| v.as_str()) {
-                        if !hash.is_empty() {
-                            children.push(hash.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        "thread_snapshot" => {
-            // base_project_snapshot_hash
-            if let Some(hash) = value
-                .get("base_project_snapshot_hash")
-                .and_then(|v| v.as_str())
-            {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-            // result_project_snapshot_hash
-            if let Some(hash) = value
-                .get("result_project_snapshot_hash")
-                .and_then(|v| v.as_str())
-            {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-            // last_event_hash
-            if let Some(hash) = value.get("last_event_hash").and_then(|v| v.as_str()) {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-        }
-
-        "thread_event" => {
-            // prev_chain_event_hash
-            if let Some(hash) = value.get("prev_chain_event_hash").and_then(|v| v.as_str()) {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-            // prev_thread_event_hash
-            if let Some(hash) = value.get("prev_thread_event_hash").and_then(|v| v.as_str()) {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-        }
-
-        "project_snapshot" => {
-            // project_manifest_hash
-            if let Some(hash) = value.get("project_manifest_hash").and_then(|v| v.as_str()) {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-            // user_manifest_hash
-            if let Some(hash) = value.get("user_manifest_hash").and_then(|v| v.as_str()) {
-                if !hash.is_empty() {
-                    children.push(hash.to_string());
-                }
-            }
-            // parent_hashes (array)
-            if let Some(parents) = value.get("parent_hashes").and_then(|v| v.as_array()) {
-                for parent in parents {
-                    if let Some(hash) = parent.as_str() {
-                        if !hash.is_empty() {
-                            children.push(hash.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        "source_manifest" => {
-            // item_source_hashes values
-            if let Some(hashes) = value.get("item_source_hashes").and_then(|v| v.as_object()) {
-                for (_path, hash_value) in hashes {
-                    if let Some(hash) = hash_value.as_str() {
-                        if !hash.is_empty() {
-                            children.push(hash.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        // item_source has no object children (only blob via content_blob_hash)
-        // signed_ref, and unknown kinds: no children
-        _ => {}
+fn read_ref_target(path: &Path, expected_ref_path: &str) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
     }
-
-    children
+    let signed_ref = read_signed_ref(path)?;
+    if signed_ref.ref_path != expected_ref_path {
+        anyhow::bail!(
+            "signed ref path mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected_ref_path,
+            signed_ref.ref_path
+        );
+    }
+    Ok(Some(signed_ref.target_hash))
 }
 
 /// Collect reachable objects for a single chain only.
@@ -289,57 +149,40 @@ pub fn collect_chain_reachable(
     chain_root_id: &str,
 ) -> Result<ReachableSet> {
     let mut set = ReachableSet::default();
-    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut roots: Vec<String> = Vec::new();
 
-    let head_path = refs_root
-        .join("generic/chains")
-        .join(chain_root_id)
-        .join("head");
-    if let Some(target) = read_ref_target(&head_path)? {
-        queue.push_back(target);
+    if let Some(signed_ref) =
+        crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+    {
+        roots.push(signed_ref.target_hash);
         set.chain_root_ids.push(chain_root_id.to_string());
     }
 
-    while let Some(hash) = queue.pop_front() {
-        if set.object_hashes.contains(&hash) {
-            continue;
-        }
-        set.object_hashes.insert(hash.clone());
-
-        let object_path = lillux::shard_path(cas_root, "objects", &hash, ".json");
-        let content = match std::fs::read_to_string(&object_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let value: Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        let children = extract_child_hashes(kind, &value);
-        for child in children {
-            if !set.object_hashes.contains(&child) {
-                queue.push_back(child);
-            }
-        }
-
-        if kind == "item_source" {
-            if let Some(blob_hash) = value.get("content_blob_hash").and_then(|v| v.as_str()) {
-                if !blob_hash.is_empty() && lillux::valid_hash(blob_hash) {
-                    set.blob_hashes.insert(blob_hash.to_string());
-                }
-            }
-        }
-    }
+    merge_object_closure(cas_root, roots, &mut set)?;
 
     Ok(set)
+}
+
+fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut ReachableSet) -> Result<()> {
+    let closure = collect_object_closure(cas_root, roots)?;
+    if !closure.is_complete() {
+        anyhow::bail!(
+            "reachable closure incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
+            closure.missing_objects.len(),
+            closure.missing_blobs.len(),
+            closure.malformed_objects.len(),
+            closure.unsupported_objects.len()
+        );
+    }
+    set.object_hashes.extend(closure.object_hashes);
+    set.blob_hashes.extend(closure.blob_hashes);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
 

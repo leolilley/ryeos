@@ -1,9 +1,0 @@
-# ryeos:signed:2026-05-23T12:06:25Z:b5aee090f0135501c40628a2d266bf38129d7f48b1b070ac5dbd807b9a327447:dAahNaW44A6iSNL9jn2g7H8xSdzq/26GCQCdNQ0cvRjUle7uEZk65z/JMUxEF+0EVp6wzenm8EMhKTyEj0PBAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "aliases"
-section: aliases
-tokens: ["remote", "vault-list"]
-verb: remote-vault-list
-description: "List secrets on a remote node's vault"
-positional_forms:
-  - slots:
-      - field: remote

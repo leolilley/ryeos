@@ -1,6 +1,14 @@
-# ryeos:signed:2026-05-23T12:06:24Z:4cd97814246de254fe51f59af5dadf00f9b0e409a8bbd71b407fc9aebcdd336a:RlSc5h3fggi7g+d+b2yj5kXBJt+KO+EXINBT+nPyF/SwLqWA2v5iTP6m0xQHKFF6otc3OwGx0TBq3MuulW+xCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "verbs"
+# ryeos:signed:2026-05-30T07:21:30Z:663511a16883cb7039dea32e8151d00460ff8625e59b27c77fd5c922ebf6a369:Jz+ha8kZdN2VfMEBawF2oWH56L+Yj4l2gukacxeon3WBwb6bjXHfpPjB7ZVW+PsDFyhm9VGp8YcPqeF8bP8XBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
 section: verbs
 name: remote-project-status
-description: "Report deployed status for a bound remote project"
+description: Report deployed status for a bound remote project
 execute: service:remote/project-status
+aliases:
+- tokens:
+  - remote
+  - project-status
+  project_resolution: required
+  positional_forms:
+  - slots:
+    - field: remote
