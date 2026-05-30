@@ -33,6 +33,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if req.prefix.is_empty() {
         anyhow::bail!("federation heads list requires a non-empty prefix");
     }
+    if !is_federation_safe_prefix(&req.prefix) {
+        anyhow::bail!(
+            "federation heads list prefix is not exportable: {}",
+            req.prefix
+        );
+    }
     let limit = req.limit.min(500);
     let heads = state
         .state_store
@@ -48,6 +54,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             .map(generic_head_to_json)
             .collect::<Vec<_>>(),
     }))
+}
+
+fn is_federation_safe_prefix(prefix: &str) -> bool {
+    prefix == "admissions" || prefix.starts_with("admissions/")
 }
 
 fn generic_head_to_json(head: ryeos_state::GenericHeadRef) -> Value {
@@ -78,3 +88,15 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn federation_head_prefixes_are_allowlisted() {
+        assert!(super::is_federation_safe_prefix("admissions"));
+        assert!(super::is_federation_safe_prefix("admissions/local-node-v1"));
+        assert!(!super::is_federation_safe_prefix(""));
+        assert!(!super::is_federation_safe_prefix("chains"));
+        assert!(!super::is_federation_safe_prefix("projects/fp/head"));
+    }
+}
