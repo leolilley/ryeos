@@ -46,6 +46,7 @@ pub mod remote_bundle_install;
 pub mod remote_configure;
 pub mod remote_doctor;
 pub mod remote_execute;
+pub mod remote_import_admitted_head;
 pub mod remote_import_admitted_root;
 pub mod remote_list;
 pub mod remote_project_status;
@@ -136,6 +137,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_project_status::DESCRIPTOR,
     remote_pull::DESCRIPTOR,
     remote_execute::DESCRIPTOR,
+    remote_import_admitted_head::DESCRIPTOR,
     remote_import_admitted_root::DESCRIPTOR,
     remote_run::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
