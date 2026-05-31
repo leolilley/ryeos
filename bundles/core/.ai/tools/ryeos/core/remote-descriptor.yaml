@@ -1,0 +1,45 @@
+# ryeos:signed:2026-05-31T04:51:54Z:2e1d559c25b7788d1882a3453f0e45f8e48b926b7a927090c8b54826792ee39a:PTXYZ2VTbn4vvruNH1h+k3j4FafVWj1oFwAAlZ2wAJriEbIAFt8i5Ai0qoHpu1sZUEZizl8i2NcHboNth/eZDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "ryeos/core"
+name: "remote-descriptor"
+required_caps: ["ryeos.execute.tool.ryeos.core.remote-descriptor"]
+description: "Export a remote descriptor trust pin for this node."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "remote-descriptor"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    system_space_dir:
+      type: string
+      description: "Node system space root. Defaults to RYEOS_SYSTEM_SPACE_DIR or the platform data dir."
+    name:
+      type: string
+      description: "Remote name callers should use."
+    url:
+      type: string
+      description: "Public URL callers should use to reach this node."
+    capabilities:
+      type: array
+      items:
+        type: string
+      description: "Optional informational capability labels advertised by this node/provider."
+      default: []
+    admission_mode:
+      type: string
+      description: "Admission mode label to advertise. Defaults to token."
+      default: "token"
+    provider_name:
+      type: string
+      description: "Optional provider/operator label."
+    output:
+      type: string
+      description: "Optional path to write the descriptor YAML."
+  required: [name, url]

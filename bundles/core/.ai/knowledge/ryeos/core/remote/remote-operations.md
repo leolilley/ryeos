@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T04:29:09Z:c1d31d8f4cd862fef133c9a4ae55a8d89fd40a9e62bd5b10ab59f36a710db311:7OxJEAzBBBMJrkPvoLVRjpbeBI3gwCk3w33iCvvUK7WNCQezyDsJzqtJeqdgXtoJ4b01HJBGC7Q37kFoHnl4Aw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -63,15 +64,40 @@ ryeos identity
    vault key material, local operator authorization, and installed
    bundles.
 
-2. **Authorize the caller node key**: the remote operator needs the
-   caller node public key in `ed25519:<base64>` form. The caller gets it
-   with:
+2. **Authorize the caller node key**: either mint a one-time admission
+   token on the target node, or directly authorize the caller node key.
+   For direct authorization, the remote operator needs the caller node
+   public key in `ed25519:<base64>` form. The caller gets it with:
 
    ```bash
   ryeos identity
    ```
 
-   The remote operator can then grant explicit scopes locally:
+   Preferred bootstrap is token based: the remote operator runs a local
+   offline tool on the target node and sends the cleartext token to the
+   caller out of band:
+
+   ```bash
+   ryeos admission-token \
+     --label "dev-machine" \
+     --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head" \
+     --ttl-secs 600
+   ```
+
+   The caller then configures the remote and claims the grant with a
+   self-signed admission request:
+
+   ```bash
+   ryeos remote configure --remote production --url https://ryeos.example.com
+   ryeos remote admit \
+     --remote production \
+     --token "<one-time-token>" \
+     --label "dev-machine" \
+     --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+   ```
+
+   Direct local authorization remains available when the operator has the
+   caller's node public key:
 
    ```bash
    ryeos authorize-key \
@@ -106,10 +132,32 @@ ryeos identity
 
    ```bash
    ryeos remote configure --remote production --url https://ryeos.example.com
+   # or, with a provider/operator descriptor pin:
+   ryeos remote configure --descriptor ./production.remote.yaml
    ```
 
    This discovers the remote's public key, principal id, vault
-   fingerprint, and ingest-ignore rules.
+   fingerprint, and ingest-ignore rules. Descriptor import is a trust pin
+   only; it is verified against the live `/public-key` document before
+   local config is written.
+
+### Publishing a descriptor
+
+Any node operator can export a descriptor locally:
+
+```bash
+ryeos remote-descriptor \
+  --name production \
+  --url https://ryeos.example.com \
+  --capabilities "remote-execute,bundle-install" \
+  --output ./production.remote.yaml
+```
+
+The descriptor is intentionally generic core data. RyeOS Cloud or another
+hosted/provider bundle may distribute it through a web UI later, but the
+authority model does not depend on that distribution channel. The caller
+still verifies the descriptor against the live node identity during
+`remote configure --descriptor`.
 
 ## End-to-End Workflow
 
@@ -119,20 +167,32 @@ ryeos identity
 # 1. Display your node public key (share this with the remote operator)
 ryeos identity
 
-# 2. Configure the remote
+# 2. Configure the remote, optionally from a descriptor trust pin
 ryeos remote configure --remote prod --url https://ryeos.example.com
 
 # ── On the REMOTE node ──
 
-# 3. Authorize the caller's node key (use the output from step 1)
-ryeos authorize-key \
-  --public-key "ed25519:<caller_node_pubkey_b64>" \
+# 3. Optionally export a descriptor trust pin for the caller
+ryeos remote-descriptor \
+  --name prod \
+  --url https://ryeos.example.com \
+  --output ./prod.remote.yaml
+
+# 4. Mint a one-time admission token for the caller
+ryeos admission-token \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
 
 # ── Back on the CALLER node ──
 
-# 4. Execute on the remote
+# 5. Claim the grant; the claim is self-signed by this caller node key
+ryeos remote admit \
+  --remote prod \
+  --token "<one-time-token>" \
+  --label "dev-machine" \
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+
+# 6. Execute on the remote
 ryeos remote execute --remote prod --item-ref tool:my/heavy-compute
 ```
 

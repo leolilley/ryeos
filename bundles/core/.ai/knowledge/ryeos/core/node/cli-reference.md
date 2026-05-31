@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T04:29:09Z:3391fb7e221431ee9c5b2f3144e9a09f6182dc31a857bca1ce57c9b246b24a3b:r05J8qDJHXCz4DgmvrhRr62dxxGqfV6gCqGM4B+8nLBQXcqa8ifIjlq1ySjcnO09EE1VXrXirB0IrwNQn8qgBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -70,6 +71,8 @@ only a `lifecycle.status` response reporting `status: "running"`.
 
 - `ryeos trust pin --from <PUBLISHER_TRUST.toml>` — pin publisher trust.
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
+- `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's remote descriptor trust pin.
+- `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 
 ## Core daemon-backed verbs
@@ -94,7 +97,8 @@ verbs such as `thread list`, `thread get`, `events replay`,
 ## Remote Operations
 
 Remote verbs cover cross-node configure/status, push/pull, execute,
-threads, remote authorization, live bundle install, and vault proxying.
+threads, token-based admission, remote authorization, live bundle
+install, and vault proxying.
 See [Remote Command Reference](../remote/remote-command-reference.md).
 
 ## Aliases Quick Reference

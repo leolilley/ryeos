@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -16,9 +16,15 @@ use ryeos_executor::executor::ServiceAvailability;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     /// Name for the remote.
-    pub remote: String,
+    #[serde(default)]
+    pub remote: Option<String>,
     /// URL of the remote node (HTTPS required except for loopback).
-    pub url: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Path to a remote descriptor YAML. The descriptor is a trust pin,
+    /// not a credential; configure still verifies the live node matches it.
+    #[serde(default)]
+    pub descriptor: Option<PathBuf>,
     /// When supplied, the entry is written to the project-level
     /// remotes config at `<project>/.ai/config/remotes/remotes.yaml`
     /// instead of the user-level system space. The CLI injects this
@@ -32,12 +38,47 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    config::validate_url(&req.url)?;
+    let descriptor = req
+        .descriptor
+        .as_deref()
+        .map(config::RemoteDescriptor::from_path)
+        .transpose()?;
+
+    let remote_name = req
+        .remote
+        .clone()
+        .or_else(|| descriptor.as_ref().and_then(|d| d.name.clone()))
+        .context("remote name required: pass a remote name or descriptor.name")?;
+    let remote_url = req
+        .url
+        .clone()
+        .or_else(|| descriptor.as_ref().map(|d| d.url.clone()))
+        .context("remote URL required: pass --url or descriptor.url")?;
+    config::validate_url(&remote_url)?;
 
     // Discover the remote's public key
-    let client = RemoteClient::new(&req.url, "", state.identity.clone());
+    let client = RemoteClient::new(&remote_url, "", state.identity.clone());
     let pubkey = client.get_public_key().await?;
     pubkey.validate_identity_binding()?;
+
+    if let Some(descriptor) = descriptor.as_ref() {
+        if pubkey.signing_key != descriptor.node.public_key {
+            anyhow::bail!(
+                "remote descriptor key mismatch for '{}': descriptor pins {}, live node reports {}",
+                remote_name,
+                descriptor.node.public_key,
+                pubkey.signing_key,
+            );
+        }
+        if pubkey.fingerprint != descriptor.node.fingerprint {
+            anyhow::bail!(
+                "remote descriptor fingerprint mismatch for '{}': descriptor pins {}, live node reports {}",
+                remote_name,
+                descriptor.node.fingerprint,
+                pubkey.fingerprint,
+            );
+        }
+    }
 
     // Fetch the remote's ingest-ignore rules — required for push to work
     // correctly. Fail hard if unavailable.
@@ -59,32 +100,33 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let vault_fp = pubkey.vault_fingerprint.clone();
     let signing_key = pubkey.signing_key.clone();
     let remote_config = config::RemoteConfig {
-        name: req.remote.clone(),
-        url: req.url.clone(),
+        name: remote_name.clone(),
+        url: remote_url.clone(),
         principal_id: pubkey.principal_id.clone(),
         signing_key: pubkey.signing_key,
         site_id: pubkey.site_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
         ingest_ignore,
         project_bindings: remotes
-            .get(&req.remote)
+            .get(&remote_name)
             .map(|r| r.project_bindings.clone())
             .unwrap_or_default(),
     };
     remote_config.validate()?;
-    remotes.insert(req.remote.clone(), remote_config);
+    remotes.insert(remote_name.clone(), remote_config);
     config::save_remotes(&target_root, &remotes)?;
 
     Ok(serde_json::json!({
-        "configured": req.remote,
+        "configured": remote_name,
         "scope": target_label,
         "config_path": config::remotes_config_path(&target_root),
-        "url": req.url,
+        "url": remote_url,
         "principal_id": pubkey.principal_id,
         "signing_key": signing_key,
         "fingerprint": pubkey.fingerprint,
         "vault_fingerprint": vault_fp,
         "site_id": pubkey.site_id,
+        "descriptor_verified": descriptor.is_some(),
     }))
 }
 

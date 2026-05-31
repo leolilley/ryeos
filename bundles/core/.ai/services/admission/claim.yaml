@@ -1,0 +1,13 @@
+# ryeos:signed:2026-05-31T03:58:35Z:f9ea57a19b961c58bff42ca00818e3101050113e7c195bd7b1b04e5f5def70f1:bTU4x20lLCnQW2+oGuzhsJQ6dJVyOu+/L/G3qmCGGQ6XhR96w8IB5y4FUyMAv1s/km/0JcIjp/YZiJvByY8qCw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: admission.claim
+required_caps: []
+schema:
+  token: string
+  public_key: string
+  label: string?
+  scopes: string[]
+  signed_at: number
+  nonce: string
+  signature: string
+description: "Claim a one-time node-local admission token and materialize an authorized-key grant"

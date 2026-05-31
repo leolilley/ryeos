@@ -563,6 +563,47 @@ impl RemoteClient {
         })
     }
 
+    /// POST /admission/claim (unauthenticated route; claim is self-signed).
+    pub async fn admission_claim(
+        &self,
+        token: &str,
+        public_key: &str,
+        label: Option<&str>,
+        scopes: &[String],
+    ) -> Result<Value> {
+        let scopes = normalize_admission_scopes(scopes)?;
+        let signed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let nonce_bytes = rand::Rng::gen::<[u8; 16]>(&mut rand::thread_rng());
+        let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
+        let token_hash = admission_token_hash(token);
+        let claim = admission_claim_string(
+            &self.audience,
+            &token_hash,
+            public_key,
+            &scopes,
+            signed_at,
+            &nonce,
+        );
+        let content_hash = lillux::cas::sha256_hex(claim.as_bytes());
+        let signature =
+            lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
+        let mut body = serde_json::json!({
+            "token": token,
+            "public_key": public_key,
+            "scopes": scopes,
+            "signed_at": signed_at,
+            "nonce": nonce,
+            "signature": base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+        });
+        if let Some(label) = label {
+            body["label"] = Value::String(label.to_string());
+        }
+        self.unsigned_post("/admission/claim", &body).await
+    }
+
     /// POST /vault/set (authenticated).
     pub async fn vault_set(&self, name: &str, value: &str) -> Result<Value> {
         let body = serde_json::json!({ "name": name, "value": value });
@@ -659,6 +700,32 @@ impl RemoteClient {
         Ok(resp_body)
     }
 
+    async fn unsigned_post(&self, path: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let body_bytes = serde_json::to_vec(body)?;
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body_bytes)
+            .send()
+            .await
+            .with_context(|| format!("POST {} failed", url))?;
+
+        let status = resp.status();
+        let resp_body: Value = resp
+            .json()
+            .await
+            .with_context(|| format!("failed to parse response from POST {}", url))?;
+
+        if !status.is_success() {
+            anyhow::bail!("POST {} returned {}: {}", url, status, resp_body);
+        }
+
+        Ok(resp_body)
+    }
+
     /// Build canonical request and produce the four `x-ryeos-*` headers.
     ///
     /// Canonical string:
@@ -735,6 +802,54 @@ fn chunk_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) -> Vec<V
     }
 
     chunks
+}
+
+fn admission_token_hash(token: &str) -> String {
+    lillux::cas::sha256_hex(token.as_bytes())
+}
+
+fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
+    let mut normalized: Vec<String> = scopes
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+
+    if normalized.is_empty() {
+        anyhow::bail!("scopes must not be empty");
+    }
+    if normalized.len() != scopes.len() {
+        anyhow::bail!("duplicate or empty scopes after normalization");
+    }
+    for scope in &normalized {
+        ryeos_runtime::authorizer::validate_scope_pattern(scope).map_err(anyhow::Error::msg)?;
+    }
+    if normalized.iter().any(|s| s.contains('*')) {
+        anyhow::bail!("wildcard scopes are forbidden for admission claim requests");
+    }
+
+    Ok(normalized)
+}
+
+fn admission_claim_string(
+    audience: &str,
+    token_hash: &str,
+    public_key: &str,
+    scopes: &[String],
+    signed_at: u64,
+    nonce: &str,
+) -> String {
+    format!(
+        "ryeos-admission-claim-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        audience,
+        token_hash,
+        public_key,
+        scopes.join(","),
+        signed_at,
+        nonce,
+    )
 }
 
 struct SignedHeaders {

@@ -156,11 +156,11 @@ impl NodeIdentity {
     }
 }
 
-/// Policy governing whether the wildcard scope `"*"` is permitted in
+/// Policy governing whether wildcard scopes are permitted in
 /// an authorized-key TOML write.
 ///
-/// Wildcard delegation is dangerous: a `["*"]` entry authorizes any
-/// call regardless of subject. Only two paths legitimately need it:
+/// Wildcard delegation is dangerous: wildcard entries authorize broad
+/// capability ranges. Only two paths legitimately need it:
 ///
 /// 1. Operator bootstrap — the node's own operator key gets `["*"]`
 ///    so the operator can administer everything on their own node.
@@ -172,10 +172,10 @@ impl NodeIdentity {
 /// be constructed only by those two callsites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WildcardPolicy {
-    /// Reject any scope equal to `"*"`. The normal path for all
+    /// Reject any scope containing `"*"`. The normal path for all
     /// delegated authorize-key writes.
     Reject,
-    /// Permit `"*"`. Use only during operator bootstrap or when the
+    /// Permit wildcard scopes. Use only during operator bootstrap or when the
     /// local CLI is invoked with `--allow-wildcard`.
     AllowBootstrap,
 }
@@ -191,7 +191,7 @@ pub enum WildcardPolicy {
 ///
 /// ## Wildcard policy
 ///
-/// `wildcard` controls whether `"*"` is accepted in `scopes`. See
+/// `wildcard` controls whether wildcard scopes are accepted in `scopes`. See
 /// [`WildcardPolicy`] for when each variant is appropriate.
 pub fn write_authorized_key_toml(
     auth_dir: &Path,
@@ -207,9 +207,9 @@ pub fn write_authorized_key_toml(
     use std::fs;
 
     // Reject wildcard delegation unless the policy permits it.
-    if wildcard == WildcardPolicy::Reject && scopes.iter().any(|s| s == "*") {
+    if wildcard == WildcardPolicy::Reject && scopes.iter().any(|s| s.contains('*')) {
         bail!(
-            "wildcard scope '*' rejected. \
+            "wildcard scopes rejected. \
              Wildcard delegation is only permitted during operator bootstrap. \
              Specify explicit scopes instead."
         );
@@ -289,6 +289,29 @@ mod tests {
             WildcardPolicy::Reject,
         );
         let err = result.expect_err("wildcard should be rejected");
+        assert!(err.to_string().contains("wildcard scope"));
+    }
+
+    #[test]
+    fn prefix_wildcard_rejected_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let vk = key.verifying_key();
+        let fp = lillux::sha256_hex(vk.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        let result = write_authorized_key_toml(
+            dir.path(),
+            &fp,
+            &key_b64,
+            &["ryeos.execute.service.*".to_string()],
+            "test",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &key,
+            WildcardPolicy::Reject,
+        );
+        let err = result.expect_err("prefix wildcard should be rejected");
         assert!(err.to_string().contains("wildcard scope"));
     }
 

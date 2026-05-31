@@ -99,8 +99,10 @@ pub async fn handle(
         validate_scope_pattern(scope)?;
     }
 
-    // 6. Reject wildcard delegation (Phase 0 decision 5).
-    if normalized.iter().any(|s| s == "*") {
+    // 6. Reject wildcard delegation (Phase 0 decision 5). This includes
+    //    prefix wildcards: subset/delegation checks are directional and
+    //    must not use runtime requirement matching to grant broader caps.
+    if normalized.iter().any(|s| s.contains('*')) {
         return Err(HandlerError::Forbidden(
             "wildcard delegation forbidden in v1".into(),
         ));
@@ -227,26 +229,28 @@ mod tests {
         assert!(validate_scope_pattern("execute").is_err());
     }
 
-    // ── Wildcard delegation: handler rejects "*", grammar permits it ──
+    // ── Wildcard delegation: handler rejects wildcard grants, grammar permits them ──
 
     #[test]
     fn wildcard_passes_grammar_but_handler_rejects_it() {
         // Grammar layer accepts "*" — wildcard policy lives elsewhere.
         assert!(validate_scope_pattern("*").is_ok());
-        // The handler's step-6 check rejects any list containing "*".
+        // The handler's step-6 check rejects any list containing a wildcard.
         let normalized = vec![
             "ryeos.execute.service.bundle.install".to_string(),
             "*".to_string(),
         ];
-        let has_wildcard = normalized.iter().any(|s| s == "*");
+        let has_wildcard = normalized.iter().any(|s| s.contains('*'));
         assert!(has_wildcard, "handler must catch '*' in scope list");
     }
 
     #[test]
-    fn accept_prefix_wildcards() {
-        // Prefix wildcards are valid grammar (and useful for delegation).
+    fn prefix_wildcards_pass_grammar_but_handler_rejects_them() {
+        // Prefix wildcards are valid grammar, but v1 delegation must not
+        // grant them because runtime matching is not a safe subset check.
         assert!(validate_scope_pattern("ryeos.*").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.*").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.*").is_ok());
+        assert!("ryeos.execute.service.*".contains('*'));
     }
 }

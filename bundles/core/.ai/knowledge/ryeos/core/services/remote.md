@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T04:53:02Z:44f5e8e5a7c83f65a1a8809004834e6483c3c1b8997420a160a462dc3b9e5b62:6QP5MW6s6yjKehvD2GL0oBK+CNas7oF6z4RiT0ZqDO0xFZbEDOTQN8ivTOrtpltfecgU9lzqNpRMViYVRmBjCw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T04:02:32Z:0018c9c40ca1b393a049fc906a9c80696f7f4b55d423c703dfd6f5df5a057015:7U0CoMLdDsH/9G/Dy2K7vpzz6Yip3AxQrftRdE0E4UUbiBxUUAFlg5++/ksKh4h8O2CjgF2NxVhSy1yo7hCsCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -26,6 +26,7 @@ The authoritative matrix is in
 | `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
 | `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
 | `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
+| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.configure` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |
@@ -44,8 +45,17 @@ The authoritative matrix is in
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.
+- `remote configure` may import a remote descriptor. The descriptor is a
+  trust pin/discovery record, not a credential; configure still reads the
+  live `/public-key` document and refuses to write config if the live node
+  key or fingerprint does not match the descriptor.
+- Initial remote authorization can use `admission/claim` when the target
+  node has a one-time local admission token. Claiming the token creates a
+  normal authorized-key grant on the target node; execution traffic still
+  uses signed requests checked against target-node grants.
 - `remote doctor` is an operator diagnostic: it combines remote discovery,
-  signed authorization probing, project binding checks, and next-step commands.
+  pinned-identity checks, signed authorization probing, project binding
+  checks, and next-step commands.
 - `remote push` and `remote execute` use the target node's ingest-ignore
   rules, not local ignore rules, when building a pushed manifest.
 - `remote execute` is synchronous in v1: push, execute, pull, apply.

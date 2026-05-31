@@ -12,6 +12,7 @@ pub mod build_bundle;
 pub mod inspect;
 pub mod install;
 pub mod publish;
+pub mod remote_descriptor;
 pub mod sign;
 pub mod sign_bundle;
 pub mod snapshot;

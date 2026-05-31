@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T04:53:02Z:afce39dd7bcbe39498e9be0cfc53839394c641b067411ac88c16f1ab089c0250:zcok8SQ+E9sV5eAEsLGdRwhRHmgMLl4yBW4D8ZqkPEGuZI0dG83swKn02sUsU1aVHzzXD7MZ5esZzi98wumpAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T04:02:18Z:fb502add64cdf478a64707f3311bf304cc671fd430445b1705e034926e7d336e:XLXjhQZ1BB7+E4yctkBI/f4OKoSKl25yi2hAI3xhFMNcyfusgQAGNosx8VKi2l/+78ZuMD8YpSNnaX2geZ9hBw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core
@@ -54,6 +54,40 @@ unauthenticated discovery routes. Mutating routes such as
 `identity/authorize-key` and `system/push-head` require signed auth plus
 the listed capability.
 
+## Admission Services
+
+| Service | Endpoint | Caps Required |
+|---|---|---|
+| `admission/claim` | `admission.claim` | none; verifies one-time token plus claimant key signature |
+| `admission/submit` | `admission.submit` | `ryeos.execute.service.admission.submit` |
+| `admission/status` | `admission.status` | `ryeos.execute.service.admission.status` |
+| `admission/attestations-for-subject` | `admission.attestations-for-subject` | `ryeos.execute.service.admission.attestations-for-subject` |
+
+`admission/claim` is the decentralized remote-node bootstrap path. It
+does not trust a central account or a bearer token for ongoing access.
+The target node must already have a one-time local token file at
+`.ai/node/admission/tokens/<sha256(token)>.toml`; the claimant signs a
+claim with the key being admitted; the service consumes the token and
+writes a normal node-signed authorized-key grant. Future requests use
+the ordinary `ryeos_signed` authorized-key path.
+
+Admission token files are target-node-local control-plane material, not
+execution credentials. Shape:
+
+```toml
+version = 1
+token_hash = "sha256-hex-of-token"
+label = "optional-default-label"
+scopes = ["ryeos.execute.service.threads.list"]
+expires_at_unix = 1767225600
+```
+
+The claim signature covers:
+
+```text
+ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}\n{sorted_scopes_csv}\n{signed_at_unix}\n{nonce}
+```
+
 ## Object Services
 
 | Service | Endpoint | Caps Required |
@@ -92,6 +126,7 @@ for the full matrix.
 | `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
 | `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
 | `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
+| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.configure` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |

@@ -13,6 +13,76 @@ use serde::{Deserialize, Serialize};
 
 pub use ryeos_state::project_sync::ProjectSyncScope;
 
+/// Provider/import descriptor for a remote RyeOS node.
+///
+/// A descriptor is a trust pin and discovery convenience, not a credential.
+/// Importing one records the expected node identity for `remote configure`,
+/// which still verifies the live node before writing local remote config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDescriptor {
+    pub version: u32,
+    pub name: Option<String>,
+    pub url: String,
+    pub node: RemoteDescriptorNode,
+    #[serde(default)]
+    pub capabilities: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub admission: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub provider: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDescriptorNode {
+    /// Remote node Ed25519 public key in `ed25519:<base64>` form.
+    pub public_key: String,
+    /// Expected fingerprint for `public_key`.
+    pub fingerprint: String,
+}
+
+impl RemoteDescriptor {
+    pub fn from_yaml_str(input: &str) -> Result<Self> {
+        let descriptor: Self = serde_yaml::from_str(input).context("invalid remote descriptor")?;
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn from_path(path: &Path) -> Result<Self> {
+        let input = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read remote descriptor: {}", path.display()))?;
+        Self::from_yaml_str(&input)
+            .with_context(|| format!("invalid remote descriptor: {}", path.display()))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.version != 1 {
+            anyhow::bail!(
+                "unsupported remote descriptor version {}; expected 1",
+                self.version
+            );
+        }
+        if let Some(name) = &self.name {
+            if name.trim().is_empty() {
+                anyhow::bail!("remote descriptor name must not be empty when present");
+            }
+        }
+        validate_url(&self.url)?;
+        let key = decode_signing_key(&self.node.public_key)
+            .context("invalid remote descriptor node.public_key")?;
+        let actual_fingerprint = lillux::crypto::fingerprint(&key);
+        if self.node.fingerprint != actual_fingerprint {
+            anyhow::bail!(
+                "remote descriptor fingerprint mismatch: node.fingerprint {}, public_key fingerprint {}",
+                self.node.fingerprint,
+                actual_fingerprint,
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Explicit local-to-remote project binding for a configured remote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -356,6 +426,12 @@ fn test_principal_id(seed: u8) -> String {
     format!("fp:{}", lillux::crypto::fingerprint(&key))
 }
 
+#[cfg(test)]
+fn test_fingerprint(seed: u8) -> String {
+    let key = decode_signing_key(&test_signing_key(seed)).unwrap();
+    lillux::crypto::fingerprint(&key)
+}
+
 // ── Target-site forwarding lookup ────────────────────────────────────
 
 /// A remote resolved from a `target_site_id` lookup.
@@ -452,6 +528,53 @@ pub fn resolve_remote_by_site_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_descriptor_validates_key_fingerprint_binding() {
+        let descriptor = RemoteDescriptor::from_yaml_str(&format!(
+            r#"
+version: 1
+name: hosted-prod
+url: https://node.example.com
+node:
+  public_key: {}
+  fingerprint: {}
+capabilities:
+  remote_execute: true
+admission:
+  methods: [one_time_code]
+provider:
+  name: RyeOS Cloud
+"#,
+            test_signing_key(7),
+            test_fingerprint(7),
+        ))
+        .unwrap();
+
+        assert_eq!(descriptor.name.as_deref(), Some("hosted-prod"));
+        assert_eq!(descriptor.url, "https://node.example.com");
+    }
+
+    #[test]
+    fn remote_descriptor_rejects_mismatched_fingerprint() {
+        let err = RemoteDescriptor::from_yaml_str(&format!(
+            r#"
+version: 1
+url: https://node.example.com
+node:
+  public_key: {}
+  fingerprint: {}
+"#,
+            test_signing_key(7),
+            test_fingerprint(8),
+        ))
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("fingerprint mismatch"),
+            "unexpected error: {err:#}"
+        );
+    }
 
     #[test]
     fn validate_rejects_plain_http() {

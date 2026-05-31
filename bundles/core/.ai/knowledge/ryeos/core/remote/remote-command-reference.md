@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T04:53:02Z:761af3d3d8a0d1c92ff3197a4dd523b21ebdeca30db502392ab183357b7ea81f:stnppxE8sW7kEUvA7wKzNtrP4/3KDQD9SXSftbyA3GAA6LhF9vuM/Wu/d/x3qOxl1PvO5bd59RlhSYbhHlQnDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T04:29:09Z:23d2610694cd632eb07c86579ba30b98ce90aff805ac5aee6fe17c30ff972c3f:CKFMKI26FDR3asv0qD+7pDAeZbLRvstx5aDeEiZ+CLU/etzYGLF4MHEzHhNkSRwXnIe9J4a5UG7d7q7GkJPdDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -32,6 +32,9 @@ remote operator when requesting access.
 | Command | Local service cap | Remote scopes on target | Remote routes used |
 |---|---|---|---|
 | `ryeos remote configure` | `ryeos.execute.service.remote.configure` | none | `GET /public-key`, `GET /ingest-ignore` |
+| `ryeos remote-descriptor` | local tool execution | none | none |
+| `ryeos admission-token` | local tool execution | none | none |
+| `ryeos remote admit` | `ryeos.execute.service.remote.admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
 | `ryeos remote list` | `ryeos.execute.service.remote.list` | none | none |
 | `ryeos remote status` | `ryeos.execute.service.remote.status` | none | `GET /health`, `GET /public-key` |
 | `ryeos remote doctor` | `ryeos.execute.service.remote.doctor` | signed auth probe; project status if `--project` is supplied | `GET /health`, `GET /public-key`, `GET /threads?limit=1`, optionally `POST /project/status` |
@@ -63,18 +66,81 @@ Add or update a named remote in local node config.
 
 ```bash
 ryeos remote configure --remote prod --url https://ryeos.example.com
+ryeos remote configure --descriptor ./prod.remote.yaml
 ```
 
 The command fetches the remote node public key, principal id, vault
 fingerprint, and ingest-ignore rules. Results are stored in
 `<system_space_dir>/.ai/config/remotes/remotes.yaml`.
 
+When `--descriptor` is supplied, the descriptor is a trust/discovery pin,
+not a credential. `remote configure` still fetches the live `/public-key`
+document and refuses to write config if the live node key or fingerprint
+does not match the descriptor.
+
 Failure modes:
 
 - fails if the remote cannot be reached
 - fails if `/public-key` or `/ingest-ignore` returns invalid data
+- fails if a descriptor pins a different node key/fingerprint than the
+  live remote reports
 - later signed requests fail if the remote's node key changes and the
   remote config is not refreshed
+
+## `ryeos remote-descriptor`
+
+Export a local descriptor trust pin for this node.
+
+```bash
+ryeos remote-descriptor \
+  --name prod \
+  --url https://ryeos.example.com \
+  --capabilities "remote-execute,bundle-install" \
+  --output ./prod.remote.yaml
+```
+
+This is local operator tooling. It reads the node's
+`.ai/node/identity/public-identity.json`, emits descriptor YAML with the
+node public key and fingerprint, and optionally writes it to disk. The
+descriptor can be hosted, emailed, checked into infra, or served by any
+provider-specific layer. It is still only a trust/discovery pin: callers
+must import it with `remote configure --descriptor`, which verifies the
+pin against the live `/public-key` response.
+
+## `ryeos admission-token`
+
+Mint a one-time, node-local bootstrap token file on the target node.
+
+```bash
+ryeos admission-token \
+  --label "dev-machine" \
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head" \
+  --ttl-secs 600
+```
+
+This is an offline/local operator tool. It writes a token hash file under
+the target system space at `.ai/node/admission/tokens/<sha256>.toml` and
+prints the cleartext token once. The token is not a bearer credential for
+runtime requests; it can only be consumed by `/admission/claim`, where
+the claimant must also sign the claim with the node key being admitted.
+
+## `ryeos remote admit`
+
+Consume a one-time admission token to authorize this caller node on a
+configured remote.
+
+```bash
+ryeos remote admit \
+  --remote prod \
+  --token "<one-time-token>" \
+  --label "dev-machine" \
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+```
+
+Before sending the token, the command fetches the live remote identity
+and verifies it still matches the locally pinned remote config. The
+target consumes the token and writes a normal node-signed authorized-key
+grant for the caller node key.
 
 ## `ryeos remote list`
 

@@ -1,6 +1,7 @@
 //! `ryeos-core-tools` — unified core tools binary.
 //!
-//! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client.
+//! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client,
+//! admission-token, remote-descriptor.
 //!
 //! Multi-tool binary for signing and inspecting RyeOS items.
 //! Invoked by tool YAMLs via `bin:ryeos-core-tools <subcommand>`.
@@ -16,7 +17,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos-core-tools",
-    about = "Unified core tools binary (sign, fetch, verify, snapshot, identity, authorize-client)",
+    about = "Unified core tools binary (sign, fetch, verify, snapshot, identity, authorize-client, admission-token, remote-descriptor)",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -140,6 +141,56 @@ enum Cmd {
         /// Human-readable label for the authorized key.
         #[arg(long, default_value = "cli-authorized")]
         label: String,
+    },
+
+    /// Mint a one-time node-local admission token for remote bootstrap.
+    AdmissionToken {
+        /// System space directory for the target node.
+        #[arg(long)]
+        system_space_dir: Option<String>,
+
+        /// Comma-separated scopes this token may grant.
+        #[arg(long)]
+        scopes: Option<String>,
+
+        /// Optional default label for the authorized key created by claim.
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Token lifetime in seconds.
+        #[arg(long, default_value_t = 600)]
+        ttl_secs: u64,
+    },
+
+    /// Export a remote descriptor trust pin for this node.
+    RemoteDescriptor {
+        /// System space directory for the node being described.
+        #[arg(long)]
+        system_space_dir: Option<String>,
+
+        /// Name callers should use for the remote.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Public URL callers should use to reach the node.
+        #[arg(long)]
+        url: Option<String>,
+
+        /// Comma-separated informational capability labels.
+        #[arg(long)]
+        capabilities: Option<String>,
+
+        /// Admission mode label to advertise. Defaults to token.
+        #[arg(long, default_value = "token")]
+        admission_mode: String,
+
+        /// Optional provider/operator label.
+        #[arg(long)]
+        provider_name: Option<String>,
+
+        /// Optional output path for the descriptor YAML.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 
     /// Manage sealed secrets in the daemon vault.
@@ -369,6 +420,30 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             ))?;
             run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json)
         }
+        Cmd::AdmissionToken {
+            system_space_dir,
+            scopes,
+            label,
+            ttl_secs,
+        } => run_admission_token(system_space_dir, scopes, label, ttl_secs, cli.stdin_json),
+        Cmd::RemoteDescriptor {
+            system_space_dir,
+            name,
+            url,
+            capabilities,
+            admission_mode,
+            provider_name,
+            output,
+        } => run_remote_descriptor(
+            system_space_dir,
+            name,
+            url,
+            capabilities,
+            admission_mode,
+            provider_name,
+            output,
+            cli.stdin_json,
+        ),
         Cmd::Vault { cmd } => run_vault(cmd),
     }
 }
@@ -865,6 +940,94 @@ fn run_authorize_client(
         }))?
     );
 
+    Ok(())
+}
+
+fn run_admission_token(
+    system_space_dir: Option<String>,
+    scopes: Option<String>,
+    label: Option<String>,
+    ttl_secs: u64,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    use ryeos_tools::actions::authorize::{run_mint_admission_token, MintAdmissionTokenParams};
+
+    let (system_space_dir, scopes, label, ttl_secs) = if stdin_json {
+        let val = read_stdin_json()?;
+        let ssd = val["system_space_dir"].as_str().map(String::from);
+        let scopes = val["scopes"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
+            .to_string();
+        let label = val["label"].as_str().map(String::from);
+        let ttl_secs = val["ttl_secs"].as_u64().unwrap_or(600);
+        (ssd, scopes, label, ttl_secs)
+    } else {
+        let scopes = scopes.ok_or_else(|| anyhow::anyhow!("--scopes required"))?;
+        (system_space_dir, scopes, label, ttl_secs)
+    };
+
+    let system_space_dir = resolve_system_space_dir(system_space_dir)?;
+    let scopes: Vec<String> = scopes
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let report = run_mint_admission_token(MintAdmissionTokenParams {
+        system_space_dir,
+        scopes,
+        label,
+        ttl_secs,
+    })?;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_remote_descriptor(
+    system_space_dir: Option<String>,
+    name: Option<String>,
+    url: Option<String>,
+    capabilities: Option<String>,
+    admission_mode: String,
+    provider_name: Option<String>,
+    output: Option<PathBuf>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    use ryeos_tools::actions::remote_descriptor::{
+        run_export_remote_descriptor, ExportRemoteDescriptorParams,
+    };
+
+    let params = if stdin_json {
+        let mut params: ExportRemoteDescriptorParams = serde_json::from_value(read_stdin_json()?)?;
+        if params.admission_mode.is_none() {
+            params.admission_mode = Some("token".to_string());
+        }
+        params
+    } else {
+        let name = name.ok_or_else(|| anyhow::anyhow!("--name required"))?;
+        let url = url.ok_or_else(|| anyhow::anyhow!("--url required"))?;
+        let capabilities = capabilities
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+        ExportRemoteDescriptorParams {
+            system_space_dir,
+            name,
+            url,
+            capabilities,
+            admission_mode: Some(admission_mode),
+            provider_name,
+            output,
+        }
+    };
+
+    let report = run_export_remote_descriptor(params)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
