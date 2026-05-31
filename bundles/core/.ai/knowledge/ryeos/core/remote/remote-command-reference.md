@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T04:22:26Z:7ea675d5fe58247894804aabb89240d3ba7629793ff02a5096fdff562affc561:t4Q3QZrmGhEebmOLF4yb93/YQFgKDs1rH3e4OTYtXldflRG5la5YQFJx7F25B6yjtTDitoTMBZ5tElot+RrBBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T04:29:09Z:23d2610694cd632eb07c86579ba30b98ce90aff805ac5aee6fe17c30ff972c3f:CKFMKI26FDR3asv0qD+7pDAeZbLRvstx5aDeEiZ+CLU/etzYGLF4MHEzHhNkSRwXnIe9J4a5UG7d7q7GkJPdDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -32,6 +32,7 @@ remote operator when requesting access.
 | Command | Local service cap | Remote scopes on target | Remote routes used |
 |---|---|---|---|
 | `ryeos remote configure` | `ryeos.execute.service.remote.configure` | none | `GET /public-key`, `GET /ingest-ignore` |
+| `ryeos remote-descriptor` | local tool execution | none | none |
 | `ryeos admission-token` | local tool execution | none | none |
 | `ryeos remote admit` | `ryeos.execute.service.remote.admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
 | `ryeos remote list` | `ryeos.execute.service.remote.list` | none | none |
@@ -85,6 +86,26 @@ Failure modes:
   live remote reports
 - later signed requests fail if the remote's node key changes and the
   remote config is not refreshed
+
+## `ryeos remote-descriptor`
+
+Export a local descriptor trust pin for this node.
+
+```bash
+ryeos remote-descriptor \
+  --name prod \
+  --url https://ryeos.example.com \
+  --capabilities "remote-execute,bundle-install" \
+  --output ./prod.remote.yaml
+```
+
+This is local operator tooling. It reads the node's
+`.ai/node/identity/public-identity.json`, emits descriptor YAML with the
+node public key and fingerprint, and optionally writes it to disk. The
+descriptor can be hosted, emailed, checked into infra, or served by any
+provider-specific layer. It is still only a trust/discovery pin: callers
+must import it with `remote configure --descriptor`, which verifies the
+pin against the live `/public-key` response.
 
 ## `ryeos admission-token`
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T04:22:26Z:750e10cc477ab2e7357cee1080a51790582c38d5b548d9ec6d3d4415c59b3e0f:iMWqqNMOGdeW8LgTILiFhJW4VLbSODefp+C8HJ1G3pmqiG/riB9DcrdEyXaPZlwp8Sno/sm2xQh8tlBNzPhpAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T04:29:09Z:3391fb7e221431ee9c5b2f3144e9a09f6182dc31a857bca1ce57c9b246b24a3b:r05J8qDJHXCz4DgmvrhRr62dxxGqfV6gCqGM4B+8nLBQXcqa8ifIjlq1ySjcnO09EE1VXrXirB0IrwNQn8qgBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -71,6 +71,7 @@ only a `lifecycle.status` response reporting `status: "running"`.
 
 - `ryeos trust pin --from <PUBLISHER_TRUST.toml>` — pin publisher trust.
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
+- `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's remote descriptor trust pin.
 - `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 
