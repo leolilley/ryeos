@@ -303,7 +303,11 @@ fn make_error_runtime_result(thread_id: &str, status: &str, error: &str) -> Runt
 /// 2. Type-check provided fields against `type`
 /// 3. Apply `default` for absent non-required fields
 fn normalize_inputs_against_schema(params: &mut Value, schema: &Value) -> anyhow::Result<()> {
-    let mut input_obj = params.get("inputs").cloned().unwrap_or(json!({}));
+    let mut input_obj = match params.get("inputs").cloned() {
+        Some(Value::Object(obj)) => Value::Object(obj),
+        Some(Value::Null) | None => json!({}),
+        Some(other) => other,
+    };
 
     // 1. Enforce required
     if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
@@ -402,6 +406,21 @@ mod tests {
         let mut params = json!({"inputs": {"name": "test"}});
         normalize_inputs_against_schema(&mut params, &schema).unwrap();
         assert_eq!(params["inputs"]["verbose"], false);
+    }
+
+    #[test]
+    fn normalize_inputs_applies_defaults_when_inputs_is_null() {
+        let schema = json!({
+            "properties": {
+                "country": {"type": "string", "default": "US"},
+                "max_pages": {"type": "integer", "default": 3},
+            }
+        });
+
+        let mut params = json!({"inputs": null});
+        normalize_inputs_against_schema(&mut params, &schema).unwrap();
+        assert_eq!(params["inputs"]["country"], "US");
+        assert_eq!(params["inputs"]["max_pages"], 3);
     }
 
     #[test]
