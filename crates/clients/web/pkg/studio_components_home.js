@@ -3,8 +3,14 @@ import { el, textEl } from "/ui/assets/studio_components_primitives.js";
 
 let ambientCanvas = null;
 let ambientScene = null;
+let homeShell = null;
+let homeField = null;
+let homeLanding = null;
+let homeLandingSignature = "";
 let typerTimer = null;
 let typerLineIndex = 0;
+let typerTarget = null;
+let typerLinesSignature = "";
 let transientTopbarUntil = 0;
 
 const FALLBACK_TYPER_LINES = [
@@ -27,16 +33,29 @@ const FALLBACK_TYPER_LINES = [
 
 export function studioHome(vm, scene, shell) {
   const isHome = vm.workspace?.is_home !== false;
-  const home = el("section", "studio-home");
-  home.setAttribute("aria-label", "RyeOS home space");
+  const home = homeShell || el("section", "studio-home");
+  homeShell = home;
+  if (!home.dataset.initialized) {
+    home.setAttribute("aria-label", "RyeOS home space");
+    homeField = el("div", "studio-home-field");
+    home.append(ambientBackground(scene), homeField);
+    home.dataset.initialized = "true";
+  } else {
+    ambientBackground(scene);
+  }
   home.style.setProperty("--scene-object-count", String(scene?.objects?.length || 0));
   if (!isHome) {
     home.classList.add("backdrop-only");
     home.setAttribute("aria-hidden", "true");
+    if (homeLanding) homeLanding.hidden = true;
+  } else {
+    home.classList.remove("backdrop-only");
+    home.removeAttribute("aria-hidden");
+    const landing = homeLandingView(vm, shell);
+    landing.hidden = false;
+    if (!landing.parentNode) home.append(landing);
   }
-
-  home.append(ambientBackground(scene), objectField(scene));
-  if (isHome) home.append(homeLanding(vm, shell));
+  updateObjectField(scene);
   return home;
 }
 
@@ -44,8 +63,10 @@ function ambientBackground(scene) {
   return ambientLayer(scene);
 }
 
-function objectField(scene) {
-  const field = el("div", "studio-home-field");
+function updateObjectField(scene) {
+  const field = homeField;
+  if (!field) return;
+  field.replaceChildren();
   for (const object of scene?.objects || []) {
     const marker = el("span", `studio-home-node ${object.kind || "object"} ${object.tone || "neutral"}`);
     marker.style.left = `${50 + (object.position?.[0] || 0) * 12}%`;
@@ -54,13 +75,20 @@ function objectField(scene) {
     marker.title = object.label || object.id || "node";
     field.append(marker);
   }
-  return field;
 }
 
-function homeLanding(vm, shell) {
-  const landing = document.createDocumentFragment();
+function homeLandingView(vm, shell) {
   const identity = el("div", "studio-home-identity");
   const homeVm = vm.presentation?.home || {};
+  const signature = JSON.stringify({
+    home: homeVm,
+    version: vm.presentation?.chrome?.version_label || "",
+    readOnly: vm.session?.read_only || false,
+    project: vm.session?.project_path || "",
+  });
+  if (homeLanding && signature === homeLandingSignature) return homeLanding;
+  homeLandingSignature = signature;
+  const landing = el("div", "studio-home-landing");
   identity.append(
     textEl("div", homeVm.brand || "RYE OS"),
     textEl("small", homeVm.tagline || "portable operating system for ai"),
@@ -73,6 +101,8 @@ function homeLanding(vm, shell) {
   const version = textEl("div", vm.presentation?.chrome?.version_label || `RYE OS - ${ryeosVersion(shell)}`);
   version.className = "studio-home-version";
   landing.append(identity, version);
+  if (homeLanding?.parentNode) homeLanding.replaceWith(landing);
+  homeLanding = landing;
   return landing;
 }
 
@@ -176,11 +206,18 @@ function ambientLayer(scene) {
 }
 
 function typerLine(lines = FALLBACK_TYPER_LINES) {
+  const choices = Array.isArray(lines) && lines.length > 0 ? lines : FALLBACK_TYPER_LINES;
+  const signature = JSON.stringify(choices);
+  if (typerTarget?.isConnected && typerLinesSignature === signature) {
+    return typerTarget.closest(".studio-home-typer");
+  }
   const line = el("div", "studio-home-typer");
   const text = textEl("span", "");
   text.className = "typer-text";
   line.append(textEl("span", "> ", "typer-cursor"), text, el("span", "typer-caret"));
-  window.queueMicrotask(() => startTypewriter(text, lines));
+  typerTarget = text;
+  typerLinesSignature = signature;
+  window.queueMicrotask(() => startTypewriter(text, choices));
   return line;
 }
 

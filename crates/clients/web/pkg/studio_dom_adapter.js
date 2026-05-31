@@ -17,14 +17,17 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   applyPresentationState(root, presentation);
   const motionSnapshot = captureWorkspaceMotion(root);
   const currentTileIds = new Set(vm.workspace?.is_home ? [] : tileIdsForNode(vm.workspace?.root));
-  root.replaceChildren(
-    studioHome(vm, scene, chromeShell),
+  const home = studioHome(vm, scene, chromeShell);
+  const layers = [
     opticFrame(vm.presentation?.frame),
     notices(vm.notices || []),
     topStatusLine(vm, chromeShell),
     studioWorkspace(vm.workspace, presentation.motion, dispatchUi),
     statusLine(vm, chromeShell),
     launcherDialog(vm.launcher || {}, chromeShell),
-  );
+  ];
+  if (root.firstChild !== home) root.prepend(home);
+  while (home.nextSibling) home.nextSibling.remove();
+  root.append(...layers);
   applyWorkspaceMotion(root, motionSnapshot, currentTileIds, presentation.currentMotion);
 }
