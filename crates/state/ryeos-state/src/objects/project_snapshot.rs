@@ -17,6 +17,9 @@ pub struct ProjectSnapshot {
     /// Hash of the user-level manifest (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_manifest_hash: Option<String>,
+    /// Optional operator-facing description for manually created snapshots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     /// Declared scope of the project manifest. When absent on the
     /// wire (only possible for objects written before this field
     /// existed), falls back to [`ProjectSyncScope::default`].
@@ -32,7 +35,7 @@ pub struct ProjectSnapshot {
 
 impl ProjectSnapshot {
     /// Schema version for project snapshots.
-    pub const SCHEMA: u32 = 3;
+    pub const SCHEMA: u32 = 4;
 
     /// Serialize to a CAS JSON object.
     pub fn to_value(&self) -> Value {
@@ -50,6 +53,11 @@ impl ProjectSnapshot {
                 .unwrap()
                 .insert("user_manifest_hash".into(), json!(umh));
         }
+        if let Some(ref message) = self.message {
+            v.as_object_mut()
+                .unwrap()
+                .insert("message".into(), json!(message));
+        }
         v
     }
 
@@ -63,6 +71,10 @@ impl ProjectSnapshot {
                 .to_string(),
             user_manifest_hash: value
                 .get("user_manifest_hash")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            message: value
+                .get("message")
                 .and_then(|v| v.as_str())
                 .map(String::from),
             project_sync_scope: value
@@ -103,6 +115,7 @@ mod tests {
         let original = ProjectSnapshot {
             project_manifest_hash: "ab".repeat(32),
             user_manifest_hash: None,
+            message: None,
             project_sync_scope: ProjectSyncScope::FullProject,
             parent_hashes: vec![],
             created_at: "2026-04-23T00:00:00Z".to_string(),
@@ -122,6 +135,7 @@ mod tests {
         let original = ProjectSnapshot {
             project_manifest_hash: "ab".repeat(32),
             user_manifest_hash: Some("cd".repeat(32)),
+            message: None,
             project_sync_scope: ProjectSyncScope::FullProject,
             parent_hashes: vec!["ef".repeat(32)],
             created_at: "2026-04-23T00:00:00Z".to_string(),
@@ -152,6 +166,7 @@ mod tests {
         let original = ProjectSnapshot {
             project_manifest_hash: "ab".repeat(32),
             user_manifest_hash: None,
+            message: None,
             project_sync_scope: ProjectSyncScope::AiOnly,
             parent_hashes: vec![],
             created_at: "2026-04-23T00:00:00Z".to_string(),
@@ -160,5 +175,24 @@ mod tests {
         let value = original.to_value();
         let restored = ProjectSnapshot::from_value(&value).unwrap();
         assert_eq!(restored.project_sync_scope, ProjectSyncScope::AiOnly);
+    }
+
+    #[test]
+    fn roundtrip_with_message() {
+        let original = ProjectSnapshot {
+            project_manifest_hash: "ab".repeat(32),
+            user_manifest_hash: None,
+            message: Some("Update deployment workflow".to_string()),
+            project_sync_scope: ProjectSyncScope::FullProject,
+            parent_hashes: vec![],
+            created_at: "2026-04-23T00:00:00Z".to_string(),
+            source: "snapshot_create".to_string(),
+        };
+        let value = original.to_value();
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(
+            restored.message,
+            Some("Update deployment workflow".to_string())
+        );
     }
 }

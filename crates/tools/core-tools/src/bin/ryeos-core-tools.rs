@@ -1,6 +1,6 @@
 //! `ryeos-core-tools` — unified core tools binary.
 //!
-//! Subcommands: sign, fetch, verify, identity, authorize-client.
+//! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client.
 //!
 //! Multi-tool binary for signing and inspecting RyeOS items.
 //! Invoked by tool YAMLs via `bin:ryeos-core-tools <subcommand>`.
@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos-core-tools",
-    about = "Unified core tools binary (sign, fetch, verify, identity, authorize-client)",
+    about = "Unified core tools binary (sign, fetch, verify, snapshot, identity, authorize-client)",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -110,6 +110,12 @@ enum Cmd {
         project_path: Option<String>,
     },
 
+    /// Inspect and create local project snapshots.
+    Snapshot {
+        #[command(subcommand)]
+        cmd: SnapshotCmd,
+    },
+
     /// Return the node's public identity document.
     Identity {
         /// System space directory.
@@ -195,6 +201,56 @@ enum VaultCmd {
         /// System space directory.
         #[arg(long)]
         system_space_dir: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SnapshotCmd {
+    /// Compare the worktree with the principal's project head snapshot.
+    Status {
+        /// Project root path.
+        #[arg(long)]
+        project_path: Option<PathBuf>,
+
+        /// Include unchanged files in the changes list.
+        #[arg(long)]
+        include_unchanged: bool,
+    },
+
+    /// Show recent snapshots from the principal's project head.
+    Log {
+        /// Project root path.
+        #[arg(long)]
+        project_path: Option<PathBuf>,
+
+        /// Maximum snapshots to return.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Create a new local project snapshot from the current worktree.
+    Create {
+        /// Project root path.
+        #[arg(long)]
+        project_path: Option<PathBuf>,
+
+        /// Snapshot message.
+        #[arg(long)]
+        message: Option<String>,
+
+        /// Create even when the manifest matches the current head.
+        #[arg(long)]
+        allow_empty: bool,
+    },
+
+    /// Show metadata for a snapshot object.
+    Show {
+        /// Snapshot hash to inspect.
+        snapshot_hash: Option<String>,
+
+        /// Project root path, used to include head/deployed relation flags.
+        #[arg(long)]
+        project_path: Option<PathBuf>,
     },
 }
 
@@ -284,6 +340,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Cmd::Snapshot { cmd } => run_snapshot(cmd, cli.stdin_json),
         Cmd::Identity { system_space_dir } => {
             let params = if cli.stdin_json {
                 read_stdin_json()?
@@ -313,6 +370,85 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json)
         }
         Cmd::Vault { cmd } => run_vault(cmd),
+    }
+}
+
+fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
+    use ryeos_tools::actions::snapshot::{
+        run_create, run_log, run_show, run_status, SnapshotCreateParams, SnapshotLogParams,
+        SnapshotShowParams, SnapshotStatusParams,
+    };
+
+    match cmd {
+        SnapshotCmd::Status {
+            project_path,
+            include_unchanged,
+        } => {
+            let params = if stdin_json {
+                serde_json::from_value(read_stdin_json()?)?
+            } else {
+                SnapshotStatusParams {
+                    project_path: project_path
+                        .or_else(|| std::env::current_dir().ok())
+                        .ok_or_else(|| anyhow::anyhow!("--project-path required"))?,
+                    include_unchanged,
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&run_status(params)?)?);
+            Ok(())
+        }
+        SnapshotCmd::Log {
+            project_path,
+            limit,
+        } => {
+            let params = if stdin_json {
+                serde_json::from_value(read_stdin_json()?)?
+            } else {
+                SnapshotLogParams {
+                    project_path: project_path
+                        .or_else(|| std::env::current_dir().ok())
+                        .ok_or_else(|| anyhow::anyhow!("--project-path required"))?,
+                    limit,
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&run_log(params)?)?);
+            Ok(())
+        }
+        SnapshotCmd::Create {
+            project_path,
+            message,
+            allow_empty,
+        } => {
+            let params = if stdin_json {
+                serde_json::from_value(read_stdin_json()?)?
+            } else {
+                SnapshotCreateParams {
+                    project_path: project_path
+                        .or_else(|| std::env::current_dir().ok())
+                        .ok_or_else(|| anyhow::anyhow!("--project-path required"))?,
+                    message,
+                    allow_empty,
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&run_create(params)?)?);
+            Ok(())
+        }
+        SnapshotCmd::Show {
+            snapshot_hash,
+            project_path,
+        } => {
+            let params = if stdin_json {
+                serde_json::from_value(read_stdin_json()?)?
+            } else {
+                SnapshotShowParams {
+                    snapshot_hash: snapshot_hash
+                        .ok_or_else(|| anyhow::anyhow!("SNAPSHOT_HASH required"))?,
+                    project_path,
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&run_show(params)?)?);
+            Ok(())
+        }
     }
 }
 
@@ -813,7 +949,7 @@ mod tests {
 
         let roots = bundle_verify_dependency_roots(
             &source.canonicalize().unwrap(),
-            Some(registry.clone()),
+            vec![registry.clone()],
             &fixture.system,
             Some(&fixture.user),
         )
@@ -831,7 +967,7 @@ mod tests {
 
         let err = bundle_verify_dependency_roots(
             &source.canonicalize().unwrap(),
-            None,
+            Vec::new(),
             &fixture.system,
             Some(&fixture.user),
         )

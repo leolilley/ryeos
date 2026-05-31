@@ -14,5 +14,6 @@ pub mod install;
 pub mod publish;
 pub mod sign;
 pub mod sign_bundle;
+pub mod snapshot;
 pub mod trust;
 pub mod vault;

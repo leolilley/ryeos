@@ -229,6 +229,7 @@ pub fn advance_after_foldback(
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: new_manifest_hash.to_string(),
         user_manifest_hash: current_snapshot.user_manifest_hash,
+        message: None,
         project_sync_scope: current_snapshot.project_sync_scope,
         parent_hashes: vec![current_snapshot_hash.to_string()],
         created_at: now,

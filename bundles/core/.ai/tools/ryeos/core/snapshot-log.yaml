@@ -1,0 +1,28 @@
+# ryeos:signed:2026-05-31T02:07:37Z:aac2f559b75e71a45d4bbdc09077e0ba5ec94a04d389ca846a98e27ed8a97322:28WCVKDup7e4IaSAzogLIQBQ3flG/CjOS5N1zEBSFFhmTgalt/OcSoY85zPq3vWjVGoQQPFx3lDDKVDd0GrFBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "ryeos/core"
+name: "snapshot-log"
+required_caps: ["project.read"]
+description: "Show recent snapshots from the principal's local project head."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "snapshot"
+    - "log"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 60
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root path"
+    limit:
+      type: integer
+      description: "Maximum snapshots to return"
+      default: 20
+  required: [project_path]

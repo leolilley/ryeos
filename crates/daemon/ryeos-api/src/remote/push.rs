@@ -78,6 +78,7 @@ pub async fn push_project_ai_only(
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
         user_manifest_hash: None,
+        message: None,
         project_sync_scope: ProjectSyncScope::AiOnly,
         parent_hashes: Vec::new(),
         created_at: lillux::time::iso8601_now(),
@@ -177,6 +178,7 @@ pub async fn push_project(
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
         user_manifest_hash: user_manifest_hash.clone(),
+        message: None,
         project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
         parent_hashes: Vec::new(),
         created_at: lillux::time::iso8601_now(),
