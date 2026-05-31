@@ -11,6 +11,9 @@ pub struct StudioEffect {
 pub enum StudioEffectKind {
     FetchSnapshot,
     FetchProjects,
+    AddProject {
+        root: String,
+    },
     OpenProject {
         local_id: String,
     },
@@ -70,6 +73,7 @@ pub struct StudioEffectResult {
 pub enum StudioEffectResultKind {
     Snapshot,
     Projects,
+    ProjectAdded,
     ProjectOpened,
     Threads,
     Items,

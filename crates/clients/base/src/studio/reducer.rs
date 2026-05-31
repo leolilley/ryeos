@@ -1,7 +1,7 @@
 use super::dto::{
-    StudioFileReadDto, StudioFilesDto, StudioGcStatusDto, StudioItemInspectionDto, StudioItemsDto,
-    StudioOpenProjectDto, StudioSchedulesDto, StudioSnapshotDto, StudioThreadInspectionDto,
-    StudioThreadsDto,
+    StudioAddProjectDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
+    StudioItemInspectionDto, StudioItemsDto, StudioOpenProjectDto, StudioSchedulesDto,
+    StudioSnapshotDto, StudioThreadInspectionDto, StudioThreadsDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::event::{StudioAction, StudioEvent, StudioFilterField, StudioUiEvent};
@@ -236,6 +236,20 @@ impl StudioCore {
                 self.ui.inspector = StudioInspectorState::Summary { title, detail };
                 self.bump_generation();
                 Vec::new()
+            }
+            StudioAction::AddCurrentProject => {
+                if self.is_read_only() {
+                    self.notice("This Studio session is read-only.", StudioTone::Warn);
+                    Vec::new()
+                } else if let Some(root) = current_project_path(self) {
+                    vec![self.emit(StudioEffectKind::AddProject { root })]
+                } else {
+                    self.notice(
+                        "No project is bound to this Studio session.",
+                        StudioTone::Warn,
+                    );
+                    Vec::new()
+                }
             }
             StudioAction::OpenProject { local_id } => {
                 if self.is_read_only() {
@@ -519,6 +533,27 @@ impl StudioCore {
                     },
                 );
             }
+            StudioEffectResultKind::ProjectAdded => {
+                let added = match serde_json::from_value::<StudioAddProjectDto>(data) {
+                    Ok(added) => added,
+                    Err(error) => {
+                        self.notice(
+                            format!("Studio could not read project_add response: {error}"),
+                            StudioTone::Danger,
+                        );
+                        return Vec::new();
+                    }
+                };
+                self.notice(
+                    if added.created {
+                        format!("Registered project {}.", added.project.name)
+                    } else {
+                        format!("Updated project {}.", added.project.name)
+                    },
+                    StudioTone::Good,
+                );
+                return vec![self.emit(StudioEffectKind::FetchProjects)];
+            }
             StudioEffectResultKind::ProjectOpened => {
                 let opened = match serde_json::from_value::<StudioOpenProjectDto>(data) {
                     Ok(opened) => opened,
@@ -753,6 +788,9 @@ fn effect_result_kind_matches(
             StudioEffectKind::FetchProjects,
             StudioEffectResultKind::Projects
         ) | (
+            StudioEffectKind::AddProject { .. },
+            StudioEffectResultKind::ProjectAdded
+        ) | (
             StudioEffectKind::OpenProject { .. },
             StudioEffectResultKind::ProjectOpened
         ) | (
@@ -801,6 +839,21 @@ fn effect_depends_on_project_binding(kind: &StudioEffectKind) -> bool {
             | StudioEffectKind::ReadFile { .. }
             | StudioEffectKind::InspectItem { .. }
     )
+}
+
+fn current_project_path(core: &StudioCore) -> Option<String> {
+    core.data
+        .session
+        .as_ref()
+        .and_then(|session| session.project_path.clone())
+        .or_else(|| {
+            core.data.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .project
+                    .as_ref()
+                    .map(|project| project.path.clone())
+            })
+        })
 }
 
 fn view_from_route(route: &str) -> Option<ViewSpec> {
@@ -1193,7 +1246,7 @@ mod tests {
         });
         let tile_id = core.workspace.focused_tile.0.to_string();
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id, index: 1 },
+            event: StudioUiEvent::SetTileCursor { tile_id, index: 2 },
         });
 
         let effects = core.dispatch(StudioEvent::Ui {
@@ -1203,6 +1256,71 @@ mod tests {
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::OpenProject { local_id }) if local_id == "second"
+        ));
+    }
+
+    #[test]
+    fn projects_view_can_register_current_project() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.data.projects = Some(
+            serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "projects": []
+            }))
+            .expect("projects dto should parse"),
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Projects,
+                },
+            },
+        });
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::ActivateFocused,
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::AddProject { root }) if root == "/tmp/project"
+        ));
+    }
+
+    #[test]
+    fn project_added_refetches_projects() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::AddCurrentProject,
+            },
+        });
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::AddProject { root }) if root == "/tmp/project"
+        ));
+
+        let followups = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effects[0].id,
+                ok: true,
+                kind: StudioEffectResultKind::ProjectAdded,
+                data: Some(serde_json::json!({
+                    "project": {
+                        "local_id": "prj_1",
+                        "name": "project",
+                        "root": "/tmp/project",
+                        "exists": true
+                    },
+                    "created": true
+                })),
+                error: None,
+            },
+        });
+
+        assert!(matches!(
+            followups.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::FetchProjects)
         ));
     }
 

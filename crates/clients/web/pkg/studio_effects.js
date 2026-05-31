@@ -5,6 +5,8 @@ export async function runEffect(effect) {
       return result(effect, "snapshot", await getJson("/ui/api/studio/snapshot"));
     case "fetch_projects":
       return result(effect, "projects", await getJson("/ui/api/studio/projects/list"));
+    case "add_project":
+      return result(effect, "project_added", await postJson("/ui/api/studio/projects/add", { root: kind.root }));
     case "open_project":
       return result(effect, "project_opened", await postJson("/ui/api/studio/projects/open", { local_id: kind.local_id }));
     case "fetch_threads":
@@ -65,6 +67,7 @@ function resultKindFor(effect) {
   const type = effect?.kind?.type;
   if (type === "fetch_snapshot") return "snapshot";
   if (type === "fetch_projects") return "projects";
+  if (type === "add_project") return "project_added";
   if (type === "open_project") return "project_opened";
   if (type === "fetch_threads") return "threads";
   if (type === "fetch_items") return "items";

@@ -552,36 +552,56 @@ fn overview(core: &StudioCore) -> StudioViewVm {
 }
 
 fn project_rows(core: &StudioCore) -> Vec<StudioRowVm> {
-    core.data
-        .projects
-        .as_ref()
-        .map(|projects| projects.projects.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|project| {
-            let local_id = project.local_id.clone();
-            row(
-                local_id.clone(),
-                if project.name.is_empty() {
-                    project.root.clone()
-                } else {
-                    project.name
-                },
-                Some(project.root),
-                Some(
-                    if project.exists {
-                        "available"
-                    } else {
-                        "missing"
-                    }
-                    .to_string(),
-                ),
-                project
-                    .exists
-                    .then_some(StudioAction::OpenProject { local_id }),
-            )
+    let mut rows = Vec::new();
+    let current_project = session_vm(core).project_path;
+    if let Some(root) = current_project.as_ref().filter(|root| {
+        !core.data.projects.as_ref().is_some_and(|projects| {
+            projects
+                .projects
+                .iter()
+                .any(|project| project.root == **root)
         })
-        .collect()
+    }) {
+        rows.push(row(
+            "__add_current_project".to_string(),
+            "Register current project".to_string(),
+            Some(root.clone()),
+            Some("not registered".to_string()),
+            Some(StudioAction::AddCurrentProject),
+        ));
+    }
+    rows.extend(
+        core.data
+            .projects
+            .as_ref()
+            .map(|projects| projects.projects.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|project| {
+                let local_id = project.local_id.clone();
+                row(
+                    local_id.clone(),
+                    if project.name.is_empty() {
+                        project.root.clone()
+                    } else {
+                        project.name
+                    },
+                    Some(project.root),
+                    Some(
+                        if project.exists {
+                            "available"
+                        } else {
+                            "missing"
+                        }
+                        .to_string(),
+                    ),
+                    project
+                        .exists
+                        .then_some(StudioAction::OpenProject { local_id }),
+                )
+            }),
+    );
+    rows
 }
 
 fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<StudioRowVm> {

@@ -137,6 +137,14 @@ pub struct StudioKnownProjectDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioAddProjectDto {
+    #[serde(default)]
+    pub project: StudioKnownProjectDto,
+    #[serde(default)]
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StudioOpenProjectDto {
     #[serde(default)]
     pub project: StudioKnownProjectDto,

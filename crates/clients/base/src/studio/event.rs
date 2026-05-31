@@ -45,6 +45,7 @@ pub enum StudioAction {
         title: String,
         detail: serde_json::Value,
     },
+    AddCurrentProject,
     OpenProject {
         local_id: String,
     },
