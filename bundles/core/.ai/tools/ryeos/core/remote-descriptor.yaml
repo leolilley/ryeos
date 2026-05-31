@@ -1,9 +1,9 @@
-# ryeos:signed:2026-05-31T04:29:09Z:ee89315caef62198d978d9fa218c43b5af49d354ac5ae7f4cd3e8067b7fd21cf:BpN2860cgx//36MHh4xKKcdzy3Eq4FK5gbm8XWv+O2klLf8tESumYmsjO5natVeiiiSmcMAYND9pS77n8gdbAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-31T04:51:54Z:2e1d559c25b7788d1882a3453f0e45f8e48b926b7a927090c8b54826792ee39a:PTXYZ2VTbn4vvruNH1h+k3j4FafVWj1oFwAAlZ2wAJriEbIAFt8i5Ai0qoHpu1sZUEZizl8i2NcHboNth/eZDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
 name: "remote-descriptor"
-required_caps: []
+required_caps: ["ryeos.execute.tool.ryeos.core.remote-descriptor"]
 description: "Export a remote descriptor trust pin for this node."
 
 config:

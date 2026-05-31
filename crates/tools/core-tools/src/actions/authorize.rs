@@ -157,8 +157,8 @@ pub fn run_mint_admission_token(
     if scopes.is_empty() {
         bail!("scopes must not be empty");
     }
-    if scopes.iter().any(|scope| scope == "*") {
-        bail!("wildcard scope '*' is not allowed in admission tokens");
+    if scopes.iter().any(|scope| scope.contains('*')) {
+        bail!("wildcard scopes are not allowed in admission tokens");
     }
     for scope in &scopes {
         ryeos_runtime::authorizer::validate_scope_pattern(scope)

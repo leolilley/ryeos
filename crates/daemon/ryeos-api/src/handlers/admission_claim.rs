@@ -100,8 +100,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }
 
     let (key_b64, verifying_key, fingerprint) = parse_public_key(&req.public_key)?;
-    let scopes = normalize_scopes(&req.scopes)?;
-    ensure_scope_subset(&scopes, &token.scopes, &state)?;
+    let scopes = normalize_scopes(&req.scopes, "admission claim requests")?;
+    let allowed_scopes = normalize_scopes(&token.scopes, "admission token files")?;
+    ensure_scope_subset(&scopes, &allowed_scopes, &state)?;
     verify_claim_signature(&req, &token_hash, &scopes, &verifying_key, &state)?;
 
     let label = req
@@ -195,7 +196,7 @@ fn parse_public_key(input: &str) -> HandlerResult<(String, VerifyingKey, String)
     Ok((key_b64.to_string(), verifying_key, fingerprint))
 }
 
-fn normalize_scopes(scopes: &[String]) -> HandlerResult<Vec<String>> {
+fn normalize_scopes(scopes: &[String], context: &str) -> HandlerResult<Vec<String>> {
     if scopes.is_empty() {
         return Err(HandlerError::BadRequest("scopes must not be empty".into()));
     }
@@ -216,9 +217,9 @@ fn normalize_scopes(scopes: &[String]) -> HandlerResult<Vec<String>> {
             .map_err(HandlerError::BadRequest)?;
     }
     if normalized.iter().any(|s| s.contains('*')) {
-        return Err(HandlerError::Forbidden(
-            "wildcard scopes are forbidden for admission claim requests".into(),
-        ));
+        return Err(HandlerError::Forbidden(format!(
+            "wildcard scopes are forbidden for {context}"
+        )));
     }
     Ok(normalized)
 }
@@ -326,19 +327,25 @@ mod tests {
 
     #[test]
     fn normalize_scopes_rejects_exact_and_prefix_wildcards() {
-        let exact = normalize_scopes(&["*".to_string()]);
+        let exact = normalize_scopes(&["*".to_string()], "admission claim requests");
         assert!(matches!(exact, Err(HandlerError::Forbidden(_))));
 
-        let prefix = normalize_scopes(&["ryeos.execute.service.*".to_string()]);
+        let prefix = normalize_scopes(
+            &["ryeos.execute.service.*".to_string()],
+            "admission token files",
+        );
         assert!(matches!(prefix, Err(HandlerError::Forbidden(_))));
     }
 
     #[test]
     fn normalize_scopes_accepts_concrete_scopes() {
-        let scopes = normalize_scopes(&[
-            "ryeos.execute.service.objects.put".to_string(),
-            "ryeos.execute.service.objects.has".to_string(),
-        ])
+        let scopes = normalize_scopes(
+            &[
+                "ryeos.execute.service.objects.put".to_string(),
+                "ryeos.execute.service.objects.has".to_string(),
+            ],
+            "admission claim requests",
+        )
         .expect("concrete scopes should be accepted");
 
         assert_eq!(
