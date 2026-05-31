@@ -1,6 +1,6 @@
 //! `ryeos-core-tools` — unified core tools binary.
 //!
-//! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client.
+//! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client, admission-token.
 //!
 //! Multi-tool binary for signing and inspecting RyeOS items.
 //! Invoked by tool YAMLs via `bin:ryeos-core-tools <subcommand>`.
@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos-core-tools",
-    about = "Unified core tools binary (sign, fetch, verify, snapshot, identity, authorize-client)",
+    about = "Unified core tools binary (sign, fetch, verify, snapshot, identity, authorize-client, admission-token)",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -140,6 +140,25 @@ enum Cmd {
         /// Human-readable label for the authorized key.
         #[arg(long, default_value = "cli-authorized")]
         label: String,
+    },
+
+    /// Mint a one-time node-local admission token for remote bootstrap.
+    AdmissionToken {
+        /// System space directory for the target node.
+        #[arg(long)]
+        system_space_dir: Option<String>,
+
+        /// Comma-separated scopes this token may grant.
+        #[arg(long)]
+        scopes: Option<String>,
+
+        /// Optional default label for the authorized key created by claim.
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Token lifetime in seconds.
+        #[arg(long, default_value_t = 600)]
+        ttl_secs: u64,
     },
 
     /// Manage sealed secrets in the daemon vault.
@@ -369,6 +388,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             ))?;
             run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json)
         }
+        Cmd::AdmissionToken {
+            system_space_dir,
+            scopes,
+            label,
+            ttl_secs,
+        } => run_admission_token(system_space_dir, scopes, label, ttl_secs, cli.stdin_json),
         Cmd::Vault { cmd } => run_vault(cmd),
     }
 }
@@ -865,6 +890,48 @@ fn run_authorize_client(
         }))?
     );
 
+    Ok(())
+}
+
+fn run_admission_token(
+    system_space_dir: Option<String>,
+    scopes: Option<String>,
+    label: Option<String>,
+    ttl_secs: u64,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    use ryeos_tools::actions::authorize::{run_mint_admission_token, MintAdmissionTokenParams};
+
+    let (system_space_dir, scopes, label, ttl_secs) = if stdin_json {
+        let val = read_stdin_json()?;
+        let ssd = val["system_space_dir"].as_str().map(String::from);
+        let scopes = val["scopes"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
+            .to_string();
+        let label = val["label"].as_str().map(String::from);
+        let ttl_secs = val["ttl_secs"].as_u64().unwrap_or(600);
+        (ssd, scopes, label, ttl_secs)
+    } else {
+        let scopes = scopes.ok_or_else(|| anyhow::anyhow!("--scopes required"))?;
+        (system_space_dir, scopes, label, ttl_secs)
+    };
+
+    let system_space_dir = resolve_system_space_dir(system_space_dir)?;
+    let scopes: Vec<String> = scopes
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let report = run_mint_admission_token(MintAdmissionTokenParams {
+        system_space_dir,
+        scopes,
+        label,
+        ttl_secs,
+    })?;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

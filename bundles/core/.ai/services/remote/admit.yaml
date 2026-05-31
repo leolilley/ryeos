@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-31T04:02:04Z:6e742d93188c8f9acf261282da5efcfd70a16ecc592084636c2372c3989bc9ae:llaQDYLB/yX3gSSb/ni4xesz5T5JLzBSxuqoEjGxn95mTGFmsjW+ZbjatZJj6OYNqyWAp6Mp8sbHSDREKPC4Cg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+endpoint: remote.admit
+required_caps: ["ryeos.execute.service.remote.configure"]
+schema:
+  remote: string?
+  token: string
+  label: string?
+  scopes: string[]
+description: "Claim a one-time admission token on a configured remote node"

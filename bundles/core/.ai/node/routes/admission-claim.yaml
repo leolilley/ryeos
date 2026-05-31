@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T03:58:42Z:5845732724eed299ede3cbd6c991f100ba5630bd69de2e7d9d007beb67cf4338:bpU4b+d7PBGpgF0qwOZh2yjUr3+LtFeUUoB+VH3Y9+YLrk5Zy54k+TEjLwCIUahKsFodGIe0Zv8EkPKXugwNAQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes
+section: routes
+id: admission/claim
+path: /admission/claim
+methods:
+  - POST
+auth: none
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 16
+response:
+  mode: json
+  source: service:admission/claim

@@ -13,6 +13,7 @@
 use crate::registry::ServiceDescriptor;
 
 pub mod admission_attestations_for_subject;
+pub mod admission_claim;
 pub mod admission_status;
 pub mod admission_submit;
 pub mod authorize_key;
@@ -40,6 +41,7 @@ pub mod project_apply_snapshot;
 pub mod project_status;
 pub mod push_head;
 pub mod rebuild;
+pub mod remote_admit;
 pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
@@ -87,6 +89,7 @@ pub(crate) fn default_replay_limit() -> usize {
 }
 
 pub const ALL: &[ServiceDescriptor] = &[
+    admission_claim::DESCRIPTOR,
     admission_submit::DESCRIPTOR,
     admission_status::DESCRIPTOR,
     admission_attestations_for_subject::DESCRIPTOR,
@@ -142,6 +145,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_import_admitted_root::DESCRIPTOR,
     remote_sync_admitted_heads::DESCRIPTOR,
     remote_run::DESCRIPTOR,
+    remote_admit::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
     remote_threads::DESCRIPTOR,
     remote_thread_status::DESCRIPTOR,

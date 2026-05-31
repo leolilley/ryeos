@@ -94,17 +94,37 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
 
     let public_key = match client.get_public_key().await {
         Ok(value) => {
+            let live_binding_ok = value.validate_identity_binding().is_ok();
+            let pinned_key_matches = value.signing_key == remote_cfg.signing_key;
+            let pinned_fingerprint = remote_cfg
+                .pinned_signing_key()
+                .map(|key| lillux::crypto::fingerprint(&key))
+                .unwrap_or_else(|_| remote_cfg.principal_id.clone());
+            let pinned_fingerprint_matches = value.fingerprint == pinned_fingerprint;
             checks.push(serde_json::json!({
                 "name": "remote_identity",
-                "ok": true,
+                "ok": live_binding_ok && pinned_key_matches && pinned_fingerprint_matches,
                 "principal_id": value.principal_id,
                 "fingerprint": value.fingerprint,
                 "vault_fingerprint": value.vault_fingerprint,
+                "live_identity_binding_ok": live_binding_ok,
+                "pinned_fingerprint": pinned_fingerprint,
+                "pinned_identity_matches": live_binding_ok && pinned_key_matches && pinned_fingerprint_matches,
             }));
+            if !(live_binding_ok && pinned_key_matches && pinned_fingerprint_matches) {
+                next_steps.push(serde_json::json!({
+                    "name": "review_remote_identity_pin",
+                    "command": format!("ryeos remote configure {} --url {}", req.remote, remote_cfg.url),
+                    "note": "The live remote identity differs from the pinned local descriptor/config. Only reconfigure if you expect this key change.",
+                }));
+            }
             Some(serde_json::json!({
                 "principal_id": value.principal_id,
                 "fingerprint": value.fingerprint,
                 "vault_fingerprint": value.vault_fingerprint,
+                "live_identity_binding_ok": live_binding_ok,
+                "pinned_fingerprint": pinned_fingerprint,
+                "pinned_identity_matches": live_binding_ok && pinned_key_matches && pinned_fingerprint_matches,
             }))
         }
         Err(e) => {
