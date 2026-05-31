@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T01:55:10Z:fcf152103d8b8381d8984e53da68d60d58d866f2cadab7b1522f52e588934238:58CrYYGQ00QcCLkTgcstvnVsLgvM7M3JYnKG3xPxkdVfLae3BS6jESQ902aoyvZ36sABKekheEqERHBGeet8Bw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T02:58:01Z:7b78dec0dfab35b4c0b2dfa7adaccee63b4d1153f653a8df48bb098ed5e6c455:4U9HpykXbig98I8wXSopSE2mS3bv7ukNE91mLhKCsx8ax3iXwQ/DepoSx2dNQAkuCasRLTae4Vtp8DLsCotYCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 <!-- rye:signed:2026-05-30T04:39:09Z:0668ae4257fbe5688b500a1157ad8ac5198382509ae9c72cd645833e518f5a7a:e841rQssGRrzuBeI710Qifkd42zjk3tsSF5xZAfSg5Dt6uIk9vABZLz8yJLAFR4a2S5mMMb2nwpQFaoO7lUuCQ:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future
@@ -494,21 +494,23 @@ Do not split local project registry into a separate user-visible “workspace”
 
 Transitional implementation may keep physically separate internal bundle directories if that reduces churn, but normal install should always include/register Studio and its local project support.
 
-The only major optional future layer is hosted/multi-tenant/cloud behavior.
+The only major optional future layer is hosted-node/provider behavior and, much later, true shared-daemon multi-tenancy.
 
-## Deferred hosted/multi-tenant layer
+## Deferred hosted-node and multi-tenant layers
 
-Hosted multi-tenancy should be deferred until a real product requirement appears, such as:
+Hosted-node/provider work should be separate from standard/local. RyeOS Cloud, if offered, should mean provisioning and operating RyeOS nodes, not centralizing RyeOS identity.
+
+True shared-daemon multi-tenancy should be deferred until a real product requirement appears, such as:
 
 - multiple unrelated principals share one daemon/node concurrently;
-- browser login must work without a trusted local launcher;
+- browser access must work directly against a hosted node without a trusted local launcher;
 - user spaces need non-filesystem or tenant-backed storage;
 - per-principal vault partitioning is required;
 - quotas/billing/audit require tenant isolation;
 - cloud sync needs durable project identity and principal-scoped policy;
 - browser sessions need server-side persistence across daemon restarts.
 
-When triggered, hosted mode should virtualize the same logical user-space files behind a resolver, not invent a different local contract:
+When triggered, shared hosted mode should virtualize the same logical user-space files behind a resolver, not invent a different local contract:
 
 ```text
 tenant:<principal>/config/projects.yaml
@@ -545,18 +547,20 @@ Do not choose this physical layout now. The important near-term constraint is th
 
 ## Future hosted auth direction
 
-Future hosted RyeOS should use key-based principal login rather than making email/password the primary identity root.
+Future hosted RyeOS should use key-based, node-local admission/session flows rather than making email/password or a central cloud account the primary identity root.
+
+RyeOS Cloud may offer a provider UI for provisioning, billing, and descriptor delivery, but that provider UI must not become the authority for RyeOS execution requests. A hosted node must still verify signed requests against its own node-local grants.
 
 Reserve this contract direction:
 
 ```text
-POST /auth/challenge
-POST /auth/verify
+POST /admission/challenge
+POST /admission/claim
 ```
 
-The client signs a nonce/audience challenge with a RyeOS principal key. The server verifies the key and mints a UI/API session bound to the verified principal and scopes.
+The client signs a nonce/audience challenge with an appropriate RyeOS key. The target node verifies the claim and materializes a node-local grant or a node-local UI/API session bound to explicit scopes.
 
-This belongs to the future hosted/cloud layer, not the immediate local Studio registry implementation.
+This belongs to hosted-node/remote admission work, not the immediate local Studio registry implementation. It should be node-local and decentralized, not a central cloud login service.
 
 ## Guardrails
 
@@ -588,6 +592,14 @@ Use `studio` / `ui` for new services, schemas, routes, docs, and user-facing lab
 
 Use a path helper/resolver seam. Do not implement tenant directories, per-principal vaults, orgs, quotas, or billing until hosted mode requires them.
 
+### Avoid central auth assumptions
+
+Do not design RyeOS Cloud as a central identity provider for execution. Hosted providers can provision nodes and deliver descriptors/admission material, but every remote execution request must still be authorized by the target RyeOS node's local grant/capability policy.
+
+### Treat remote descriptors as trust pins, not credentials
+
+Remote descriptors may include URLs, public keys, fingerprints, capabilities, and provider signatures. They must not include long-lived bearer secrets, private keys, or authority by themselves. Access comes from signed requests checked against target-node grants.
+
 ## Completed local implementation boundary
 
 The first implementation pass focused on and completed:
@@ -603,7 +615,7 @@ The first implementation pass focused on and completed:
 6. Do not add project-local identity yet.
 7. Do not implement hosted multi-tenancy yet.
 
-## Remaining roadmap to full principal support
+## Remaining roadmap to decentralized hosted/principal support
 
 ### Level 1: principal-aware local user space
 
@@ -631,9 +643,98 @@ Work items:
 
 This level should not add orgs, quotas, billing, per-principal vault partitions, or hosted storage.
 
-### Level 2: authenticated principal sessions
+### Level 2: decentralized remote-node identity and admission
 
-Goal: make browser/API sessions explicitly bound to a real verified principal.
+Goal: let local RyeOS connect to self-hosted or provider-hosted RyeOS nodes without introducing a central identity provider.
+
+RyeOS Cloud, if offered, is a hosted node/provisioning provider. It is not the root authority for RyeOS protocol calls. Runtime authority remains with the target RyeOS node: node identity, pinned descriptors, signed requests, authorized-key grants, and explicit scopes.
+
+Core invariant:
+
+> A remote request is allowed because the target RyeOS node has a local grant for the caller key, not because a central cloud service says the caller is logged in.
+
+Use these identity roles distinctly:
+
+| Role | Meaning |
+|---|---|
+| local node key | Signs remote execution/setup requests from the local RyeOS node. |
+| user/principal key | May sign local UI/session/admission flows later, but is not a central account login. |
+| hosted/remote node key | Identifies the target node and is pinned in the local remote descriptor. |
+| node-local grant | Target-node authorization record mapping caller key to explicit scopes. |
+
+Standard/local RyeOS should support generic remote-node UX:
+
+1. import or discover a remote descriptor;
+2. pin the remote node fingerprint;
+3. run node-local admission if required;
+4. store the resulting remote config as user/principal intent;
+5. execute against that remote using signed requests and target-node grants.
+
+The provider/provisioning layer may create nodes, return descriptors, manage DNS/TLS, and issue short-lived admission material. It must not become a hot-path identity provider for remote execution.
+
+Work items:
+
+1. Define a `RemoteDescriptor` contract.
+   - URL;
+   - target node public key/fingerprint;
+   - supported capabilities;
+   - optional admission methods;
+   - optional provider signature proving descriptor provenance.
+2. Make descriptor import/configuration explicit in CLI and Studio.
+   - Descriptor is not a credential;
+   - key changes require explicit re-pin;
+   - TOFU discovery must display fingerprints clearly.
+3. Add or standardize node-local admission flow.
+   - one-time/short-lived admission code or challenge;
+   - claim signed by local node key;
+   - target node materializes a normal authorized-key grant;
+   - future requests go directly local-node → target-node.
+4. Add `remote doctor`/Studio status that explains:
+   - local caller node fingerprint;
+   - pinned remote node fingerprint;
+   - whether caller is authorized;
+   - missing scopes;
+   - suggested authorize/admit command.
+5. Keep Cloud-specific UX as provisioning/descriptor/admission convenience, not central login.
+
+Example remote descriptor shape:
+
+```yaml
+version: 1
+name: hosted-prod
+url: https://node-abc.ryeos.example
+node:
+  public_key: ed25519:...
+  fingerprint: sha256:...
+capabilities:
+  remote_execute: true
+  bundle_install: true
+  vault: true
+admission:
+  methods:
+    - one_time_code
+provider:
+  name: RyeOS Cloud
+  node_id: cloud-node-abc
+  descriptor_signature: optional-provider-signature
+```
+
+Example decentralized hosted-node bootstrap:
+
+```text
+provider/provisioner creates hosted node
+  -> returns remote descriptor + one-time admission material
+local RyeOS imports descriptor and pins node identity
+  -> local node signs admission claim
+hosted node validates claim locally
+  -> hosted node writes authorized-key grant for local node key
+future remote execution
+  -> direct signed local-node request checked against hosted-node grants
+```
+
+### Level 3: local/browser principal sessions
+
+Goal: make browser/API sessions explicitly bound to a verified principal where needed, while keeping auth node-local/decentralized.
 
 Work items:
 
@@ -646,17 +747,54 @@ Work items:
 4. Audit all UI handlers that mutate user/node/project state and decide which identity they require.
 5. Add tests for expired/invalid/read-only sessions and principal mismatch behavior.
 
-### Level 3: hosted multi-tenancy
+This may be implemented for local standard sessions and hosted-node browser sessions, but it should still verify against a node-local challenge/session model. Do not introduce a central cloud auth root.
 
-Goal: support multiple unrelated principals sharing hosted infrastructure.
+### Level 4: hosted-node bundle/provider layer
+
+Goal: package a RyeOS node as a hosted remote target and provide infrastructure/provisioning around it.
+
+This is outside standard/local. Standard may be a client of hosted nodes, but it should not contain provider control-plane logic.
+
+Hosted-node bundle/layer should include:
+
+- public HTTPS deployment assumptions;
+- node discovery and descriptor generation;
+- node-local admission endpoints/services;
+- stricter default remote policies;
+- audit logs for admission and grant changes;
+- operational telemetry;
+- setup/run affordances through existing remote services.
+
+Provider/provisioning surface may include:
+
+- node provisioning;
+- DNS/TLS/gateway setup;
+- descriptor delivery;
+- one-time admission material delivery;
+- billing/ops outside the RyeOS execution auth path.
+
+Provider/provisioning surface must not include:
+
+- central bearer tokens accepted by hosted nodes as execution authority;
+- account membership as the primary remote authorization check;
+- implicit cross-node authority;
+- shared-daemon tenant isolation unless the daemon itself is tenant-aware.
+
+### Level 5: true hosted multi-tenancy
+
+Goal: support multiple unrelated principals sharing one hosted daemon or hard-partitioned hosted substrate.
+
+Do not put this in standard/local. Prefer isolated hosted nodes/containers per user/org/project boundary until the operational cost forces shared-daemon tenancy.
 
 Work items:
 
-1. Key-based login challenge/verify flow.
-2. Tenant-backed logical user-space storage behind `UserSpaceResolver`.
-3. Account/org/workspace membership and authorization policy.
-4. Per-principal or per-tenant vault partitioning if secrets are hosted.
-5. Quotas, audit trails, revocation, logout, and recovery flows.
-6. Project identity only if sync/federation/attestation needs path-independent identity.
+1. Tenant-backed logical user-space storage behind `UserSpaceResolver`.
+2. Tenant-aware CAS namespace/policy.
+3. Tenant-aware vault namespace/policy.
+4. Tenant-aware thread/run storage.
+5. Tenant-aware capability policy on every route/service.
+6. Per-tenant quotas, audit, revocation, backup/restore, and recovery flows.
+7. Optional org/workspace membership if it is enforced by the hosted node/substrate rather than a central bypass.
+8. Project identity only if sync/federation/attestation needs path-independent identity.
 
-Do not begin Level 3 until there is a concrete hosted product requirement.
+Do not begin Level 5 until there is a concrete hosted requirement that isolated hosted nodes cannot satisfy.

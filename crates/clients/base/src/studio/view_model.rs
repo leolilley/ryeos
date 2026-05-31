@@ -403,7 +403,10 @@ fn status_bar_vm(
             StudioStatusSegmentVm {
                 id: "project".to_string(),
                 label: None,
-                value: session.project_path.clone().unwrap_or_else(|| "home".to_string()),
+                value: session
+                    .project_path
+                    .clone()
+                    .unwrap_or_else(|| "home".to_string()),
                 tone: StudioTone::Neutral,
                 grow: true,
             },

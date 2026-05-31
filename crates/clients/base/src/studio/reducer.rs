@@ -1608,10 +1608,11 @@ mod tests {
             core.workspace.focused_view(),
             Some(ViewSpec::Services)
         ));
-        assert!(core.ui.motion.iter().any(|event| matches!(
-            event,
-            StudioMotionEventVm::TileSplit { .. }
-        )));
+        assert!(core
+            .ui
+            .motion
+            .iter()
+            .any(|event| matches!(event, StudioMotionEventVm::TileSplit { .. })));
         assert!(core.ui.motion.iter().any(|event| matches!(
             event,
             StudioMotionEventVm::TileEnter { tile_id } if tile_id == &core.workspace.focused_tile.0.to_string()
@@ -1649,10 +1650,11 @@ mod tests {
             .count();
         assert_eq!(core.workspace.layout.tile_ids().len(), before + 1);
         assert_eq!(item_tile_count, 2);
-        assert!(core.ui.motion.iter().any(|event| matches!(
-            event,
-            StudioMotionEventVm::TileSplit { .. }
-        )));
+        assert!(core
+            .ui
+            .motion
+            .iter()
+            .any(|event| matches!(event, StudioMotionEventVm::TileSplit { .. })));
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::FetchItems { .. })
@@ -1712,10 +1714,11 @@ mod tests {
         });
 
         assert!(core.workspace.is_home());
-        assert!(core.ui.motion.iter().any(|event| matches!(
-            event,
-            StudioMotionEventVm::HomeEnter
-        )));
+        assert!(core
+            .ui
+            .motion
+            .iter()
+            .any(|event| matches!(event, StudioMotionEventVm::HomeEnter)));
     }
 
     #[test]

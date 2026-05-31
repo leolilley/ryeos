@@ -87,7 +87,10 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             [0.0, -0.2, 0.0],
             [scale_for_count(snapshot.project.iter().count()), 1.0, 1.0],
             "#fe8019",
-            snapshot.project.as_ref().map(|project| project.path.clone()),
+            snapshot
+                .project
+                .as_ref()
+                .map(|project| project.path.clone()),
             StudioTone::Accent,
         ));
 
@@ -105,7 +108,11 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             "services:beacon",
             StudioSceneObjectKind::ServiceBeacon,
             [-2.6, 0.0, -2.8],
-            [scale_for_count(snapshot.local_node.services.len()), 1.0, 1.0],
+            [
+                scale_for_count(snapshot.local_node.services.len()),
+                1.0,
+                1.0,
+            ],
             "#83a598",
             Some(format!("{} services", snapshot.local_node.services.len())),
             StudioTone::Neutral,
@@ -115,9 +122,16 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             "threads:active",
             StudioSceneObjectKind::ThreadFlow,
             [2.4, 0.0, -2.0],
-            [scale_for_count(snapshot.threads.active_count.max(0) as usize), 1.0, 1.0],
+            [
+                scale_for_count(snapshot.threads.active_count.max(0) as usize),
+                1.0,
+                1.0,
+            ],
             "#d3869b",
-            Some(format!("{} active threads", snapshot.threads.active_count.max(0))),
+            Some(format!(
+                "{} active threads",
+                snapshot.threads.active_count.max(0)
+            )),
             if snapshot.threads.active_count > 0 {
                 StudioTone::Accent
             } else {
