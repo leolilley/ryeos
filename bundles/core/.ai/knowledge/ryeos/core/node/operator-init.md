@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:57Z:27be0bbb37ce9700c0faf18b4e603843519d63f3bef0532188d7249c15881bcd:tRiIaseFk79yI5RSUrRGFPp7Wz/Y4Q5HLiNA+arCq6YuTMzZQ34If9or2vwZxpI9ga2IGSXWAL8Nu7v0WSSUBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]

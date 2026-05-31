@@ -873,9 +873,8 @@ mod tests {
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
             let dev_trust = std::fs::read_to_string(
                 workspace_root()
-                    .join("bundles")
-                    .join("core")
-                    .join("PUBLISHER_TRUST.toml"),
+                    .join(".dev-keys")
+                    .join("PUBLISHER_DEV_TRUST.toml"),
             )
             .unwrap();
             let dev_trust = ryeos_engine::trust::PublisherTrustDoc::parse(&dev_trust).unwrap();

@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:71d59deaab20211d0fd8f5737244c3d651ad112c788378da757b2a18d09eca50:flfrCEZn8xR9soJhTdB4hM7P3H5psipk51rbu9wScYcXQ4UbPknmlWW+92BVypl0wZ8cB9wnhqHWG1kFO9ZfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]

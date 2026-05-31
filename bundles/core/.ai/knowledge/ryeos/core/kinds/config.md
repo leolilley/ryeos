@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:c8ebbc2f22219ece010cae3f4cc7f30199aa2b2a9d9553a85aaeb4e98f7f931d:H4yo2SLQsy+FTjAwRIxCpukBzZGRI4ZfA+dFRusDyBjlzsrtsgHGMQadYxDK+yzRvzBBOG8ay67EvqndD3QABw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, config]

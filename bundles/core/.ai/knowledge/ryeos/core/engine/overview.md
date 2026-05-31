@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:57Z:ab59733e2d5a16901543bdb5d86201bfabc68afc67c4f4d7f7c36c07cb86fe5b:oUjWjxqKO0lLY9zKrzB3c28dC+pSyVtUsRL0/Ua0JJdvi2oAdpgjyPfbLuVaXmNoNoxCtsRbW0TUEdc4by7SAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, architecture, parse, compose, execute]

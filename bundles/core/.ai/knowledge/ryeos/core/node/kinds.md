@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:57Z:0f4118c187fcb6d75a557c79ecd585162f0857da1f65eece8cd81e8308130ad4:pSKHCHj6gHbe5zGgLBPO9Xzd+/fNq7zsQIZdC5x17lSGJamM0bLm13CSxe8PV2CFFgoeJjiF/26JvRcs7S1LCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]

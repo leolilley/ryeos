@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:c29c3881c1f935b019d0cf58b0d574a60521b56ea4691669d81bfebf1618ce40:tfTSUIFINpPSB3Q4PWmjqtvIDiooS3N0QL7tNOD9oPGneS+zG1KdwKz7ePcgRJ4q43EIAsCCZElmmMuByDmnAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [protocol, streaming-tool]

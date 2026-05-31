@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:1311da3860593050b2afb30919e367c62fa2ed479d042324c0a37d408343cb9f:cpbuCIQ6xcdFUWX3Zv0hpUK3C6hwX+vnWYQDXK25uVodRWZEAYbN/KB1WjH6r5Aa2YJ2XN2bkby59BUqMGE0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]

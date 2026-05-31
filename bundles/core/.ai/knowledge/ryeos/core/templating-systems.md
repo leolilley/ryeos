@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:57Z:ddd1858d1500f94b38f1d6243f89ffacaad69d1b8a7b7a97acbd1be5c9b97d81:SPNmiuqPy6Wv/hBvmt7pfxvEk1aYEJIH0SxxnYt2EBdGsWIDnESohTWgQrsQTOyR0XaNJ6vRQnS7J95F9Qw7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core

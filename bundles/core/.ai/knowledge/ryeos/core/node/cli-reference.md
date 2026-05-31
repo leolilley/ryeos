@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T04:29:09Z:3391fb7e221431ee9c5b2f3144e9a09f6182dc31a857bca1ce57c9b246b24a3b:r05J8qDJHXCz4DgmvrhRr62dxxGqfV6gCqGM4B+8nLBQXcqa8ifIjlq1ySjcnO09EE1VXrXirB0IrwNQn8qgBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T08:15:57Z:3391fb7e221431ee9c5b2f3144e9a09f6182dc31a857bca1ce57c9b246b24a3b:blSaeGqN0wc0NfjykZUV60OeGngcAW9qzE69q1Bf5gZvQAFCby4+iyxuXECoy8LYSskDoHp9qcZ3ALmtQSO8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]

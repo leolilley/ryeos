@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T07:18:20Z:116f0262496f73c6e3b90fc45f29dabff1bc8308361a4be9dbc8d0755f78c111:yYWNkmYC+C8zBy3ii1M7kSmQkX+elcGkSncqCr+hvhMWVg9sKtgA7nhFQfnWqjJlO7ftDx3D+P37PIZ31qJ9Bg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-05-31T08:15:56Z:116f0262496f73c6e3b90fc45f29dabff1bc8308361a4be9dbc8d0755f78c111:1RFl5jYqB7i0B77v5xIVfzHCt85GmF/CLBQLye/vWWDr864UpoFy97qE+xnHvznIJ3OW89vLY47NaQlJ/8niDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, verify, signatures, offline]

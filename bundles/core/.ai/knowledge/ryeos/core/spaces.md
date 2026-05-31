@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:cf21b20d027b4590d5bb865ea623d529976390deacd32ef9d9588090787a1fef:Y7XdejSJObrzvSnnNGQ+EC2rw0Cw5ffv0P9INP1SnVZBI2MPx3SfbfVcufrKirPBlBQFeZXBRq3g4rxtYmuACw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]

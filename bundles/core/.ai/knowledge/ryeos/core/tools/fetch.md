@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:86669201494cd13ded90a621ca20bd6966f74a4a16a02ba796140ad35d7b182a:uV7VH45EIyKiBnl/fcM2MDjh4o+6XaNuxd9CMoM1GtYXBjhqTGQtu2DceyYzibKPSB0cGUvLdrQX2PTozK43Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/tools
 tags: [tool, fetch, cli]

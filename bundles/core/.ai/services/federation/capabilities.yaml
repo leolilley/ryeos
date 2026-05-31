@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-30T03:27:25Z:af5b0cab1d3937fb614703b9691b36a801770801527e5e2e6d4e08fef5c8c4df:vN1LoJrcABDhKydRU85lLq5nOxwdrFl6x2q4m2wSyl7N56/SI/D4YdLq1bMEGg+qEEAn7302hKitbWTbWelHAg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-31T08:15:52Z:af5b0cab1d3937fb614703b9691b36a801770801527e5e2e6d4e08fef5c8c4df:efytWIB6iAjhLWeqJppZomzaCtYPHN/8ha+haYS8Pp+GJ2XNfeFqwLkiMmF8/VyvVPXBATAwHEKzA51i7o8+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: federation.capabilities
 required_caps: []

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-30T08:58:02Z:318139cb666dadbadc32e54ed744294dd4ce7fec3a74d8db6a71684ebef4d8c0:rjF5iAzJnH0CHiZ7f2tenetZAemRqRiDi742gulNuDPxBWe5Px2JY3cLMkL/UoCFJBsaT5D/n6ZsCQPyeUIYBg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-31T08:15:58Z:318139cb666dadbadc32e54ed744294dd4ce7fec3a74d8db6a71684ebef4d8c0:lS7LJBtgvmxJg7RJAG8dJKPX6IjcUo34FbZRMLHVs7AHa+bFoNqRddfL3yNfea5DOZ0dq2EvFs5567P5RIiOAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: cockpit/thread/inspect
 version: "1.0.0"

@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:6ce8fb28276d7dc62689b60f567c709169b7981bc3e6abd8926e7c71ef0f4819:hmpVKiFbwKFa6FJGq0TJ6dON+ShvUoPbO1UTadZkMwQb+ZDNow6c+6GzsvPlW5KHNtBqdQ7d/e7b4pYqFH6zCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities]

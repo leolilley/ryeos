@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T08:15:56Z:fe49f42ded5789667ee6cb4b7321d70af9d0488cd432c1286633ac92e46f869d:LS3P3IpGuKDMcCaI++Tu0MJp2lsjz97sUmlNSfhL4ADjblgeOSuGS348xZ/LiE6ixQIDrHJvAV4N9lXi0yiUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]
