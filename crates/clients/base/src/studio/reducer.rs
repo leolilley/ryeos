@@ -4,7 +4,9 @@ use super::dto::{
     StudioSnapshotDto, StudioThreadInspectionDto, StudioThreadsDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
-use super::event::{StudioAction, StudioEvent, StudioFilterField, StudioUiEvent};
+use super::event::{
+    StudioAction, StudioEvent, StudioFilterField, StudioStackMoveDirection, StudioUiEvent,
+};
 use super::model::{StudioCore, StudioInspectorState};
 use super::view_model::{
     action_for_focused_row, launcher_items, StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
@@ -216,6 +218,46 @@ impl StudioCore {
                 }
                 Vec::new()
             }
+            StudioAction::ToggleFocusedMaster => {
+                if self.workspace.toggle_focused_master() {
+                    self.push_motion(StudioMotionEventVm::FocusChanged {
+                        tile_id: self.workspace.focused_tile.0.to_string(),
+                    });
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            StudioAction::MoveFocusedTile { direction } => {
+                let delta = match direction {
+                    StudioStackMoveDirection::Up => -1,
+                    StudioStackMoveDirection::Down => 1,
+                };
+                if self.workspace.move_focused_in_stack(delta) {
+                    self.push_motion(StudioMotionEventVm::FocusChanged {
+                        tile_id: self.workspace.focused_tile.0.to_string(),
+                    });
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            StudioAction::CycleTab { direction } => self.cycle_workspace_tab(direction),
+            StudioAction::SwitchTab { index } => self.switch_workspace_tab(index),
+            StudioAction::ToggleTopStatusBar => {
+                self.ui.top_status_visible = !self.ui.top_status_visible;
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioAction::ToggleBottomStatusBar => {
+                self.ui.bottom_status_visible = !self.ui.bottom_status_visible;
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioAction::ResizeFocused { direction } => {
+                if self.workspace.resize_focused(direction) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             StudioAction::SelectSnapshot => {
                 self.ui.inspector = StudioInspectorState::Snapshot;
                 self.bump_generation();
@@ -226,12 +268,17 @@ impl StudioCore {
                 self.ui.inspector = StudioInspectorState::Item {
                     canonical_ref: canonical_ref.clone(),
                 };
+                self.ensure_item_inspector_tile();
                 self.bump_generation();
                 vec![self.emit(StudioEffectKind::InspectItem {
                     canonical_ref,
                     include_raw: true,
                     include_effective: true,
                 })]
+            }
+            StudioAction::EnterItemFolder { tile_id, path } => {
+                self.set_item_folder(tile_id, path);
+                Vec::new()
             }
             StudioAction::InspectThread { thread_id } => {
                 self.data.thread_inspection = None;
@@ -251,21 +298,18 @@ impl StudioCore {
             }
             StudioAction::AddCurrentProject => {
                 if self.is_read_only() {
-                    self.notice("This Studio session is read-only.", StudioTone::Warn);
+                    self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
                 } else if let Some(root) = current_project_path(self) {
                     vec![self.emit(StudioEffectKind::AddProject { root })]
                 } else {
-                    self.notice(
-                        "No project is bound to this Studio session.",
-                        StudioTone::Warn,
-                    );
+                    self.notice("No project is bound to this session.", StudioTone::Warn);
                     Vec::new()
                 }
             }
             StudioAction::OpenProject { local_id } => {
                 if self.is_read_only() {
-                    self.notice("This Studio session is read-only.", StudioTone::Warn);
+                    self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
                 } else {
                     vec![self.emit(StudioEffectKind::OpenProject { local_id })]
@@ -278,10 +322,7 @@ impl StudioCore {
             } => self.set_tile_files_path(tile_id, root, path),
             StudioAction::ReadFile { root, path } => {
                 if !self.has_project_bound() && file_root_requires_project(&root) {
-                    self.notice(
-                        "No project is bound to this Studio session.",
-                        StudioTone::Warn,
-                    );
+                    self.notice("No project is bound to this session.", StudioTone::Warn);
                     return Vec::new();
                 }
                 self.data.file_read = None;
@@ -303,24 +344,21 @@ impl StudioCore {
                 parameters,
             } => {
                 if self.is_read_only() {
-                    self.notice("This Studio session is read-only.", StudioTone::Warn);
+                    self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
                 } else {
                     let _ = (item_ref, parameters);
-                    self.notice("Execution from Studio is not wired yet.", StudioTone::Warn);
+                    self.notice("Execution from RyeOS is not wired yet.", StudioTone::Warn);
                     Vec::new()
                 }
             }
             StudioAction::CancelThread { thread_id } => {
                 if self.is_read_only() {
-                    self.notice("This Studio session is read-only.", StudioTone::Warn);
+                    self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
                 } else {
                     let _ = thread_id;
-                    self.notice(
-                        "Thread commands from Studio are not wired yet.",
-                        StudioTone::Warn,
-                    );
+                    self.notice("Thread commands are not wired yet.", StudioTone::Warn);
                     Vec::new()
                 }
             }
@@ -365,6 +403,113 @@ impl StudioCore {
         self.data.tile_items.remove(&tile_id.0.to_string());
         self.bump_generation();
         vec![self.emit_fetch_items(tile_id)]
+    }
+
+    fn set_item_folder(&mut self, tile_id: String, path: String) {
+        let Some(tile_id) = parse_tile_id(&tile_id) else {
+            return;
+        };
+        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+            return;
+        };
+        let ViewLocalState::SpaceBrowser {
+            cursor,
+            path: local_path,
+            ..
+        } = &mut tile.local
+        else {
+            return;
+        };
+        *local_path = path.trim_matches('/').to_string();
+        *cursor = 0;
+        self.bump_generation();
+    }
+
+    fn cycle_workspace_tab(&mut self, direction: StudioStackMoveDirection) -> Vec<StudioEffect> {
+        let len = self.workspaces.len().max(1);
+        let delta = match direction {
+            StudioStackMoveDirection::Up => -1,
+            StudioStackMoveDirection::Down => 1,
+        };
+        let next = wrap_index(self.active_workspace, delta, len);
+        self.switch_workspace_tab(next)
+    }
+
+    fn switch_workspace_tab(&mut self, index: usize) -> Vec<StudioEffect> {
+        if index >= self.workspaces.len() || index == self.active_workspace {
+            return Vec::new();
+        }
+        if self.active_workspace < self.workspaces.len() {
+            self.workspaces[self.active_workspace] = self.workspace.clone();
+        }
+        self.workspace = self.workspaces[index].clone();
+        self.active_workspace = index;
+        self.data.tile_items.clear();
+        self.data.tile_files.clear();
+        self.data.file_read = None;
+        self.ui.inspector = StudioInspectorState::Snapshot;
+        self.push_motion(StudioMotionEventVm::FocusChanged {
+            tile_id: self.workspace.focused_tile.0.to_string(),
+        });
+        self.push_motion(StudioMotionEventVm::TabChanged {
+            workspace_number: index + 1,
+        });
+        self.bump_generation();
+        self.effects_for_current_workspace()
+    }
+
+    fn effects_for_current_workspace(&mut self) -> Vec<StudioEffect> {
+        let Some(view) = self
+            .workspace
+            .tiles
+            .get(&self.workspace.focused_tile)
+            .map(|tile| tile.view.clone())
+        else {
+            return Vec::new();
+        };
+        self.effects_for_view(&view)
+    }
+
+    fn ensure_item_inspector_tile(&mut self) {
+        if let Some(tile_id) = self
+            .workspace
+            .layout
+            .tile_ids()
+            .into_iter()
+            .find(|tile_id| {
+                self.workspace
+                    .tiles
+                    .get(tile_id)
+                    .is_some_and(|tile| matches!(tile.view, ViewSpec::ItemInspector))
+            })
+        {
+            self.workspace.focused_tile = tile_id;
+            self.push_motion(StudioMotionEventVm::FocusChanged {
+                tile_id: tile_id.0.to_string(),
+            });
+            return;
+        }
+        let previous_focus = self.workspace.focused_tile;
+        let prior_tile_count = self.workspace.layout.tile_ids().len();
+        if let Some(tile_id) = self
+            .workspace
+            .add_master_stack_tile(ViewSpec::ItemInspector)
+        {
+            self.workspace.focused_tile = tile_id;
+            self.push_motion(StudioMotionEventVm::TileSplit {
+                source_tile_id: previous_focus.0.to_string(),
+                new_tile_id: tile_id.0.to_string(),
+                axis: split_axis_vm(
+                    master_stack_added_axis(prior_tile_count).unwrap_or(SplitAxis::Horizontal),
+                ),
+            });
+            self.push_motion(StudioMotionEventVm::TileEnter {
+                tile_id: tile_id.0.to_string(),
+            });
+            self.push_motion(StudioMotionEventVm::FocusChanged {
+                tile_id: tile_id.0.to_string(),
+            });
+        }
     }
 
     fn set_tile_files_path(
@@ -578,7 +723,7 @@ impl StudioCore {
 
         if !effect_result_kind_matches(&expected, &result.kind) {
             self.notice(
-                "Studio ignored a mismatched platform effect result.",
+                "RyeOS ignored a mismatched platform effect result.",
                 StudioTone::Warn,
             );
             return Vec::new();
@@ -588,7 +733,7 @@ impl StudioCore {
             self.notice(
                 result
                     .error
-                    .unwrap_or_else(|| "Studio platform effect failed".to_string()),
+                    .unwrap_or_else(|| "RyeOS platform effect failed".to_string()),
                 StudioTone::Danger,
             );
             return Vec::new();
@@ -619,7 +764,7 @@ impl StudioCore {
                     Ok(added) => added,
                     Err(error) => {
                         self.notice(
-                            format!("Studio could not read project_add response: {error}"),
+                            format!("RyeOS could not read project_add response: {error}"),
                             StudioTone::Danger,
                         );
                         return Vec::new();
@@ -640,7 +785,7 @@ impl StudioCore {
                     Ok(opened) => opened,
                     Err(error) => {
                         self.notice(
-                            format!("Studio could not read project_open response: {error}"),
+                            format!("RyeOS could not read project_open response: {error}"),
                             StudioTone::Danger,
                         );
                         return Vec::new();
@@ -796,7 +941,7 @@ impl StudioCore {
         match serde_json::from_value::<T>(data) {
             Ok(value) => apply(self, value),
             Err(error) => self.notice(
-                format!("Studio could not read {label} response: {error}"),
+                format!("RyeOS could not read {label} response: {error}"),
                 StudioTone::Danger,
             ),
         }
@@ -831,8 +976,8 @@ fn split_axis_vm(axis: SplitAxis) -> StudioSplitAxisVm {
 fn master_stack_added_axis(prior_tile_count: usize) -> Option<SplitAxis> {
     match prior_tile_count {
         0 => None,
-        1 => Some(SplitAxis::Vertical),
-        _ => Some(SplitAxis::Horizontal),
+        1 => Some(SplitAxis::Horizontal),
+        _ => Some(SplitAxis::Vertical),
     }
 }
 
@@ -1813,7 +1958,7 @@ mod tests {
     }
 
     #[test]
-    fn master_stack_places_master_above_horizontal_stack() {
+    fn master_stack_places_master_left_and_slaves_right() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -1837,14 +1982,61 @@ mod tests {
             },
         });
 
-        let crate::layout::LayoutTree::Split { axis, second, .. } = &core.workspace.layout else {
+        let crate::layout::LayoutTree::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = &core.workspace.layout
+        else {
             panic!("master stack should split root");
         };
-        assert_eq!(*axis, SplitAxis::Vertical);
+        assert_eq!(*axis, SplitAxis::Horizontal);
+        assert!(matches!(first.as_ref(), crate::layout::LayoutTree::Leaf(_)));
         let crate::layout::LayoutTree::Split { axis, .. } = second.as_ref() else {
             panic!("slave stack should split stack");
         };
-        assert_eq!(*axis, SplitAxis::Horizontal);
+        assert_eq!(*axis, SplitAxis::Vertical);
+    }
+
+    #[test]
+    fn workspace_tabs_keep_independent_tile_layouts() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Services,
+                },
+            },
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenNewView {
+                    view: ViewSpec::Files,
+                },
+            },
+        });
+        let first_tab_tiles = core.workspace.layout.tile_ids().len();
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SwitchTab { index: 1 },
+            },
+        });
+
+        assert_eq!(core.active_workspace, 1);
+        assert_eq!(core.workspace.layout.tile_ids().len(), 1);
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CycleTab {
+                    direction: StudioStackMoveDirection::Up,
+                },
+            },
+        });
+
+        assert_eq!(core.active_workspace, 0);
+        assert_eq!(core.workspace.layout.tile_ids().len(), first_tab_tiles);
     }
 
     #[test]

@@ -45,7 +45,7 @@ fn studio_envelope(
     effects: Vec<ryeos_client_base::studio::StudioEffect>,
 ) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&core.envelope(effects))
-        .map_err(|e| JsValue::from_str(&format!("serialize Studio envelope: {e}")))
+        .map_err(|e| JsValue::from_str(&format!("serialize RyeOS envelope: {e}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,7 +114,7 @@ fn default_true() -> bool {
 // WASM exports — JS calls these
 // ---------------------------------------------------------------------------
 
-/// Start RyeOS Studio, returning the semantic view/scene models and initial effects.
+/// Start RyeOS, returning the semantic view/scene models and initial effects.
 #[wasm_bindgen]
 pub fn studio_start(
     session_json: JsValue,
@@ -122,9 +122,9 @@ pub fn studio_start(
     now_ms: u64,
 ) -> Result<JsValue, JsValue> {
     let session: StudioBrowserSession = serde_wasm_bindgen::from_value(session_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid Studio browser session: {e}")))?;
+        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS browser session: {e}")))?;
     let viewport: BrowserViewport = serde_wasm_bindgen::from_value(viewport_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid Studio viewport: {e}")))?;
+        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS viewport: {e}")))?;
 
     let mut core = StudioCore::new(session, viewport, now_ms);
     core.bump_generation();
@@ -138,61 +138,61 @@ pub fn studio_start(
     Ok(response)
 }
 
-/// Dispatch a browser-neutral Studio event into the Rust reducer.
+/// Dispatch a browser-neutral RyeOS event into the Rust reducer.
 #[wasm_bindgen]
 pub fn studio_dispatch(event_json: JsValue) -> Result<JsValue, JsValue> {
     let event: StudioEvent = serde_wasm_bindgen::from_value(event_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid Studio event: {e}")))?;
+        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS event: {e}")))?;
 
     STUDIO.with(|state| {
         let mut state = state.borrow_mut();
         let core = state
             .as_mut()
-            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
         let effects = core.dispatch(event);
         studio_envelope(core, effects)
     })
 }
 
-/// Apply a browser/daemon effect result to Studio.
+/// Apply a browser/daemon effect result to RyeOS.
 #[wasm_bindgen]
 pub fn studio_apply_effect_result(result_json: JsValue) -> Result<JsValue, JsValue> {
     let result: StudioEffectResult = serde_wasm_bindgen::from_value(result_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid Studio effect result: {e}")))?;
+        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS effect result: {e}")))?;
 
     STUDIO.with(|state| {
         let mut state = state.borrow_mut();
         let core = state
             .as_mut()
-            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
         let effects = core.dispatch(StudioEvent::EffectResult { result });
         studio_envelope(core, effects)
     })
 }
 
-/// Return the current Studio view model without mutating state.
+/// Return the current RyeOS view model without mutating state.
 #[wasm_bindgen]
 pub fn studio_view_model() -> Result<JsValue, JsValue> {
     STUDIO.with(|state| {
         let state = state.borrow();
         let core = state
             .as_ref()
-            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
         serde_wasm_bindgen::to_value(&core.envelope(Vec::new()).view_model)
-            .map_err(|e| JsValue::from_str(&format!("serialize Studio view model: {e}")))
+            .map_err(|e| JsValue::from_str(&format!("serialize RyeOS view model: {e}")))
     })
 }
 
-/// Return the current Studio scene model without mutating state.
+/// Return the current RyeOS scene model without mutating state.
 #[wasm_bindgen]
 pub fn studio_scene_model() -> Result<JsValue, JsValue> {
     STUDIO.with(|state| {
         let state = state.borrow();
         let core = state
             .as_ref()
-            .ok_or_else(|| JsValue::from_str("Studio has not been started"))?;
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
         serde_wasm_bindgen::to_value(&core.envelope(Vec::new()).scene_model)
-            .map_err(|e| JsValue::from_str(&format!("serialize Studio scene model: {e}")))
+            .map_err(|e| JsValue::from_str(&format!("serialize RyeOS scene model: {e}")))
     })
 }
 

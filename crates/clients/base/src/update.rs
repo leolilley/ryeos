@@ -1885,6 +1885,7 @@ mod tests {
             cursor: 0,
             query: String::new(),
             kind: String::new(),
+            path: String::new(),
             scroll: 0,
         };
 

@@ -52,6 +52,8 @@ pub enum ViewLocalState {
         cursor: usize,
         query: String,
         kind: String,
+        #[serde(default)]
+        path: String,
         scroll: usize,
     },
     Files {
@@ -117,6 +119,7 @@ impl ViewSpec {
                 cursor: 0,
                 query: String::new(),
                 kind: String::new(),
+                path: String::new(),
                 scroll: 0,
             },
             ViewSpec::Files => ViewLocalState::Files {
@@ -348,6 +351,8 @@ pub struct Workspace {
     pub tiles: HashMap<TileId, TileState>,
     pub focused_tile: TileId,
     pub input_bar: InputBarState,
+    #[serde(default)]
+    pub master_tiles: Vec<TileId>,
 }
 
 impl Workspace {
@@ -393,6 +398,7 @@ impl Workspace {
             tiles,
             focused_tile: thread_id,
             input_bar: InputBarState::default(),
+            master_tiles: vec![thread_id],
         }
     }
 
@@ -441,6 +447,7 @@ impl Workspace {
             },
         );
         self.focused_tile = tile_id;
+        self.master_tiles = vec![tile_id];
     }
 
     pub fn replace_focused_view(&mut self, view: ViewSpec) -> Option<TileId> {
@@ -530,11 +537,14 @@ impl Workspace {
                 view: new_view,
             },
         );
+        if self.master_tiles.is_empty() {
+            self.master_tiles.push(focused);
+        }
         Some(new_id)
     }
 
     /// Add a tile using a dwm-style master/stack layout.
-    /// The first existing tile remains master; all other tiles form a vertical stack.
+    /// Existing master tiles remain in the master area; new tiles enter the slave stack.
     pub fn add_master_stack_tile(&mut self, new_view: ViewSpec) -> Option<TileId> {
         let mut ids = self.layout.tile_ids();
         if ids.is_empty() {
@@ -542,7 +552,10 @@ impl Workspace {
         }
         let new_id = Self::next_tile_id();
         ids.push(new_id);
-        self.layout = master_stack_layout(&ids)?;
+        if self.master_tiles.is_empty() {
+            self.master_tiles.push(self.focused_tile);
+        }
+        self.layout = master_stack_layout(&ids, &self.master_tiles)?;
         self.tiles.insert(
             new_id,
             TileState {
@@ -572,6 +585,7 @@ impl Workspace {
 
         self.layout = new_tree;
         self.tiles.remove(&tile_id);
+        self.master_tiles.retain(|id| *id != tile_id);
 
         let remaining = self.layout.tile_ids();
         self.focused_tile = remaining.first().copied().unwrap_or(tile_id);
@@ -591,7 +605,8 @@ impl Workspace {
             .into_iter()
             .filter(|id| *id != tile_id)
             .collect();
-        let Some(layout) = master_stack_layout(&remaining) else {
+        self.master_tiles.retain(|id| *id != tile_id);
+        let Some(layout) = master_stack_layout(&remaining, &self.master_tiles) else {
             return false;
         };
         self.layout = layout;
@@ -600,12 +615,80 @@ impl Workspace {
         true
     }
 
+    pub fn toggle_focused_master(&mut self) -> bool {
+        self.toggle_tile_master(self.focused_tile)
+    }
+
+    pub fn toggle_tile_master(&mut self, tile_id: TileId) -> bool {
+        if !self.tiles.contains_key(&tile_id) || self.layout.tile_ids().len() <= 1 {
+            return false;
+        }
+        let ids = self.layout.tile_ids();
+        if self.master_tiles.is_empty() {
+            self.master_tiles.push(ids[0]);
+        }
+        if self.master_tiles.contains(&tile_id) {
+            self.master_tiles.retain(|id| *id != tile_id);
+        } else {
+            self.master_tiles.push(tile_id);
+        }
+        if self.master_tiles.is_empty() {
+            self.master_tiles.push(tile_id);
+        }
+        self.layout = match master_stack_layout(&ids, &self.master_tiles) {
+            Some(layout) => layout,
+            None => return false,
+        };
+        self.focused_tile = tile_id;
+        true
+    }
+
+    pub fn move_focused_in_stack(&mut self, delta: i32) -> bool {
+        self.move_tile_in_stack(self.focused_tile, delta)
+    }
+
+    pub fn move_tile_in_stack(&mut self, tile_id: TileId, delta: i32) -> bool {
+        let ids = self.layout.tile_ids();
+        let mut order = stack_order(&ids, &self.master_tiles);
+        if order.len() <= 1 || !order.contains(&tile_id) {
+            return false;
+        }
+        let master_count = self
+            .master_tiles
+            .iter()
+            .filter(|id| order.contains(id))
+            .count()
+            .max(1)
+            .min(order.len());
+        let Some(index) = order.iter().position(|id| *id == tile_id) else {
+            return false;
+        };
+        let new_index = wrap_index(index, delta, order.len());
+        if new_index == index {
+            return false;
+        }
+        let moved = order.remove(index);
+        order.insert(new_index, moved);
+        self.master_tiles = order.iter().take(master_count).copied().collect();
+        let Some(layout) = master_stack_layout(&order, &self.master_tiles) else {
+            return false;
+        };
+        self.layout = layout;
+        self.focused_tile = tile_id;
+        true
+    }
+
+    pub fn resize_focused(&mut self, direction: FocusDirection) -> bool {
+        resize_toward(&mut self.layout, self.focused_tile, direction)
+    }
+
     /// Reset layout to the default 3-pane.
     pub fn reset_layout(&mut self) {
         let default = Self::default_three_pane();
         self.layout = default.layout;
         self.tiles = default.tiles;
         self.focused_tile = default.focused_tile;
+        self.master_tiles = default.master_tiles;
     }
 
     /// Move cursor up in the focused list view.
@@ -668,6 +751,22 @@ impl Workspace {
     }
 }
 
+fn stack_order(ids: &[TileId], master_ids: &[TileId]) -> Vec<TileId> {
+    ids.iter()
+        .copied()
+        .filter(|id| master_ids.contains(id))
+        .chain(ids.iter().copied().filter(|id| !master_ids.contains(id)))
+        .collect()
+}
+
+fn wrap_index(index: usize, delta: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let len = len as i32;
+    (index as i32 + delta).rem_euclid(len) as usize
+}
+
 fn rect_center(rect: Rect) -> (i32, i32) {
     (
         rect.x as i32 + rect.w as i32 / 2,
@@ -687,28 +786,48 @@ fn perpendicular_gap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> i32 
     }
 }
 
-fn master_stack_layout(ids: &[TileId]) -> Option<LayoutTree> {
+fn master_stack_layout(ids: &[TileId], master_ids: &[TileId]) -> Option<LayoutTree> {
     match ids {
         [] => None,
         [only] => Some(LayoutTree::Leaf(*only)),
-        [master, stack @ ..] => Some(LayoutTree::Split {
-            axis: SplitAxis::Vertical,
-            ratio: 0.58,
-            first: Box::new(LayoutTree::Leaf(*master)),
-            second: Box::new(stack_layout(stack)?),
-        }),
+        _ => {
+            let masters: Vec<_> = ids
+                .iter()
+                .copied()
+                .filter(|id| master_ids.contains(id))
+                .collect();
+            let slaves: Vec<_> = ids
+                .iter()
+                .copied()
+                .filter(|id| !masters.contains(id))
+                .collect();
+            match (
+                stack_layout(&masters, SplitAxis::Horizontal),
+                stack_layout(&slaves, SplitAxis::Vertical),
+            ) {
+                (Some(master_stack), Some(slave_stack)) => Some(LayoutTree::Split {
+                    axis: SplitAxis::Horizontal,
+                    ratio: 0.58,
+                    first: Box::new(master_stack),
+                    second: Box::new(slave_stack),
+                }),
+                (None, Some(slave_stack)) => Some(slave_stack),
+                (Some(master_stack), None) => Some(master_stack),
+                (None, None) => None,
+            }
+        }
     }
 }
 
-fn stack_layout(ids: &[TileId]) -> Option<LayoutTree> {
+fn stack_layout(ids: &[TileId], axis: SplitAxis) -> Option<LayoutTree> {
     match ids {
         [] => None,
         [only] => Some(LayoutTree::Leaf(*only)),
         [first, rest @ ..] => Some(LayoutTree::Split {
-            axis: SplitAxis::Horizontal,
+            axis,
             ratio: 1.0 / ids.len() as f32,
             first: Box::new(LayoutTree::Leaf(*first)),
-            second: Box::new(stack_layout(rest)?),
+            second: Box::new(stack_layout(rest, axis)?),
         }),
     }
 }
@@ -844,6 +963,48 @@ fn split_ratio(tree: &LayoutTree) -> f32 {
     }
 }
 
+fn resize_toward(tree: &mut LayoutTree, target: TileId, direction: FocusDirection) -> bool {
+    let LayoutTree::Split {
+        axis,
+        ratio,
+        first,
+        second,
+    } = tree
+    else {
+        return false;
+    };
+
+    if resize_toward(first, target, direction) || resize_toward(second, target, direction) {
+        return true;
+    }
+
+    let wanted_axis = match direction {
+        FocusDirection::Left | FocusDirection::Right => SplitAxis::Horizontal,
+        FocusDirection::Up | FocusDirection::Down => SplitAxis::Vertical,
+    };
+    if *axis != wanted_axis {
+        return false;
+    }
+    let in_first = tree_contains(first, target);
+    let in_second = tree_contains(second, target);
+    if !in_first && !in_second {
+        return false;
+    }
+    let grow_first = matches!(direction, FocusDirection::Left | FocusDirection::Up);
+    let delta = if in_first == grow_first { 0.04 } else { -0.04 };
+    *ratio = (*ratio + delta).clamp(0.15, 0.85);
+    true
+}
+
+fn tree_contains(tree: &LayoutTree, target: TileId) -> bool {
+    match tree {
+        LayoutTree::Leaf(id) => *id == target,
+        LayoutTree::Split { first, second, .. } => {
+            tree_contains(first, target) || tree_contains(second, target)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -932,9 +1093,94 @@ mod tests {
 
         assert!(matches!(
             ws.tiles.get(&new_id).map(|tile| &tile.local),
-            Some(ViewLocalState::SpaceBrowser { cursor: 0, query, kind, scroll: 0 })
-                if query.is_empty() && kind.is_empty()
+            Some(ViewLocalState::SpaceBrowser { cursor: 0, query, kind, path, scroll: 0 })
+                if query.is_empty() && kind.is_empty() && path.is_empty()
         ));
+    }
+
+    #[test]
+    fn toggling_tile_moves_between_master_and_slave_stacks() {
+        let mut ws = Workspace::default_three_pane();
+        assert!(ws.toggle_tile_master(TileId::new(1)));
+
+        let LayoutTree::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = &ws.layout
+        else {
+            panic!("master/slave layout should split root");
+        };
+        assert_eq!(*axis, SplitAxis::Horizontal);
+        assert!(matches!(
+            first.as_ref(),
+            LayoutTree::Split {
+                axis: SplitAxis::Horizontal,
+                ..
+            }
+        ));
+        assert!(matches!(second.as_ref(), LayoutTree::Leaf(TileId(3))));
+
+        assert!(ws.toggle_tile_master(TileId::new(1)));
+        let LayoutTree::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = &ws.layout
+        else {
+            panic!("master/slave layout should split root");
+        };
+        assert_eq!(*axis, SplitAxis::Horizontal);
+        assert!(matches!(first.as_ref(), LayoutTree::Leaf(TileId(2))));
+        assert!(matches!(
+            second.as_ref(),
+            LayoutTree::Split {
+                axis: SplitAxis::Vertical,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn moving_tile_wraps_between_master_and_slave_order() {
+        let mut ws = Workspace::default_three_pane();
+        ws.focused_tile = TileId::new(2);
+        assert!(ws.move_focused_in_stack(-1));
+        assert_eq!(
+            ws.layout.tile_ids(),
+            vec![TileId::new(1), TileId::new(3), TileId::new(2)]
+        );
+        assert_eq!(ws.master_tiles, vec![TileId::new(1)]);
+
+        assert!(ws.move_focused_in_stack(-1));
+        assert_eq!(
+            ws.layout.tile_ids(),
+            vec![TileId::new(1), TileId::new(2), TileId::new(3)]
+        );
+        assert_eq!(ws.master_tiles, vec![TileId::new(1)]);
+
+        assert!(ws.move_focused_in_stack(1));
+        assert_eq!(
+            ws.layout.tile_ids(),
+            vec![TileId::new(1), TileId::new(3), TileId::new(2)]
+        );
+        assert_eq!(ws.master_tiles, vec![TileId::new(1)]);
+    }
+
+    #[test]
+    fn resize_focused_grows_focused_side() {
+        let mut ws = Workspace::default_three_pane();
+        ws.focused_tile = TileId::new(1);
+        let LayoutTree::Split { ratio: before, .. } = ws.layout else {
+            panic!("default workspace should split");
+        };
+        assert!(ws.resize_focused(FocusDirection::Left));
+        let LayoutTree::Split { ratio: after, .. } = ws.layout else {
+            panic!("default workspace should split");
+        };
+        assert!(after > before);
     }
 
     #[test]

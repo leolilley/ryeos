@@ -6,6 +6,7 @@ use super::scene_model::{build_scene_model, StudioSceneModel};
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
 use crate::workspace::{TileState, ViewLocalState, ViewSpec};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioViewModel {
@@ -75,11 +76,28 @@ pub struct StudioThemeVm {
 pub struct StudioPresentationChromeVm {
     pub title: String,
     pub version_label: String,
+    pub top_bar: StudioTopBarVm,
     pub status_bar: StudioStatusBarVm,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioTopBarVm {
+    pub visible: bool,
+    pub tabs: Vec<StudioWorkspaceTabVm>,
+    pub focused_title: String,
+    pub layout_symbol: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioWorkspaceTabVm {
+    pub number: usize,
+    pub active: bool,
+    pub tile_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioStatusBarVm {
+    pub visible: bool,
     pub segments: Vec<StudioStatusSegmentVm>,
     pub key_hint: String,
 }
@@ -145,6 +163,9 @@ pub enum StudioMotionEventVm {
     HomeExit,
     LauncherOpen,
     LauncherClose,
+    TabChanged {
+        workspace_number: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,6 +316,7 @@ pub struct StudioFilePreviewVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioPanelFiltersVm {
     pub tile_id: String,
+    pub items_path: String,
     pub items_query: String,
     pub items_kind: String,
     pub item_kind_options: Vec<StudioFilterOptionVm>,
@@ -313,6 +335,7 @@ pub struct StudioInspectorVm {
     pub sections: Vec<StudioSectionVm>,
     pub code_blocks: Vec<StudioCodeBlockVm>,
     pub empty: bool,
+    pub empty_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -345,7 +368,7 @@ pub fn build_view_model(core: &StudioCore) -> StudioViewModel {
     let health = health_label(core);
     let workspace = workspace_vm(core);
     let chrome = StudioChromeVm {
-        title: "RyeOS Studio".to_string(),
+        title: "RyeOS".to_string(),
         subtitle: subtitle(core),
         health_label: health.clone(),
         health_tone: tone_for_health(&health),
@@ -379,6 +402,7 @@ fn presentation_vm(
         chrome: StudioPresentationChromeVm {
             title: "Rye OS".to_string(),
             version_label: format!("RYE OS - {version}"),
+            top_bar: top_bar_vm(core),
             status_bar: status_bar_vm(session, chrome, workspace, core, &version),
         },
         metrics: presentation_metrics_vm(core, workspace),
@@ -396,6 +420,48 @@ fn presentation_vm(
         home: home_vm(),
         motion: core.ui.motion.clone(),
     }
+}
+
+fn top_bar_vm(core: &StudioCore) -> StudioTopBarVm {
+    StudioTopBarVm {
+        visible: core.ui.top_status_visible,
+        tabs: core
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(index, workspace)| *index == core.active_workspace || !workspace.is_home())
+            .map(|(index, workspace)| StudioWorkspaceTabVm {
+                number: index + 1,
+                active: index == core.active_workspace,
+                tile_count: if index == core.active_workspace {
+                    core.workspace.layout.tile_ids().len()
+                } else {
+                    workspace.layout.tile_ids().len()
+                },
+            })
+            .collect(),
+        focused_title: focused_tile_title(core),
+        layout_symbol: layout_symbol(core),
+    }
+}
+
+fn focused_tile_title(core: &StudioCore) -> String {
+    core.workspace
+        .tiles
+        .get(&core.workspace.focused_tile)
+        .map(|tile| tile.view.title())
+        .unwrap_or_else(|| "home".to_string())
+}
+
+fn layout_symbol(core: &StudioCore) -> String {
+    let master = core.workspace.master_tiles.len().max(1);
+    let slave = core
+        .workspace
+        .layout
+        .tile_ids()
+        .len()
+        .saturating_sub(master);
+    format!("M{master}│S{slave}")
 }
 
 fn presentation_metrics_vm(
@@ -505,6 +571,7 @@ fn status_bar_vm(
         .map(|threads| threads.threads.len())
         .unwrap_or_default();
     StudioStatusBarVm {
+        visible: core.ui.bottom_status_visible,
         segments: vec![
             StudioStatusSegmentVm {
                 id: "brand".to_string(),
@@ -566,7 +633,7 @@ fn status_bar_vm(
                 grow: true,
             },
         ],
-        key_hint: "alt+k open · arrows focus · enter select · esc close".to_string(),
+        key_hint: "alt+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string(),
     }
 }
 
@@ -668,6 +735,7 @@ fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm
         ViewSpec::SpaceBrowser { .. } => StudioViewVm::Items {
             filters: StudioPanelFiltersVm {
                 tile_id: tile_id_text(tile_id),
+                items_path: item_folder_state(tile),
                 items_query: item_filter_state(tile).0,
                 items_kind: item_filter_state(tile).1,
                 item_kind_options: item_kind_options(),
@@ -794,7 +862,7 @@ fn launcher(core: &StudioCore) -> StudioLauncherVm {
         open: core.ui.launcher.open,
         query: core.ui.launcher.query.clone(),
         selected,
-        hint: "Alt+K open · ↑/↓ select · Enter choose · Shift+Enter new tile · Esc close"
+        hint: "Alt+K open · Ctrl+←/→ focus · Ctrl+↑/↓ move · Ctrl+Shift+arrows resize · Alt+M master/slave · Alt+Q close"
             .to_string(),
         items,
     }
@@ -911,7 +979,7 @@ fn overview(core: &StudioCore) -> StudioViewVm {
                         .project_path
                         .unwrap_or_else(|| "No project bound".to_string()),
                 ),
-                ("Mode".to_string(), "RyeOS Studio".to_string()),
+                ("Mode".to_string(), "RyeOS".to_string()),
             ],
             action: Some(StudioAction::SelectSnapshot),
         }],
@@ -993,32 +1061,9 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
                 )
             })
             .collect(),
-        ViewSpec::SpaceBrowser { .. } => tile_id
-            .and_then(|tile_id| core.data.tile_items.get(&tile_id_text(tile_id)))
-            .or(core.data.items.as_ref())
-            .as_ref()
-            .map(|x| x.items.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|item| {
-                let kind = item.item_kind.clone();
-                let mut row = row(
-                    item.canonical_ref.clone(),
-                    if item.label.is_empty() {
-                        item.bare_id
-                    } else {
-                        item.label
-                    },
-                    Some(item.canonical_ref.clone()),
-                    Some(item.item_kind),
-                    Some(StudioAction::InspectItem {
-                        canonical_ref: item.canonical_ref,
-                    }),
-                );
-                row.kind = Some(kind);
-                row
-            })
-            .collect(),
+        ViewSpec::SpaceBrowser { .. } => {
+            tile_id.map_or_else(Vec::new, |tile_id| item_rows(core, tile_id))
+        }
         ViewSpec::Schedules => core
             .data
             .schedules
@@ -1169,7 +1214,11 @@ fn file_preview_vm(
 
     let Some(selected) = selected else {
         return Some(StudioFilePreviewVm {
-            title: if path.is_empty() { "/".to_string() } else { path.to_string() },
+            title: if path.is_empty() {
+                "/".to_string()
+            } else {
+                path.to_string()
+            },
             subtitle: root.to_string(),
             kind: "directory".to_string(),
             size: None,
@@ -1201,7 +1250,9 @@ fn file_preview_vm(
         title: selected.name.clone(),
         subtitle: selected_path,
         kind: "file".to_string(),
-        size: read.map(|file| file.size).or(selected.size.map(|size| size as usize)),
+        size: read
+            .map(|file| file.size)
+            .or(selected.size.map(|size| size as usize)),
         truncated: read.is_some_and(|file| file.truncated),
         content: read.map(|file| file.content.clone()),
         hint: if read.is_some() {
@@ -1246,6 +1297,132 @@ fn item_filter_state(tile: &TileState) -> (String, String) {
     }
 }
 
+fn item_folder_state(tile: &TileState) -> String {
+    match &tile.local {
+        ViewLocalState::SpaceBrowser { path, .. } => path.clone(),
+        _ => String::new(),
+    }
+}
+
+fn item_rows(core: &StudioCore, tile_id: TileId) -> Vec<StudioRowVm> {
+    let tile_id_text = tile_id_text(tile_id);
+    let folder = core
+        .workspace
+        .tiles
+        .get(&tile_id)
+        .map(item_folder_state)
+        .unwrap_or_default();
+    let folder_prefix = if folder.is_empty() {
+        String::new()
+    } else {
+        format!("{folder}/")
+    };
+    let items = core
+        .data
+        .tile_items
+        .get(&tile_id_text)
+        .or(core.data.items.as_ref())
+        .map(|x| x.items.clone())
+        .unwrap_or_default();
+    let mut dirs = BTreeSet::new();
+    let mut rows = Vec::new();
+
+    if !folder.is_empty() {
+        let parent = folder
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_string())
+            .unwrap_or_default();
+        let mut up = row(
+            "..".to_string(),
+            "..".to_string(),
+            Some(parent.clone()),
+            Some("folder".to_string()),
+            Some(StudioAction::EnterItemFolder {
+                tile_id: tile_id_text.clone(),
+                path: parent,
+            }),
+        );
+        up.kind = Some("folder_up".to_string());
+        rows.push(up);
+    }
+
+    for item in items {
+        let item_path = item_path(&item);
+        let Some(remainder) = item_path.strip_prefix(&folder_prefix) else {
+            continue;
+        };
+        if remainder.is_empty() {
+            continue;
+        }
+        if let Some((dir, _)) = remainder.split_once('/') {
+            dirs.insert(dir.to_string());
+            continue;
+        }
+        let kind = item.item_kind.clone();
+        let display = item_leaf_label(&item.label, &item.bare_id, remainder);
+        let mut item_row = row(
+            item.canonical_ref.clone(),
+            display,
+            Some(item.canonical_ref.clone()),
+            Some(item.item_kind),
+            Some(StudioAction::InspectItem {
+                canonical_ref: item.canonical_ref,
+            }),
+        );
+        item_row.kind = Some(kind);
+        rows.push(item_row);
+    }
+
+    for dir in dirs.into_iter().rev() {
+        let path = join_item_path(&folder, &dir);
+        let mut dir_row = row(
+            format!("folder:{path}"),
+            dir,
+            Some(path.clone()),
+            Some("folder".to_string()),
+            Some(StudioAction::EnterItemFolder {
+                tile_id: tile_id_text.clone(),
+                path,
+            }),
+        );
+        dir_row.kind = Some("folder".to_string());
+        rows.insert(if folder.is_empty() { 0 } else { 1 }, dir_row);
+    }
+    rows
+}
+
+fn item_path(item: &super::dto::StudioItemDto) -> String {
+    item.namespace
+        .as_ref()
+        .filter(|namespace| !namespace.is_empty())
+        .map(|namespace| {
+            if item.bare_id.starts_with(&format!("{namespace}/")) {
+                item.bare_id.clone()
+            } else {
+                join_item_path(namespace, &item.bare_id)
+            }
+        })
+        .unwrap_or_else(|| item.bare_id.clone())
+}
+
+fn item_leaf_label(label: &str, bare_id: &str, fallback: &str) -> String {
+    if !label.is_empty() && label != bare_id {
+        label.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn join_item_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else if child.is_empty() {
+        parent.to_string()
+    } else {
+        format!("{parent}/{child}")
+    }
+}
+
 fn file_state(tile: &TileState) -> (String, String) {
     match &tile.local {
         ViewLocalState::Files { root, path, .. } => (root.clone(), path.clone()),
@@ -1256,7 +1433,7 @@ fn file_state(tile: &TileState) -> (String, String) {
 fn inspector(core: &StudioCore) -> StudioInspectorVm {
     match &core.ui.inspector {
         StudioInspectorState::Snapshot => StudioInspectorVm {
-            title: "Studio".to_string(),
+            title: "RyeOS".to_string(),
             subtitle: Some("Current project and local node state".to_string()),
             sections: vec![StudioSectionVm {
                 title: "Project".to_string(),
@@ -1267,16 +1444,17 @@ fn inspector(core: &StudioCore) -> StudioInspectorVm {
                             .project_path
                             .unwrap_or_else(|| "No project bound".to_string()),
                     ),
-                    ("Mode".to_string(), "RyeOS Studio".to_string()),
+                    ("Mode".to_string(), "RyeOS".to_string()),
                     ("Health".to_string(), health_label(core)),
                 ],
                 action: None,
             }],
             code_blocks: Vec::new(),
             empty: false,
+            empty_message: None,
         },
         StudioInspectorState::Summary { title, detail } => {
-            code_or_empty(title, None, serde_json::to_string_pretty(detail).ok())
+            code_or_empty(title, None, serde_json::to_string_pretty(detail).ok(), None)
         }
         StudioInspectorState::Item { canonical_ref } => code_or_empty(
             canonical_ref,
@@ -1285,6 +1463,7 @@ fn inspector(core: &StudioCore) -> StudioInspectorVm {
                 .item_inspection
                 .as_ref()
                 .and_then(|x| serde_json::to_string_pretty(x).ok()),
+            Some("Loading item details…"),
         ),
         StudioInspectorState::Thread { thread_id } => code_or_empty(
             thread_id,
@@ -1293,18 +1472,21 @@ fn inspector(core: &StudioCore) -> StudioInspectorVm {
                 .thread_inspection
                 .as_ref()
                 .and_then(|x| serde_json::to_string_pretty(x).ok()),
+            Some("Loading thread details…"),
         ),
         StudioInspectorState::File { root, path } => code_or_empty(
             path,
             Some(root),
             core.data.file_read.as_ref().map(|x| x.content.clone()),
+            Some("Loading file…"),
         ),
         StudioInspectorState::Empty => StudioInspectorVm {
-            title: "Studio".to_string(),
+            title: "RyeOS".to_string(),
             subtitle: Some("Select an object to inspect it.".to_string()),
             sections: Vec::new(),
             code_blocks: Vec::new(),
             empty: true,
+            empty_message: Some("Select an object to inspect it.".to_string()),
         },
     }
 }
@@ -1313,6 +1495,7 @@ fn code_or_empty(
     title: &str,
     subtitle: Option<&str>,
     content: Option<String>,
+    empty_message: Option<&str>,
 ) -> StudioInspectorVm {
     let empty = content.is_none();
     StudioInspectorVm {
@@ -1329,6 +1512,7 @@ fn code_or_empty(
             })
             .unwrap_or_default(),
         empty,
+        empty_message: empty_message.map(str::to_string),
     }
 }
 
@@ -1399,8 +1583,16 @@ fn ryeos_version(core: &StudioCore) -> String {
         .as_ref()
         .and_then(|snapshot| snapshot.local_node.status.get("version"))
         .and_then(|v| v.as_str())
-        .unwrap_or(env!("CARGO_PKG_VERSION"))
-        .to_string()
+        .map(normalize_version_label)
+        .unwrap_or_else(|| {
+            option_env!("RYEOS_BUILD_VERSION")
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .to_string()
+        })
+}
+
+fn normalize_version_label(version: &str) -> String {
+    version.trim().trim_start_matches("ryeosd-").to_string()
 }
 
 fn tone_for_health(value: &str) -> StudioTone {

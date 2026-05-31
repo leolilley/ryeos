@@ -34,9 +34,28 @@ pub enum StudioAction {
     CloseTile {
         tile_id: String,
     },
+    ToggleFocusedMaster,
+    MoveFocusedTile {
+        direction: StudioStackMoveDirection,
+    },
+    CycleTab {
+        direction: StudioStackMoveDirection,
+    },
+    SwitchTab {
+        index: usize,
+    },
+    ToggleTopStatusBar,
+    ToggleBottomStatusBar,
+    ResizeFocused {
+        direction: FocusDirection,
+    },
     SelectSnapshot,
     InspectItem {
         canonical_ref: String,
+    },
+    EnterItemFolder {
+        tile_id: String,
+        path: String,
     },
     InspectThread {
         thread_id: String,
@@ -114,6 +133,13 @@ pub enum StudioUiEvent {
         index: usize,
     },
     ActivateFocused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioStackMoveDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

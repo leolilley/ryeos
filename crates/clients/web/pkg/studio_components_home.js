@@ -5,6 +5,7 @@ let ambientCanvas = null;
 let ambientScene = null;
 let typerTimer = null;
 let typerLineIndex = 0;
+let transientTopbarUntil = 0;
 
 const FALLBACK_TYPER_LINES = [
   "solve once, solve everywhere.",
@@ -27,7 +28,7 @@ const FALLBACK_TYPER_LINES = [
 export function studioHome(vm, scene, shell) {
   const isHome = vm.workspace?.is_home !== false;
   const home = el("section", "studio-home");
-  home.setAttribute("aria-label", "RyeOS Studio home space");
+  home.setAttribute("aria-label", "RyeOS home space");
   home.style.setProperty("--scene-object-count", String(scene?.objects?.length || 0));
   if (!isHome) {
     home.classList.add("backdrop-only");
@@ -84,9 +85,38 @@ export function opticFrame(frame = {}) {
   return node;
 }
 
+export function topStatusLine(vm, shell) {
+  const line = el("header", "studio-topbar");
+  const top = vm.presentation?.chrome?.top_bar || {};
+  const tabChanged = (vm.presentation?.motion || []).find((motion) => motion.type === "tab_changed");
+  if (!top.visible && tabChanged?.workspace_number) {
+    transientTopbarUntil = Date.now() + 1050;
+  }
+  const transient = !top.visible && Date.now() < transientTopbarUntil;
+  line.classList.toggle("hidden", !top.visible);
+  line.classList.toggle("transient", transient);
+  const tabs = el("nav", "studio-workspace-tabs");
+  tabs.setAttribute("aria-label", "RyeOS workspaces");
+  for (const tab of top.tabs || []) {
+    const button = textEl("button", String(tab.number), tab.active ? "active" : "");
+    button.type = "button";
+    button.title = `workspace ${tab.number} · ${tab.tile_count || 0} tiles`;
+    button.addEventListener("click", () => shell?.dispatchUi?.({
+      type: "activate",
+      action: { type: "switch_tab", index: Math.max(0, (tab.number || 1) - 1) },
+    }));
+    tabs.append(button);
+  }
+  line.append(tabs);
+  line.append(textEl("span", top.focused_title || "home", "focused-title"));
+  line.append(textEl("span", top.layout_symbol || "M1│S0", "layout-symbol"));
+  return line;
+}
+
 export function statusLine(vm, shell) {
   const line = el("footer", "studio-statusbar");
   const status = vm.presentation?.chrome?.status_bar;
+  line.classList.toggle("hidden", status?.visible === false);
   const segments = status?.segments || [];
   if (segments.length === 0) {
     const mode = vm.session?.read_only ? "ro" : "rw";
@@ -99,7 +129,7 @@ export function statusLine(vm, shell) {
       textEl("span", health, `tone-${vm.chrome?.health_tone || "neutral"}`),
       textEl("span", mode),
       textEl("span", project, "grow"),
-      textEl("span", "alt+k open · arrows focus · enter select · esc close", "keys"),
+      textEl("span", "alt+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move", "keys"),
     );
     return line;
   }
@@ -130,7 +160,7 @@ function appendCompatMetrics(line, vm, segments) {
 }
 
 function ryeosVersion(shell) {
-  return shell?.snapshot?.local_node?.status?.version || "0.1.0";
+  return (shell?.snapshot?.local_node?.status?.version || "0.1.0").replace(/^ryeosd-/, "");
 }
 
 function ambientLayer(scene) {

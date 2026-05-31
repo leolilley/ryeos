@@ -46,7 +46,7 @@ export async function runEffect(effect) {
       window.open(kind.url, "_blank", "noopener,noreferrer");
       return result(effect, "browser_only", null);
     default:
-      throw new Error(`Unhandled Studio effect: ${kind.type}`);
+      throw new Error(`Unhandled RyeOS effect: ${kind.type}`);
   }
 }
 

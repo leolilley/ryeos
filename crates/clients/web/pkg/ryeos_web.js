@@ -199,7 +199,7 @@ export function start_with_surface(session_json, effective_surface_json, width, 
 }
 
 /**
- * Apply a browser/daemon effect result to Studio.
+ * Apply a browser/daemon effect result to RyeOS.
  * @param {any} result_json
  * @returns {any}
  */
@@ -212,7 +212,7 @@ export function studio_apply_effect_result(result_json) {
 }
 
 /**
- * Dispatch a browser-neutral Studio event into the Rust reducer.
+ * Dispatch a browser-neutral RyeOS event into the Rust reducer.
  * @param {any} event_json
  * @returns {any}
  */
@@ -225,7 +225,7 @@ export function studio_dispatch(event_json) {
 }
 
 /**
- * Return the current Studio scene model without mutating state.
+ * Return the current RyeOS scene model without mutating state.
  * @returns {any}
  */
 export function studio_scene_model() {
@@ -237,7 +237,7 @@ export function studio_scene_model() {
 }
 
 /**
- * Start RyeOS Studio, returning the semantic view/scene models and initial effects.
+ * Start RyeOS, returning the semantic view/scene models and initial effects.
  * @param {any} session_json
  * @param {any} viewport_json
  * @param {bigint} now_ms
@@ -252,7 +252,7 @@ export function studio_start(session_json, viewport_json, now_ms) {
 }
 
 /**
- * Return the current Studio view model without mutating state.
+ * Return the current RyeOS view model without mutating state.
  * @returns {any}
  */
 export function studio_view_model() {

@@ -36,21 +36,12 @@ function layoutNode(node, dispatchUi, motion = []) {
   tile.dataset.tileId = node.tile_id || "";
   const motionName = motionForTile(node, motion);
   if (motionName) tile.dataset.motion = motionName;
-  tile.addEventListener("pointerenter", (event) => {
-    if (event.pointerType && event.pointerType !== "mouse") return;
-    if (node.focused) return;
-    dispatchUi({ type: "focus_changed", target: node.tile_id || null });
-  });
   tile.addEventListener("mousedown", (event) => {
     if (event.target.closest("button,input,select,textarea,a")) return;
     if (node.focused) return;
     dispatchUi({ type: "focus_changed", target: node.tile_id || null });
   });
-  const chrome = el("header", "studio-tile-chrome");
-  const title = el("div", "studio-tile-title");
-  title.append(textEl("strong", node.title || "Tile"));
-  chrome.append(title);
-  tile.append(chrome, view(node.view || {}, node.tile_id || "", dispatchUi));
+  tile.append(view(node.view || {}, node.tile_id || "", dispatchUi));
   return tile;
 }
 
@@ -221,6 +212,11 @@ function sceneMap(scene, dispatchUi) {
 function itemsToolbar(filters, tileId, dispatchUi) {
   const targetTile = filters.tile_id || tileId || "";
   const toolbar = el("div", "studio-toolbar");
+  const crumb = el("button", "studio-folder-crumb");
+  crumb.type = "button";
+  crumb.textContent = filters.items_path ? `items / ${filters.items_path}` : "items /";
+  crumb.title = "Back to item root";
+  crumb.addEventListener("click", () => dispatchUi({ type: "activate", action: { type: "enter_item_folder", tile_id: targetTile, path: "" } }));
   const query = document.createElement("input");
   query.type = "search";
   query.placeholder = "Filter items";
@@ -238,7 +234,7 @@ function itemsToolbar(filters, tileId, dispatchUi) {
     kind.append(option);
   }
   kind.addEventListener("change", () => dispatchUi({ type: "set_filter", tile_id: targetTile, field: "items_kind", value: kind.value }));
-  toolbar.append(query, kind);
+  toolbar.append(crumb, query, kind);
   return toolbar;
 }
 
@@ -275,6 +271,8 @@ function rowGlyph(item, kind) {
   const rowKind = item.kind || "";
   if (kind === "files") return rowKind === "directory" ? "▸" : "·";
   if (kind === "items") {
+    if (rowKind === "folder_up") return "↩";
+    if (rowKind === "folder") return "▸";
     if (rowKind === "tool") return "⚙";
     if (rowKind === "directive") return "◆";
     if (rowKind === "knowledge") return "◈";
@@ -289,7 +287,7 @@ function inspector(vm) {
   const wrap = el("div", "studio-inspector-view");
   wrap.append(textEl("h2", vm.title));
   if (vm.subtitle) wrap.append(textEl("p", vm.subtitle));
-  if (vm.empty) wrap.append(textEl("p", "Select a Studio object to inspect it."));
+  if (vm.empty) wrap.append(textEl("p", vm.empty_message || "Select an object to inspect it."));
   for (const section of vm.sections || []) wrap.append(sectionBlock(section, null));
   for (const block of vm.code_blocks || []) wrap.append(textEl("h3", block.label), code(block.content));
   return wrap;

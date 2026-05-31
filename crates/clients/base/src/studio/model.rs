@@ -119,7 +119,7 @@ pub struct StudioLauncherState {
     pub selected: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioUiState {
     pub inspector: StudioInspectorState,
     pub filters: StudioFilters,
@@ -129,6 +129,31 @@ pub struct StudioUiState {
     pub loading: BTreeMap<String, bool>,
     pub notices: Vec<StudioNotice>,
     pub route: Option<String>,
+    #[serde(default)]
+    pub top_status_visible: bool,
+    #[serde(default = "default_true")]
+    pub bottom_status_visible: bool,
+}
+
+impl Default for StudioUiState {
+    fn default() -> Self {
+        Self {
+            inspector: StudioInspectorState::default(),
+            filters: StudioFilters::default(),
+            files: StudioFilesState::default(),
+            launcher: StudioLauncherState::default(),
+            motion: Vec::new(),
+            loading: BTreeMap::new(),
+            notices: Vec::new(),
+            route: None,
+            top_status_visible: false,
+            bottom_status_visible: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -168,6 +193,8 @@ pub struct StudioCore {
     pub data: StudioDataState,
     pub ui: StudioUiState,
     pub workspace: Workspace,
+    pub workspaces: Vec<Workspace>,
+    pub active_workspace: usize,
     pub runtime: StudioRuntimeState,
     pub pending_effects: BTreeMap<u64, StudioEffectKind>,
     pub generation: u64,
@@ -188,6 +215,9 @@ impl StudioCore {
         core.runtime.now_ms = now_ms;
         core.ui.inspector = StudioInspectorState::Snapshot;
         core.workspace = workspace;
+        core.workspaces = vec![studio_default_surface().to_workspace(); 9];
+        core.workspaces[0] = core.workspace.clone();
+        core.active_workspace = 0;
         core
     }
 
@@ -359,7 +389,7 @@ fn studio_default_surface() -> SurfaceSpec {
         name: "studio-base".to_string(),
         version: "1".to_string(),
         extends: None,
-        description: Some("RyeOS Studio home space".to_string()),
+        description: Some("RyeOS home space".to_string()),
         layout: SurfaceLayoutSpec {
             root: "root".to_string(),
             nodes,
@@ -374,10 +404,15 @@ fn studio_default_surface() -> SurfaceSpec {
 
 impl Default for StudioCore {
     fn default() -> Self {
+        let workspace = studio_default_surface().to_workspace();
+        let mut workspaces = vec![workspace.clone(); 9];
+        workspaces[0] = workspace.clone();
         Self {
             data: StudioDataState::default(),
             ui: StudioUiState::default(),
-            workspace: studio_default_surface().to_workspace(),
+            workspace,
+            workspaces,
+            active_workspace: 0,
             runtime: StudioRuntimeState::default(),
             pending_effects: BTreeMap::new(),
             generation: 0,

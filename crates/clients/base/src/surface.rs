@@ -176,6 +176,7 @@ impl ViewKindSpec {
                 cursor: 0,
                 query: String::new(),
                 kind: String::new(),
+                path: String::new(),
                 scroll: 0,
             },
             ViewKindSpec::Overview
@@ -819,6 +820,7 @@ impl SurfaceSpec {
             tiles,
             focused_tile,
             input_bar: InputBarState::default(),
+            master_tiles: vec![focused_tile],
         })
     }
 

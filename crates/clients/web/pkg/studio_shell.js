@@ -162,7 +162,7 @@ function attachSessionEvents(session) {
       const payload = JSON.parse(event.data);
       void commit(studio_dispatch({ type: "daemon_event", payload }));
     } catch (error) {
-      console.warn("Failed to process Studio event stream message", error);
+      console.warn("Failed to process RyeOS event stream message", error);
     }
   });
 }
@@ -178,6 +178,49 @@ function attachBrowserEvents() {
     if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "q") {
       event.preventDefault();
       dispatchUi({ type: "activate", action: { type: "close_focused" } });
+      return;
+    }
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "m") {
+      event.preventDefault();
+      dispatchUi({ type: "activate", action: { type: "toggle_focused_master" } });
+      return;
+    }
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "t") {
+      event.preventDefault();
+      dispatchUi({ type: "activate", action: { type: "toggle_top_status_bar" } });
+      return;
+    }
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "b") {
+      event.preventDefault();
+      dispatchUi({ type: "activate", action: { type: "toggle_bottom_status_bar" } });
+      return;
+    }
+    if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey) {
+      const direction = arrowDirection(event.key);
+      if (direction) {
+        event.preventDefault();
+        dispatchUi({ type: "activate", action: { type: "resize_focused", direction } });
+      }
+      return;
+    }
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowUp") {
+      event.preventDefault();
+      dispatchUi({ type: "activate", action: { type: "move_focused_tile", direction: "up" } });
+      return;
+    }
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowDown") {
+      event.preventDefault();
+      dispatchUi({ type: "activate", action: { type: "move_focused_tile", direction: "down" } });
+      return;
+    }
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowLeft") {
+      event.preventDefault();
+      dispatchUi({ type: "activate", action: { type: "cycle_tab", direction: "up" } });
+      return;
+    }
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowRight") {
+      event.preventDefault();
+      dispatchUi({ type: "activate", action: { type: "cycle_tab", direction: "down" } });
       return;
     }
     if (event.key === "Escape" && launcherOpen) {
