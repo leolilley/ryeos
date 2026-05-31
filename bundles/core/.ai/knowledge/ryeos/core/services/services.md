@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:fb502add64cdf478a64707f3311bf304cc671fd430445b1705e034926e7d336e:Yc0gnpSciqQxNttdT++VRPeqJPnm4PCjMDPFcXvbLiCQRjWkyvflsHFe7rws4XoJ1b+GySetWvUxklFCCsGEBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-31T08:13:14Z:8540d821abb86eed7e12a2d902401c7aa41d9b57af71a65565ec651c3f56aec8:uqPQmhouqFzTvL4LvmpdBpU7LEdMLm6Ot7E/ERN+6Ce3iGafzHLtgmvSnuorGvSzswTMQtocKcz9pKILZEBMCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core
@@ -126,7 +126,7 @@ for the full matrix.
 | `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
 | `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
 | `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
-| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.configure` |
+| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:0018c9c40ca1b393a049fc906a9c80696f7f4b55d423c703dfd6f5df5a057015:FhNcdncoFN7kh2KV5Kts5eb92Ebv3UQRlX1aNQuAgkk+vCr6ljmL62HAKXhy0jAAXvtK/jCGCRTQXeAu8cacBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-31T08:13:14Z:8c73992cd867e749f4a3cb49b59c2f9ff353b1e5a4fdc2a7c58e365e7bddde55:+sckIW27R+1+pr5wKYmJuh8pch2mWEyYFhAlSFJladnAOFkTxeBTSfYq3Y4orH5JnnHFjIdL2ponVwJXUiJ5AQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -26,7 +26,7 @@ The authoritative matrix is in
 | `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
 | `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
 | `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
-| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.configure` |
+| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:c1d31d8f4cd862fef133c9a4ae55a8d89fd40a9e62bd5b10ab59f36a710db311:HvkYOmSfgbVppVgizOYuG1KShqLTy7OyERNHFebVlfcUnYDEGri55K7jcablK8sBPYOZiOn70IDMS9CBZl6pBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-05-31T08:40:53Z:b87d84cad516fcadacb22456e8d7984c7284716d26ab1b1f7bb4416e62ee05b2:WrEOasVwhTq7v/M46sF3I8TiC2kX0GNZo1l/X9Eoa9oSdON626MSvWa8Gr42gzZZwzvfWb/WKjMTlqRSq4klAQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -159,42 +159,61 @@ authority model does not depend on that distribution channel. The caller
 still verifies the descriptor against the live node identity during
 `remote configure --descriptor`.
 
-## End-to-End Workflow
+## End-to-End Operator Workflow
+
+This is the copy-pasteable two-node bootstrap path. It uses only generic
+core primitives; hosted/provider bundles can later wrap the same flow in
+UI or provisioning automation.
+
+### Target node / remote operator
+
+Export a descriptor trust pin for the node and mint a one-time admission
+token. Deliver both files/values to the caller out of band.
 
 ```bash
-# ── On the CALLER node ──
-
-# 1. Display your node public key (share this with the remote operator)
-ryeos identity
-
-# 2. Configure the remote, optionally from a descriptor trust pin
-ryeos remote configure --remote prod --url https://ryeos.example.com
-
-# ── On the REMOTE node ──
-
-# 3. Optionally export a descriptor trust pin for the caller
 ryeos remote-descriptor \
   --name prod \
   --url https://ryeos.example.com \
   --output ./prod.remote.yaml
 
-# 4. Mint a one-time admission token for the caller
 ryeos admission-token \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head" \
+  --ttl-secs 600
+```
 
-# ── Back on the CALLER node ──
+### Caller node
 
-# 5. Claim the grant; the claim is self-signed by this caller node key
+Import the descriptor, claim the grant, verify setup, then execute.
+
+```bash
+ryeos remote configure --descriptor ./prod.remote.yaml
+
 ryeos remote admit \
   --remote prod \
   --token "<one-time-token>" \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
 
-# 6. Execute on the remote
+ryeos remote doctor --remote prod
+
 ryeos remote execute --remote prod --item-ref tool:my/heavy-compute
 ```
+
+Operational notes:
+
+- The descriptor is a trust/discovery pin, not a credential. Importing it
+  still verifies the live `/public-key` response before local config is
+  written.
+- The admission token is one-time bootstrap material. It must be
+  delivered out of band, is shown only once by the token tool, and is
+  consumed by `/admission/claim`.
+- Non-loopback admission should use HTTPS. Request signing authenticates
+  claims, but it does not encrypt the token in transit.
+- Admission tokens and admission claims must use concrete scopes only;
+  wildcard scopes are rejected.
+- Runtime authority after admission is the normal target-node-local
+  `authorized_keys` grant for the caller node key.
 
 The synchronous `remote execute` command:
 
@@ -214,9 +233,9 @@ HEAD ref is rolled back to its pre-push state.
 ## No Wildcard Delegation
 
 Bootstrap may create `["*"]` keys locally for the node operator.
-Remote authorization (`ryeos authorize-key`) rejects any request that
-includes `"*"` in the scopes list. All remote keys must enumerate
-their capabilities explicitly.
+Remote authorization (`ryeos authorize-key`) and admission bootstrap
+reject any requested or token-file scope containing `"*"`. All remote
+keys must enumerate their capabilities explicitly.
 
 ## Node-Key Rotation
 
