@@ -1,0 +1,6 @@
+name: hosted-node
+version: "0.1.0"
+description: "Hosted RyeOS node operator policy for decentralized admission and public remote exposure"
+requires_kinds:
+  - node
+uses_kinds: []

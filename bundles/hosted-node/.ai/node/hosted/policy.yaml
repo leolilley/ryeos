@@ -1,0 +1,37 @@
+# ryeos:signed:2026-05-31T09:45:24Z:c9902a14a2f4ef170d87a64035d936a48344c94ea491bfcd52ec6d7023b19b59:AJfcCtK30aoAmxTZaq65rEyfabxWIuz7o4Z/eKvlfBO6kddhU7HSa0+t/RBDOLZLeCJ0WnEngeDtoQ+pbaUnCA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: "hosted"
+section: "hosted"
+version: "0.1.0"
+schema_version: "1.0.0"
+description: "Default hosted-node operator policy for decentralized remote admission."
+
+# Hosted-node policy is node-level guidance/configuration for daemons exposed
+# as public remotes. It is not an identity provider and must not be treated as
+# execution authority. Runtime requests are still authorized by the target
+# node's local authorized-key grants.
+transport:
+  public_https_required: true
+  loopback_http_allowed: true
+
+admission:
+  mode: "one_time_token"
+  token_ttl_secs: 600
+  reject_wildcard_scopes: true
+  token_delivery: "out_of_band"
+
+descriptor:
+  require_live_identity_match: true
+  advertised_capabilities:
+    - remote-execute
+    - bundle-install
+
+authorization:
+  authority: "target_node_authorized_keys"
+  central_bearer_tokens_allowed: false
+  implicit_cross_node_authority_allowed: false
+
+operations:
+  audit_admission_events: true
+  audit_grant_changes: true
+  prefer_isolated_node_per_principal: true
+  shared_daemon_multitenancy_enabled: false

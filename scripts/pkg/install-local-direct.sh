@@ -4,7 +4,7 @@
 # This intentionally skips yay/makepkg but installs the same runtime layout
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
-#   - bundle sources -> /usr/share/ryeos/{core,standard,cockpit,web}
+#   - bundle sources -> /usr/share/ryeos/{core,standard,cockpit,web,hosted-node}
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -18,8 +18,8 @@ Usage: scripts/pkg/install-local-direct.sh [options]
 
 Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
-  /usr/share/ryeos/{core,standard,cockpit,web}/.ai
-  ~/.local/share/ryeos/.ai/bundles/{core,standard,cockpit,web}  (after init)
+  /usr/share/ryeos/{core,standard,cockpit,web,hosted-node}/.ai
+  ~/.local/share/ryeos/.ai/bundles/{core,standard,cockpit,web,hosted-node}  (after init)
 
 Options:
   --skip-populate       Do not run scripts/populate-bundles.sh first
@@ -206,10 +206,12 @@ done
 [[ -d "$repo_root/bundles/standard/.ai" ]] || die "missing bundles/standard/.ai"
 [[ -d "$repo_root/bundles/cockpit/.ai" ]] || die "missing bundles/cockpit/.ai"
 [[ -d "$repo_root/bundles/web/.ai" ]] || die "missing bundles/web/.ai"
+[[ -d "$repo_root/bundles/hosted-node/.ai" ]] || die "missing bundles/hosted-node/.ai"
 [[ -f "$repo_root/bundles/core/PUBLISHER_TRUST.toml" ]] || die "missing bundles/core/PUBLISHER_TRUST.toml"
 [[ -f "$repo_root/bundles/standard/PUBLISHER_TRUST.toml" ]] || die "missing bundles/standard/PUBLISHER_TRUST.toml"
 [[ -f "$repo_root/bundles/cockpit/PUBLISHER_TRUST.toml" ]] || die "missing bundles/cockpit/PUBLISHER_TRUST.toml"
 [[ -f "$repo_root/bundles/web/PUBLISHER_TRUST.toml" ]] || die "missing bundles/web/PUBLISHER_TRUST.toml"
+[[ -f "$repo_root/bundles/hosted-node/PUBLISHER_TRUST.toml" ]] || die "missing bundles/hosted-node/PUBLISHER_TRUST.toml"
 
 echo "[install-local-direct] installing binaries -> $bin_dir"
 for b in "${required_bins[@]}"; do
@@ -234,6 +236,10 @@ for bundle_dir in "$repo_root"/bundles/*/; do
     if [[ -f "$bundle_dir/PUBLISHER_TRUST.toml" ]]; then
         sudo install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
             "$share_dir/$name/PUBLISHER_TRUST.toml"
+    fi
+    if [[ -f "$bundle_dir/README.md" ]]; then
+        sudo install -Dm644 "$bundle_dir/README.md" \
+            "/usr/share/doc/ryeos/$name/README.md"
     fi
 done
 sudo chown -R root:root "$share_dir"
@@ -283,6 +289,8 @@ if [[ $run_init -eq 1 ]]; then
         die "initialized cockpit bundle missing from ~/.local/share/ryeos"
     test -d "$HOME/.local/share/ryeos/.ai/bundles/web/.ai" || \
         die "initialized web bundle missing from ~/.local/share/ryeos"
+    test -d "$HOME/.local/share/ryeos/.ai/bundles/hosted-node/.ai" || \
+        die "initialized hosted-node bundle missing from ~/.local/share/ryeos"
     grep -q '^execute: client:ryeos/tui$' \
         "$HOME/.local/share/ryeos/.ai/bundles/cockpit/.ai/node/verbs/tui.yaml" || \
         die "initialized tui verb is stale or not client-backed"
@@ -297,7 +305,7 @@ fi
 echo
 echo "[install-local-direct] complete"
 echo "  ryeos:        $(command -v ryeos)"
-echo "  bundle src:   $share_dir/{core,standard,cockpit,web}"
+echo "  bundle src:   $share_dir/{core,standard,cockpit,web,hosted-node}"
 echo "  local state:  $HOME/.local/share/ryeos"
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "  daemon:       restarted"

@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::node_config::sections::alias::AliasRecord;
+use crate::node_config::sections::hosted_node::HostedNodePolicyRecord;
 use crate::node_config::sections::verb::VerbRecord;
 use crate::route_raw::RawRouteSpec;
 
@@ -68,6 +69,8 @@ pub struct NodeConfigSnapshot {
     pub verbs: Vec<VerbRecord>,
     /// Alias definitions synthesized from verb descriptors (routing sugar).
     pub aliases: Vec<AliasRecord>,
+    /// Hosted node operator policies loaded from installed bundle/state roots.
+    pub hosted_node_policies: Vec<HostedNodePolicyRecord>,
 }
 
 impl NodeConfigSnapshot {}
@@ -104,6 +107,10 @@ impl SectionTable {
     pub fn new() -> Self {
         let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
         sections.insert("bundles", Box::new(sections::bundle::BundleSection));
+        sections.insert(
+            "hosted",
+            Box::new(sections::hosted_node::HostedNodePolicySection),
+        );
         sections.insert("routes", Box::new(sections::route::RouteSection));
         sections.insert("verbs", Box::new(sections::verb::VerbSection));
         Self { sections }

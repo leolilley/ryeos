@@ -99,6 +99,7 @@ fn build_app_state(
         routes: vec![],
         verbs: vec![],
         aliases: vec![],
+        hosted_node_policies: vec![],
     };
     let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[]).unwrap());
     let test_ar =

@@ -28,6 +28,7 @@ use ryeos_engine::trust::TrustStore;
 
 use super::sections::alias::AliasRecord;
 use super::sections::bundle::BundleSection;
+use super::sections::hosted_node::HostedNodePolicyRecord;
 use super::sections::verb::VerbRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, SectionSourcePolicy, SectionTable,
@@ -291,6 +292,7 @@ impl<'a> BootstrapLoader<'a> {
         let mut loaded_bundles: Vec<BundleRecord> = Vec::new();
         let mut routes: Vec<RawRouteSpec> = Vec::new();
         let mut verbs: Vec<VerbRecord> = Vec::new();
+        let mut hosted_node_policies: Vec<HostedNodePolicyRecord> = Vec::new();
 
         for section_name in section_table.section_names() {
             let section = section_table.get(section_name).context(format!(
@@ -415,6 +417,23 @@ impl<'a> BootstrapLoader<'a> {
                             .clone();
                         record.source_file = verified.path.clone();
                         routes.push(record);
+                    } else if section_name == "hosted" {
+                        let record =
+                            section
+                                .parse(&verified.name, &verified.body)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse hosted-node policy record {}",
+                                        verified.path.display()
+                                    )
+                                })?;
+                        let mut record: HostedNodePolicyRecord = record
+                            .as_any()
+                            .downcast_ref::<HostedNodePolicyRecord>()
+                            .context("HostedNodePolicySection::parse returned wrong type")?
+                            .clone();
+                        record.source_file = verified.path.clone();
+                        hosted_node_policies.push(record);
                     } else if section_name == "verbs" {
                         let record =
                             section
@@ -449,6 +468,7 @@ impl<'a> BootstrapLoader<'a> {
             routes,
             verbs,
             aliases,
+            hosted_node_policies,
         })
     }
 }
@@ -902,6 +922,52 @@ mod tests {
                 .iter()
                 .any(|route| route.path == "/ui/api/items/effective"),
             "browser-session effective item route should load from nested route directory"
+        );
+    }
+
+    #[test]
+    fn load_full_loads_hosted_node_policy_from_bundle() {
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .expect("workspace root with bundles/ directory")
+            .to_path_buf();
+        let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
+        let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
+
+        let core = workspace.join("bundles/core").canonicalize().unwrap();
+        let hosted_node = workspace
+            .join("bundles/hosted-node")
+            .canonicalize()
+            .unwrap();
+        let bundles = vec![BundleRecord {
+            name: "hosted-node".into(),
+            path: hosted_node,
+            source_file: workspace.join("bundles/core/.ai/node/bundles/hosted-node.yaml"),
+        }];
+
+        let loader = BootstrapLoader {
+            system_space_dir: &core,
+            trust_store: &trust_store,
+        };
+        let snapshot = loader
+            .load_full(&SectionTable::new(), &bundles)
+            .expect("load full node config with hosted-node bundle");
+
+        assert_eq!(snapshot.hosted_node_policies.len(), 1);
+        let policy = &snapshot.hosted_node_policies[0];
+        assert!(policy.transport.public_https_required);
+        assert_eq!(policy.admission.mode, "one_time_token");
+        assert_eq!(
+            policy.authorization.authority,
+            "target_node_authorized_keys"
+        );
+        assert!(!policy.authorization.central_bearer_tokens_allowed);
+        assert!(!policy.operations.shared_daemon_multitenancy_enabled);
+        assert!(
+            policy.source_file.ends_with(".ai/node/hosted/policy.yaml"),
+            "policy source should be the hosted node section, got {}",
+            policy.source_file.display()
         );
     }
 

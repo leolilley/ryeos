@@ -56,6 +56,8 @@ package() {
     #   /usr/share/ryeos/core/.ai/...
     #   /usr/share/ryeos/standard/.ai/...
     #   /usr/share/ryeos/web/.ai/...
+    #   /usr/share/ryeos/cockpit/.ai/...
+    #   /usr/share/ryeos/hosted-node/.ai/...
     mkdir -p "$pkgdir/usr/share/ryeos"
     for bundle_dir in bundles/*/; do
         name=$(basename "$bundle_dir")
@@ -67,6 +69,10 @@ package() {
         if [[ -f "$bundle_dir/PUBLISHER_TRUST.toml" ]]; then
             install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
                 "$pkgdir/usr/share/ryeos/$name/PUBLISHER_TRUST.toml"
+        fi
+        if [[ -f "$bundle_dir/README.md" ]]; then
+            install -Dm644 "$bundle_dir/README.md" \
+                "$pkgdir/usr/share/doc/$pkgname/$name/README.md"
         fi
     done
 

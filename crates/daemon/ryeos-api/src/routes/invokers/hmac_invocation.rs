@@ -1303,6 +1303,7 @@ mod tests {
             routes: vec![],
             verbs: vec![],
             aliases: vec![],
+            hosted_node_policies: vec![],
         };
         let test_vr = std::sync::Arc::new(
             ryeos_runtime::verb_registry::VerbRegistry::from_records(&[

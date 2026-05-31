@@ -882,6 +882,44 @@ mod tests {
     }
 
     #[test]
+    fn run_init_installs_core_and_hosted_node_without_standard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
+            .expect("copy core bundle");
+        copy_dir_recursive(
+            &workspace_root().join("bundles/hosted-node"),
+            &source.join("hosted-node"),
+        )
+        .expect("copy hosted-node bundle");
+
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = InitOptions {
+            system_space_dir: state.to_path_buf(),
+            user_root: user.to_path_buf(),
+            source_dir: source,
+            trust_files: vec![dev_trust_file()],
+            skip_preflight: true,
+        };
+
+        let report = run_init(&opts).expect("init core + hosted-node");
+        assert_eq!(
+            report.bundles_installed,
+            vec!["core".to_string(), "hosted-node".to_string()]
+        );
+        assert!(state.join(".ai/bundles/core/.ai").is_dir());
+        assert!(state.join(".ai/bundles/hosted-node/.ai").is_dir());
+        assert!(state.join(".ai/node/bundles/core.yaml").exists());
+        assert!(state.join(".ai/node/bundles/hosted-node.yaml").exists());
+        assert!(
+            !state.join(".ai/bundles/standard").exists(),
+            "hosted-node init proof must not install standard"
+        );
+    }
+
+    #[test]
     fn run_init_creates_keys_and_pins_platform() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");

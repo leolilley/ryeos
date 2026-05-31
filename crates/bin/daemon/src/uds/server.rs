@@ -496,6 +496,7 @@ mod tests {
                 routes: vec![],
                 verbs: vec![],
                 aliases: vec![],
+                hosted_node_policies: vec![],
             }),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             verb_registry: test_vr,

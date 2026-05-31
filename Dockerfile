@@ -50,6 +50,7 @@ COPY --from=builder /build/bundles/core      /opt/ryeos/core
 COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
 COPY --from=builder /build/bundles/web       /opt/ryeos/web
 COPY --from=builder /build/bundles/cockpit   /opt/ryeos/cockpit
+COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 
 # Entrypoint runs ryeos init every boot (idempotent) then starts daemon.
 # Both /data/core (system) and /data/user (operator) persist across redeploys.
