@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T04:22:27Z:914bc209e6626f95621fcb1c47f952dca9df47d8058b98ec8b1fae71823524c8:hPcb2aPg++hPLnMYmIriEqm7/McD0vbZemHNsu1vwQyIApy2js8AN3kFxTB4jQ0DfZEAuBm6IlRuHPoA2rLWBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -18,6 +19,7 @@ Unauthenticated discovery endpoints:
 - `GET /health`
 - `GET /public-key`
 - `GET /ingest-ignore`
+- `POST /admission/claim` (token-gated bootstrap; see below)
 
 All other routes require signed auth and then enforce the capabilities
 listed by the target service descriptor.
@@ -79,6 +81,19 @@ Authorize a public key with scoped capabilities. Authenticated.
 - **Required cap:** `ryeos.execute.service.authorize.key`
 - **Request:** `{ public_key, label, scopes }`
 - **Response:** authorized-key metadata including fingerprint and scopes
+
+### `POST /admission/claim`
+
+Claim a one-time local admission token. No prior authorized key is
+required, but the request is token-gated and self-signed by the node key
+being admitted.
+
+- **Source:** `service:admission/claim`
+- **Auth:** none; validates token hash file, token expiry, requested
+  scopes subset, nonce/timestamp, and claimant signature
+- **Request:** `{ token, public_key, label, scopes, nonce, timestamp_unix, signature }`
+- **Response:** authorized-key metadata including fingerprint and scopes
+- **Used by:** `ryeos remote admit`
 
 ## Thread Routes
 
