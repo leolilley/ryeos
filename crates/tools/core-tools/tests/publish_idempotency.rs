@@ -103,7 +103,7 @@ fn run_publish_once(
 ) -> ryeos_tools::actions::publish::PublishReport {
     let opts = ryeos_tools::actions::publish::PublishOptions {
         bundle_source: bundle_dir.to_path_buf(),
-        registry_root: bundle_dir.to_path_buf(), // core is its own registry
+        registry_roots: vec![bundle_dir.to_path_buf()], // core is its own registry
         signing_key: key.clone(),
         owner: "test".to_string(),
         emit_trust_doc: false,

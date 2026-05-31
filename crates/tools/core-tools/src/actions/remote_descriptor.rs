@@ -74,12 +74,12 @@ pub struct ProviderDescriptor {
 struct PublicIdentityDoc {
     principal_id: String,
     signing_key: String,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    created_at: Option<String>,
+    #[serde(default, rename = "kind")]
+    _kind: Option<String>,
+    #[serde(default, rename = "created_at")]
+    _created_at: Option<String>,
     #[serde(default, rename = "_signature")]
-    signature: Option<serde_json::Value>,
+    _signature: Option<serde_json::Value>,
 }
 
 pub fn run_export_remote_descriptor(
