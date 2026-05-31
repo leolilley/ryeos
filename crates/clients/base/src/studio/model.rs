@@ -201,6 +201,30 @@ impl StudioCore {
         }
     }
 
+    pub fn has_project_bound(&self) -> bool {
+        self.data
+            .session
+            .as_ref()
+            .and_then(|session| session.project_path.as_deref())
+            .is_some_and(|path| !path.is_empty())
+            || self
+                .data
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.project.as_ref())
+                .is_some_and(|project| !project.path.is_empty())
+    }
+
+    pub fn studio_projects_service_available(&self) -> bool {
+        self.data.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .local_node
+                .services
+                .iter()
+                .any(|service| service.service_ref == "service:ui/studio/projects/list")
+        })
+    }
+
     pub fn initial_effects(&mut self) -> Vec<StudioEffect> {
         let mut needs_threads = false;
         let mut needs_schedules = false;
@@ -229,10 +253,7 @@ impl StudioCore {
             }
         }
 
-        let mut effects = vec![
-            self.emit(StudioEffectKind::FetchSnapshot),
-            self.emit(StudioEffectKind::FetchProjects),
-        ];
+        let mut effects = vec![self.emit(StudioEffectKind::FetchSnapshot)];
         if needs_threads {
             effects.push(self.emit(StudioEffectKind::FetchThreads { limit: 200 }));
         }
@@ -257,8 +278,11 @@ impl StudioCore {
         for (tile_id, local) in file_tiles {
             let (root, path) = match local {
                 ViewLocalState::Files { root, path, .. } => (root, path),
-                _ => ("project_ai".to_string(), String::new()),
+                _ => ("project".to_string(), String::new()),
             };
+            if !self.has_project_bound() && file_root_requires_project(&root) {
+                continue;
+            }
             effects.push(self.emit(StudioEffectKind::ListFiles {
                 tile_id: Some(tile_id.0.to_string()),
                 root,
@@ -308,6 +332,10 @@ impl StudioCore {
             })
             .collect()
     }
+}
+
+fn file_root_requires_project(root: &str) -> bool {
+    matches!(root, "project" | "project_ai")
 }
 
 fn non_empty(value: String) -> Option<String> {

@@ -1,22 +1,16 @@
 import { code, el, textEl } from "/ui/assets/studio_components_primitives.js";
 
-let previousTileIds = new Set();
-
 export function studioWorkspace(vm, motion, dispatchUi) {
   const main = el("main", "studio-workspace");
   if (!vm?.root) {
     main.append(textEl("p", "No workspace loaded."));
-    previousTileIds = new Set();
     return main;
   }
   if (vm.is_home) {
     main.classList.add("home-space");
-    previousTileIds = new Set();
     return main;
   }
-  const currentTileIds = tileIdsForNode(vm.root);
-  main.append(layoutNode(vm.root, dispatchUi, motion, previousTileIds));
-  previousTileIds = new Set(currentTileIds);
+  main.append(layoutNode(vm.root, dispatchUi, motion));
   return main;
 }
 
@@ -31,16 +25,16 @@ export function tileIdsForNode(node, ids = []) {
   return ids;
 }
 
-function layoutNode(node, dispatchUi, motion = [], previousIds = new Set()) {
+function layoutNode(node, dispatchUi, motion = []) {
   if (node.type === "split") {
     const wrap = el("div", `studio-split ${node.axis}`);
     wrap.style.setProperty("--split-ratio", `${Math.round((node.ratio || 0.5) * 100)}%`);
-    wrap.append(layoutNode(node.first, dispatchUi, motion, previousIds), layoutNode(node.second, dispatchUi, motion, previousIds));
+    wrap.append(layoutNode(node.first, dispatchUi, motion), layoutNode(node.second, dispatchUi, motion));
     return wrap;
   }
   const tile = el("section", `studio-tile${node.focused ? " focused" : ""}`);
   tile.dataset.tileId = node.tile_id || "";
-  const motionName = motionForTile(node, motion, previousIds);
+  const motionName = motionForTile(node, motion);
   if (motionName) tile.dataset.motion = motionName;
   tile.addEventListener("pointerenter", (event) => {
     if (event.pointerType && event.pointerType !== "mouse") return;
@@ -60,13 +54,12 @@ function layoutNode(node, dispatchUi, motion = [], previousIds = new Set()) {
   return tile;
 }
 
-function motionForTile(node, motion, previousIds) {
+function motionForTile(node, motion) {
   const tileId = node.tile_id || "";
   if (!tileId) return "";
   if ((motion || []).some((event) => event.type === "tile_split" && event.new_tile_id === tileId)) return "split-enter";
   if ((motion || []).some((event) => event.type === "tile_enter" && event.tile_id === tileId)) return "enter";
   if ((motion || []).some((event) => event.type === "focus_changed" && event.tile_id === tileId)) return "focus";
-  if (!previousIds.has(tileId)) return "enter";
   return "";
 }
 
@@ -85,7 +78,7 @@ function view(viewVm, tileId, dispatchUi) {
       body.append(itemsToolbar(viewVm.filters || {}, tileId, dispatchUi), rows(viewVm.rows || [], tileId, listKind, dispatchUi));
       break;
     case "files":
-      body.append(listHeader("files", `${viewVm.root}: /${viewVm.path}`), rows(viewVm.rows || [], tileId, listKind, dispatchUi));
+      body.append(fileBrowser(viewVm, tileId, dispatchUi));
       break;
     case "thread_list":
       body.append(listHeader("threads", "runs and events"), rows(viewVm.rows || [], tileId, listKind, dispatchUi));
@@ -130,6 +123,66 @@ function listHeader(title, detail) {
   const header = el("div", "studio-list-header");
   header.append(textEl("strong", title || "list"), textEl("span", detail || ""));
   return header;
+}
+
+function fileBrowser(viewVm, tileId, dispatchUi) {
+  const wrap = el("section", "studio-file-browser");
+  const nav = el("div", "studio-file-nav");
+  nav.append(
+    textEl("strong", viewVm.root || "files"),
+    textEl("span", `/${viewVm.path || ""}`),
+  );
+
+  const panes = el("div", "studio-file-panes");
+  const listPane = el("div", "studio-file-list-pane");
+  const fileRows = rows(viewVm.rows || [], tileId, "files", dispatchUi);
+  fileRows.dataset.scrollKey = `file-list-${tileId}`;
+  listPane.append(fileRows);
+  panes.append(listPane, filePreview(viewVm.preview, viewVm.rows || []));
+  wrap.append(nav, panes);
+  return wrap;
+}
+
+function filePreview(preview, rowsVm) {
+  const selected = rowsVm.find((row) => row.selected) || rowsVm[0] || null;
+  const data = preview || {
+    title: selected?.primary || "No file selected",
+    subtitle: selected?.secondary || "",
+    kind: selected?.kind || "empty",
+    content: null,
+    hint: "Select a file or directory.",
+  };
+  const pane = el("aside", `studio-file-preview ${data.kind || "unknown"}`);
+  const head = el("div", "studio-file-preview-head");
+  head.append(
+    textEl("strong", data.title || "preview"),
+    textEl("span", data.subtitle || ""),
+    textEl("small", previewMeta(data)),
+  );
+  pane.append(head);
+  if (data.content) {
+    const pre = code(data.content);
+    pre.classList.add("studio-file-preview-code");
+    pane.append(pre);
+  } else {
+    const empty = el("div", "studio-file-preview-empty");
+    empty.append(textEl("strong", data.kind === "directory" ? "directory" : "preview"), textEl("span", data.hint || "No preview loaded."));
+    pane.append(empty);
+  }
+  return pane;
+}
+
+function previewMeta(preview) {
+  const parts = [preview.kind || "file"];
+  if (preview.size !== undefined && preview.size !== null) parts.push(formatBytes(preview.size));
+  if (preview.truncated) parts.push("truncated");
+  return parts.join(" · ");
+}
+
+function formatBytes(value) {
+  if (value < 1024) return `${value}b`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}kb`;
+  return `${(value / (1024 * 1024)).toFixed(1)}mb`;
 }
 
 function metrics(items, dispatchUi) {
@@ -204,6 +257,7 @@ function rows(items, tileId, kind, dispatchUi) {
   items.forEach((item, index) => {
     const row = el("button", `studio-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
     row.type = "button";
+    row.dataset.rowIndex = String(index);
     row.disabled = !item.action;
     row.append(
       textEl("span", rowGlyph(item, kind), "studio-row-glyph"),
@@ -211,9 +265,6 @@ function rows(items, tileId, kind, dispatchUi) {
       textEl("span", item.secondary || ""),
       textEl("small", item.meta || ""),
     );
-    row.addEventListener("mouseenter", () => {
-      if (tileId) dispatchUi({ type: "set_tile_cursor", tile_id: tileId, index });
-    });
     if (item.action) row.addEventListener("click", () => dispatchUi({ type: "activate", action: item.action }));
     list.append(row);
   });
@@ -221,14 +272,13 @@ function rows(items, tileId, kind, dispatchUi) {
 }
 
 function rowGlyph(item, kind) {
-  const meta = (item.meta || "").toLowerCase();
-  const secondary = (item.secondary || "").toLowerCase();
-  if (kind === "files") return secondary.includes("directory") ? "▸" : "·";
+  const rowKind = item.kind || "";
+  if (kind === "files") return rowKind === "directory" ? "▸" : "·";
   if (kind === "items") {
-    if (meta.includes("tool")) return "⚙";
-    if (meta.includes("directive")) return "◆";
-    if (meta.includes("knowledge")) return "◈";
-    if (meta.includes("config")) return "◇";
+    if (rowKind === "tool") return "⚙";
+    if (rowKind === "directive") return "◆";
+    if (rowKind === "knowledge") return "◈";
+    if (rowKind === "config") return "◇";
     return "•";
   }
   if (kind === "threads") return "▶";

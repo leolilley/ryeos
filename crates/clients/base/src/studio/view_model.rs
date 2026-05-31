@@ -41,9 +41,28 @@ pub struct StudioPresentationVm {
     pub schema_version: String,
     pub theme: StudioThemeVm,
     pub chrome: StudioPresentationChromeVm,
+    pub metrics: StudioPresentationMetricsVm,
     pub frame: StudioFrameVm,
     pub home: StudioHomeVm,
     pub motion: Vec<StudioMotionEventVm>,
+}
+
+/// Shared semantic presentation signals.
+///
+/// Rust owns RyeOS meaning: counts, modes, health, focus, and semantic motion.
+/// Renderers own pixels, easing, glyph choice, DOM/canvas/TUI implementation,
+/// and how these signals are mapped into local visual affordances.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioPresentationMetricsVm {
+    pub tile_count: usize,
+    pub scene_object_count: usize,
+    pub item_count: usize,
+    pub thread_count: usize,
+    pub project_count: usize,
+    pub service_count: usize,
+    pub schedule_count: usize,
+    pub active_thread_count: i64,
+    pub activity_level: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -184,6 +203,7 @@ pub enum StudioViewVm {
         root: String,
         path: String,
         rows: Vec<StudioRowVm>,
+        preview: Option<StudioFilePreviewVm>,
     },
     Rows {
         title: String,
@@ -255,9 +275,21 @@ pub struct StudioRowVm {
     pub primary: String,
     pub secondary: Option<String>,
     pub meta: Option<String>,
+    pub kind: Option<String>,
     pub action: Option<StudioAction>,
     pub tone: StudioTone,
     pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioFilePreviewVm {
+    pub title: String,
+    pub subtitle: String,
+    pub kind: String,
+    pub size: Option<usize>,
+    pub truncated: bool,
+    pub content: Option<String>,
+    pub hint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,8 +379,9 @@ fn presentation_vm(
         chrome: StudioPresentationChromeVm {
             title: "Rye OS".to_string(),
             version_label: format!("RYE OS - {version}"),
-            status_bar: status_bar_vm(session, chrome, &version),
+            status_bar: status_bar_vm(session, chrome, workspace, core, &version),
         },
+        metrics: presentation_metrics_vm(core, workspace),
         frame: StudioFrameVm {
             mode: if workspace.is_home {
                 StudioFrameModeVm::Home
@@ -365,11 +398,112 @@ fn presentation_vm(
     }
 }
 
+fn presentation_metrics_vm(
+    core: &StudioCore,
+    workspace: &StudioWorkspaceVm,
+) -> StudioPresentationMetricsVm {
+    let item_count = core
+        .data
+        .items
+        .as_ref()
+        .map(|items| items.items.len())
+        .unwrap_or_default();
+    let thread_count = core
+        .data
+        .threads
+        .as_ref()
+        .map(|threads| threads.threads.len())
+        .unwrap_or_else(|| {
+            core.data
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.threads.active_count.max(0) as usize)
+                .unwrap_or_default()
+        });
+    let project_count = core
+        .data
+        .projects
+        .as_ref()
+        .map(|projects| projects.projects.len())
+        .unwrap_or_default();
+    let service_count = core
+        .data
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.local_node.services.len())
+        .unwrap_or_default();
+    let schedule_count = core
+        .data
+        .schedules
+        .as_ref()
+        .map(|schedules| schedules.schedules.len())
+        .or_else(|| {
+            core.data
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.schedules.total)
+        })
+        .unwrap_or_default();
+    let active_thread_count = core
+        .data
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.threads.active_count)
+        .unwrap_or_default();
+    let scene_object_count = build_scene_model(core).objects.len();
+    let activity_level = presentation_activity_level(
+        workspace.tile_count,
+        core.ui.motion.len(),
+        core.ui.loading.len(),
+        active_thread_count,
+    );
+
+    StudioPresentationMetricsVm {
+        tile_count: workspace.tile_count,
+        scene_object_count,
+        item_count,
+        thread_count,
+        project_count,
+        service_count,
+        schedule_count,
+        active_thread_count,
+        activity_level,
+    }
+}
+
+fn presentation_activity_level(
+    tile_count: usize,
+    motion_count: usize,
+    loading_count: usize,
+    active_thread_count: i64,
+) -> f32 {
+    let active_threads = active_thread_count.max(0) as f32;
+    ((tile_count as f32 * 0.12)
+        + (motion_count as f32 * 0.22)
+        + (loading_count as f32 * 0.18)
+        + (active_threads * 0.18))
+        .clamp(0.0, 1.0)
+}
+
 fn status_bar_vm(
     session: &StudioSessionVm,
     chrome: &StudioChromeVm,
+    workspace: &StudioWorkspaceVm,
+    core: &StudioCore,
     version: &str,
 ) -> StudioStatusBarVm {
+    let item_count = core
+        .data
+        .items
+        .as_ref()
+        .map(|items| items.items.len())
+        .unwrap_or_default();
+    let thread_count = core
+        .data
+        .threads
+        .as_ref()
+        .map(|threads| threads.threads.len())
+        .unwrap_or_default();
     StudioStatusBarVm {
         segments: vec![
             StudioStatusSegmentVm {
@@ -397,6 +531,27 @@ fn status_bar_vm(
                 id: "mode".to_string(),
                 label: None,
                 value: if session.read_only { "ro" } else { "rw" }.to_string(),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "tiles".to_string(),
+                label: Some("tiles".to_string()),
+                value: workspace.tile_count.to_string(),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "items".to_string(),
+                label: Some("items".to_string()),
+                value: item_count.to_string(),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "threads".to_string(),
+                label: Some("threads".to_string()),
+                value: thread_count.to_string(),
                 tone: StudioTone::Neutral,
                 grow: false,
             },
@@ -846,7 +1001,8 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
             .unwrap_or_default()
             .into_iter()
             .map(|item| {
-                row(
+                let kind = item.item_kind.clone();
+                let mut row = row(
                     item.canonical_ref.clone(),
                     if item.label.is_empty() {
                         item.bare_id
@@ -858,7 +1014,9 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
                     Some(StudioAction::InspectItem {
                         canonical_ref: item.canonical_ref,
                     }),
-                )
+                );
+                row.kind = Some(kind);
+                row
             })
             .collect(),
         ViewSpec::Schedules => core
@@ -940,6 +1098,7 @@ fn files(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm {
     StudioViewVm::Files {
         root: root.clone(),
         path: path.clone(),
+        preview: file_preview_vm(core, tile, &root, &path),
         rows: mark_selected(
             core.data
                 .tile_files
@@ -951,7 +1110,8 @@ fn files(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm {
                 .into_iter()
                 .map(|entry| {
                     let path = join_path(&path, &entry.name);
-                    row(
+                    let kind = if entry.is_dir { "directory" } else { "file" };
+                    let mut row = row(
                         path.clone(),
                         entry.name,
                         if entry.is_dir {
@@ -972,12 +1132,84 @@ fn files(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm {
                                 path,
                             }
                         }),
-                    )
+                    );
+                    row.kind = Some(kind.to_string());
+                    row
                 })
                 .collect(),
             selected_cursor(core, tile_id),
         ),
     }
+}
+
+fn file_preview_vm(
+    core: &StudioCore,
+    tile: &TileState,
+    root: &str,
+    path: &str,
+) -> Option<StudioFilePreviewVm> {
+    let files = core
+        .data
+        .tile_files
+        .values()
+        .find(|files| files.root == root && files.path == path)
+        .or_else(|| {
+            core.data
+                .files
+                .as_ref()
+                .filter(|files| files.root == root && files.path == path)
+        });
+    let selected = files.and_then(|files| {
+        let selected_index = match &tile.local {
+            ViewLocalState::Files { cursor, .. } => *cursor,
+            _ => 0,
+        };
+        files.entries.get(selected_index)
+    });
+
+    let Some(selected) = selected else {
+        return Some(StudioFilePreviewVm {
+            title: if path.is_empty() { "/".to_string() } else { path.to_string() },
+            subtitle: root.to_string(),
+            kind: "directory".to_string(),
+            size: None,
+            truncated: false,
+            content: None,
+            hint: "Select a file to preview or a directory to enter.".to_string(),
+        });
+    };
+
+    let selected_path = join_path(path, &selected.name);
+    if selected.is_dir {
+        return Some(StudioFilePreviewVm {
+            title: selected.name.clone(),
+            subtitle: selected_path,
+            kind: "directory".to_string(),
+            size: None,
+            truncated: false,
+            content: None,
+            hint: "Enter opens this directory.".to_string(),
+        });
+    }
+
+    let read = core
+        .data
+        .file_read
+        .as_ref()
+        .filter(|file| file.root == root && file.path == selected_path);
+    Some(StudioFilePreviewVm {
+        title: selected.name.clone(),
+        subtitle: selected_path,
+        kind: "file".to_string(),
+        size: read.map(|file| file.size).or(selected.size.map(|size| size as usize)),
+        truncated: read.is_some_and(|file| file.truncated),
+        content: read.map(|file| file.content.clone()),
+        hint: if read.is_some() {
+            "Preview loaded from file read.".to_string()
+        } else {
+            "Enter reads this file into the preview.".to_string()
+        },
+    })
 }
 
 pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
@@ -1128,6 +1360,7 @@ fn row(
         primary,
         secondary,
         meta,
+        kind: None,
         action,
         tone: StudioTone::Neutral,
         selected: false,

@@ -120,7 +120,7 @@ impl ViewSpec {
                 scroll: 0,
             },
             ViewSpec::Files => ViewLocalState::Files {
-                root: "project_ai".to_string(),
+                root: "project".to_string(),
                 path: String::new(),
                 cursor: 0,
                 scroll: 0,

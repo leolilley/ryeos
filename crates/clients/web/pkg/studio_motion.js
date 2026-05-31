@@ -25,11 +25,7 @@ export function applyWorkspaceMotion(root, snapshot, currentTileIds, motionEvent
 
 function animateSplitBeams(root, snapshot, motionEvents) {
   const splitEvents = (motionEvents || []).filter((event) => event.type === "tile_split");
-  const targets = splitEvents.length > 0
-    ? splitEvents.map((event) => ({ tileId: event.new_tile_id, axis: event.axis }))
-    : [...root.querySelectorAll(".studio-workspace .studio-tile[data-tile-id]")]
-      .filter((tile) => !snapshot.tiles.has(tile.dataset.tileId || ""))
-      .map((tile) => ({ tileId: tile.dataset.tileId || "", axis: null }));
+  const targets = splitEvents.map((event) => ({ tileId: event.new_tile_id, axis: event.axis }));
   if (targets.length === 0 || snapshot.tiles.size === 0) return;
 
   const layer = document.createElement("div");

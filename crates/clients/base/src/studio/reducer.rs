@@ -277,6 +277,13 @@ impl StudioCore {
                 path,
             } => self.set_tile_files_path(tile_id, root, path),
             StudioAction::ReadFile { root, path } => {
+                if !self.has_project_bound() && file_root_requires_project(&root) {
+                    self.notice(
+                        "No project is bound to this Studio session.",
+                        StudioTone::Warn,
+                    );
+                    return Vec::new();
+                }
                 self.data.file_read = None;
                 self.ui.inspector = StudioInspectorState::File {
                     root: root.clone(),
@@ -384,6 +391,9 @@ impl StudioCore {
         *local_path = path.clone();
         self.data.tile_files.remove(&tile_id.0.to_string());
         self.bump_generation();
+        if !self.has_project_bound() && file_root_requires_project(&root) {
+            return Vec::new();
+        }
         vec![self.emit(StudioEffectKind::ListFiles {
             tile_id: Some(tile_id.0.to_string()),
             root,
@@ -492,12 +502,13 @@ impl StudioCore {
 
     fn split_focused(&mut self, axis: SplitAxis, view: ViewSpec) -> Vec<StudioEffect> {
         let source_tile_id = self.workspace.focused_tile;
+        let prior_tile_count = self.workspace.layout.tile_ids().len();
         if let Some(tile_id) = self.workspace.add_master_stack_tile(view) {
             self.workspace.focused_tile = tile_id;
             self.push_motion(StudioMotionEventVm::TileSplit {
                 source_tile_id: source_tile_id.0.to_string(),
                 new_tile_id: tile_id.0.to_string(),
-                axis: split_axis_vm(axis),
+                axis: split_axis_vm(master_stack_added_axis(prior_tile_count).unwrap_or(axis)),
             });
             self.push_motion(StudioMotionEventVm::TileEnter {
                 tile_id: tile_id.0.to_string(),
@@ -531,7 +542,10 @@ impl StudioCore {
             }
             ViewSpec::Files => {
                 let (root, path) = tile_file_state(self, self.workspace.focused_tile)
-                    .unwrap_or_else(|| ("project_ai".to_string(), String::new()));
+                    .unwrap_or_else(|| ("project".to_string(), String::new()));
+                if !self.has_project_bound() && file_root_requires_project(&root) {
+                    return Vec::new();
+                }
                 vec![self.emit(StudioEffectKind::ListFiles {
                     tile_id: Some(self.workspace.focused_tile.0.to_string()),
                     root,
@@ -540,7 +554,13 @@ impl StudioCore {
             }
             ViewSpec::Schedules => vec![self.emit(StudioEffectKind::FetchSchedules)],
             ViewSpec::GcStatus => vec![self.emit(StudioEffectKind::FetchGcStatus)],
-            ViewSpec::Projects => vec![self.emit(StudioEffectKind::FetchProjects)],
+            ViewSpec::Projects => {
+                if self.studio_projects_service_available() {
+                    vec![self.emit(StudioEffectKind::FetchProjects)]
+                } else {
+                    Vec::new()
+                }
+            }
             ViewSpec::Overview
             | ViewSpec::Remotes
             | ViewSpec::Services
@@ -808,6 +828,14 @@ fn split_axis_vm(axis: SplitAxis) -> StudioSplitAxisVm {
     }
 }
 
+fn master_stack_added_axis(prior_tile_count: usize) -> Option<SplitAxis> {
+    match prior_tile_count {
+        0 => None,
+        1 => Some(SplitAxis::Vertical),
+        _ => Some(SplitAxis::Horizontal),
+    }
+}
+
 fn is_home_view(view: &ViewSpec) -> bool {
     matches!(view, ViewSpec::Graph { graph_id: None })
 }
@@ -922,6 +950,10 @@ fn current_project_path(core: &StudioCore) -> Option<String> {
                     .map(|project| project.path.clone())
             })
         })
+}
+
+fn file_root_requires_project(root: &str) -> bool {
+    matches!(root, "project" | "project_ai")
 }
 
 fn view_from_route(route: &str) -> Option<ViewSpec> {

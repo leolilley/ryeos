@@ -24,12 +24,26 @@ const FALLBACK_TYPER_LINES = [
   "search. load. execute. sign.",
 ];
 
-export function ambientHome(vm, scene, shell) {
+export function studioHome(vm, scene, shell) {
+  const isHome = vm.workspace?.is_home !== false;
   const home = el("section", "studio-home");
   home.setAttribute("aria-label", "RyeOS Studio home space");
   home.style.setProperty("--scene-object-count", String(scene?.objects?.length || 0));
+  if (!isHome) {
+    home.classList.add("backdrop-only");
+    home.setAttribute("aria-hidden", "true");
+  }
 
-  const ambient = ambientLayer(scene);
+  home.append(ambientBackground(scene), objectField(scene));
+  if (isHome) home.append(homeLanding(vm, shell));
+  return home;
+}
+
+function ambientBackground(scene) {
+  return ambientLayer(scene);
+}
+
+function objectField(scene) {
   const field = el("div", "studio-home-field");
   for (const object of scene?.objects || []) {
     const marker = el("span", `studio-home-node ${object.kind || "object"} ${object.tone || "neutral"}`);
@@ -39,7 +53,11 @@ export function ambientHome(vm, scene, shell) {
     marker.title = object.label || object.id || "node";
     field.append(marker);
   }
+  return field;
+}
 
+function homeLanding(vm, shell) {
+  const landing = document.createDocumentFragment();
   const identity = el("div", "studio-home-identity");
   const homeVm = vm.presentation?.home || {};
   identity.append(
@@ -53,8 +71,8 @@ export function ambientHome(vm, scene, shell) {
 
   const version = textEl("div", vm.presentation?.chrome?.version_label || `RYE OS - ${ryeosVersion(shell)}`);
   version.className = "studio-home-version";
-  home.append(ambient, field, identity, version);
-  return home;
+  landing.append(identity, version);
+  return landing;
 }
 
 export function opticFrame(frame = {}) {
@@ -92,8 +110,23 @@ export function statusLine(vm, shell) {
     const value = segment.label ? `${segment.label} ${segment.value}` : segment.value;
     line.append(textEl(tag, value, classes.join(" ")));
   }
+  appendCompatMetrics(line, vm, segments);
   if (status?.key_hint) line.append(textEl("span", status.key_hint, "keys"));
   return line;
+}
+
+function appendCompatMetrics(line, vm, segments) {
+  const seen = new Set(segments.map((segment) => segment.id));
+  const metrics = vm.presentation?.metrics || {};
+  const values = [
+    ["tiles", metrics.tile_count ?? vm.workspace?.tile_count],
+    ["items", metrics.item_count],
+    ["threads", metrics.thread_count],
+  ];
+  for (const [label, value] of values) {
+    if (seen.has(label) || value === undefined || value === null) continue;
+    line.append(textEl("span", `${label} ${value}`, "tone-neutral"));
+  }
 }
 
 function ryeosVersion(shell) {

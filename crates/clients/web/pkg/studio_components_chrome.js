@@ -1,7 +1,12 @@
 import { el, textEl } from "/ui/assets/studio_components_primitives.js";
 
+let launcherWasOpen = false;
+const dismissedNoticeKeys = new Set();
+
 export function launcherDialog(state, shell) {
-  const overlay = el("div", `studio-command-overlay${state.open ? " open" : ""}`);
+  const opening = Boolean(state.open && !launcherWasOpen);
+  launcherWasOpen = Boolean(state.open);
+  const overlay = el("div", `studio-command-overlay${state.open ? " open" : ""}${opening ? " opening" : ""}`);
   if (!state.open) return overlay;
 
   const choices = state.items || [];
@@ -64,9 +69,21 @@ export function launcherDialog(state, shell) {
 export function notices(items) {
   const wrap = el("div", "studio-notices");
   for (const item of items) {
-    const notice = el("div", `studio-notice ${item.tone || "neutral"}`);
+    const key = noticeKey(item);
+    if (dismissedNoticeKeys.has(key)) continue;
+    const notice = el("button", `studio-notice ${item.tone || "neutral"}`);
+    notice.type = "button";
+    notice.title = "Dismiss notice";
     notice.textContent = item.message || "";
+    notice.addEventListener("click", () => {
+      dismissedNoticeKeys.add(key);
+      notice.remove();
+    });
     wrap.append(notice);
   }
   return wrap;
+}
+
+function noticeKey(item) {
+  return `${item.id || "notice"}:${item.tone || "neutral"}:${item.message || ""}`;
 }

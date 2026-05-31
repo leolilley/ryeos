@@ -39,6 +39,7 @@ async function commit(envelope) {
     const scroll = captureTileScroll(root);
     renderDom(root, envelope.view_model, envelope.scene_model, dispatchUi, shellController());
     restoreTileScroll(root, scroll);
+    revealSelectedRows(root);
     restoreFocus(root, focus);
     if (envelope.view_model?.launcher?.open) {
       requestAnimationFrame(() => root?.querySelector("[data-studio-launcher-input]")?.focus());
@@ -120,6 +121,9 @@ function captureTileScroll(container) {
     const body = tile.querySelector(".studio-tile-body");
     if (id && body) state.set(id, { top: body.scrollTop, left: body.scrollLeft });
   });
+  container?.querySelectorAll("[data-scroll-key]").forEach((node) => {
+    state.set(`scroll:${node.dataset.scrollKey}`, { top: node.scrollTop, left: node.scrollLeft });
+  });
   return state;
 }
 
@@ -130,6 +134,18 @@ function restoreTileScroll(container, state) {
     body.scrollTop = pos.top;
     body.scrollLeft = pos.left;
   }
+  container?.querySelectorAll("[data-scroll-key]").forEach((node) => {
+    const pos = state.get(`scroll:${node.dataset.scrollKey}`);
+    if (!pos) return;
+    node.scrollTop = pos.top;
+    node.scrollLeft = pos.left;
+  });
+}
+
+function revealSelectedRows(container) {
+  container?.querySelectorAll(".studio-rows .studio-row.selected").forEach((row) => {
+    row.scrollIntoView({ block: "nearest" });
+  });
 }
 
 function cssEscape(value) {
@@ -182,6 +198,11 @@ function attachBrowserEvents() {
     if (launcherOpen || isTypingTarget(event.target) || event.altKey || event.ctrlKey || event.metaKey) {
       return;
     }
+    const cursorDelta = rowCursorDelta(event.key);
+    if (cursorDelta && moveFocusedRowCursor(cursorDelta)) {
+      event.preventDefault();
+      return;
+    }
     const direction = arrowDirection(event.key);
     if (direction) {
       event.preventDefault();
@@ -194,6 +215,31 @@ function attachBrowserEvents() {
   window.addEventListener("hashchange", () => {
     void commit(studio_dispatch({ type: "route_changed", route: location.hash.replace(/^#/, "") }));
   });
+}
+
+function rowCursorDelta(key) {
+  if (key === "ArrowUp") return -1;
+  if (key === "ArrowDown") return 1;
+  return 0;
+}
+
+function moveFocusedRowCursor(delta) {
+  const tile = focusedTileNode(currentEnvelope?.view_model?.workspace?.root);
+  const rows = tile?.view?.rows;
+  if (!tile?.tile_id || !Array.isArray(rows) || rows.length === 0) return false;
+  const selected = rows.findIndex((row) => row.selected);
+  const current = selected >= 0 ? selected : 0;
+  const next = Math.max(0, Math.min(rows.length - 1, current + delta));
+  if (next === current) return false;
+  dispatchUi({ type: "set_tile_cursor", tile_id: tile.tile_id, index: next });
+  return true;
+}
+
+function focusedTileNode(node) {
+  if (!node) return null;
+  if (node.type === "tile") return node.focused ? node : null;
+  if (node.type === "split") return focusedTileNode(node.first) || focusedTileNode(node.second);
+  return null;
 }
 
 function arrowDirection(key) {

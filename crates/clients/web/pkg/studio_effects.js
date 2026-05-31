@@ -4,7 +4,7 @@ export async function runEffect(effect) {
     case "fetch_snapshot":
       return result(effect, "snapshot", await getJson("/ui/api/studio/snapshot"));
     case "fetch_projects":
-      return result(effect, "projects", await getJson("/ui/api/studio/projects/list"));
+      return result(effect, "projects", await optionalProjectsJson());
     case "add_project":
       return result(effect, "project_added", await postJson("/ui/api/studio/projects/add", { root: kind.root }));
     case "open_project":
@@ -22,9 +22,9 @@ export async function runEffect(effect) {
     case "fetch_gc_status":
       return result(effect, "gc_status", await getJson("/ui/api/studio/gc/status"));
     case "list_files":
-      return result(effect, "files_list", await postJson("/ui/api/studio/files/list", { root: kind.root, path: kind.path }));
+      return result(effect, "files_list", await fileJson("/ui/api/studio/files/list", kind));
     case "read_file":
-      return result(effect, "file_read", await postJson("/ui/api/studio/files/read", { root: kind.root, path: kind.path }));
+      return result(effect, "file_read", await fileJson("/ui/api/studio/files/read", kind));
     case "inspect_item":
       return result(effect, "item_inspection", await postJson("/ui/api/studio/item/inspect", {
         canonical_ref: kind.canonical_ref,
@@ -48,6 +48,40 @@ export async function runEffect(effect) {
     default:
       throw new Error(`Unhandled Studio effect: ${kind.type}`);
   }
+}
+
+function fileRoot(root) {
+  return root === "project_ai" ? "project" : root;
+}
+
+async function fileJson(url, kind) {
+  let data;
+  try {
+    data = await postJson(url, { root: fileRoot(kind.root), path: kind.path });
+  } catch (error) {
+    if (isNoBoundProjectError(error) && url.endsWith("/files/list")) {
+      return { root: kind.root || "project", path: kind.path || "", truncated: false, entries: [] };
+    }
+    throw error;
+  }
+  if (kind.root && data && typeof data === "object") data.root = kind.root;
+  return data;
+}
+
+async function optionalProjectsJson() {
+  try {
+    return await getJson("/ui/api/studio/projects/list");
+  } catch (error) {
+    if (String(error?.message || error).includes("/ui/api/studio/projects/list: 404")) {
+      return { version: 1, projects: [] };
+    }
+    throw error;
+  }
+}
+
+function isNoBoundProjectError(error) {
+  const message = String(error?.message || error);
+  return message.includes("/ui/api/studio/files/list: 400") && message.includes("no project bound to this session");
 }
 
 export function failedResultFor(effect, error) {
@@ -92,7 +126,7 @@ async function postJson(url, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
-  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  if (!response.ok) throw new Error(`${url}: ${response.status} ${await response.text()}`);
   return response.json();
 }
 
