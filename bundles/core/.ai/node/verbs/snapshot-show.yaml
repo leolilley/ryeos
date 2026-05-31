@@ -1,0 +1,12 @@
+# ryeos:signed:2026-05-31T02:07:36Z:eb2bac6d520fdf101397c26824024f812c3d5f03f1436606ae8d4656b8851d84:ds7w4tltaR/8JuU0Flr6SlLYT6Gp7ioVjQW0PPNdUvRcXv+N5ryt3kfk6Kcs5kWBtbKiYMt38zWx1t4kxMJcBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: snapshot-show
+description: Show metadata for a local snapshot
+execute: tool:ryeos/core/snapshot-show
+aliases:
+- tokens:
+  - snapshot
+  - show
+  description: Show metadata for a local snapshot
+  positional_field: snapshot_hash

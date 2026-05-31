@@ -1,0 +1,27 @@
+# ryeos:signed:2026-05-31T02:07:37Z:f3e701d1385f2fc22d6a34f1177ff15756e355cb3d0beb320b38c7758fdb10c4:WZwm2Rrw4zvQQNprQ/G9D/UyKfd08N01MEEurCFH0L2H0VjsXX7yNvRvba7dRd5eoOPm0nntuy7e65djW9REAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "ryeos/core"
+name: "snapshot-show"
+required_caps: ["project.read"]
+description: "Show metadata for a local snapshot object."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "snapshot"
+    - "show"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 60
+
+config_schema:
+  type: object
+  properties:
+    snapshot_hash:
+      type: string
+      description: "Snapshot hash to inspect"
+    project_path:
+      type: string
+      description: "Optional project root path used to include head/deployed relation flags"
+  required: [snapshot_hash]

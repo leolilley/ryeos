@@ -44,7 +44,7 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(
         out,
         "  {:<30} {}",
-        "status", "Show local node lifecycle status"
+        "node status", "Show local node lifecycle status"
     )?;
     writeln!(out)?;
     writeln!(out, "UNIVERSAL ESCAPE HATCH:")?;
@@ -115,9 +115,6 @@ fn discover_aliases_from_disk(
     };
 
     for alias in aliases {
-        if alias.def.tokens == ["status"] {
-            continue;
-        }
         // Skip short aliases (s, f) — they're abbreviations.
         if alias.def.tokens.len() == 1 && alias.def.tokens[0].len() <= 1 {
             continue;
@@ -526,12 +523,23 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(out, "  --system-space-dir <DIR> System space root")?;
             writeln!(out, "  --user-root <DIR>        User space root")?;
         }
-        Some("status") => {
-            writeln!(out, "ryeos status — Show local node lifecycle status")?;
+        Some("node") if verb_tokens.get(1).map(String::as_str) == Some("status") => {
+            writeln!(out, "ryeos node status — Show local node lifecycle status")?;
             writeln!(out)?;
             writeln!(
                 out,
-                "USAGE: ryeos status [--json] [--system-space-dir <DIR>]"
+                "USAGE: ryeos node status [--json] [--system-space-dir <DIR>]"
+            )?;
+        }
+        Some("system") if verb_tokens.get(1).map(String::as_str) == Some("status") => {
+            writeln!(
+                out,
+                "ryeos system status — Show local node lifecycle status"
+            )?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "USAGE: ryeos system status [--json] [--system-space-dir <DIR>]"
             )?;
         }
         Some("start") => {

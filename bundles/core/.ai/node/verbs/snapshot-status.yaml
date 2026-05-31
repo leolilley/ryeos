@@ -1,0 +1,16 @@
+# ryeos:signed:2026-05-31T02:07:36Z:793df7d3ecb6cffe43c6d50cad29ddb86bfef5c43f063dff50b4206cf6395241:8FJ0T4XZaj+6WIzVcoiIv5jotdhiL39Jvxtw3eSO50B+jO5KQ1IqgvKUpfS6LY2MxenXhSGmy7e1aOv1onpPCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: snapshot-status
+description: Show local project snapshot status
+execute: tool:ryeos/core/snapshot-status
+aliases:
+- tokens:
+  - status
+  description: Show local project snapshot status
+  project_resolution: required
+- tokens:
+  - snapshot
+  - status
+  description: Show local project snapshot status
+  project_resolution: required

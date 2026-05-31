@@ -1,9 +1,10 @@
-# ryeos:signed:2026-05-30T07:21:31Z:0d1ac627dd394f8dad366e918fbb1bebc0f49fe27b43612b2871f8b582545f10:sm5Fp7iv3nw+GRxQ0QZ7Qvcjuc8MyQTjSefWtpyMicv97fP7kHEXW6vh7X282dcHLdWrEm3DdkSeNGgSH4ufAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-05-31T02:07:36Z:12c341d1d7ff8e27d3400271a3c4dafbd6ccad994a192f4eab69231a5d73a54d:sEVmPZ1655YFiuyX1NApxrZ9yqvwZ+QO04tqMlZIrHosaWEKNhDFr8vQ0pRTd+YBkd6KP8bUNzWB64GLDAI1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: verbs
 section: verbs
-name: status
+name: system-status
 description: 'Show daemon status: version, uptime, bind address, active threads'
 execute: service:system/status
 aliases:
 - tokens:
+  - daemon
   - status

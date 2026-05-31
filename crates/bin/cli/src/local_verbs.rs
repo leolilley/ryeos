@@ -6,7 +6,7 @@
 //!   - `ryeos init`   — bootstrap operator keys, trust store, and bundles
 //!   - `ryeos start`  — bring the local node runtime online
 //!   - `ryeos stop`   — gracefully stop the local node runtime
-//!   - `ryeos status` — show local node lifecycle status
+//!   - `ryeos node status` — show local node lifecycle status
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -41,8 +41,8 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
             run_init_verb(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
-        "status" => {
-            run_status_verb(&argv[1..]).await.map_err(map_local_err)?;
+        "node" | "system" if argv.get(1).map(String::as_str) == Some("status") => {
+            run_status_verb(&argv[2..]).await.map_err(map_local_err)?;
             Ok(true)
         }
         "start" => {
@@ -143,11 +143,11 @@ fn run_init_verb(argv: &[String]) -> Result<()> {
     Ok(())
 }
 
-// ── ryeos {status,start,stop} ───────────────────────────────────────
+// ── ryeos {node status,start,stop} ──────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos status",
+    name = "ryeos node status",
     about = "Show local node lifecycle status",
     no_binary_name = true
 )]
@@ -164,7 +164,10 @@ struct StatusArgs {
 async fn run_status_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StatusArgs>(argv)?;
     let controller = LifecycleController::from_env(local_env(args.system_space_dir)?);
-    let status = controller.status().await.context("ryeos status failed")?;
+    let status = controller
+        .status()
+        .await
+        .context("ryeos node status failed")?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {

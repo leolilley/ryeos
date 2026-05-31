@@ -470,6 +470,7 @@ fn pin_localpath_snapshot_if_needed(
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash,
         user_manifest_hash: pre_user_manifest_hash.clone(),
+        message: None,
         project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
         parent_hashes: Vec::new(),
         created_at: lillux::time::iso8601_now(),

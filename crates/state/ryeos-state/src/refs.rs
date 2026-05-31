@@ -21,7 +21,9 @@ use base64::Engine as _;
 use lillux::crypto::Verifier;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 
 use crate::signer::Signer;
@@ -262,6 +264,72 @@ pub fn read_project_head_ref(
     }
     let signed_ref = read_signed_ref(&head_path)?;
     Ok(Some(signed_ref.target_hash))
+}
+
+/// Advisory inter-process lock for a principal-scoped project HEAD.
+///
+/// The signed project HEAD helpers provide compare-and-swap semantics,
+/// but without a shared lock two processes can both read the same HEAD
+/// and then both write a valid advancement. Hold this guard around any
+/// read/advance/write sequence for `projects/<principal>/<project>`.
+pub struct ProjectHeadLock {
+    _lock_file: File,
+}
+
+impl ProjectHeadLock {
+    /// Acquire an exclusive lock for a principal/project HEAD.
+    ///
+    /// The lock path is `refs/projects/<principal_key>/<project_hash>/lock`.
+    pub fn acquire(
+        refs_root: &Path,
+        principal_key: &str,
+        project_hash: &str,
+    ) -> anyhow::Result<Self> {
+        let lock_path = refs_root
+            .join("projects")
+            .join(principal_key)
+            .join(project_hash)
+            .join("lock");
+
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).context("failed to create project HEAD lock directory")?;
+        }
+
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| {
+                format!("failed to open project HEAD lock: {}", lock_path.display())
+            })?;
+
+        #[cfg(unix)]
+        {
+            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+            if ret != 0 {
+                anyhow::bail!(
+                    "project HEAD flock failed at {}: {}",
+                    lock_path.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        Ok(Self {
+            _lock_file: lock_file,
+        })
+    }
+}
+
+impl Drop for ProjectHeadLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 /// Advance a project head ref with compare-and-swap.
