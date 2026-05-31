@@ -1,9 +1,9 @@
-# ryeos:signed:2026-05-31T04:14:43Z:67edc3c5335dac88f9e624de799894d5a675160071a0e2f065e6bbdbe93938aa:wTUdMyr3f5LPvYOd+ie4VdsCilt9ZMZDSVjac8DI8zzGxp6/l2SS4t78GTsy9imA+q5IEVExb88PqBfIXMStCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-05-31T04:39:41Z:a5af217ecbaeec4e497e2b048e9f7c4cc4fa627029b614736c5486f181702208:kPprs8jIUYB3Fy1aSG/bOuYNi00gR2SflY5gtI++MiADRsAZ4hMzYAWwHBRuRdoEhKY2FMiDCUhmT5a9BTN2Cg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
 name: "admission-token"
-required_caps: []
+required_caps: ["ryeos.execute.tool.ryeos.core.admission-token"]
 description: "Mint a one-time node-local admission token for remote bootstrap."
 
 config:

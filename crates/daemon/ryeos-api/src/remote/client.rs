@@ -826,8 +826,8 @@ fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     for scope in &normalized {
         ryeos_runtime::authorizer::validate_scope_pattern(scope).map_err(anyhow::Error::msg)?;
     }
-    if normalized.iter().any(|s| s == "*") {
-        anyhow::bail!("wildcard scope forbidden for admission claims");
+    if normalized.iter().any(|s| s.contains('*')) {
+        anyhow::bail!("wildcard scopes are forbidden for admission claim requests");
     }
 
     Ok(normalized)

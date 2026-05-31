@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
+use base64::Engine;
+use lillux::crypto::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +113,15 @@ pub fn run_export_remote_descriptor(
         .strip_prefix("fp:")
         .unwrap_or(identity.principal_id.as_str())
         .to_string();
+    let actual_fingerprint = fingerprint_for_ed25519_key(&identity.signing_key)
+        .context("invalid public identity signing_key")?;
+    if fingerprint != actual_fingerprint {
+        bail!(
+            "public identity principal_id {} does not match signing_key fingerprint {}",
+            identity.principal_id,
+            actual_fingerprint
+        );
+    }
 
     let mut capabilities = params
         .capabilities
@@ -187,4 +198,21 @@ fn resolve_system_space_dir(opt: Option<String>) -> Result<PathBuf> {
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
         .ok_or_else(|| anyhow::anyhow!("could not determine system space directory"))
+}
+
+fn fingerprint_for_ed25519_key(key: &str) -> Result<String> {
+    let b64 = key
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| anyhow::anyhow!("signing_key must start with ed25519:"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .context("invalid base64 ed25519 public key")?;
+    let key = VerifyingKey::from_bytes(
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("ed25519 public key must be 32 bytes"))?,
+    )
+    .map_err(|e| anyhow::anyhow!("invalid ed25519 public key: {e}"))?;
+    Ok(lillux::crypto::fingerprint(&key))
 }

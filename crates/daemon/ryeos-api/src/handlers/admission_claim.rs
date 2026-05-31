@@ -215,9 +215,9 @@ fn normalize_scopes(scopes: &[String]) -> HandlerResult<Vec<String>> {
         ryeos_runtime::authorizer::validate_scope_pattern(scope)
             .map_err(HandlerError::BadRequest)?;
     }
-    if normalized.iter().any(|s| s == "*") {
+    if normalized.iter().any(|s| s.contains('*')) {
         return Err(HandlerError::Forbidden(
-            "wildcard scope forbidden for admission claims".into(),
+            "wildcard scopes are forbidden for admission claim requests".into(),
         ));
     }
     Ok(normalized)
@@ -319,3 +319,34 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_scopes_rejects_exact_and_prefix_wildcards() {
+        let exact = normalize_scopes(&["*".to_string()]);
+        assert!(matches!(exact, Err(HandlerError::Forbidden(_))));
+
+        let prefix = normalize_scopes(&["ryeos.execute.service.*".to_string()]);
+        assert!(matches!(prefix, Err(HandlerError::Forbidden(_))));
+    }
+
+    #[test]
+    fn normalize_scopes_accepts_concrete_scopes() {
+        let scopes = normalize_scopes(&[
+            "ryeos.execute.service.objects.put".to_string(),
+            "ryeos.execute.service.objects.has".to_string(),
+        ])
+        .expect("concrete scopes should be accepted");
+
+        assert_eq!(
+            scopes,
+            vec![
+                "ryeos.execute.service.objects.has".to_string(),
+                "ryeos.execute.service.objects.put".to_string(),
+            ]
+        );
+    }
+}
