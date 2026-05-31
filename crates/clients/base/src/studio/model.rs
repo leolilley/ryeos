@@ -9,6 +9,7 @@ use super::dto::{
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::scene_model::StudioSceneModel;
 use super::view_model::{StudioMotionEventVm, StudioNoticeVm, StudioTone, StudioViewModel};
+use crate::atlas::AtlasUiStateVm;
 use crate::surface::{LayoutNodeSpec, SurfaceLayoutSpec, SurfaceSpec, ViewKindSpec};
 use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use std::collections::HashMap;
@@ -125,6 +126,8 @@ pub struct StudioUiState {
     pub filters: StudioFilters,
     pub files: StudioFilesState,
     pub launcher: StudioLauncherState,
+    #[serde(default)]
+    pub atlas: AtlasUiStateVm,
     pub motion: Vec<StudioMotionEventVm>,
     pub loading: BTreeMap<String, bool>,
     pub notices: Vec<StudioNotice>,
@@ -142,6 +145,7 @@ impl Default for StudioUiState {
             filters: StudioFilters::default(),
             files: StudioFilesState::default(),
             launcher: StudioLauncherState::default(),
+            atlas: AtlasUiStateVm::default(),
             motion: Vec::new(),
             loading: BTreeMap::new(),
             notices: Vec::new(),
@@ -259,6 +263,7 @@ impl StudioCore {
         let mut needs_threads = false;
         let mut needs_schedules = false;
         let mut needs_gc = false;
+        let mut needs_atlas_items = false;
         let mut item_tiles = Vec::new();
         let mut file_tiles = Vec::new();
 
@@ -269,6 +274,7 @@ impl StudioCore {
             match tile.view {
                 ViewSpec::Thread { .. } | ViewSpec::ThreadList => needs_threads = true,
                 ViewSpec::SpaceBrowser { .. } => item_tiles.push((tile_id, tile.local.clone())),
+                ViewSpec::Graph { graph_id: None } => needs_atlas_items = true,
                 ViewSpec::Schedules => needs_schedules = true,
                 ViewSpec::GcStatus => needs_gc = true,
                 ViewSpec::Files => file_tiles.push((tile_id, tile.local.clone())),
@@ -283,7 +289,10 @@ impl StudioCore {
             }
         }
 
-        let mut effects = vec![self.emit(StudioEffectKind::FetchSnapshot)];
+        let mut effects = vec![
+            self.emit(StudioEffectKind::FetchSnapshot),
+            self.emit(StudioEffectKind::FetchProjects),
+        ];
         if needs_threads {
             effects.push(self.emit(StudioEffectKind::FetchThreads { limit: 200 }));
         }
@@ -296,6 +305,14 @@ impl StudioCore {
                 tile_id: Some(tile_id.0.to_string()),
                 query: non_empty(query),
                 kind: non_empty(kind),
+                limit: 1000,
+            }));
+        }
+        if needs_atlas_items {
+            effects.push(self.emit(StudioEffectKind::FetchItems {
+                tile_id: None,
+                query: None,
+                kind: None,
                 limit: 1000,
             }));
         }

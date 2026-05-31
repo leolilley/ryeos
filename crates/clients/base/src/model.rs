@@ -1,6 +1,7 @@
 //! Root application model — AppModel ties Store, Workspace, and runtime state.
 
 use crate::animation::AnimationState;
+use crate::atlas::AtlasUiStateVm;
 use crate::ids::ExecutionId;
 use crate::layout::Rect;
 use crate::store::{DaemonStatus, Store};
@@ -83,6 +84,7 @@ impl AppModel {
             },
             visual: VisualState {
                 animation: AnimationState::default(),
+                atlas: AtlasUiStateVm::default(),
             },
             generation: 0,
             dirty: true,
@@ -109,6 +111,7 @@ impl AppModel {
             },
             visual: VisualState {
                 animation: AnimationState::default(),
+                atlas: AtlasUiStateVm::default(),
             },
             generation: 0,
             dirty: true,
@@ -163,6 +166,8 @@ pub struct RuntimeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualState {
     pub animation: AnimationState,
+    #[serde(default)]
+    pub atlas: AtlasUiStateVm,
 }
 
 // ---------------------------------------------------------------------------

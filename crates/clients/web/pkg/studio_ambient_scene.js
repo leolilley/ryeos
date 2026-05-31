@@ -435,6 +435,10 @@ function updateSemanticObjects(layer, state, sceneModel) {
   state.semanticSignature = signature;
   disposeLayer(layer);
   state.remotes = [];
+  if (sceneModel?.atlas) {
+    updateAtlasObjects(layer, sceneModel.atlas);
+    return;
+  }
   const objects = (sceneModel?.objects || []).filter((object) => object.kind !== "local_node");
   objects.forEach((object, index) => {
     const marker = semanticMarker(object);
@@ -450,9 +454,171 @@ function updateSemanticObjects(layer, state, sceneModel) {
 }
 
 function semanticSignature(sceneModel) {
+  if (sceneModel?.atlas) {
+    const nodes = sceneModel.atlas.nodes || [];
+    const ui = sceneModel.atlas.ui || {};
+    return `atlas:${sceneModel.atlas.generation}:${sceneModel.atlas.selected_ref || ""}:${(ui.visible_layers || []).join(",")}:${ui.active_lens || "none"}:` + nodes
+      .map((node) => [node.id, node.stack?.length || 0, node.state?.selected ? "s" : "", node.state?.highlighted ? "h" : "", node.state?.dimmed ? "d" : ""].join("/"))
+      .join(";") + `:${sceneModel.atlas.regions?.length || 0}:${sceneModel.atlas.links?.length || 0}`;
+  }
   return (sceneModel?.objects || [])
     .map((object) => [object.id, object.kind, object.color, object.label, object.scale?.[0], object.position?.join(":")].join("|"))
     .join(";");
+}
+
+function updateAtlasObjects(layer, atlas) {
+  const group = new THREE.Group();
+  group.userData.sceneObjectKind = "namespace_atlas";
+  const nodes = atlas?.nodes || [];
+  const nodeByKey = new Map(nodes.map((node) => [node.namespace_key || "", node]));
+  const nodeById = new Map(nodes.map((node) => [node.id || "", node]));
+  const radiusScale = atlas?.bounds?.radius_max ? Math.min(3.2, 14 / Math.max(1, atlas.bounds.radius_max)) : 1.6;
+
+  for (const node of nodes) {
+    if (!node.path?.length) continue;
+    const parentKey = node.path.slice(0, -1).join("/");
+    const parent = nodeByKey.get(parentKey);
+    if (!parent) continue;
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([
+        atlasVec(parent.position, radiusScale, 0),
+        atlasVec(node.position, radiusScale, 0),
+      ]),
+      lineMat(node.stack?.length ? G.bg2 : G.bg2, node.stack?.length ? 0.34 : 0.16),
+    );
+    group.add(line);
+  }
+
+  for (const region of atlas?.regions || []) {
+    const radiusMin = Math.max(0.2, (region.radius_min || 0) * radiusScale);
+    const radiusMax = Math.max(radiusMin + 0.2, (region.radius_max || region.radius_min || 1) * radiusScale);
+    const start = region.angle_start || 0;
+    const end = region.angle_end || start;
+    group.add(arcLine(radiusMax, start, end, G.purple, 0.34));
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(Math.cos(start) * radiusMin, 0.02, Math.sin(start) * radiusMin),
+      new THREE.Vector3(Math.cos(start) * radiusMax, 0.02, Math.sin(start) * radiusMax),
+    ]), lineMat(G.purple, 0.18)));
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(Math.cos(end) * radiusMin, 0.02, Math.sin(end) * radiusMin),
+      new THREE.Vector3(Math.cos(end) * radiusMax, 0.02, Math.sin(end) * radiusMax),
+    ]), lineMat(G.purple, 0.18)));
+  }
+
+  for (const link of atlas?.links || []) {
+    const from = nodeById.get(link.from);
+    const to = nodeById.get(link.to);
+    if (!from || !to) continue;
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([
+      atlasVec(from.position, radiusScale, 0.42),
+      atlasVec(to.position, radiusScale, 0.42),
+    ]), lineMat(G.yellow, 0.62)));
+  }
+
+  for (const node of nodes) {
+    if (!node.path?.length && !(node.stack || []).length) continue;
+    const stack = (node.stack || []).filter((item) => atlasItemVisible(atlas, item));
+    const anchor = atlasVec(node.position, radiusScale, 0);
+    if (!stack.length && !node.state?.selected && !node.state?.highlighted) {
+      const bead = new THREE.Mesh(
+        new THREE.SphereGeometry(0.035, 8, 6),
+        new THREE.MeshBasicMaterial({ color: G.bg2, transparent: true, opacity: 0.25 }),
+      );
+      bead.position.copy(anchor);
+      group.add(bead);
+      continue;
+    }
+    if (!stack.length) {
+      const bead = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 8, 6),
+        new THREE.MeshBasicMaterial({ color: G.yellow, transparent: true, opacity: node.state?.selected ? 0.65 : 0.38 }),
+      );
+      bead.position.copy(anchor);
+      group.add(bead);
+      continue;
+    }
+    const haloOpacity = node.state?.selected ? 0.95 : node.state?.highlighted ? 0.7 : node.state?.dimmed ? 0.16 : 0.42;
+    const halo = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(circlePoints(0.18 + stack.length * 0.025, 28)),
+      lineMat(node.state?.selected ? G.yellow : G.orange, haloOpacity),
+    );
+    halo.position.copy(anchor);
+    halo.rotation.x = Math.PI / 2;
+    group.add(halo);
+    for (const item of stack) {
+      const marker = atlasStackMarker(item, node.state || {});
+      const offset = (item.y_offset || 0) * 0.55;
+      marker.position.set(anchor.x, anchor.y + 0.12 + offset, anchor.z);
+      group.add(marker);
+    }
+  }
+
+  layer.add(group);
+}
+
+function atlasItemVisible(atlas, item) {
+  const ui = atlas?.ui || {};
+  const visible = new Set(ui.visible_layers || ["directive", "tool", "knowledge", "config", "other"]);
+  const kind = item.kind || "other";
+  if (!visible.has(kind)) return false;
+  if ((ui.active_lens || "none") === "knowledge") return kind === "knowledge";
+  return true;
+}
+
+function atlasVec(position = [0, 0, 0], scale = 1, yOffset = 0) {
+  return new THREE.Vector3((position[0] || 0) * scale, (position[1] || 0) + yOffset, (position[2] || 0) * scale);
+}
+
+function atlasStackMarker(item, state) {
+  const kind = item.kind || "other";
+  const color = atlasKindColor(kind);
+  const scope = item.scope || "unknown";
+  const scopeOpacity = scope === "system" ? 0.44 : scope === "user" ? 0.54 : 0.62;
+  const opacity = state.selected ? 0.98 : state.highlighted ? 0.86 : state.dimmed ? 0.18 : scopeOpacity;
+  let geometry;
+  switch (kind) {
+    case "directive":
+      geometry = new THREE.OctahedronGeometry(0.16, 0);
+      break;
+    case "tool":
+      geometry = new THREE.TorusGeometry(0.15, 0.018, 8, 28);
+      break;
+    case "knowledge":
+      geometry = new THREE.DodecahedronGeometry(0.14, 0);
+      break;
+    case "config":
+      geometry = new THREE.BoxGeometry(0.18, 0.035, 0.18);
+      break;
+    default:
+      geometry = new THREE.SphereGeometry(0.12, 10, 8);
+      break;
+  }
+  const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, wireframe: kind !== "config" });
+  const marker = new THREE.Mesh(geometry, material);
+  marker.userData.sceneObjectId = item.canonical_ref;
+  marker.userData.sceneObjectKind = kind;
+  marker.userData.sceneObjectLabel = item.label;
+  return marker;
+}
+
+function arcLine(radius, start, end, color, opacity) {
+  const points = [];
+  const segments = Math.max(8, Math.ceil(Math.abs(end - start) * 24));
+  for (let i = 0; i <= segments; i++) {
+    const angle = start + (end - start) * (i / segments);
+    points.push(new THREE.Vector3(Math.cos(angle) * radius, 0.02, Math.sin(angle) * radius));
+  }
+  return new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), lineMat(color, opacity));
+}
+
+function atlasKindColor(kind) {
+  switch (kind) {
+    case "directive": return G.purple;
+    case "tool": return G.aqua;
+    case "knowledge": return G.yellow;
+    case "config": return G.blue;
+    default: return G.fg;
+  }
 }
 
 function semanticMarker(object) {
@@ -497,14 +663,20 @@ function semanticMarker(object) {
 
 function disposeLayer(layer) {
   for (const child of layer.children) {
+    disposeObject(child);
+  }
+  layer.clear();
+}
+
+function disposeObject(object) {
+  object.traverse?.((child) => {
     child.geometry?.dispose?.();
     if (Array.isArray(child.material)) {
       child.material.forEach((material) => material.dispose?.());
     } else {
       child.material?.dispose?.();
     }
-  }
-  layer.clear();
+  });
 }
 
 function circlePoints(r, segs) {

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::effect::StudioEffectResult;
 use super::model::{BrowserSession, BrowserViewport};
+use crate::atlas::{AtlasItemKind, AtlasLensVm};
 use crate::layout::SplitAxis;
 use crate::workspace::{FocusDirection, ViewSpec};
 
@@ -110,6 +111,13 @@ pub enum StudioUiEvent {
     SetFilesPath {
         tile_id: String,
         path: String,
+    },
+    SetAtlasLayerVisible {
+        kind: AtlasItemKind,
+        visible: bool,
+    },
+    SetAtlasLens {
+        lens: AtlasLensVm,
     },
     FocusChanged {
         target: Option<String>,

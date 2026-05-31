@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+use crate::atlas::{build_namespace_atlas, AtlasInput, AtlasItemInput, NamespaceAtlasVm};
 
 use super::event::StudioAction;
+use super::model::StudioInspectorState;
 use super::view_model::StudioTone;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -9,6 +13,8 @@ pub struct StudioSceneModel {
     pub generation: u64,
     pub camera: StudioCameraVm,
     pub objects: Vec<StudioSceneObjectVm>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atlas: Option<NamespaceAtlasVm>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,6 +65,7 @@ impl Default for StudioSceneModel {
                 fov_degrees: 45.0,
             },
             objects: Vec::new(),
+            atlas: None,
         }
     }
 }
@@ -179,6 +186,46 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             Some(format!("{} items", items.items.len())),
             StudioTone::Accent,
         ));
+        let selected_ref = match &core.ui.inspector {
+            StudioInspectorState::Item { canonical_ref } => Some(canonical_ref.clone()),
+            _ => None,
+        };
+        let mut capabilities = core
+            .data
+            .session
+            .as_ref()
+            .map(|session| session.granted_caps.clone())
+            .unwrap_or_default();
+        if let Some(snapshot) = &core.data.snapshot {
+            capabilities.extend(snapshot.session.granted_caps.clone());
+            for service in &snapshot.local_node.services {
+                capabilities.extend(service.required_caps.clone());
+            }
+        }
+        capabilities.sort();
+        capabilities.dedup();
+
+        scene.atlas = Some(build_namespace_atlas(AtlasInput {
+            generation: core.generation,
+            root_label: ".ai".to_string(),
+            items: items
+                .items
+                .iter()
+                .map(|item| AtlasItemInput {
+                    canonical_ref: item.canonical_ref.clone(),
+                    kind: item.item_kind.clone(),
+                    label: item.label.clone(),
+                    namespace: item.namespace.clone(),
+                    source_path: item.source_path.clone(),
+                    scope: item.space.clone(),
+                    executable: item.executable,
+                })
+                .collect(),
+            capabilities,
+            selected_ref,
+            context_refs: atlas_context_refs(core),
+            ui: core.ui.atlas.clone(),
+        }));
     }
 
     if let Some(threads) = &core.data.threads {
@@ -234,4 +281,165 @@ fn scene_object(
 
 fn scale_for_count(count: usize) -> f32 {
     (0.65 + (count as f32).sqrt() * 0.12).min(2.2)
+}
+
+fn atlas_context_refs(core: &StudioCore) -> Vec<String> {
+    let Some(inspection) = &core.data.item_inspection else {
+        return Vec::new();
+    };
+    let current_ref = match &core.ui.inspector {
+        StudioInspectorState::Item { canonical_ref } => canonical_ref.as_str(),
+        _ => return Vec::new(),
+    };
+    if inspection.item.canonical_ref != current_ref {
+        return Vec::new();
+    }
+
+    let mut refs = BTreeSet::new();
+    if let Some(effective) = &inspection.effective {
+        collect_refs_from_json(effective, &mut refs);
+    }
+    if let Some(raw) = &inspection.raw {
+        collect_refs_from_text(&raw.content, &mut refs);
+    }
+    refs.into_iter()
+        .filter(|item_ref| item_ref != current_ref)
+        .collect()
+}
+
+fn collect_refs_from_json(value: &serde_json::Value, refs: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::String(value) => collect_refs_from_text(value, refs),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_refs_from_json(value, refs);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values() {
+                collect_refs_from_json(value, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_refs_from_text(text: &str, refs: &mut BTreeSet<String>) {
+    for token in text.split(|ch: char| {
+        ch.is_whitespace() || matches!(ch, ',' | '[' | ']' | '{' | '}' | '(' | ')' | '"' | '\'')
+    }) {
+        let token = token.trim_matches(|ch: char| matches!(ch, ':' | ';' | '.' | ','));
+        if is_canonical_item_ref(token) {
+            refs.insert(token.to_string());
+        }
+    }
+}
+
+fn is_canonical_item_ref(value: &str) -> bool {
+    let Some((kind, bare)) = value.split_once(':') else {
+        return false;
+    };
+    matches!(kind, "directive" | "tool" | "knowledge" | "config") && !bare.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::studio::dto::{StudioItemDto, StudioItemsDto};
+
+    #[test]
+    fn scene_model_includes_namespace_atlas_for_items() {
+        let mut core = StudioCore::default();
+        core.generation = 42;
+        core.data.items = Some(StudioItemsDto {
+            items: vec![
+                StudioItemDto {
+                    canonical_ref: "directive:rye/core/create_tool".to_string(),
+                    item_kind: "directive".to_string(),
+                    bare_id: "create_tool".to_string(),
+                    label: "create_tool".to_string(),
+                    namespace: Some("rye/core".to_string()),
+                    space: "project".to_string(),
+                    source_path: ".ai/directives/rye/core/create_tool.md".to_string(),
+                    executable: true,
+                    trust: None,
+                },
+                StudioItemDto {
+                    canonical_ref: "knowledge:rye/core/create_tool".to_string(),
+                    item_kind: "knowledge".to_string(),
+                    bare_id: "create_tool".to_string(),
+                    label: "create_tool".to_string(),
+                    namespace: Some("rye/core".to_string()),
+                    space: "project".to_string(),
+                    source_path: ".ai/knowledge/rye/core/create_tool.md".to_string(),
+                    executable: false,
+                    trust: None,
+                },
+            ],
+            ..StudioItemsDto::default()
+        });
+
+        let scene = build_scene_model(&core);
+        let atlas = scene.atlas.expect("atlas");
+        assert_eq!(atlas.generation, 42);
+        let stack_node = atlas
+            .nodes
+            .iter()
+            .find(|node| node.namespace_key == "rye/core/create_tool")
+            .expect("projected stack");
+        assert_eq!(stack_node.stack.len(), 2);
+    }
+
+    #[test]
+    fn scene_model_highlights_inspected_context_refs() {
+        let mut core = StudioCore::default();
+        core.ui.inspector = StudioInspectorState::Item {
+            canonical_ref: "directive:rye/core/create_tool".to_string(),
+        };
+        core.data.items = Some(StudioItemsDto {
+            items: vec![
+                StudioItemDto {
+                    canonical_ref: "directive:rye/core/create_tool".to_string(),
+                    item_kind: "directive".to_string(),
+                    bare_id: "create_tool".to_string(),
+                    label: "create_tool".to_string(),
+                    namespace: Some("rye/core".to_string()),
+                    space: "project".to_string(),
+                    source_path: ".ai/directives/rye/core/create_tool.md".to_string(),
+                    executable: true,
+                    trust: None,
+                },
+                StudioItemDto {
+                    canonical_ref: "knowledge:rye/core/signing".to_string(),
+                    item_kind: "knowledge".to_string(),
+                    bare_id: "signing".to_string(),
+                    label: "signing".to_string(),
+                    namespace: Some("rye/core".to_string()),
+                    space: "project".to_string(),
+                    source_path: ".ai/knowledge/rye/core/signing.md".to_string(),
+                    executable: false,
+                    trust: None,
+                },
+            ],
+            ..StudioItemsDto::default()
+        });
+        core.data.item_inspection = Some(crate::studio::dto::StudioItemInspectionDto {
+            item: crate::studio::dto::StudioInspectedItemDto {
+                canonical_ref: "directive:rye/core/create_tool".to_string(),
+                ..Default::default()
+            },
+            effective: Some(serde_json::json!({
+                "context": ["knowledge:rye/core/signing"]
+            })),
+            ..Default::default()
+        });
+
+        let atlas = build_scene_model(&core).atlas.expect("atlas");
+        let signing = atlas
+            .nodes
+            .iter()
+            .find(|node| node.namespace_key == "rye/core/signing")
+            .expect("signing knowledge");
+        assert!(signing.state.highlighted);
+    }
 }

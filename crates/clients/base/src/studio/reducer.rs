@@ -71,6 +71,16 @@ impl StudioCore {
                     .unwrap_or_else(|| "project_ai".to_string());
                 self.set_tile_files_path(tile_id.0.to_string(), root, path)
             }
+            StudioUiEvent::SetAtlasLayerVisible { kind, visible } => {
+                self.ui.atlas.set_layer_visible(kind, visible);
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioUiEvent::SetAtlasLens { lens } => {
+                self.ui.atlas.set_lens(lens);
+                self.bump_generation();
+                Vec::new()
+            }
             StudioUiEvent::FocusChanged { target } => {
                 let Some(tile_id) = target
                     .and_then(|target| target.parse::<u64>().ok())
@@ -700,18 +710,23 @@ impl StudioCore {
             ViewSpec::Schedules => vec![self.emit(StudioEffectKind::FetchSchedules)],
             ViewSpec::GcStatus => vec![self.emit(StudioEffectKind::FetchGcStatus)],
             ViewSpec::Projects => {
-                if self.studio_projects_service_available() {
-                    vec![self.emit(StudioEffectKind::FetchProjects)]
-                } else {
-                    Vec::new()
-                }
+                vec![self.emit(StudioEffectKind::FetchProjects)]
             }
+            ViewSpec::Graph { graph_id: None } => vec![
+                self.emit(StudioEffectKind::FetchSnapshot),
+                self.emit(StudioEffectKind::FetchItems {
+                    tile_id: None,
+                    query: None,
+                    kind: None,
+                    limit: 1000,
+                }),
+            ],
             ViewSpec::Overview
             | ViewSpec::Remotes
             | ViewSpec::Services
             | ViewSpec::ItemInspector
             | ViewSpec::Trust
-            | ViewSpec::Graph { .. }
+            | ViewSpec::Graph { graph_id: Some(_) }
             | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchSnapshot)],
         }
     }
@@ -839,8 +854,9 @@ impl StudioCore {
                         } = &expected
                         {
                             core.data.tile_items.insert(tile_id.clone(), items.clone());
+                        } else {
+                            core.data.items = Some(items);
                         }
-                        core.data.items = Some(items);
                     }
                 });
             }
@@ -1148,6 +1164,9 @@ fn effect_matches_current_items(expected: Option<&StudioEffectKind>, core: &Stud
     else {
         return true;
     };
+    if tile_id.is_none() {
+        return query.is_none() && kind.is_none();
+    }
     let Some(tile_id) = tile_id.as_deref().and_then(parse_tile_id) else {
         return false;
     };
@@ -1286,13 +1305,17 @@ mod tests {
             now_ms: 0,
         });
 
-        assert_eq!(effects.len(), 2);
+        assert_eq!(effects.len(), 3);
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot)));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
+        assert!(effects.iter().any(|effect| matches!(
+            effect.kind,
+            StudioEffectKind::FetchItems { tile_id: None, .. }
+        )));
     }
 
     #[test]
@@ -1701,7 +1724,11 @@ mod tests {
             },
         });
 
-        let items = core.data.items.as_ref().expect("items loaded");
+        let items = core
+            .data
+            .tile_items
+            .get(&tile_id.0.to_string())
+            .expect("items loaded");
         assert_eq!(items.items[0].canonical_ref, "tool:new/run");
     }
 
@@ -1950,7 +1977,7 @@ mod tests {
 
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::FocusDirection {
-                direction: FocusDirection::Up,
+                direction: FocusDirection::Left,
             },
         });
 
