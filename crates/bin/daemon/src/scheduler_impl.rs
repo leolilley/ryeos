@@ -83,7 +83,7 @@ impl SchedulerContext for AppSchedulerContext {
         );
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
-            launch_mode: "detached",
+            launch_mode: "inline",
             target_site_id: None,
             validate_only: false,
             params,

@@ -167,6 +167,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // Parse body.
         let mut request: ExecuteRequest = serde_json::from_slice(&ctx.body_raw)
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+        if ctx.request_parts.uri.path() == "/execute/launch" && request.launch_mode == "inline" {
+            request.launch_mode = "accepted".to_string();
+        }
 
         // API invariants: item_ref and tokens are mutually exclusive; one required.
         match (&request.item_ref, &request.tokens) {
@@ -503,6 +506,94 @@ impl CompiledResponseMode for CompiledExecuteMode {
             .target_site_id
             .as_deref()
             .is_some_and(|target| target != site_id);
+
+        if request.launch_mode == "accepted" {
+            if remote_target_requested {
+                let dispatch_err = target_site_unsupported(
+                    request.target_site_id.as_deref().unwrap_or_default(),
+                    "launch_mode 'accepted' is not supported with remote target_site_id",
+                );
+                return Ok(dispatch_error_response(dispatch_err));
+            }
+            if request.validate_only {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": "validate_only is not supported with launch_mode='accepted'" })),
+                )
+                    .into_response());
+            }
+            if !matches!(project_source, ProjectSource::LiveFs) {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": "launch_mode='accepted' supports live filesystem projects only" })),
+                )
+                    .into_response());
+            }
+
+            let parsed_item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(item_ref)
+                .map_err(|e| {
+                    RouteDispatchError::BadRequest(format!(
+                        "invalid item_ref '{}': {}",
+                        item_ref, e
+                    ))
+                })?;
+            let accepted_project_path = crate::routes::abs_path::AbsolutePathBuf::try_new(
+                project_ctx.effective_path.clone(),
+            )
+            .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
+            let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            let response_thread_id = thread_id.clone();
+
+            let handle = crate::routes::launch::spawn_dispatch_launch(
+                &state,
+                parsed_item_ref,
+                accepted_project_path,
+                request.parameters.clone(),
+                caller_principal_id.clone(),
+                caller_scopes.clone(),
+                thread_id.clone(),
+                crate::routes::launch::DispatchLaunchOptions {
+                    launch_mode: "inline".to_string(),
+                    target_site_id: None,
+                    validate_only: false,
+                    operation: request.operation.clone(),
+                    inputs: request.inputs.clone(),
+                },
+            );
+
+            tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => {
+                        tracing::debug!(thread_id = %thread_id, "accepted execute background dispatch completed");
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            code = %err.code(),
+                            error = %err,
+                            "accepted execute background dispatch failed"
+                        );
+                    }
+                    Err(join_err) => {
+                        tracing::error!(
+                            thread_id = %thread_id,
+                            error = %join_err,
+                            "accepted execute background dispatch panicked"
+                        );
+                    }
+                }
+            });
+
+            return Ok((
+                StatusCode::ACCEPTED,
+                axum::Json(json!({
+                    "status": "accepted",
+                    "thread_id": response_thread_id,
+                })),
+            )
+                .into_response());
+        }
+
         let request_can_need_remote_config = request.launch_mode == "inline"
             && !request.validate_only
             && matches!(project_source, ProjectSource::LiveFs)

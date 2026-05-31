@@ -1,0 +1,15 @@
+category: routes
+section: routes
+id: core/execute-launch
+path: /execute/launch
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 10485760
+  timeout_ms: 30000
+  concurrent_max: 100
+response:
+  mode: execute

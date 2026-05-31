@@ -650,7 +650,19 @@ impl Walker {
         };
 
         let interpolated_action =
-            ryeos_runtime::interpolate_action(&action, &ctx.as_context()).unwrap_or(action.clone());
+            match ryeos_runtime::interpolate_action(&action, &ctx.as_context()) {
+                Ok(value) => value,
+                Err(err) => {
+                    return StepOutcome::DispatchHardError {
+                        item_id: Some(item_id),
+                        error: format!(
+                            "interpolation error in action for node `{current}`: {err:#}"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: elapsed,
+                    };
+                }
+            };
 
         let stripped_action = strip_none_values(&interpolated_action);
 
