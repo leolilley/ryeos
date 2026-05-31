@@ -182,7 +182,7 @@ impl StudioCore {
                 effects
             }
             StudioAction::OpenNewView { view } => {
-                let effects = self.split_focused(SplitAxis::Horizontal, view);
+                let effects = self.add_slave_tile(view);
                 self.bump_generation();
                 effects
             }
@@ -192,7 +192,7 @@ impl StudioCore {
                     .focused_view()
                     .cloned()
                     .unwrap_or(ViewSpec::Overview);
-                let effects = self.split_focused(axis, view);
+                let effects = self.split_focused_tile(axis, view);
                 self.bump_generation();
                 effects
             }
@@ -209,7 +209,7 @@ impl StudioCore {
                     .focused_view()
                     .cloned()
                     .unwrap_or(ViewSpec::Overview);
-                let effects = self.split_focused(axis, view);
+                let effects = self.split_focused_tile(axis, view);
                 self.bump_generation();
                 effects
             }
@@ -465,19 +465,7 @@ impl StudioCore {
             workspace_number: index + 1,
         });
         self.bump_generation();
-        self.effects_for_current_workspace()
-    }
-
-    fn effects_for_current_workspace(&mut self) -> Vec<StudioEffect> {
-        let Some(view) = self
-            .workspace
-            .tiles
-            .get(&self.workspace.focused_tile)
-            .map(|tile| tile.view.clone())
-        else {
-            return Vec::new();
-        };
-        self.effects_for_view(&view)
+        self.initial_effects()
     }
 
     fn ensure_item_inspector_tile(&mut self) {
@@ -625,7 +613,7 @@ impl StudioCore {
             }
         }
 
-        let effects = self.split_focused(SplitAxis::Horizontal, view);
+        let effects = self.add_slave_tile(view);
         self.bump_generation();
         effects
     }
@@ -655,7 +643,34 @@ impl StudioCore {
         }
     }
 
-    fn split_focused(&mut self, axis: SplitAxis, view: ViewSpec) -> Vec<StudioEffect> {
+    fn split_focused_tile(&mut self, axis: SplitAxis, view: ViewSpec) -> Vec<StudioEffect> {
+        let source_tile_id = self.workspace.focused_tile;
+        if let Some(tile_id) = self.workspace.split_focused(axis, view) {
+            self.workspace.focused_tile = tile_id;
+            self.push_motion(StudioMotionEventVm::TileSplit {
+                source_tile_id: source_tile_id.0.to_string(),
+                new_tile_id: tile_id.0.to_string(),
+                axis: split_axis_vm(axis),
+            });
+            self.push_motion(StudioMotionEventVm::TileEnter {
+                tile_id: tile_id.0.to_string(),
+            });
+            self.push_motion(StudioMotionEventVm::FocusChanged {
+                tile_id: tile_id.0.to_string(),
+            });
+            let view = self
+                .workspace
+                .tiles
+                .get(&tile_id)
+                .map(|tile| tile.view.clone())
+                .unwrap_or(ViewSpec::Overview);
+            self.effects_for_view(&view)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn add_slave_tile(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
         let source_tile_id = self.workspace.focused_tile;
         let prior_tile_count = self.workspace.layout.tile_ids().len();
         if let Some(tile_id) = self.workspace.add_master_stack_tile(view) {
@@ -663,7 +678,9 @@ impl StudioCore {
             self.push_motion(StudioMotionEventVm::TileSplit {
                 source_tile_id: source_tile_id.0.to_string(),
                 new_tile_id: tile_id.0.to_string(),
-                axis: split_axis_vm(master_stack_added_axis(prior_tile_count).unwrap_or(axis)),
+                axis: split_axis_vm(
+                    master_stack_added_axis(prior_tile_count).unwrap_or(SplitAxis::Horizontal),
+                ),
             });
             self.push_motion(StudioMotionEventVm::TileEnter {
                 tile_id: tile_id.0.to_string(),
@@ -2056,14 +2073,47 @@ mod tests {
 
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
-                action: StudioAction::CycleTab {
-                    direction: StudioStackMoveDirection::Up,
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Files,
+                },
+            },
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenNewView {
+                    view: ViewSpec::SpaceBrowser { project: None },
                 },
             },
         });
 
-        assert_eq!(core.active_workspace, 0);
-        assert_eq!(core.workspace.layout.tile_ids().len(), first_tab_tiles);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SwitchTab { index: 0 },
+            },
+        });
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SwitchTab { index: 1 },
+            },
+        });
+
+        assert_eq!(core.active_workspace, 1);
+        assert_eq!(core.workspaces[0].layout.tile_ids().len(), first_tab_tiles);
+        assert!(effects.iter().any(|effect| matches!(
+            effect.kind,
+            StudioEffectKind::ListFiles {
+                tile_id: Some(_),
+                ..
+            }
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect.kind,
+            StudioEffectKind::FetchItems {
+                tile_id: Some(_),
+                ..
+            }
+        )));
     }
 
     #[test]

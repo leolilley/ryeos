@@ -862,7 +862,7 @@ fn launcher(core: &StudioCore) -> StudioLauncherVm {
         open: core.ui.launcher.open,
         query: core.ui.launcher.query.clone(),
         selected,
-        hint: "Alt+K open · Ctrl+←/→ focus · Ctrl+↑/↓ move · Ctrl+Shift+arrows resize · Alt+M master/slave · Alt+Q close"
+        hint: "Alt+K open · Ctrl+←/→ tab · Ctrl+↑/↓ move · Ctrl+Shift+arrows resize · Alt+M master/slave · Alt+Q close"
             .to_string(),
         items,
     }
