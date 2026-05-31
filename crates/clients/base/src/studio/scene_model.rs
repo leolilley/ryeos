@@ -70,35 +70,154 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
         generation: core.generation,
         ..StudioSceneModel::default()
     };
-    scene.objects.push(StudioSceneObjectVm {
-        id: "node:local".to_string(),
-        kind: StudioSceneObjectKind::LocalNode,
-        position: [0.0, 0.0, 0.0],
-        rotation: [0.0, 0.0, 0.0],
-        scale: [1.0, 1.0, 1.0],
-        color: "#83a598".to_string(),
-        opacity: 1.0,
-        label: Some("Local node".to_string()),
-        tone: StudioTone::Neutral,
-        selected: false,
-        action: None,
-    });
+    scene.objects.push(scene_object(
+        "node:local",
+        StudioSceneObjectKind::LocalNode,
+        [0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        "#83a598",
+        Some("Local node".to_string()),
+        StudioTone::Neutral,
+    ));
+
     if let Some(snapshot) = &core.data.snapshot {
+        scene.objects.push(scene_object(
+            "project:core",
+            StudioSceneObjectKind::ProjectCore,
+            [0.0, -0.2, 0.0],
+            [scale_for_count(snapshot.project.iter().count()), 1.0, 1.0],
+            "#fe8019",
+            snapshot.project.as_ref().map(|project| project.path.clone()),
+            StudioTone::Accent,
+        ));
+
+        scene.objects.push(scene_object(
+            "spaces:ring",
+            StudioSceneObjectKind::SpaceRing,
+            [0.0, -0.4, 0.0],
+            [scale_for_count(snapshot.local_node.spaces.len()), 1.0, 1.0],
+            "#fabd2f",
+            Some(format!("{} spaces", snapshot.local_node.spaces.len())),
+            StudioTone::Neutral,
+        ));
+
+        scene.objects.push(scene_object(
+            "services:beacon",
+            StudioSceneObjectKind::ServiceBeacon,
+            [-2.6, 0.0, -2.8],
+            [scale_for_count(snapshot.local_node.services.len()), 1.0, 1.0],
+            "#83a598",
+            Some(format!("{} services", snapshot.local_node.services.len())),
+            StudioTone::Neutral,
+        ));
+
+        scene.objects.push(scene_object(
+            "threads:active",
+            StudioSceneObjectKind::ThreadFlow,
+            [2.4, 0.0, -2.0],
+            [scale_for_count(snapshot.threads.active_count.max(0) as usize), 1.0, 1.0],
+            "#d3869b",
+            Some(format!("{} active threads", snapshot.threads.active_count.max(0))),
+            if snapshot.threads.active_count > 0 {
+                StudioTone::Accent
+            } else {
+                StudioTone::Neutral
+            },
+        ));
+
+        scene.objects.push(scene_object(
+            "schedules:pulse",
+            StudioSceneObjectKind::SchedulePulse,
+            [3.2, 0.0, 2.4],
+            [scale_for_count(snapshot.schedules.enabled), 1.0, 1.0],
+            "#b8bb26",
+            Some(format!(
+                "{} enabled / {} schedules",
+                snapshot.schedules.enabled, snapshot.schedules.total
+            )),
+            if snapshot.schedules.enabled > 0 {
+                StudioTone::Good
+            } else {
+                StudioTone::Neutral
+            },
+        ));
+
         for (index, remote) in snapshot.remotes.iter().enumerate() {
-            scene.objects.push(StudioSceneObjectVm {
-                id: format!("remote:{}", remote.name),
-                kind: StudioSceneObjectKind::RemoteNode,
-                position: [index as f32 + 2.0, 0.0, -2.0],
-                rotation: [0.0, 0.0, 0.0],
-                scale: [0.7, 0.7, 0.7],
-                color: "#8ec07c".to_string(),
-                opacity: 0.9,
-                label: Some(remote.name.clone()),
-                tone: StudioTone::Good,
-                selected: false,
-                action: None,
-            });
+            scene.objects.push(scene_object(
+                &format!("remote:{}", remote.name),
+                StudioSceneObjectKind::RemoteNode,
+                [index as f32 + 2.0, 0.0, -2.0],
+                [0.7, 0.7, 0.7],
+                "#8ec07c",
+                Some(remote.name.clone()),
+                StudioTone::Good,
+            ));
         }
     }
+
+    if let Some(items) = &core.data.items {
+        scene.objects.push(scene_object(
+            "items:cluster",
+            StudioSceneObjectKind::ItemCluster,
+            [-3.0, 0.0, 1.8],
+            [scale_for_count(items.items.len()), 1.0, 1.0],
+            "#fabd2f",
+            Some(format!("{} items", items.items.len())),
+            StudioTone::Accent,
+        ));
+    }
+
+    if let Some(threads) = &core.data.threads {
+        scene.objects.push(scene_object(
+            "threads:recent",
+            StudioSceneObjectKind::ThreadFlow,
+            [2.0, 0.0, -3.2],
+            [scale_for_count(threads.threads.len()), 1.0, 1.0],
+            "#d3869b",
+            Some(format!("{} recent threads", threads.threads.len())),
+            StudioTone::Accent,
+        ));
+    }
+
+    if let Some(schedules) = &core.data.schedules {
+        scene.objects.push(scene_object(
+            "schedules:list",
+            StudioSceneObjectKind::SchedulePulse,
+            [3.8, 0.0, 1.6],
+            [scale_for_count(schedules.schedules.len()), 1.0, 1.0],
+            "#b8bb26",
+            Some(format!("{} loaded schedules", schedules.schedules.len())),
+            StudioTone::Good,
+        ));
+    }
+
     scene
+}
+
+fn scene_object(
+    id: &str,
+    kind: StudioSceneObjectKind,
+    position: [f32; 3],
+    scale: [f32; 3],
+    color: &str,
+    label: Option<String>,
+    tone: StudioTone,
+) -> StudioSceneObjectVm {
+    StudioSceneObjectVm {
+        id: id.to_string(),
+        kind,
+        position,
+        rotation: [0.0, 0.0, 0.0],
+        scale,
+        color: color.to_string(),
+        opacity: 1.0,
+        label,
+        tone,
+        selected: false,
+        action: None,
+    }
+}
+
+fn scale_for_count(count: usize) -> f32 {
+    (0.65 + (count as f32).sqrt() * 0.12).min(2.2)
 }

@@ -6,13 +6,16 @@ use super::dto::{
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::event::{StudioAction, StudioEvent, StudioFilterField, StudioUiEvent};
 use super::model::{StudioCore, StudioInspectorState};
-use super::view_model::{action_for_focused_row, launcher_items, StudioTone};
+use super::view_model::{
+    action_for_focused_row, launcher_items, StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
+};
 use crate::ids::TileId;
 use crate::layout::SplitAxis;
 use crate::workspace::{ViewLocalState, ViewSpec};
 
 impl StudioCore {
     pub fn dispatch(&mut self, event: StudioEvent) -> Vec<StudioEffect> {
+        self.ui.motion.clear();
         match event {
             StudioEvent::Start {
                 session,
@@ -75,12 +78,18 @@ impl StudioCore {
                 };
                 if self.workspace.tiles.contains_key(&tile_id) {
                     self.workspace.focused_tile = tile_id;
+                    self.push_motion(StudioMotionEventVm::FocusChanged {
+                        tile_id: tile_id.0.to_string(),
+                    });
                     self.bump_generation();
                 }
                 Vec::new()
             }
             StudioUiEvent::FocusDirection { direction } => {
                 if self.workspace.focus_in_direction(direction) {
+                    self.push_motion(StudioMotionEventVm::FocusChanged {
+                        tile_id: self.workspace.focused_tile.0.to_string(),
+                    });
                     self.bump_generation();
                 }
                 Vec::new()
@@ -89,12 +98,14 @@ impl StudioCore {
                 self.ui.launcher.open = true;
                 self.ui.launcher.query.clear();
                 self.ui.launcher.selected = 0;
+                self.push_motion(StudioMotionEventVm::LauncherOpen);
                 self.bump_generation();
                 Vec::new()
             }
             StudioUiEvent::CloseLauncher => {
                 if self.ui.launcher.open {
                     self.ui.launcher.open = false;
+                    self.push_motion(StudioMotionEventVm::LauncherClose);
                     self.bump_generation();
                 }
                 Vec::new()
@@ -128,6 +139,7 @@ impl StudioCore {
                 self.ui.launcher.open = false;
                 self.ui.launcher.query.clear();
                 self.ui.launcher.selected = 0;
+                self.push_motion(StudioMotionEventVm::LauncherClose);
                 self.bump_generation();
                 action.map_or_else(Vec::new, |action| self.dispatch_action(action))
             }
@@ -407,11 +419,27 @@ impl StudioCore {
 
     fn open_view(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
         if self.workspace.is_home() && !is_home_view(&view) {
-            self.workspace.replace_focused_view(view.clone());
+            if let Some(tile_id) = self.workspace.replace_focused_view(view.clone()) {
+                self.push_motion(StudioMotionEventVm::HomeExit);
+                self.push_motion(StudioMotionEventVm::TileEnter {
+                    tile_id: tile_id.0.to_string(),
+                });
+                self.push_motion(StudioMotionEventVm::FocusChanged {
+                    tile_id: tile_id.0.to_string(),
+                });
+            }
             self.bump_generation();
             return self.effects_for_view(&view);
         }
         if is_home_view(&view) {
+            if !self.workspace.is_home() {
+                for tile_id in self.workspace.layout.tile_ids() {
+                    self.push_motion(StudioMotionEventVm::TileExit {
+                        tile_id: tile_id.0.to_string(),
+                    });
+                }
+                self.push_motion(StudioMotionEventVm::HomeEnter);
+            }
             self.workspace.reset_to_home();
             self.bump_generation();
             return self.effects_for_view(&view);
@@ -424,6 +452,9 @@ impl StudioCore {
                 .is_some_and(|tile| tile.view == view)
             {
                 self.workspace.focused_tile = tile_id;
+                self.push_motion(StudioMotionEventVm::FocusChanged {
+                    tile_id: tile_id.0.to_string(),
+                });
                 self.bump_generation();
                 return self.effects_for_view(&view);
             }
@@ -439,15 +470,41 @@ impl StudioCore {
             if self.workspace.is_home() || !self.workspace.tiles.contains_key(&tile_id) {
                 return false;
             }
+            self.push_motion(StudioMotionEventVm::TileExit {
+                tile_id: tile_id.0.to_string(),
+            });
+            self.push_motion(StudioMotionEventVm::HomeEnter);
             self.workspace.reset_to_home();
             return true;
         }
-        self.workspace.close_tile_master_stack(tile_id)
+        if self.workspace.close_tile_master_stack(tile_id) {
+            self.push_motion(StudioMotionEventVm::TileExit {
+                tile_id: tile_id.0.to_string(),
+            });
+            self.push_motion(StudioMotionEventVm::FocusChanged {
+                tile_id: self.workspace.focused_tile.0.to_string(),
+            });
+            true
+        } else {
+            false
+        }
     }
 
-    fn split_focused(&mut self, _axis: SplitAxis, view: ViewSpec) -> Vec<StudioEffect> {
+    fn split_focused(&mut self, axis: SplitAxis, view: ViewSpec) -> Vec<StudioEffect> {
+        let source_tile_id = self.workspace.focused_tile;
         if let Some(tile_id) = self.workspace.add_master_stack_tile(view) {
             self.workspace.focused_tile = tile_id;
+            self.push_motion(StudioMotionEventVm::TileSplit {
+                source_tile_id: source_tile_id.0.to_string(),
+                new_tile_id: tile_id.0.to_string(),
+                axis: split_axis_vm(axis),
+            });
+            self.push_motion(StudioMotionEventVm::TileEnter {
+                tile_id: tile_id.0.to_string(),
+            });
+            self.push_motion(StudioMotionEventVm::FocusChanged {
+                tile_id: tile_id.0.to_string(),
+            });
             let view = self
                 .workspace
                 .tiles
@@ -458,6 +515,10 @@ impl StudioCore {
         } else {
             Vec::new()
         }
+    }
+
+    fn push_motion(&mut self, motion: StudioMotionEventVm) {
+        self.ui.motion.push(motion);
     }
 
     fn effects_for_view(&mut self, view: &ViewSpec) -> Vec<StudioEffect> {
@@ -738,6 +799,13 @@ impl StudioCore {
 
 fn parse_tile_id(tile_id: &str) -> Option<crate::ids::TileId> {
     tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)
+}
+
+fn split_axis_vm(axis: SplitAxis) -> StudioSplitAxisVm {
+    match axis {
+        SplitAxis::Horizontal => StudioSplitAxisVm::Horizontal,
+        SplitAxis::Vertical => StudioSplitAxisVm::Vertical,
+    }
 }
 
 fn is_home_view(view: &ViewSpec) -> bool {
@@ -1540,6 +1608,14 @@ mod tests {
             core.workspace.focused_view(),
             Some(ViewSpec::Services)
         ));
+        assert!(core.ui.motion.iter().any(|event| matches!(
+            event,
+            StudioMotionEventVm::TileSplit { .. }
+        )));
+        assert!(core.ui.motion.iter().any(|event| matches!(
+            event,
+            StudioMotionEventVm::TileEnter { tile_id } if tile_id == &core.workspace.focused_tile.0.to_string()
+        )));
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::FetchSnapshot)
@@ -1573,6 +1649,10 @@ mod tests {
             .count();
         assert_eq!(core.workspace.layout.tile_ids().len(), before + 1);
         assert_eq!(item_tile_count, 2);
+        assert!(core.ui.motion.iter().any(|event| matches!(
+            event,
+            StudioMotionEventVm::TileSplit { .. }
+        )));
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::FetchItems { .. })
@@ -1607,6 +1687,10 @@ mod tests {
 
         assert!(!core.workspace.tiles.contains_key(&tile_id));
         assert!(!core.workspace.layout.tile_ids().contains(&tile_id));
+        assert!(core.ui.motion.iter().any(|event| matches!(
+            event,
+            StudioMotionEventVm::TileExit { tile_id: closed } if closed == &tile_id.0.to_string()
+        )));
     }
 
     #[test]
@@ -1628,6 +1712,10 @@ mod tests {
         });
 
         assert!(core.workspace.is_home());
+        assert!(core.ui.motion.iter().any(|event| matches!(
+            event,
+            StudioMotionEventVm::HomeEnter
+        )));
     }
 
     #[test]

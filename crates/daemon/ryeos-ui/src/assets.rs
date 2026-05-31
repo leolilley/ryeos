@@ -5,6 +5,8 @@
 //! in `ryeos-api` so that generic static mode can resolve web assets
 //! without the API crate knowing about web-specific paths.
 
+use std::path::{Component, Path, PathBuf};
+
 use sha2::{Digest, Sha256};
 
 use ryeos_api::routes::response_modes::static_mode::{StaticAsset, StaticAssetProvider};
@@ -45,9 +47,22 @@ fn compute_etag(bytes: &[u8]) -> String {
 
 static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html");
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
+static STUDIO_COMPONENTS_CHROME_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/studio_components_chrome.js");
+static STUDIO_COMPONENTS_HOME_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/studio_components_home.js");
+static STUDIO_COMPONENTS_PRIMITIVES_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/studio_components_primitives.js");
+static STUDIO_COMPONENTS_WORKSPACE_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/studio_components_workspace.js");
 static STUDIO_DOM_ADAPTER_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/studio_dom_adapter.js");
+static STUDIO_AMBIENT_SCENE_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/studio_ambient_scene.js");
 static STUDIO_EFFECTS_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_effects.js");
+static STUDIO_MOTION_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_motion.js");
+static STUDIO_PRESENTATION_STATE_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/studio_presentation_state.js");
 static STUDIO_SHELL_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_shell.js");
 static WEB_SHELL_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/web-shell.css");
 static RYEOS_WEB_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web.js");
@@ -59,13 +74,35 @@ pub struct WebAssetProvider;
 impl StaticAssetProvider for WebAssetProvider {
     fn get(&self, path: &str) -> Option<StaticAsset> {
         let trimmed = path.trim_start_matches('/');
+        if let Some(asset) = dev_asset(trimmed) {
+            return Some(asset);
+        }
         let (bytes, cache_control) = match trimmed {
             "index.html" | "ui/index.html" => (INDEX_HTML, "no-cache"),
             "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
+            "studio_components_chrome.js" | "ui/assets/studio_components_chrome.js" => {
+                (STUDIO_COMPONENTS_CHROME_JS, "no-cache")
+            }
+            "studio_components_home.js" | "ui/assets/studio_components_home.js" => {
+                (STUDIO_COMPONENTS_HOME_JS, "no-cache")
+            }
+            "studio_components_primitives.js" | "ui/assets/studio_components_primitives.js" => {
+                (STUDIO_COMPONENTS_PRIMITIVES_JS, "no-cache")
+            }
+            "studio_components_workspace.js" | "ui/assets/studio_components_workspace.js" => {
+                (STUDIO_COMPONENTS_WORKSPACE_JS, "no-cache")
+            }
             "studio_dom_adapter.js" | "ui/assets/studio_dom_adapter.js" => {
                 (STUDIO_DOM_ADAPTER_JS, "no-cache")
             }
+            "studio_ambient_scene.js" | "ui/assets/studio_ambient_scene.js" => {
+                (STUDIO_AMBIENT_SCENE_JS, "no-cache")
+            }
             "studio_effects.js" | "ui/assets/studio_effects.js" => (STUDIO_EFFECTS_JS, "no-cache"),
+            "studio_motion.js" | "ui/assets/studio_motion.js" => (STUDIO_MOTION_JS, "no-cache"),
+            "studio_presentation_state.js" | "ui/assets/studio_presentation_state.js" => {
+                (STUDIO_PRESENTATION_STATE_JS, "no-cache")
+            }
             "studio_shell.js" | "ui/assets/studio_shell.js" => (STUDIO_SHELL_JS, "no-cache"),
             "web-shell.css" | "ui/assets/web-shell.css" => (WEB_SHELL_CSS, "no-cache"),
             "ryeos_web.js" | "ui/assets/ryeos_web.js" => (RYEOS_WEB_JS, "no-cache"),
@@ -73,12 +110,53 @@ impl StaticAssetProvider for WebAssetProvider {
             _ => return None,
         };
         Some(StaticAsset {
-            bytes,
+            bytes: bytes.to_vec(),
             content_type: content_type_for_path(trimmed),
             etag: compute_etag(bytes),
             cache_control,
         })
     }
+}
+
+/// Optional local development override for browser UI assets.
+///
+/// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/web/pkg` before starting
+/// `ryeosd`, then `/ui` and `/ui/assets/*` are served from that directory
+/// instead of the compile-time embedded bytes. This is intentionally an env-gated
+/// development escape hatch so UI JS/CSS can be refreshed without repopulating
+/// bundles or recompiling the daemon for every edit.
+fn dev_asset(trimmed: &str) -> Option<StaticAsset> {
+    let root = std::env::var_os("RYEOS_UI_ASSET_DIR").map(PathBuf::from)?;
+    let relative = asset_relative_path(trimmed)?;
+    let path = safe_join(&root, &relative)?;
+    let bytes = std::fs::read(&path).ok()?;
+    let etag = compute_etag(&bytes);
+    Some(StaticAsset {
+        bytes,
+        content_type: content_type_for_path(relative.to_str().unwrap_or(trimmed)),
+        etag,
+        cache_control: "no-store",
+    })
+}
+
+fn asset_relative_path(trimmed: &str) -> Option<PathBuf> {
+    let relative = trimmed.strip_prefix("ui/assets/").unwrap_or(trimmed);
+    if relative == "ui/index.html" {
+        return Some(PathBuf::from("index.html"));
+    }
+    Some(PathBuf::from(relative))
+}
+
+fn safe_join(root: &Path, relative: &Path) -> Option<PathBuf> {
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
+    Some(root.join(relative))
 }
 
 #[cfg(test)]
@@ -127,6 +205,12 @@ mod tests {
             .expect("studio_shell.js must be embedded");
         assert!(studio.bytes.len() > 0);
         assert!(studio.content_type.contains("javascript"));
+
+        let ambient = provider
+            .get("ui/assets/studio_ambient_scene.js")
+            .expect("studio_ambient_scene.js must be embedded");
+        assert!(ambient.bytes.len() > 0);
+        assert!(ambient.content_type.contains("javascript"));
 
         let wasm = provider
             .get("ui/assets/ryeos_web_bg.wasm")

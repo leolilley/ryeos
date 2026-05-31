@@ -14,7 +14,7 @@ use ryeos_app::route_raw::RawRouteSpec;
 
 /// A static asset served by an injected provider.
 pub struct StaticAsset {
-    pub bytes: &'static [u8],
+    pub bytes: Vec<u8>,
     pub content_type: &'static str,
     pub etag: String,
     /// Cache-Control header value.
@@ -87,7 +87,7 @@ pub struct CompiledStaticMode {
 }
 
 /// Security headers applied to all embedded asset responses.
-static CSP_VALUE: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
+static CSP_VALUE: &str = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
 
 impl ResponseMode for StaticMode {
     fn key(&self) -> &'static str {
@@ -279,7 +279,7 @@ impl CompiledResponseMode for CompiledStaticMode {
 
                 let cache_control = asset.cache_control;
 
-                let mut resp = (self.status, asset.bytes.to_vec()).into_response();
+                let mut resp = (self.status, asset.bytes).into_response();
                 let headers = resp.headers_mut();
                 headers.insert(header::CONTENT_TYPE, ct);
                 headers.insert(header::ETAG, asset.etag.parse().unwrap());
@@ -310,13 +310,13 @@ mod tests {
         fn get(&self, path: &str) -> Option<StaticAsset> {
             match path.trim_start_matches('/') {
                 "index.html" | "app/index.html" => Some(StaticAsset {
-                    bytes: b"<html></html>",
+                    bytes: b"<html></html>".to_vec(),
                     content_type: "text/html; charset=utf-8",
                     etag: "\"fake-etag-html\"".to_string(),
                     cache_control: "no-cache",
                 }),
                 "main.js" | "app/assets/main.js" => Some(StaticAsset {
-                    bytes: b"// main",
+                    bytes: b"// main".to_vec(),
                     content_type: "application/javascript; charset=utf-8",
                     etag: "\"fake-etag-js\"".to_string(),
                     cache_control: "no-cache",

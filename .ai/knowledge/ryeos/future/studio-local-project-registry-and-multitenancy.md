@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-05-31T01:55:10Z:fcf152103d8b8381d8984e53da68d60d58d866f2cadab7b1522f52e588934238:58CrYYGQ00QcCLkTgcstvnVsLgvM7M3JYnKG3xPxkdVfLae3BS6jESQ902aoyvZ36sABKekheEqERHBGeet8Bw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 <!-- rye:signed:2026-05-30T04:39:09Z:0668ae4257fbe5688b500a1157ad8ac5198382509ae9c72cd645833e518f5a7a:e841rQssGRrzuBeI710Qifkd42zjk3tsSF5xZAfSg5Dt6uIk9vABZLz8yJLAFR4a2S5mMMb2nwpQFaoO7lUuCQ:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future
@@ -18,6 +19,51 @@ tags:
 ```
 
 # Studio Local Project Registry and Future Multi-Tenancy
+
+## Implementation status as of 2026-05-31
+
+The first local-registry implementation pass has landed.
+
+Committed implementation milestones:
+
+- `011775ce` — hardened local user-space YAML persistence and registry/config handlers:
+  - atomic sibling-temp writes with parent-directory fsync;
+  - private user-space directory/file permissions;
+  - process-local YAML mutation lock;
+  - schema-version checks for `projects.yaml`, `studio.yaml`, and `recent.yaml`;
+  - browser-session authorization on read/write handlers;
+  - safer project forget/config-update semantics.
+- `94d7af51` — backend project-open session binding and tenant seam:
+  - `UserSpaceResolver`, `LocalUserSpaceResolver`, and `LOCAL_PRINCIPAL_ID`;
+  - `BrowserSessionStore::set_project_root`;
+  - `ui.studio.projects.open` service/route;
+  - project open canonicalizes the stored root, rebinds the browser session, and touches recents.
+- `697c8c53` — Studio client project-open wiring:
+  - Projects view list/open flow;
+  - `POST /ui/api/studio/projects/open` browser effect;
+  - stale project-bound pending effect invalidation after session rebinding;
+  - Projects launcher/route/focused-row activation.
+- `be6aab0f` — Studio client current-project registration:
+  - Projects view shows `Register current project` when the current session project is not registered;
+  - existing `ui.studio.projects.add` is used directly; no button-specific backend service was added;
+  - successful registration refetches the project list.
+
+Current state:
+
+- local project registry is backend-complete for list/add/open/forget/resolve/config/recent basics;
+- Studio can register the current project, list known projects, and open a project through session rebinding;
+- local persistence uses `<user_root>/.ai/config/projects.yaml`, `<user_root>/.ai/config/studio.yaml`, and `<user_root>/.ai/state/studio/recent.yaml`;
+- the tenancy seam exists, but handlers still resolve the synthetic local principal.
+
+Not yet implemented:
+
+- real principal extraction from UI/API requests;
+- principal-scoped local user-space layout;
+- hosted tenant storage;
+- account/org/workspace membership or authorization policy;
+- project-local identity.
+
+Use this note now as both the record of what landed and the checklist for the remaining principal/multi-tenant work.
 
 ## Purpose
 
@@ -334,18 +380,23 @@ If signed later, do not include absolute local paths in the signed payload.
 
 Expose the local registry through Studio/UI-oriented daemon services rather than making the browser read files directly.
 
-Initial service surface should include operations equivalent to:
+Implemented service surface includes operations equivalent to:
 
 ```text
-studio.projects.list
-studio.projects.add
-studio.projects.forget
-studio.projects.resolve
-studio.projects.touch_recent
-studio.config.get
-studio.config.update
-studio.recent.list
+ui.studio.projects.list
+ui.studio.projects.add
+ui.studio.projects.forget
+ui.studio.projects.resolve
+ui.studio.projects.open
+ui.studio.recent.touch
+ui.studio.recent.list
+ui.studio.config.get
+ui.studio.config.update
 ```
+
+Do not add one endpoint per UI button. Prefer resource-style services (`projects.add`, `projects.open`, `projects.forget`) and let client actions compose those services. For example, Studio's `Register current project` UI action calls the existing `ui.studio.projects.add` service with the current session root; it does not introduce `projects.add_current`.
+
+Use a tool instead of a service only when the operation is an executable workflow rather than daemon/UI state management. Good future tool candidates include project scanning, metadata import, health checks, migrations, or AI-generated summaries. The project registry itself is daemon-mediated user-space state, so it remains a service surface.
 
 Naming guidance:
 
@@ -362,13 +413,21 @@ Behavioral requirements:
 - avoid passive home-directory scanning by default;
 - keep file APIs scoped to a selected/registered project root.
 
+Current implementation notes:
+
+- `projects.add` canonicalizes accessible absolute roots and updates an existing entry by canonical root;
+- `projects.open` canonicalizes the stored root, requires a writable browser session, rebinds that session, and touches recents;
+- read handlers require a valid browser session;
+- write handlers reject read-only sessions;
+- `local_id` wins for forget semantics, so missing/moved roots can still be removed.
+
 ## User-space path helper seam
 
 Preserve future hosted compatibility by centralizing user-space path construction now.
 
 Do not let Studio handlers hardcode `~/.ryeos` or manually concatenate user paths everywhere.
 
-Near-term helper shape:
+Implemented helper shape:
 
 ```rust
 pub struct UserSpacePaths {
@@ -381,6 +440,19 @@ impl UserSpacePaths {
 }
 ```
 
+The app layer now also exposes a resolver seam:
+
+```rust
+pub trait UserSpaceResolver {
+    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths>;
+}
+
+pub struct LocalUserSpaceResolver;
+pub const LOCAL_PRINCIPAL_ID: &str = "local";
+```
+
+Studio handlers currently call this seam through `resolve_user_space_paths(...)` and still pass the synthetic local principal. That is the intended local-mode transitional state.
+
 Use stable logical relative paths:
 
 ```text
@@ -390,7 +462,7 @@ state/studio/recent.yaml
 state/projects/index.yaml
 ```
 
-Later, this can become a principal-aware resolver without changing every Studio handler:
+Next, this should become a principal-aware resolver without changing every Studio handler:
 
 ```rust
 pub trait UserSpaceResolver {
@@ -399,6 +471,14 @@ pub trait UserSpaceResolver {
 ```
 
 Do not implement hosted tenant storage now.
+
+Remaining Level-1 principal work:
+
+1. Decide the local principal-scoped physical layout.
+2. Add a principal extraction function for Studio/UI handler contexts.
+3. Replace `LOCAL_PRINCIPAL_ID` at the handler boundary with the extracted local principal.
+4. Preserve backwards compatibility for the current singleton local files, either by treating the local operator as the singleton principal or by adding a one-time migration/copy strategy.
+5. Add tests proving two distinct principals get separate `projects.yaml`, `studio.yaml`, and `recent.yaml` data through the same service handlers.
 
 ## Normal install scope
 
@@ -508,19 +588,75 @@ Use `studio` / `ui` for new services, schemas, routes, docs, and user-facing lab
 
 Use a path helper/resolver seam. Do not implement tenant directories, per-principal vaults, orgs, quotas, or billing until hosted mode requires them.
 
-## Immediate implementation boundary
+## Completed local implementation boundary
 
-The first implementation pass should focus on:
+The first implementation pass focused on and completed:
 
-1. Define `UserSpacePaths` or equivalent helper for user config/state paths.
-2. Add read/write helpers for:
+1. Define `UserSpacePaths` and a resolver seam for user config/state paths.
+2. Add atomic read/write helpers for:
    - `config/projects.yaml`;
    - `config/studio.yaml`;
    - `state/studio/recent.yaml`.
-3. Add Studio/UI services for project list/add/forget/resolve and config/recent reads.
-4. Wire Studio startup/project picker to those services.
+3. Add Studio/UI services for project list/add/forget/resolve/open and config/recent reads/writes.
+4. Wire Studio startup/project picker/register-current/open flow to those services.
 5. Keep browser file access rooted in a canonical selected project.
 6. Do not add project-local identity yet.
 7. Do not implement hosted multi-tenancy yet.
 
-After local registry and Studio wiring are stable, revisit project-local identity only if sync/federation/attestation work needs path-independent project identity.
+## Remaining roadmap to full principal support
+
+### Level 1: principal-aware local user space
+
+Goal: prove local user-space isolation without implementing hosted accounts or tenant storage.
+
+Work items:
+
+1. Choose the local principal ID source.
+   - Candidate: the verified browser/CLI key fingerprint already available through signed launch/session creation.
+   - Local compatibility option: keep the current singleton local root for the default local operator, and only use scoped roots when a non-default principal is present.
+2. Add principal information to browser session state.
+   - Store a `principal_id` or equivalent verified caller identity on `BrowserSession`.
+   - Ensure session minting has enough signed-request context to set it.
+3. Add typed principal extraction for handlers.
+   - Avoid loose JSON `_caller_fingerprint`-style fields.
+   - Prefer a typed context/session accessor used by all Studio user-space handlers.
+4. Route `resolve_user_space_paths(ctx)` through that principal.
+   - Remove direct `LOCAL_PRINCIPAL_ID` usage from the handler boundary.
+   - Keep `LocalUserSpaceResolver` as the local filesystem resolver.
+5. Add isolation tests.
+   - Same daemon, two principals, separate project registries.
+   - Separate `studio.yaml` preferences.
+   - Separate `recent.yaml` recents.
+   - Existing singleton local behavior still works.
+
+This level should not add orgs, quotas, billing, per-principal vault partitions, or hosted storage.
+
+### Level 2: authenticated principal sessions
+
+Goal: make browser/API sessions explicitly bound to a real verified principal.
+
+Work items:
+
+1. Define the local UI session principal contract.
+   - Which key signs launch/mint requests?
+   - Which principal does that key represent?
+   - How does read-only mode interact with principal identity?
+2. Extend `BrowserSession` and `BrowserSessionStore` with principal metadata.
+3. Thread principal metadata into `HandlerContext` or an adjacent typed accessor.
+4. Audit all UI handlers that mutate user/node/project state and decide which identity they require.
+5. Add tests for expired/invalid/read-only sessions and principal mismatch behavior.
+
+### Level 3: hosted multi-tenancy
+
+Goal: support multiple unrelated principals sharing hosted infrastructure.
+
+Work items:
+
+1. Key-based login challenge/verify flow.
+2. Tenant-backed logical user-space storage behind `UserSpaceResolver`.
+3. Account/org/workspace membership and authorization policy.
+4. Per-principal or per-tenant vault partitioning if secrets are hosted.
+5. Quotas, audit trails, revocation, logout, and recovery flows.
+6. Project identity only if sync/federation/attestation needs path-independent identity.
+
+Do not begin Level 3 until there is a concrete hosted product requirement.

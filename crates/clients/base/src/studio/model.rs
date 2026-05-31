@@ -8,7 +8,7 @@ use super::dto::{
 };
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::scene_model::StudioSceneModel;
-use super::view_model::{StudioNoticeVm, StudioTone, StudioViewModel};
+use super::view_model::{StudioMotionEventVm, StudioNoticeVm, StudioTone, StudioViewModel};
 use crate::surface::{LayoutNodeSpec, SurfaceLayoutSpec, SurfaceSpec, ViewKindSpec};
 use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use std::collections::HashMap;
@@ -125,6 +125,7 @@ pub struct StudioUiState {
     pub filters: StudioFilters,
     pub files: StudioFilesState,
     pub launcher: StudioLauncherState,
+    pub motion: Vec<StudioMotionEventVm>,
     pub loading: BTreeMap<String, bool>,
     pub notices: Vec<StudioNotice>,
     pub route: Option<String>,

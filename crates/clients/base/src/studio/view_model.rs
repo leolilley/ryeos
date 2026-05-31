@@ -13,6 +13,7 @@ pub struct StudioViewModel {
     pub generation: u64,
     pub session: StudioSessionVm,
     pub chrome: StudioChromeVm,
+    pub presentation: StudioPresentationVm,
     pub workspace: StudioWorkspaceVm,
     pub launcher: StudioLauncherVm,
     pub overlays: Vec<StudioOverlayVm>,
@@ -33,6 +34,98 @@ pub struct StudioChromeVm {
     pub subtitle: String,
     pub health_label: String,
     pub health_tone: StudioTone,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioPresentationVm {
+    pub schema_version: String,
+    pub theme: StudioThemeVm,
+    pub chrome: StudioPresentationChromeVm,
+    pub frame: StudioFrameVm,
+    pub home: StudioHomeVm,
+    pub motion: Vec<StudioMotionEventVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioThemeVm {
+    pub id: String,
+    pub tone: StudioTone,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioPresentationChromeVm {
+    pub title: String,
+    pub version_label: String,
+    pub status_bar: StudioStatusBarVm,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioStatusBarVm {
+    pub segments: Vec<StudioStatusSegmentVm>,
+    pub key_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioStatusSegmentVm {
+    pub id: String,
+    pub label: Option<String>,
+    pub value: String,
+    pub tone: StudioTone,
+    pub grow: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioFrameVm {
+    pub mode: StudioFrameModeVm,
+    pub corners: StudioFrameCornersVm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioFrameModeVm {
+    Home,
+    Workspace,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioFrameCornersVm {
+    pub visible: bool,
+    pub tone: StudioTone,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioHomeVm {
+    pub brand: String,
+    pub tagline: String,
+    pub description: String,
+    pub terminal_lines: Vec<String>,
+    pub primary_label: String,
+    pub secondary_label: String,
+    pub secondary_url: String,
+    pub install_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StudioMotionEventVm {
+    TileEnter {
+        tile_id: String,
+    },
+    TileExit {
+        tile_id: String,
+    },
+    TileSplit {
+        source_tile_id: String,
+        new_tile_id: String,
+        axis: StudioSplitAxisVm,
+    },
+    FocusChanged {
+        tile_id: String,
+    },
+    HomeEnter,
+    HomeExit,
+    LauncherOpen,
+    LauncherClose,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -218,20 +311,136 @@ pub enum StudioTone {
 pub fn build_view_model(core: &StudioCore) -> StudioViewModel {
     let session = session_vm(core);
     let health = health_label(core);
+    let workspace = workspace_vm(core);
+    let chrome = StudioChromeVm {
+        title: "RyeOS Studio".to_string(),
+        subtitle: subtitle(core),
+        health_label: health.clone(),
+        health_tone: tone_for_health(&health),
+    };
     StudioViewModel {
         schema_version: "ryeos.studio.vm.v1".to_string(),
         generation: core.generation,
+        presentation: presentation_vm(core, &session, &chrome, &workspace),
         session,
-        chrome: StudioChromeVm {
-            title: "RyeOS Studio".to_string(),
-            subtitle: subtitle(core),
-            health_label: health.clone(),
-            health_tone: tone_for_health(&health),
-        },
-        workspace: workspace_vm(core),
+        chrome,
+        workspace,
         launcher: launcher(core),
         overlays: Vec::new(),
         notices: core.notices_vm(),
+    }
+}
+
+fn presentation_vm(
+    core: &StudioCore,
+    session: &StudioSessionVm,
+    chrome: &StudioChromeVm,
+    workspace: &StudioWorkspaceVm,
+) -> StudioPresentationVm {
+    let version = ryeos_version(core);
+    StudioPresentationVm {
+        schema_version: "ryeos.studio.presentation.v1".to_string(),
+        theme: StudioThemeVm {
+            id: "gruvbox-optic".to_string(),
+            tone: StudioTone::Accent,
+        },
+        chrome: StudioPresentationChromeVm {
+            title: "Rye OS".to_string(),
+            version_label: format!("RYE OS - {version}"),
+            status_bar: status_bar_vm(session, chrome, &version),
+        },
+        frame: StudioFrameVm {
+            mode: if workspace.is_home {
+                StudioFrameModeVm::Home
+            } else {
+                StudioFrameModeVm::Workspace
+            },
+            corners: StudioFrameCornersVm {
+                visible: true,
+                tone: StudioTone::Accent,
+            },
+        },
+        home: home_vm(),
+        motion: core.ui.motion.clone(),
+    }
+}
+
+fn status_bar_vm(
+    session: &StudioSessionVm,
+    chrome: &StudioChromeVm,
+    version: &str,
+) -> StudioStatusBarVm {
+    StudioStatusBarVm {
+        segments: vec![
+            StudioStatusSegmentVm {
+                id: "brand".to_string(),
+                label: None,
+                value: "rye os".to_string(),
+                tone: StudioTone::Accent,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "version".to_string(),
+                label: None,
+                value: format!("v{version}"),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "health".to_string(),
+                label: None,
+                value: chrome.health_label.clone(),
+                tone: chrome.health_tone,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "mode".to_string(),
+                label: None,
+                value: if session.read_only { "ro" } else { "rw" }.to_string(),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "project".to_string(),
+                label: None,
+                value: session.project_path.clone().unwrap_or_else(|| "home".to_string()),
+                tone: StudioTone::Neutral,
+                grow: true,
+            },
+        ],
+        key_hint: "alt+k open · arrows focus · enter select · esc close".to_string(),
+    }
+}
+
+fn home_vm() -> StudioHomeVm {
+    StudioHomeVm {
+        brand: "RYE OS".to_string(),
+        tagline: "portable operating system for ai".to_string(),
+        description: "Persistent, signed AI substrate that travels with you across spaces, machines, and models.".to_string(),
+        terminal_lines: vec![
+            "solve once, solve everywhere.",
+            "swap the model. the substrate remains.",
+            "four tools. one substrate.",
+            "directives, tools, knowledge — signed and portable.",
+            "ed25519 seals every item.",
+            "tampered items fail closed.",
+            "runtimes live in yaml, not code.",
+            "space resolves: project → user → system.",
+            "data-driven execution engine.",
+            "lillux microkernel.",
+            "any tool. two primitives.",
+            "tool → runtime → primitive. verified chain.",
+            "pull from the registry. trust the author.",
+            "content-addressed. immutable. keyed by hash.",
+            "search. load. execute. sign.",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        primary_label: "OPEN".to_string(),
+        secondary_label: "GITHUB".to_string(),
+        secondary_url: "https://github.com/leolilley/ryeos".to_string(),
+        install_command: "pip install ryeos-mcp".to_string(),
     }
 }
 
@@ -945,6 +1154,16 @@ fn health_label(core: &StudioCore) -> String {
         .and_then(|snapshot| snapshot.local_node.health.get("status"))
         .and_then(|v| v.as_str())
         .unwrap_or("connecting")
+        .to_string()
+}
+
+fn ryeos_version(core: &StudioCore) -> String {
+    core.data
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.local_node.status.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
         .to_string()
 }
 
