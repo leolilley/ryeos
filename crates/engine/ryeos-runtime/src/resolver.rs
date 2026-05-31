@@ -79,13 +79,12 @@ pub fn resolve_command(
         })?
         .clone();
 
-    // 3. Look up alias metadata first so we can apply positional-field binding
+    // 3. Look up alias metadata first so we can apply declared positional forms.
     let consumed_tokens: Vec<String> = tokens[..consumed].to_vec();
     let alias_def = alias_registry.get_alias(&consumed_tokens);
 
-    // 4. Extract tail and bind parameters. If the alias declares a
-    //    positional_field, route a lone positional argument into that
-    //    named field instead of `_args`.
+    // 4. Extract tail and bind parameters using the alias's explicit
+    //    positional forms. Undeclared positional tails fail closed.
     let tail: Vec<String> = tokens[consumed..].to_vec();
     let parameters = crate::arg_binder::bind_argv_with_alias(&tail, alias_def).map_err(|e| {
         ResolveError::Bind {
@@ -126,7 +125,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -136,7 +134,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -146,7 +143,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -156,7 +152,6 @@ mod tests {
                 deprecated: true,
                 replacement_tokens: Some(vec!["sign".into()]),
                 removed_in: Some("0.4.0".into()),
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -286,12 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_positional_field_routes_lone_positional() {
-        // When the alias declares `positional_field: "item_ref"`,
-        // a lone positional argument lands in that field instead
-        // of `_args`. This is the v1-shaped use case:
-        //   ryeos remote execute directive:foo/bar
-        //   → { item_ref: "directive:foo/bar", ... }
+    fn alias_without_positional_forms_rejects_positional_tail() {
         let aliases = crate::alias_registry::AliasRegistry::from_records(&[
             crate::alias_registry::AliasDef {
                 tokens: vec!["remote".into(), "execute".into()],
@@ -299,7 +289,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: Some("item_ref".into()),
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -318,14 +307,8 @@ mod tests {
             "directive:foo/bar".to_string(),
             "--no-project".to_string(),
         ];
-        let cmd = resolve_command(&tokens, &aliases, &verbs).unwrap();
-        assert_eq!(cmd.parameters.get("item_ref").unwrap(), "directive:foo/bar");
-        assert_eq!(cmd.parameters.get("no_project").unwrap(), true);
-        assert!(
-            cmd.parameters.get("_args").is_none(),
-            "lone positional must NOT fall through to _args when positional_field is set; got {:?}",
-            cmd.parameters
-        );
+        let err = resolve_command(&tokens, &aliases, &verbs).unwrap_err();
+        assert!(format!("{err}").contains("does not declare positional_forms"));
     }
 
     #[test]
@@ -337,7 +320,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: vec![
                     crate::alias_registry::PositionalForm {
                         slots: vec![
@@ -421,17 +403,11 @@ mod tests {
     }
 
     #[test]
-    fn alias_without_positional_field_keeps_args_in_underscore_args() {
-        // Negative control: when the alias doesn't declare a
-        // positional field, lone positionals collect into `_args`
-        // as before (backwards-compatible behaviour).
+    fn alias_without_positional_forms_rejects_args_in_underscore_args() {
         let (aliases, verbs) = test_registries();
         let tokens = vec!["status".to_string(), "extra_arg".to_string()];
-        let cmd = resolve_command(&tokens, &aliases, &verbs).unwrap();
-        assert!(cmd.parameters.get("item_ref").is_none());
-        let args = cmd.parameters.get("_args").unwrap().as_array().unwrap();
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0], "extra_arg");
+        let err = resolve_command(&tokens, &aliases, &verbs).unwrap_err();
+        assert!(format!("{err}").contains("does not declare positional_forms"));
     }
 
     #[test]

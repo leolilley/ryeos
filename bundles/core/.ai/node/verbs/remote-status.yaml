@@ -9,7 +9,6 @@ aliases:
   - remote
   - status
   project_resolution: optional
-  positional_field: remote
   positional_forms:
   - slots:
     - field: remote

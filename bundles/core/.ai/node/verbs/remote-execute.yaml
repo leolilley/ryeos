@@ -8,7 +8,6 @@ aliases:
 - tokens:
   - remote
   - execute
-  positional_field: item_ref
   project_resolution: optional
   positional_forms:
   - slots:

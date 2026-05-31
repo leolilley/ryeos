@@ -470,7 +470,6 @@ fn synthesize_aliases_from_verbs(verbs: &[VerbRecord]) -> Vec<AliasRecord> {
                 deprecated: alias.deprecated,
                 replacement_tokens: alias.replacement_tokens.clone(),
                 removed_in: alias.removed_in.clone(),
-                positional_field: alias.positional_field.clone(),
                 positional_forms: alias.positional_forms.clone(),
                 project_resolution: alias.project_resolution,
                 source_file: verb.source_file.clone(),
@@ -920,7 +919,6 @@ mod tests {
                 deprecated: None,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: Some("item_ref".into()),
                 positional_forms: Vec::new(),
                 project_resolution: crate::node_config::sections::alias::ProjectResolution::None,
             }],
@@ -932,7 +930,6 @@ mod tests {
         assert_eq!(aliases[0].tokens, vec!["sign"]);
         assert_eq!(aliases[0].verb, "sign");
         assert_eq!(aliases[0].description, "Sign an item");
-        assert_eq!(aliases[0].positional_field.as_deref(), Some("item_ref"));
         assert_eq!(
             aliases[0].source_file,
             PathBuf::from("/bundle/.ai/node/verbs/sign.yaml")
@@ -950,7 +947,6 @@ mod tests {
             deprecated: None,
             replacement_tokens: None,
             removed_in: None,
-            positional_field: None,
             positional_forms: Vec::new(),
             project_resolution: crate::node_config::sections::alias::ProjectResolution::None,
             source_file: PathBuf::from("/a.yaml"),

@@ -571,8 +571,7 @@ fn bind_params_minimal(
         return Ok(input);
     }
 
-    let normalized = normalize_bare_key_value_args(tail);
-    let mut params = ryeos_runtime::arg_binder::bind_argv_with_alias(&normalized, Some(alias))
+    let mut params = ryeos_runtime::arg_binder::bind_argv_with_alias(tail, Some(alias))
         .map_err(|e| CliError::Local { detail: e })?;
 
     // Project resolution
@@ -732,25 +731,6 @@ fn expand_template(
     let mut out = template.replace("{params_json}", params_json);
     out = out.replace("{project_path}", project_path);
     Ok(out)
-}
-
-fn normalize_bare_key_value_args(rest: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(rest.len());
-    for token in rest {
-        if token.starts_with('-') {
-            out.push(token.clone());
-            continue;
-        }
-        if let Some((key, value)) = token.split_once('=') {
-            if !key.is_empty() && !value.is_empty() {
-                out.push(format!("--{key}"));
-                out.push(value.to_string());
-                continue;
-            }
-        }
-        out.push(token.clone());
-    }
-    out
 }
 
 fn params_to_tail(params: &Value) -> Vec<String> {
@@ -947,7 +927,7 @@ mod tests {
                     .join("node")
                     .join("verbs")
                     .join("custom.yaml"),
-                "name: custom\nexecute: service:custom\naliases:\n  - tokens: [\"custom\"]\n    positional_field: name\n",
+                "name: custom\nexecute: service:custom\naliases:\n  - tokens: [\"custom\"]\n    positional_forms:\n      - slots:\n          - field: name\n",
             );
             let offline_execute_line = offline_execute_line.unwrap_or("");
             self.write_signed(

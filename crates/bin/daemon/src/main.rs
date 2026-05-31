@@ -332,8 +332,7 @@ async fn main() -> Result<()> {
                     deprecated: r.deprecated.unwrap_or(false),
                     replacement_tokens: r.replacement_tokens.clone(),
                     removed_in: r.removed_in.clone(),
-                    positional_field: r.positional_field.clone(),
-                    positional_forms: r
+                        positional_forms: r
                         .positional_forms
                         .iter()
                         .map(|f| ryeos_runtime::alias_registry::PositionalForm {
@@ -817,8 +816,7 @@ async fn run_service_standalone(
                     deprecated: r.deprecated.unwrap_or(false),
                     replacement_tokens: r.replacement_tokens.clone(),
                     removed_in: r.removed_in.clone(),
-                    positional_field: r.positional_field.clone(),
-                    positional_forms: r
+                        positional_forms: r
                         .positional_forms
                         .iter()
                         .map(|f| ryeos_runtime::alias_registry::PositionalForm {

@@ -9,4 +9,6 @@ aliases:
   - snapshot
   - show
   description: Show metadata for a local snapshot
-  positional_field: snapshot_hash
+  positional_forms:
+  - slots:
+    - field: snapshot_hash

@@ -6,7 +6,6 @@
 //! ## Rules
 //!
 //! - `--key=value` → `{ "key": "value" }`  (hyphens normalised to underscores)
-//! - `key=value` → `{ "key": "value" }` (convenience form used by Rye's Python CLI)
 //! - `--key value` → `{ "key": "value" }`  (next token consumed as value)
 //! - `--key` (alone or before `--next`) → `{ "key": true }`
 //! - `--key -1` → `{ "key": "-1" }` (single-dash values are values, not flags)
@@ -17,7 +16,7 @@
 //!   deserialize via [`crate::scalar_or_vec`] to accept both forms.
 //! - Empty input → `{}`
 
-use crate::alias_registry::{AliasDef, PositionalForm, PositionalMatcher, PositionalSlot};
+use crate::alias_registry::{AliasDef, PositionalMatcher, PositionalSlot};
 
 /// Normalise a flag key: strip the `--` prefix (already done by caller)
 /// and replace hyphens with underscores so `--public-key` becomes `public_key`.
@@ -33,9 +32,6 @@ fn normalise_key(key: &str) -> String {
 /// terminator, no type coercion. The daemon validates params against the
 /// item's schema downstream.
 ///
-/// See [`bind_argv_with_positional_field`] for the schema-aware variant
-/// that maps a lone positional argument to a named field (e.g. `item_ref`
-/// for `ryeos execute <item_ref>`).
 pub fn bind_argv(argv: &[String]) -> serde_json::Value {
     let mut params = serde_json::Map::new();
     let mut positional = Vec::new();
@@ -65,20 +61,6 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
                 (normalise_key(key), serde_json::Value::Bool(true))
             };
             insert_or_accumulate(&mut params, k, v);
-        } else if let Some((key, value)) = token.split_once('=') {
-            // Rye Python CLI compatibility / prompt-friendly shorthand:
-            // `remote=railway` should bind exactly like `--remote railway`.
-            // Keep `=foo` and `foo=` positional-ish rather than inventing
-            // empty keys or surprising empty values.
-            if !key.is_empty() && !value.is_empty() {
-                insert_or_accumulate(
-                    &mut params,
-                    normalise_key(key),
-                    serde_json::Value::String(value.to_string()),
-                );
-            } else {
-                positional.push(serde_json::Value::String(token.clone()));
-            }
         } else {
             positional.push(serde_json::Value::String(token.clone()));
         }
@@ -92,56 +74,8 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
     serde_json::Value::Object(params)
 }
 
-/// Schema-aware variant of [`bind_argv`]: when the caller knows the
-/// schema has a single positional-friendly required field (e.g. `item_ref`
-/// for `ryeos execute <item_ref>`), pass its name here and a lone
-/// positional argument will be bound to that field instead of landing
-/// in `_args`.
-///
-/// Rules (in addition to [`bind_argv`]):
-/// - If `positional_field` is `None`, behaves identically to `bind_argv`.
-/// - If `positional_field` is `Some(name)` AND the binding produced
-///   `_args` with exactly one element AND no key matching `name` was
-///   already set by a `--name` flag, the lone positional is moved to
-///   `params[name]` and `_args` is removed.
-/// - If there are zero positionals, or more than one, `_args` is left
-///   in place (avoid surprising the caller — multi-positional is an
-///   error condition the schema layer should diagnose).
-/// - If a `--<positional_field>` flag was set, the positional binding
-///   is also left in `_args` (explicit `--flag` wins over positional).
-pub fn bind_argv_with_positional_field(
-    argv: &[String],
-    positional_field: Option<&str>,
-) -> serde_json::Value {
-    let mut value = bind_argv(argv);
-    let Some(field) = positional_field else {
-        return value;
-    };
-    let normalised_field = normalise_key(field);
-    let Some(obj) = value.as_object_mut() else {
-        return value;
-    };
-    // Don't clobber an explicit --flag setting.
-    if obj.contains_key(&normalised_field) {
-        return value;
-    }
-    // Only re-bind if exactly one positional.
-    let single = obj
-        .get("_args")
-        .and_then(|v| v.as_array())
-        .filter(|arr| arr.len() == 1)
-        .and_then(|arr| arr[0].as_str())
-        .map(String::from);
-    if let Some(s) = single {
-        obj.remove("_args");
-        obj.insert(normalised_field, serde_json::Value::String(s));
-    }
-    value
-}
-
 /// Alias-aware binding driven by alias metadata. Supports ordered
-/// positional forms while retaining `positional_field` as a migration
-/// shim for old aliases.
+/// positional forms and fails closed on undeclared positional tails.
 pub fn bind_argv_with_alias(
     argv: &[String],
     alias: Option<&AliasDef>,
@@ -153,18 +87,9 @@ pub fn bind_argv_with_alias(
     let mut value = bind_argv(argv);
     decode_structured_alias_fields(&mut value)?;
 
-    let mut forms = alias.positional_forms.clone();
+    let forms = alias.positional_forms.clone();
     if forms.is_empty() {
-        if let Some(field) = &alias.positional_field {
-            forms.push(PositionalForm {
-                slots: vec![PositionalSlot {
-                    field: field.clone(),
-                    matcher: PositionalMatcher::Any,
-                }],
-            });
-        }
-    }
-    if forms.is_empty() {
+        reject_undeclared_positionals(&value, alias)?;
         return Ok(value);
     }
 
@@ -210,6 +135,24 @@ pub fn bind_argv_with_alias(
     Err(format!(
         "positional arguments {:?} do not match any positional form for alias {:?}",
         positionals, alias.tokens
+    ))
+}
+
+fn reject_undeclared_positionals(
+    value: &serde_json::Value,
+    alias: &AliasDef,
+) -> Result<(), String> {
+    let positionals = value
+        .get("_args")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.len())
+        .unwrap_or_default();
+    if positionals == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "alias {:?} does not declare positional_forms but received {positionals} positional argument(s)",
+        alias.tokens
     ))
 }
 
@@ -289,25 +232,10 @@ mod tests {
     }
 
     #[test]
-    fn bare_key_value_binds_like_flag_value() {
-        let result = bind_argv(&["remote=railway".into(), "limit=5".into()]);
-        assert_eq!(result["remote"], "railway");
-        assert_eq!(result["limit"], "5");
-        assert!(result.get("_args").is_none());
-    }
-
-    #[test]
-    fn bare_key_value_normalises_hyphens() {
-        let result = bind_argv(&["remote-project=/srv/app".into()]);
-        assert_eq!(result["remote_project"], "/srv/app");
-        assert!(result.get("remote-project").is_none());
-    }
-
-    #[test]
-    fn empty_bare_key_value_stays_positional() {
-        let result = bind_argv(&["foo=".into(), "=bar".into()]);
+    fn bare_key_value_stays_positional() {
+        let result = bind_argv(&["remote=railway".into(), "foo=".into(), "=bar".into()]);
         let args = result["_args"].as_array().unwrap();
-        assert_eq!(args, &["foo=", "=bar"]);
+        assert_eq!(args, &["remote=railway", "foo=", "=bar"]);
     }
 
     #[test]
@@ -466,86 +394,6 @@ mod tests {
         assert_eq!(result["dry_run"], true);
     }
 
-    // ── Item 7: bind_argv_with_positional_field ──
-
-    #[test]
-    fn positional_field_none_behaves_like_bind_argv() {
-        let argv = vec!["foo".into()];
-        let with = bind_argv_with_positional_field(&argv, None);
-        let plain = bind_argv(&argv);
-        assert_eq!(with, plain);
-    }
-
-    #[test]
-    fn positional_field_binds_lone_positional_to_named_field() {
-        let argv = vec!["directive:my/task".into()];
-        let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
-        assert_eq!(result["item_ref"], "directive:my/task");
-        assert!(
-            result.get("_args").is_none(),
-            "_args must be removed when positional is bound"
-        );
-    }
-
-    #[test]
-    fn positional_field_leaves_multi_positional_in_args() {
-        let argv = vec!["a".into(), "b".into()];
-        let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
-        // Multi-positional: don't guess. Leave _args populated.
-        assert!(
-            result.get("item_ref").is_none(),
-            "must not bind when multi-positional"
-        );
-        let args = result["_args"].as_array().unwrap();
-        assert_eq!(args.len(), 2);
-    }
-
-    #[test]
-    fn positional_field_yields_to_explicit_flag() {
-        let argv = vec!["--item-ref".into(), "explicit:foo".into(), "lone".into()];
-        let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
-        // Explicit --item-ref wins; lone positional remains in _args.
-        assert_eq!(result["item_ref"], "explicit:foo");
-        let args = result["_args"].as_array().unwrap();
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0], "lone");
-    }
-
-    #[test]
-    fn positional_field_with_flags_and_one_positional() {
-        let argv = vec![
-            "--verbose".into(),
-            "tool:foo".into(),
-            "--limit".into(),
-            "5".into(),
-        ];
-        let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
-        // `tool:foo` is consumed by --verbose because the binder is
-        // schema-free and treats the next non-dash token as the value.
-        // So _args is empty here — verify the bind doesn't synthesize
-        // a phantom item_ref.
-        assert!(result.get("item_ref").is_none(), "no positional to bind");
-        assert_eq!(result["verbose"], "tool:foo");
-        assert_eq!(result["limit"], "5");
-    }
-
-    #[test]
-    fn positional_field_normalises_hyphenated_field_name() {
-        let argv = vec!["directive:my/task".into()];
-        let result = bind_argv_with_positional_field(&argv, Some("item-ref"));
-        // hyphen normalised to underscore
-        assert_eq!(result["item_ref"], "directive:my/task");
-    }
-
-    #[test]
-    fn positional_field_no_positional_no_op() {
-        let argv = vec!["--name".into(), "alice".into()];
-        let result = bind_argv_with_positional_field(&argv, Some("item_ref"));
-        // Nothing to bind; flags pass through.
-        assert!(result.get("item_ref").is_none());
-        assert_eq!(result["name"], "alice");
-    }
-
     #[test]
     fn alias_decodes_parameters_json_object() {
         let alias = AliasDef {
@@ -554,7 +402,6 @@ mod tests {
             deprecated: false,
             replacement_tokens: None,
             removed_in: None,
-            positional_field: None,
             positional_forms: Vec::new(),
             project_resolution: crate::alias_registry::ProjectResolution::None,
         };
@@ -580,7 +427,6 @@ mod tests {
             deprecated: false,
             replacement_tokens: None,
             removed_in: None,
-            positional_field: None,
             positional_forms: Vec::new(),
             project_resolution: crate::alias_registry::ProjectResolution::None,
         };

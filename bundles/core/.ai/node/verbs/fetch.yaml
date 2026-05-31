@@ -8,10 +8,16 @@ aliases:
 - tokens:
   - f
   description: Fetch (short form)
-  positional_field: item_ref
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
   project_resolution: optional
 - tokens:
   - fetch
   description: Fetch a resource from the daemon
-  positional_field: item_ref
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
   project_resolution: optional

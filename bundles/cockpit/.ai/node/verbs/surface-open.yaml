@@ -8,5 +8,7 @@ aliases:
 - tokens:
   - surface
   - open
-  positional_field: surface
+  positional_forms:
+  - slots:
+    - field: surface
   project_resolution: optional

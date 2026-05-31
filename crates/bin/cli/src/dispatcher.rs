@@ -141,9 +141,8 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    service-schema `project` field, while global `-p/--project` before
     //    the verb remains supported by clap above.
 
-    let normalized_kv = normalize_bare_key_value_args(&cli.rest);
     let tokens = canonicalize_tokens_from_alias_metadata(
-        &normalized_kv,
+        &cli.rest,
         &system_space_dir,
         cli.project.as_deref(),
     )?;
@@ -156,28 +155,6 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     let result = post_to_daemon(&system_space_dir, &body).await?;
     print_result(result);
     Ok(())
-}
-
-/// CLI-side compatibility for Rye's historical `key=value` shorthand.
-/// Token-mode binding happens inside the daemon; rewriting here means a
-/// newer CLI remains pleasant even when talking to an older local daemon.
-fn normalize_bare_key_value_args(rest: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(rest.len());
-    for token in rest {
-        if token.starts_with('-') {
-            out.push(token.clone());
-            continue;
-        }
-        if let Some((key, value)) = token.split_once('=') {
-            if !key.is_empty() && !value.is_empty() {
-                out.push(format!("--{key}"));
-                out.push(value.to_string());
-                continue;
-            }
-        }
-        out.push(token.clone());
-    }
-    out
 }
 
 fn canonicalize_tokens_from_alias_metadata(
@@ -207,10 +184,7 @@ fn canonicalize_tokens_with_aliases_and_project(
     };
     let tail = &rest[consumed..];
 
-    if alias.positional_field.is_none()
-        && alias.positional_forms.is_empty()
-        && alias.project_resolution == ProjectResolution::None
-    {
+    if alias.positional_forms.is_empty() && alias.project_resolution == ProjectResolution::None {
         return Ok(rest.to_vec());
     }
 
@@ -407,7 +381,6 @@ mod tests {
             deprecated: false,
             replacement_tokens: None,
             removed_in: None,
-            positional_field: None,
             positional_forms: forms
                 .into_iter()
                 .map(|slots| PositionalForm {
@@ -434,16 +407,6 @@ mod tests {
         let out = canonicalize_tokens_with_aliases(&s(&["remote", "threads", "railway"]), &aliases)
             .unwrap();
         assert_eq!(out, s(&["remote", "threads", "--remote", "railway"]));
-    }
-
-    #[test]
-    fn bare_key_value_is_normalized_for_token_mode() {
-        let out =
-            normalize_bare_key_value_args(&s(&["remote", "status", "remote=railway", "limit=5"]));
-        assert_eq!(
-            out,
-            s(&["remote", "status", "--remote", "railway", "--limit", "5",])
-        );
     }
 
     #[test]

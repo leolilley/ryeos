@@ -8,11 +8,15 @@ aliases:
 - tokens:
   - commit
   description: Create a snapshot using git-familiar wording
-  positional_field: message
+  positional_forms:
+  - slots:
+    - field: message
   project_resolution: required
 - tokens:
   - snapshot
   - create
   description: Create a local project snapshot
-  positional_field: message
+  positional_forms:
+  - slots:
+    - field: message
   project_resolution: required

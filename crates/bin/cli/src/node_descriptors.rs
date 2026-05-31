@@ -38,8 +38,6 @@ struct VerbAliasYaml {
     #[serde(default)]
     removed_in: Option<String>,
     #[serde(default)]
-    positional_field: Option<String>,
-    #[serde(default)]
     positional_forms: Vec<PositionalForm>,
     #[serde(default)]
     project_resolution: ProjectResolution,
@@ -85,7 +83,6 @@ pub fn load_alias_descriptors(
                     deprecated: alias.deprecated.unwrap_or(false),
                     replacement_tokens: alias.replacement_tokens,
                     removed_in: alias.removed_in,
-                    positional_field: alias.positional_field,
                     positional_forms: alias.positional_forms,
                     project_resolution: alias.project_resolution,
                 },

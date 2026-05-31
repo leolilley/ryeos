@@ -8,5 +8,8 @@ aliases:
 - tokens:
   - verify
   description: Verify an item's signature and integrity
-  positional_field: item_ref
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
   project_resolution: optional

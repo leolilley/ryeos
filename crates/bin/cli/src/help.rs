@@ -387,8 +387,6 @@ fn usage_tail(alias: &LoadedAliasDescriptor, item: Option<&ItemHelpMetadata>) ->
                 parts.push(shape);
             }
         }
-    } else if let Some(field) = &alias.def.positional_field {
-        parts.push(format!("<{}>", field.replace('_', "-")));
     }
 
     if let Some(item) = item {

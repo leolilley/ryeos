@@ -7,5 +7,7 @@ execute: client:ryeos/tui
 aliases:
 - tokens:
   - tui
-  positional_field: surface
+  positional_forms:
+  - slots:
+    - field: surface
   project_resolution: optional

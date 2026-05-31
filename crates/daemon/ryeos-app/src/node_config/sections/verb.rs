@@ -28,9 +28,6 @@ pub struct VerbAliasRecord {
     /// If deprecated, the version in which this alias will be removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_in: Option<String>,
-    /// If present, binds a lone positional argument in the tail to this field.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub positional_field: Option<String>,
     /// Ordered alternative positional forms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub positional_forms: Vec<PositionalForm>,
@@ -183,7 +180,7 @@ mod tests {
         body["aliases"] = serde_json::json!([
             {
                 "tokens": ["sign"],
-                "positional_field": "item_ref"
+                "positional_forms": [{ "slots": [{ "field": "item_ref" }] }]
             },
             {
                 "tokens": ["s"],
@@ -197,8 +194,8 @@ mod tests {
         assert_eq!(record.aliases.len(), 2);
         assert_eq!(record.aliases[0].tokens, vec!["sign"]);
         assert_eq!(
-            record.aliases[0].positional_field.as_deref(),
-            Some("item_ref")
+            record.aliases[0].positional_forms[0].slots[0].field,
+            "item_ref"
         );
         assert_eq!(
             record.aliases[1].description.as_deref(),

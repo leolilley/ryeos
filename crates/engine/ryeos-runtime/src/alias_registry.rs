@@ -55,12 +55,6 @@ pub struct AliasDef {
     pub replacement_tokens: Option<Vec<String>>,
     /// If deprecated, the version in which this alias will be removed.
     pub removed_in: Option<String>,
-    /// If present, a lone positional argument in the tail is bound to
-    /// this field instead of landing in `_args`. E.g. `item_ref` for
-    /// `ryeos execute <item_ref>` or `remote` for
-    /// `ryeos remote configure <remote_name>`. See
-    /// [`crate::arg_binder::bind_argv_with_positional_field`].
-    pub positional_field: Option<String>,
     /// Ordered alternative positional forms for this alias. The first
     /// form whose matchers accept the positional tail is used. This is
     /// the data-driven replacement for command-specific CLI shims.
@@ -212,7 +206,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -222,7 +215,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -232,7 +224,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -242,7 +233,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -252,7 +242,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -262,7 +251,6 @@ mod tests {
                 deprecated: true,
                 replacement_tokens: Some(vec!["sign".into()]),
                 removed_in: Some("0.4.0".into()),
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -386,7 +374,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },
@@ -396,7 +383,6 @@ mod tests {
                 deprecated: false,
                 replacement_tokens: None,
                 removed_in: None,
-                positional_field: None,
                 positional_forms: Vec::new(),
                 project_resolution: crate::alias_registry::ProjectResolution::None,
             },

@@ -8,7 +8,13 @@ aliases:
 - tokens:
   - s
   description: Sign (short form)
-  positional_field: item_ref
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
 - tokens:
   - sign
-  positional_field: item_ref
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
