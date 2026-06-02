@@ -6,6 +6,7 @@
 //! `config` block. Two ⇒ `EngineError::MultipleRuntimeConfigs`.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -34,6 +35,25 @@ pub struct RuntimeConfig {
 
 fn default_timeout_secs() -> u64 {
     300
+}
+
+fn timeout_secs_from_params(
+    params: &Value,
+    descriptor_timeout_secs: u64,
+    source_path: &Path,
+) -> Result<u64, EngineError> {
+    let Some(timeout) = params.get("timeout") else {
+        return Ok(descriptor_timeout_secs);
+    };
+
+    timeout
+        .as_u64()
+        .ok_or_else(|| EngineError::InvalidRuntimeConfig {
+            path: source_path.display().to_string(),
+            reason: format!(
+                "invalid execution timeout: expected unsigned integer seconds, got {timeout}"
+            ),
+        })
 }
 
 pub struct RuntimeConfigHandler;
@@ -76,11 +96,13 @@ impl RuntimeHandler for RuntimeConfigHandler {
                 reason: format!("{e}"),
             }
         })?;
+        let timeout_secs =
+            timeout_secs_from_params(&ctx.params, config.timeout_secs, &intermediate.source_path)?;
 
         ctx.spec_overrides.command = Some(config.command);
         ctx.spec_overrides.args = Some(config.args);
         ctx.spec_overrides.stdin_data = config.input_data;
-        ctx.spec_overrides.timeout_secs = Some(config.timeout_secs);
+        ctx.spec_overrides.timeout_secs = Some(timeout_secs);
 
         // Expand cwd template now (template_ctx has the always-
         // present `tool_dir` / `tool_parent` extras and any
@@ -102,5 +124,37 @@ impl RuntimeHandler for RuntimeConfigHandler {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn descriptor_timeout_wins_when_no_execution_override_present() {
+        let path = PathBuf::from("/tmp/runtime.yaml");
+        let timeout = timeout_secs_from_params(&json!({}), 300, &path).unwrap();
+        assert_eq!(timeout, 300);
+    }
+
+    #[test]
+    fn execution_timeout_override_wins_over_descriptor_default() {
+        let path = PathBuf::from("/tmp/runtime.yaml");
+        let timeout = timeout_secs_from_params(&json!({"timeout": 7200}), 300, &path).unwrap();
+        assert_eq!(timeout, 7200);
+    }
+
+    #[test]
+    fn execution_timeout_override_must_be_unsigned_integer_seconds() {
+        let path = PathBuf::from("/tmp/runtime.yaml");
+        let err = timeout_secs_from_params(&json!({"timeout": "7200"}), 300, &path)
+            .expect_err("string timeout should fail");
+        assert!(
+            matches!(err, EngineError::InvalidRuntimeConfig { ref reason, .. } if reason.contains("invalid execution timeout")),
+            "got {err:?}"
+        );
     }
 }
