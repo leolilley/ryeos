@@ -11,7 +11,7 @@
 //!     `ctx.params["resolved_config"]` so the tool body receives it.
 //!   * On non-root chain elements (runtime / primitive hops):
 //!     extract `defaults` + per-tool overrides
-//!     (`tools.<root_executor_id>`), filter to keys in
+//!     (`tools.<root_item_id>`), filter to keys in
 //!     (universal `{"timeout"}` ∪ this element's `execution_params`),
 //!     and set in `ctx.params` only if not already present (caller
 //!     wins).
@@ -36,7 +36,7 @@ pub const KEY: &str = "config_resolve";
 
 /// Universal execution-config keys allowed on every runtime element,
 /// regardless of its declared `execution_params`.
-const UNIVERSAL_EXEC_KEYS: &[&str] = &["timeout"];
+const UNIVERSAL_EXEC_KEYS: &[&str] = &["timeout", "cancellation_mode", "cancellation_grace_secs"];
 
 /// One config spec — relative path under `.ai/config/` plus a
 /// resolution mode. `#[serde(deny_unknown_fields)]` so typos surface
@@ -125,28 +125,37 @@ impl RuntimeHandler for ConfigResolveHandler {
         if ctx.current_index == 0 {
             // Root tool: hand the resolved config straight to the
             // tool body via parameters["resolved_config"].
+            tracing::info!(
+                item_ref = %ctx.chain[0].resolved_ref,
+                config_resolve_mode = ?spec,
+                "resolved config attached to root parameters"
+            );
             insert_param(&mut ctx.params, "resolved_config", resolved);
         } else {
             // Runtime / primitive element: extract execution overrides
             // and conditionally inject into params.
             //
-            // Python uses `chain[0].item_id` — in this engine that is
-            // `executor_id` on the root ChainIntermediate (the same
-            // identifier used to look up the tool through resolution).
-            let root_tool_id = ctx
-                .chain
-                .first()
-                .map(|c| c.executor_id.as_str())
-                .unwrap_or("");
+            // Execution config is keyed by the actual root item being
+            // executed, not by the root item's selected runtime. For example
+            // `tool:snap-track/scrapers/hydrate-shows` may execute through
+            // `tool:snap-track/runtimes/python-function`, but the config key
+            // is `tools."snap-track/scrapers/hydrate-shows"`.
+            let root_tool_id = crate::runtime::root_item_bare_id(ctx.chain)?;
 
             let exec_defaults = resolved
                 .get("defaults")
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
+            let defaults_present = !exec_defaults.is_empty();
+            let tool_override_present = resolved
+                .get("tools")
+                .and_then(|t| t.get(&root_tool_id))
+                .and_then(Value::as_object)
+                .is_some();
             let tool_overrides = resolved
                 .get("tools")
-                .and_then(|t| t.get(root_tool_id))
+                .and_then(|t| t.get(&root_tool_id))
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
@@ -178,15 +187,32 @@ impl RuntimeHandler for ConfigResolveHandler {
                 }
             }
 
+            let mut injected_keys = Vec::new();
+            let mut caller_won_keys = Vec::new();
+            let mut filtered_keys = Vec::new();
             for (ek, ev) in exec_config {
                 if !allowed.contains(&ek) {
+                    filtered_keys.push(ek);
                     continue;
                 }
                 if param_already_present(&ctx.params, &ek) {
+                    caller_won_keys.push(ek);
                     continue;
                 }
+                injected_keys.push(ek.clone());
                 insert_param(&mut ctx.params, &ek, ev);
             }
+            tracing::info!(
+                root_item_ref = %ctx.chain[0].resolved_ref,
+                runtime_item_ref = %intermediate.resolved_ref,
+                lookup_key = %format!("tools.{root_tool_id}"),
+                defaults_present,
+                item_override_present = tool_override_present,
+                injected_keys = ?injected_keys,
+                caller_won_keys = ?caller_won_keys,
+                filtered_keys = ?filtered_keys,
+                "execution config resolved for runtime hop"
+            );
         }
 
         Ok(())
@@ -221,6 +247,12 @@ fn resolve_single(spec: &ConfigSpec, ctx: &CompileContext<'_>) -> Result<Value, 
             for root in &ctx.roots.ordered {
                 let candidate = root.ai_root.join("config").join(&spec.path);
                 if candidate.exists() {
+                    tracing::info!(
+                        config_path = %candidate.display(),
+                        space = ?root.space,
+                        mode = "deep_merge",
+                        "config_resolve loaded config layer"
+                    );
                     let layer = load_and_verify_config_file(&candidate, ctx)?;
                     merged = deep_merge(merged, layer);
                 }
@@ -236,6 +268,12 @@ fn resolve_single(spec: &ConfigSpec, ctx: &CompileContext<'_>) -> Result<Value, 
                 for root in ctx.roots.ordered.iter().filter(|r| r.space == *target) {
                     let candidate = root.ai_root.join("config").join(&spec.path);
                     if candidate.exists() {
+                        tracing::info!(
+                            config_path = %candidate.display(),
+                            space = ?root.space,
+                            mode = "first_match",
+                            "config_resolve selected config file"
+                        );
                         return load_and_verify_config_file(&candidate, ctx);
                     }
                 }
@@ -567,6 +605,20 @@ metadata:
         }
     }
 
+    fn fake_intermediate_with_ref(
+        executor_id: &str,
+        resolved_ref: &str,
+        parsed: Value,
+    ) -> ChainIntermediate {
+        ChainIntermediate {
+            executor_id: executor_id.into(),
+            resolved_ref: resolved_ref.into(),
+            kind: "tool".into(),
+            source_path: PathBuf::from("/tmp/fake"),
+            parsed,
+        }
+    }
+
     // ── Tests ────────────────────────────────────────────────────────
 
     #[test]
@@ -735,6 +787,62 @@ metadata:
         );
         // Root-tool sentinel must NOT appear on a non-root call.
         assert!(params.get("resolved_config").is_none());
+    }
+
+    #[test]
+    fn chain_non_root_tool_override_uses_root_item_id_not_runtime_id() {
+        let rig = build_rig();
+        write_signed_config(
+            &rig.project_ai,
+            "exec.yaml",
+            "defaults:\n  timeout: 300\n\
+             tools:\n  my/app/tool:\n    timeout: 7200\n  my/runtimes/python-function:\n    timeout: 111\n",
+        );
+
+        let chain = vec![
+            // Root item is `tool:my/app/tool`, but it executes via the shared
+            // Python runtime. The per-tool override must match the root item,
+            // not the runtime id.
+            fake_intermediate_with_ref(
+                "tool:my/runtimes/python-function",
+                "tool:my/app/tool",
+                json!({}),
+            ),
+            fake_intermediate_with_ref(
+                "tool:my/runtimes/python-function",
+                "tool:my/runtimes/python-function",
+                json!({ "config_resolve": { "path": "exec.yaml" } }),
+            ),
+        ];
+        let block = json!({ "type": "single", "spec": { "path": "exec.yaml" } });
+
+        let params = run_handler(&rig, chain, 1, block, json!({})).unwrap();
+        assert_eq!(params["timeout"], json!(7200));
+    }
+
+    #[test]
+    fn chain_non_root_injects_cancellation_policy_for_native_async() {
+        let rig = build_rig();
+        write_signed_config(
+            &rig.project_ai,
+            "exec.yaml",
+            "defaults:\n  cancellation_mode: graceful\n  cancellation_grace_secs: 5\n\
+             tools:\n  my/app/tool:\n    cancellation_grace_secs: 90\n",
+        );
+
+        let chain = vec![
+            fake_intermediate_with_ref("tool:my/runtimes/native", "tool:my/app/tool", json!({})),
+            fake_intermediate_with_ref(
+                "tool:my/runtimes/native",
+                "tool:my/runtimes/native",
+                json!({ "config_resolve": { "path": "exec.yaml" } }),
+            ),
+        ];
+        let block = json!({ "type": "single", "spec": { "path": "exec.yaml" } });
+
+        let params = run_handler(&rig, chain, 1, block, json!({})).unwrap();
+        assert_eq!(params["cancellation_mode"], json!("graceful"));
+        assert_eq!(params["cancellation_grace_secs"], json!(90));
     }
 
     #[test]

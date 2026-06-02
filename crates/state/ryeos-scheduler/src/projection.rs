@@ -309,11 +309,13 @@ fn fire_record_from_entry(entry: &serde_json::Value) -> FireRecord {
         status: entry_str(entry, "status"),
         trigger_reason: entry
             .get("trigger_reason")
+            .or_else(|| entry.get("skipped_reason"))
             .and_then(|v| v.as_str())
             .unwrap_or("normal")
             .to_string(),
         outcome: entry
             .get("outcome")
+            .or_else(|| entry.get("skipped_reason"))
             .and_then(|v| v.as_str())
             .map(String::from),
         signer_fingerprint: entry

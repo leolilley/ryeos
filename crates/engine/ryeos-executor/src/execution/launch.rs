@@ -10,7 +10,10 @@ use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
 };
-use super::limits::{compute_effective_limits, load_limits_config};
+use super::limits::{
+    apply_execution_policy_overrides, compute_effective_limits, load_execution_policy_limits,
+    load_limits_config,
+};
 use super::thread_meta::ThreadMeta;
 use ryeos_app::callback_token::compute_ttl;
 use ryeos_app::state::AppState;
@@ -615,6 +618,16 @@ pub async fn build_and_launch(
     let thread_id = thread.thread_id.clone();
 
     // 2. Compute limits (root execution: depth = 0)
+    let root_item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&resolved.item_ref)
+        .map_err(|e| anyhow::anyhow!("build_and_launch: invalid root item ref: {e}"))?;
+    let execution_policy_limits = load_execution_policy_limits(project_path, &root_item_ref)
+        .with_context(|| {
+            format!(
+                "loading execution policy for item {} in project {}",
+                resolved.item_ref,
+                project_path.display()
+            )
+        })?;
     let limits_config = load_limits_config(project_path).with_context(|| {
         format!(
             "loading limits config for project {}",
@@ -622,8 +635,35 @@ pub async fn build_and_launch(
         )
     })?;
     let limits_config = limits_config.unwrap_or_default();
-    let hard_limits =
-        compute_effective_limits(None, &limits_config.defaults, &limits_config.caps, None, 0);
+    let requested_limits = execution_policy_limits
+        .as_ref()
+        .map(|policy| apply_execution_policy_overrides(&limits_config.defaults, policy));
+    let hard_limits = compute_effective_limits(
+        requested_limits.as_ref(),
+        &limits_config.defaults,
+        &limits_config.caps,
+        None,
+        0,
+    );
+    let duration_source = execution_policy_limits
+        .as_ref()
+        .and_then(|policy| policy.duration_seconds_source.as_deref())
+        .unwrap_or("ryeos-runtime/limits.yaml defaults or built-in default");
+    let turns_source = execution_policy_limits
+        .as_ref()
+        .and_then(|policy| policy.turns_source.as_deref())
+        .unwrap_or("ryeos-runtime/limits.yaml defaults or built-in default");
+    tracing::info!(
+        item_ref = %resolved.item_ref,
+        duration_seconds = hard_limits.duration_seconds,
+        duration_source,
+        duration_cap = ?limits_config.caps.duration_seconds,
+        turns = hard_limits.turns,
+        turns_source,
+        turns_cap = ?limits_config.caps.turns,
+        execution_policy_override = execution_policy_limits.is_some(),
+        "native launch execution policy resolved"
+    );
 
     // 3. Effective capabilities derivation happens below — sourced
     //    from `resolution.composed.effective_caps` so callback

@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::canonical_ref::CanonicalRef;
 use crate::contracts::{ExecutionDecorations, PlanSubprocessSpec, RuntimeEnvSource};
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
@@ -93,6 +94,30 @@ pub struct ChainIntermediate {
     pub kind: String,
     pub source_path: PathBuf,
     pub parsed: Value,
+}
+
+/// Return the bare canonical id of the root item being executed.
+///
+/// Runtime handlers often run on non-root chain elements (for example a
+/// shared Python runtime), but execution config is keyed by the actual root
+/// item (`tools."snap-track/scrapers/hydrate-shows"`), not by that root
+/// item's selected runtime (`tool:snap-track/runtimes/python-function`).
+pub(crate) fn root_item_bare_id(chain: &[ChainIntermediate]) -> Result<String, EngineError> {
+    let first = chain.first().ok_or_else(|| {
+        EngineError::Internal("runtime handler called with an empty executor chain".to_string())
+    })?;
+
+    let root_ref = CanonicalRef::parse(&first.resolved_ref).map_err(|e| {
+        EngineError::InvalidRuntimeConfig {
+            path: first.source_path.display().to_string(),
+            reason: format!(
+                "invalid root item ref `{}` in executor chain: {e}",
+                first.resolved_ref
+            ),
+        }
+    })?;
+
+    Ok(root_ref.bare_id)
 }
 
 // ── Template expansion ───────────────────────────────────────────────────

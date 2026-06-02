@@ -240,11 +240,11 @@ async fn record_skip<Ctx: SchedulerContext>(
         schedule_id: spec.schedule_id.clone(),
         scheduled_at,
         fired_at: Some(now),
-        completed_at: None,
+        completed_at: Some(now),
         thread_id: None,
         status: "skipped".to_string(),
         trigger_reason: reason.to_string(),
-        outcome: None,
+        outcome: Some(reason.to_string()),
         signer_fingerprint: Some(spec.signer_fingerprint.clone()),
     };
 
@@ -255,8 +255,11 @@ async fn record_skip<Ctx: SchedulerContext>(
         "schedule_id": spec.schedule_id,
         "scheduled_at": scheduled_at,
         "fired_at": now,
+        "completed_at": now,
         "thread_id": null,
+        "trigger_reason": reason,
         "skipped_reason": reason,
+        "outcome": reason,
         "signer_fingerprint": spec.signer_fingerprint,
     });
     let fires_path = ctx

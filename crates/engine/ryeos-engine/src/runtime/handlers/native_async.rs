@@ -55,63 +55,104 @@ const DEFAULT_GRACEFUL_SECS: u64 = 5;
 /// defaults when the entry is missing.
 struct ResolvedPolicy {
     mode: String,
+    mode_source: &'static str,
     grace_secs: u64,
+    grace_source: &'static str,
 }
 
 fn resolve_policy_from_config(
     ctx: &CompileContext<'_>,
     default_mode: &str,
     default_grace: u64,
-) -> ResolvedPolicy {
+    apply_defaults: bool,
+) -> Result<ResolvedPolicy, EngineError> {
     let mut mode = default_mode.to_owned();
+    let mut mode_source = "native_async default";
     let mut grace = default_grace;
+    let mut grace_source = "native_async default";
 
-    let Some(resolved) = ctx.params.get("resolved_config") else {
-        return ResolvedPolicy {
-            mode,
-            grace_secs: grace,
-        };
-    };
-
-    // Layer 1: system / user / project defaults (already merged by
-    // `ConfigResolveHandler` deep_merge resolution).
-    if let Some(defaults) = resolved.get("defaults") {
-        if let Some(s) = defaults.get("cancellation_mode").and_then(Value::as_str) {
-            mode = s.to_owned();
+    if let Some(resolved) = ctx.params.get("resolved_config") {
+        // Layer 1: system / user / project defaults (already merged by
+        // `ConfigResolveHandler` deep_merge resolution). Runtime descriptor rich
+        // form is also an implementation default, so callers may skip this layer
+        // when preserving an item-local rich form while still allowing exact
+        // execution.yaml item overrides below.
+        if apply_defaults {
+            if let Some(defaults) = resolved.get("defaults") {
+                if let Some(s) = defaults.get("cancellation_mode").and_then(Value::as_str) {
+                    mode = s.to_owned();
+                    mode_source = "resolved_config.defaults.cancellation_mode";
+                }
+                if let Some(n) = defaults
+                    .get("cancellation_grace_secs")
+                    .and_then(Value::as_u64)
+                {
+                    grace = n;
+                    grace_source = "resolved_config.defaults.cancellation_grace_secs";
+                }
+            }
         }
-        if let Some(n) = defaults
-            .get("cancellation_grace_secs")
-            .and_then(Value::as_u64)
-        {
-            grace = n;
+
+        // Layer 2: per-tool overrides keyed by the root item id, not by the
+        // runtime selected by that item.
+        let root_tool_id = crate::runtime::root_item_bare_id(ctx.chain)?;
+        if let Some(tool_overrides) = resolved.get("tools").and_then(|t| t.get(&root_tool_id)) {
+            if let Some(s) = tool_overrides
+                .get("cancellation_mode")
+                .and_then(Value::as_str)
+            {
+                mode = s.to_owned();
+                mode_source = "resolved_config.tools.<root>.cancellation_mode";
+            }
+            if let Some(n) = tool_overrides
+                .get("cancellation_grace_secs")
+                .and_then(Value::as_u64)
+            {
+                grace = n;
+                grace_source = "resolved_config.tools.<root>.cancellation_grace_secs";
+            }
         }
     }
 
-    // Layer 2: per-tool overrides keyed by chain[0]'s executor_id.
-    let root_tool_id = ctx
-        .chain
-        .first()
-        .map(|c| c.executor_id.as_str())
-        .unwrap_or("");
-    if let Some(tool_overrides) = resolved.get("tools").and_then(|t| t.get(root_tool_id)) {
-        if let Some(s) = tool_overrides
-            .get("cancellation_mode")
-            .and_then(Value::as_str)
-        {
+    // Layer 3: direct params win. This covers caller-provided cancellation
+    // params and the common non-root chain where ConfigResolveHandler runs on
+    // the runtime hop and injects the already-merged execution policy keys,
+    // rather than storing `resolved_config` for NativeAsyncHandler to inspect.
+    if let Some(raw_mode) = ctx.params.get("cancellation_mode") {
+        if let Some(s) = raw_mode.as_str() {
             mode = s.to_owned();
+            mode_source = "params.cancellation_mode";
+        } else {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: ctx.chain[ctx.current_index]
+                    .source_path
+                    .display()
+                    .to_string(),
+                reason: "cancellation_mode must be a string (`graceful` | `hard`)".to_string(),
+            });
         }
-        if let Some(n) = tool_overrides
-            .get("cancellation_grace_secs")
-            .and_then(Value::as_u64)
-        {
+    }
+    if let Some(raw_grace) = ctx.params.get("cancellation_grace_secs") {
+        if let Some(n) = raw_grace.as_u64() {
             grace = n;
+            grace_source = "params.cancellation_grace_secs";
+        } else {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: ctx.chain[ctx.current_index]
+                    .source_path
+                    .display()
+                    .to_string(),
+                reason: "cancellation_grace_secs must be an unsigned integer".to_string(),
+            });
         }
     }
 
-    ResolvedPolicy {
+    Ok(ResolvedPolicy {
         mode,
+        mode_source,
         grace_secs: grace,
-    }
+        grace_source,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,8 +210,9 @@ impl RuntimeHandler for NativeAsyncHandler {
         // `native_async: false` is rejected loudly.
         let cancellation_mode = match block {
             Value::Bool(true) => {
-                let policy = resolve_policy_from_config(ctx, "graceful", DEFAULT_GRACEFUL_SECS);
-                match policy.mode.as_str() {
+                let policy =
+                    resolve_policy_from_config(ctx, "graceful", DEFAULT_GRACEFUL_SECS, true)?;
+                let cancellation_mode = match policy.mode.as_str() {
                     "hard" => CancellationMode::Hard,
                     "graceful" => CancellationMode::Graceful {
                         grace_secs: policy.grace_secs,
@@ -184,7 +226,17 @@ impl RuntimeHandler for NativeAsyncHandler {
                             ),
                         });
                     }
-                }
+                };
+                tracing::info!(
+                    root_item_ref = %ctx.chain[0].resolved_ref,
+                    item_ref = %intermediate.resolved_ref,
+                    cancellation_mode = %policy.mode,
+                    mode_source = policy.mode_source,
+                    grace_secs = policy.grace_secs,
+                    grace_source = policy.grace_source,
+                    "native_async cancellation policy resolved"
+                );
+                cancellation_mode
             }
             Value::Bool(false) => {
                 return Err(EngineError::InvalidRuntimeConfig {
@@ -200,12 +252,41 @@ impl RuntimeHandler for NativeAsyncHandler {
                         reason: format!("invalid native_async block: {e}"),
                     }
                 })?;
-                match rich.cancel_mode {
-                    CancelModeChoice::Hard => CancellationMode::Hard,
-                    CancelModeChoice::Graceful => CancellationMode::Graceful {
-                        grace_secs: rich.graceful_shutdown_secs,
+                let (default_mode, default_grace) = match rich.cancel_mode {
+                    CancelModeChoice::Hard => ("hard", rich.graceful_shutdown_secs),
+                    CancelModeChoice::Graceful => ("graceful", rich.graceful_shutdown_secs),
+                };
+                let policy = resolve_policy_from_config(
+                    ctx,
+                    default_mode,
+                    default_grace,
+                    ctx.current_index > 0,
+                )?;
+                let cancellation_mode = match policy.mode.as_str() {
+                    "hard" => CancellationMode::Hard,
+                    "graceful" => CancellationMode::Graceful {
+                        grace_secs: policy.grace_secs,
                     },
-                }
+                    other => {
+                        return Err(EngineError::InvalidRuntimeConfig {
+                            path: intermediate.source_path.display().to_string(),
+                            reason: format!(
+                                "unknown cancellation_mode `{other}` in resolved \
+                                 execution config (expected `graceful` | `hard`)"
+                            ),
+                        });
+                    }
+                };
+                tracing::info!(
+                    root_item_ref = %ctx.chain[0].resolved_ref,
+                    item_ref = %intermediate.resolved_ref,
+                    cancellation_mode = %policy.mode,
+                    mode_source = policy.mode_source,
+                    grace_secs = policy.grace_secs,
+                    grace_source = policy.grace_source,
+                    "native_async cancellation policy resolved"
+                );
+                cancellation_mode
             }
         };
 
@@ -246,6 +327,23 @@ mod tests {
         block: Value,
         initial_params: Value,
     ) -> Result<(SpecOverrides, HashMap<String, String>), EngineError> {
+        run_with_chain(block, initial_params, None)
+    }
+
+    fn run_with_chain(
+        block: Value,
+        initial_params: Value,
+        chain_override: Option<Vec<ChainIntermediate>>,
+    ) -> Result<(SpecOverrides, HashMap<String, String>), EngineError> {
+        run_with_chain_at(block, initial_params, chain_override, 0)
+    }
+
+    fn run_with_chain_at(
+        block: Value,
+        initial_params: Value,
+        chain_override: Option<Vec<ChainIntermediate>>,
+        current_index: usize,
+    ) -> Result<(SpecOverrides, HashMap<String, String>), EngineError> {
         let chain = vec![ChainIntermediate {
             executor_id: "tool:demo".into(),
             resolved_ref: "tool:demo".into(),
@@ -253,6 +351,7 @@ mod tests {
             source_path: PathBuf::from("/tmp/demo.yaml"),
             parsed: json!({ "native_async": block.clone() }),
         }];
+        let chain = chain_override.unwrap_or(chain);
         let parsers = dispatcher_with_canonical_bundle_descriptors();
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
@@ -265,7 +364,7 @@ mod tests {
             params: initial_params,
             original_params: &NULL_PARAMS,
             chain: &chain,
-            current_index: 0,
+            current_index,
             roots: &roots,
             parsers: &parsers,
             kinds: &kinds,
@@ -375,7 +474,7 @@ mod tests {
             "resolved_config": {
                 "defaults": { "cancellation_grace_secs": 5 },
                 "tools": {
-                    "tool:demo": { "cancellation_grace_secs": 90 }
+                    "demo": { "cancellation_grace_secs": 90 }
                 }
             }
         });
@@ -388,8 +487,8 @@ mod tests {
 
     #[test]
     fn rich_form_overrides_resolved_config() {
-        // Bool shorthand defers to system config; rich form is
-        // explicit per-tool intent and wins.
+        // Bool shorthand defers to system config; a root-item rich form is
+        // explicit per-item intent and wins over execution defaults.
         let params = json!({
             "resolved_config": {
                 "defaults": { "cancellation_grace_secs": 999 }
@@ -403,6 +502,93 @@ mod tests {
         assert_eq!(
             overrides.execution.native_async.unwrap().cancellation_mode,
             CancellationMode::Graceful { grace_secs: 7 }
+        );
+    }
+
+    #[test]
+    fn exact_execution_override_beats_root_rich_form() {
+        let params = json!({
+            "resolved_config": {
+                "defaults": { "cancellation_grace_secs": 999 },
+                "tools": {
+                    "demo": { "cancellation_grace_secs": 90 }
+                }
+            }
+        });
+        let (overrides, _) = run_with_params(
+            json!({ "cancel_mode": "graceful", "graceful_shutdown_secs": 7 }),
+            params,
+        )
+        .unwrap();
+        assert_eq!(
+            overrides.execution.native_async.unwrap().cancellation_mode,
+            CancellationMode::Graceful { grace_secs: 90 }
+        );
+    }
+
+    #[test]
+    fn runtime_rich_form_is_default_for_root_execution_policy() {
+        let block = json!({ "cancel_mode": "graceful", "graceful_shutdown_secs": 7 });
+        let params = json!({
+            "resolved_config": {
+                "defaults": { "cancellation_grace_secs": 30 },
+                "tools": {
+                    "my/app/tool": { "cancellation_grace_secs": 90 }
+                }
+            }
+        });
+        let chain = vec![
+            ChainIntermediate {
+                executor_id: "tool:my/runtimes/native".into(),
+                resolved_ref: "tool:my/app/tool".into(),
+                kind: "tool".into(),
+                source_path: PathBuf::from("/tmp/tool.yaml"),
+                parsed: json!({}),
+            },
+            ChainIntermediate {
+                executor_id: "tool:my/runtimes/native".into(),
+                resolved_ref: "tool:my/runtimes/native".into(),
+                kind: "tool".into(),
+                source_path: PathBuf::from("/tmp/runtime.yaml"),
+                parsed: json!({ "native_async": block.clone() }),
+            },
+        ];
+
+        let (overrides, _) = run_with_chain_at(block, params, Some(chain), 1).unwrap();
+        assert_eq!(
+            overrides.execution.native_async.unwrap().cancellation_mode,
+            CancellationMode::Graceful { grace_secs: 90 }
+        );
+    }
+
+    #[test]
+    fn direct_cancellation_params_beat_runtime_rich_form() {
+        let block = json!({ "cancel_mode": "graceful", "graceful_shutdown_secs": 7 });
+        let params = json!({
+            "cancellation_mode": "graceful",
+            "cancellation_grace_secs": 90
+        });
+        let chain = vec![
+            ChainIntermediate {
+                executor_id: "tool:my/runtimes/native".into(),
+                resolved_ref: "tool:my/app/tool".into(),
+                kind: "tool".into(),
+                source_path: PathBuf::from("/tmp/tool.yaml"),
+                parsed: json!({}),
+            },
+            ChainIntermediate {
+                executor_id: "tool:my/runtimes/native".into(),
+                resolved_ref: "tool:my/runtimes/native".into(),
+                kind: "tool".into(),
+                source_path: PathBuf::from("/tmp/runtime.yaml"),
+                parsed: json!({ "native_async": block.clone() }),
+            },
+        ];
+
+        let (overrides, _) = run_with_chain_at(block, params, Some(chain), 1).unwrap();
+        assert_eq!(
+            overrides.execution.native_async.unwrap().cancellation_mode,
+            CancellationMode::Graceful { grace_secs: 90 }
         );
     }
 
