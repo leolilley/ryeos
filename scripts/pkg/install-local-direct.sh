@@ -5,6 +5,7 @@
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
 #   - bundle sources -> /usr/share/ryeos/{core,standard,cockpit,web,hosted-node}
+#     or, with --bundle-set hosted-node, /usr/share/ryeos/{core,hosted-node}
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -30,6 +31,8 @@ Options:
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: ryeos-dev)
+  --bundle-set SET      Bundle set to populate/install: full or hosted-node
+                        (default: full)
   -h, --help            Show this help
 
 Default behavior is safe and complete: populate bundles, install files,
@@ -103,6 +106,7 @@ restart_daemon=1
 cleanup_shadows=1
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
+bundle_set="full"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -132,6 +136,11 @@ while [[ $# -gt 0 ]]; do
             owner="$2"
             shift 2
             ;;
+        --bundle-set)
+            [[ $# -ge 2 ]] || die "--bundle-set requires a value"
+            bundle_set="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -144,9 +153,28 @@ done
 
 cd "$repo_root"
 
+case "$bundle_set" in
+    full)
+        bundle_names=(core standard cockpit web hosted-node)
+        ;;
+    hosted-node)
+        bundle_names=(core hosted-node)
+        ;;
+    *)
+        die "--bundle-set must be 'full' or 'hosted-node', got: $bundle_set"
+        ;;
+esac
+bundle_names_csv=$(IFS=,; echo "${bundle_names[*]}")
+
+if [[ "$bundle_set" == "hosted-node" && $run_init -eq 0 ]]; then
+    echo "[install-local-direct] warning: --no-init installs lean sources only; existing local initialized state is not rewritten" >&2
+fi
+
 bin_dir="/usr/bin"
 share_dir="/usr/share/ryeos"
+doc_dir="/usr/share/doc/ryeos"
 target_dir="$repo_root/target/release"
+init_system_space_dir="${RYEOS_SYSTEM_SPACE_DIR:-}"
 
 # Only user-facing binaries go in /usr/bin/.
 # All handler/runtime/tool binaries live inside bundles under
@@ -165,7 +193,10 @@ optional_bins=(lillux)
 if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
     echo "[install-local-direct] populating bundles"
-    "$repo_root/scripts/populate-bundles.sh" --key "$key" --owner "$owner"
+    "$repo_root/scripts/populate-bundles.sh" \
+        --key "$key" \
+        --owner "$owner" \
+        --bundle-set "$bundle_set"
 fi
 
 daemon_was_running=0
@@ -202,16 +233,11 @@ for b in "${stale_bins[@]}"; do
     fi
 done
 
-[[ -d "$repo_root/bundles/core/.ai" ]] || die "missing bundles/core/.ai"
-[[ -d "$repo_root/bundles/standard/.ai" ]] || die "missing bundles/standard/.ai"
-[[ -d "$repo_root/bundles/cockpit/.ai" ]] || die "missing bundles/cockpit/.ai"
-[[ -d "$repo_root/bundles/web/.ai" ]] || die "missing bundles/web/.ai"
-[[ -d "$repo_root/bundles/hosted-node/.ai" ]] || die "missing bundles/hosted-node/.ai"
-[[ -f "$repo_root/bundles/core/PUBLISHER_TRUST.toml" ]] || die "missing bundles/core/PUBLISHER_TRUST.toml"
-[[ -f "$repo_root/bundles/standard/PUBLISHER_TRUST.toml" ]] || die "missing bundles/standard/PUBLISHER_TRUST.toml"
-[[ -f "$repo_root/bundles/cockpit/PUBLISHER_TRUST.toml" ]] || die "missing bundles/cockpit/PUBLISHER_TRUST.toml"
-[[ -f "$repo_root/bundles/web/PUBLISHER_TRUST.toml" ]] || die "missing bundles/web/PUBLISHER_TRUST.toml"
-[[ -f "$repo_root/bundles/hosted-node/PUBLISHER_TRUST.toml" ]] || die "missing bundles/hosted-node/PUBLISHER_TRUST.toml"
+for name in "${bundle_names[@]}"; do
+    [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
+    [[ -f "$repo_root/bundles/$name/PUBLISHER_TRUST.toml" ]] || \
+        die "missing bundles/$name/PUBLISHER_TRUST.toml"
+done
 
 echo "[install-local-direct] installing binaries -> $bin_dir"
 for b in "${required_bins[@]}"; do
@@ -227,9 +253,22 @@ done
 
 echo "[install-local-direct] installing bundle sources -> $share_dir"
 sudo mkdir -p "$share_dir"
-for bundle_dir in "$repo_root"/bundles/*/; do
+if [[ "$bundle_set" == "hosted-node" ]]; then
+    for path in "$share_dir"/*; do
+        [[ -d "$path/.ai" ]] || continue
+        name="$(basename "$path")"
+        case "$name" in
+            core|hosted-node) ;;
+            *)
+                echo "[install-local-direct] removing non-hosted bundle source: $path"
+                sudo rm -rf "$path"
+                ;;
+        esac
+    done
+fi
+for name in "${bundle_names[@]}"; do
+    bundle_dir="$repo_root/bundles/$name"
     [[ -d "$bundle_dir/.ai" ]] || continue
-    name="$(basename "$bundle_dir")"
     sudo rm -rf "$share_dir/$name"
     sudo mkdir -p "$share_dir/$name"
     sudo cp -a "$bundle_dir/.ai" "$share_dir/$name/.ai"
@@ -239,7 +278,7 @@ for bundle_dir in "$repo_root"/bundles/*/; do
     fi
     if [[ -f "$bundle_dir/README.md" ]]; then
         sudo install -Dm644 "$bundle_dir/README.md" \
-            "/usr/share/doc/ryeos/$name/README.md"
+            "$doc_dir/$name/README.md"
     fi
 done
 sudo chown -R root:root "$share_dir"
@@ -273,27 +312,55 @@ fi
 
 if [[ $run_init -eq 1 ]]; then
     echo "[install-local-direct] running ryeos init from PATH"
+    if [[ "$bundle_set" == "hosted-node" ]]; then
+        state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
+        for path in "$state_root/.ai/bundles"/*; do
+            [[ -d "$path/.ai" ]] || continue
+            name="$(basename "$path")"
+            case "$name" in
+                core|hosted-node) ;;
+                *) rm -rf "$path" ;;
+            esac
+        done
+        for path in "$state_root/.ai/node/bundles"/*.yaml; do
+            [[ -f "$path" ]] || continue
+            name="$(basename "$path" .yaml)"
+            case "$name" in
+                core|hosted-node) ;;
+                *) rm -f "$path" ;;
+            esac
+        done
+    fi
     trust_args=()
     for trust_file in "$share_dir"/*/PUBLISHER_TRUST.toml; do
         [[ -f "$trust_file" ]] || continue
         trust_args+=(--trust-file "$trust_file")
     done
-    ryeos init "${trust_args[@]}"
+    init_args=(init --source "$share_dir")
+    if [[ -n "$init_system_space_dir" ]]; then
+        init_args+=(--system-space-dir "$init_system_space_dir")
+    fi
+    ryeos "${init_args[@]}" "${trust_args[@]}"
 
     echo "[install-local-direct] verifying initialized bundle state"
-    test -d "$HOME/.local/share/ryeos/.ai/bundles/core/.ai" || \
-        die "initialized core bundle missing from ~/.local/share/ryeos"
-    test -d "$HOME/.local/share/ryeos/.ai/bundles/standard/.ai" || \
-        die "initialized standard bundle missing from ~/.local/share/ryeos"
-    test -d "$HOME/.local/share/ryeos/.ai/bundles/cockpit/.ai" || \
-        die "initialized cockpit bundle missing from ~/.local/share/ryeos"
-    test -d "$HOME/.local/share/ryeos/.ai/bundles/web/.ai" || \
-        die "initialized web bundle missing from ~/.local/share/ryeos"
-    test -d "$HOME/.local/share/ryeos/.ai/bundles/hosted-node/.ai" || \
-        die "initialized hosted-node bundle missing from ~/.local/share/ryeos"
-    grep -q '^execute: client:ryeos/tui$' \
-        "$HOME/.local/share/ryeos/.ai/bundles/cockpit/.ai/node/verbs/tui.yaml" || \
-        die "initialized tui verb is stale or not client-backed"
+    state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
+    for name in "${bundle_names[@]}"; do
+        test -d "$state_root/.ai/bundles/$name/.ai" || \
+            die "initialized $name bundle missing from $state_root"
+    done
+    if [[ "$bundle_set" == "hosted-node" ]]; then
+        for name in standard cockpit web; do
+            test ! -e "$state_root/.ai/bundles/$name" || \
+                die "initialized hosted-node state unexpectedly contains $name bundle"
+            test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
+                die "initialized hosted-node state unexpectedly contains $name registration"
+        done
+    fi
+    if [[ "$bundle_set" == "full" ]]; then
+        grep -q '^execute: client:ryeos/tui$' \
+            "$state_root/.ai/bundles/cockpit/.ai/node/verbs/tui.yaml" || \
+            die "initialized tui verb is stale or not client-backed"
+    fi
 fi
 
 if [[ $daemon_was_running -eq 1 ]]; then
@@ -305,8 +372,9 @@ fi
 echo
 echo "[install-local-direct] complete"
 echo "  ryeos:        $(command -v ryeos)"
-echo "  bundle src:   $share_dir/{core,standard,cockpit,web,hosted-node}"
-echo "  local state:  $HOME/.local/share/ryeos"
+echo "  bundle set:   $bundle_set"
+echo "  bundle src:   $share_dir/{$bundle_names_csv}"
+echo "  local state:  ${init_system_space_dir:-$HOME/.local/share/ryeos}"
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "  daemon:       restarted"
 fi

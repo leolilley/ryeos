@@ -54,6 +54,10 @@ struct AdmissionTokenFile {
     #[serde(default)]
     label: Option<String>,
     scopes: Vec<String>,
+    #[serde(default)]
+    issued_at_unix: Option<u64>,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
     expires_at_unix: u64,
 }
 
@@ -90,6 +94,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             "admission token expired".to_string(),
         ));
     }
+    enforce_hosted_policy_token_ttl(&state, &token, now)?;
     if now.abs_diff(req.signed_at) > CLAIM_MAX_AGE_SECS {
         return Err(HandlerError::Forbidden(
             "admission claim signature timestamp expired".to_string(),
@@ -178,6 +183,48 @@ fn consume_token_file(path: &Path) -> HandlerResult<()> {
             HandlerError::Internal(format!("failed to consume admission token: {e}"))
         }
     })
+}
+
+fn enforce_hosted_policy_token_ttl(
+    state: &AppState,
+    token: &AdmissionTokenFile,
+    now: u64,
+) -> HandlerResult<()> {
+    let Some(policy) = state.node_config.hosted_node_policies.first() else {
+        return Ok(());
+    };
+    let issued_at_unix = token.issued_at_unix.ok_or_else(|| {
+        HandlerError::Forbidden("hosted-node admission token is missing issued_at_unix".to_string())
+    })?;
+    let ttl_secs = token.ttl_secs.ok_or_else(|| {
+        HandlerError::Forbidden("hosted-node admission token is missing ttl_secs".to_string())
+    })?;
+    if ttl_secs == 0 {
+        return Err(HandlerError::Forbidden(
+            "hosted-node admission token ttl_secs must be greater than zero".to_string(),
+        ));
+    }
+    if issued_at_unix > now.saturating_add(CLAIM_MAX_AGE_SECS) {
+        return Err(HandlerError::Forbidden(
+            "hosted-node admission token issued_at_unix is in the future".to_string(),
+        ));
+    }
+    if ttl_secs > policy.admission.token_ttl_secs {
+        return Err(HandlerError::Forbidden(format!(
+            "admission token TTL {}s exceeds hosted-node policy maximum {}s",
+            ttl_secs, policy.admission.token_ttl_secs
+        )));
+    }
+    let expected_expires_at_unix = issued_at_unix.checked_add(ttl_secs).ok_or_else(|| {
+        HandlerError::Forbidden("hosted-node admission token expiry overflows".to_string())
+    })?;
+    if token.expires_at_unix > expected_expires_at_unix {
+        return Err(HandlerError::Forbidden(
+            "hosted-node admission token expires_at_unix exceeds issued_at_unix + ttl_secs"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_public_key(input: &str) -> HandlerResult<(String, VerifyingKey, String)> {

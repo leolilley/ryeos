@@ -180,9 +180,9 @@ enum Cmd {
         #[arg(long)]
         capabilities: Option<String>,
 
-        /// Admission mode label to advertise. Defaults to token.
-        #[arg(long, default_value = "token")]
-        admission_mode: String,
+        /// Admission mode label to advertise. Defaults to hosted policy or one_time_token.
+        #[arg(long)]
+        admission_mode: Option<String>,
 
         /// Optional provider/operator label.
         #[arg(long)]
@@ -991,7 +991,7 @@ fn run_remote_descriptor(
     name: Option<String>,
     url: Option<String>,
     capabilities: Option<String>,
-    admission_mode: String,
+    admission_mode: Option<String>,
     provider_name: Option<String>,
     output: Option<PathBuf>,
     stdin_json: bool,
@@ -1001,11 +1001,7 @@ fn run_remote_descriptor(
     };
 
     let params = if stdin_json {
-        let mut params: ExportRemoteDescriptorParams = serde_json::from_value(read_stdin_json()?)?;
-        if params.admission_mode.is_none() {
-            params.admission_mode = Some("token".to_string());
-        }
-        params
+        serde_json::from_value(read_stdin_json()?)?
     } else {
         let name = name.ok_or_else(|| anyhow::anyhow!("--name required"))?;
         let url = url.ok_or_else(|| anyhow::anyhow!("--url required"))?;
@@ -1020,7 +1016,7 @@ fn run_remote_descriptor(
             name,
             url,
             capabilities,
-            admission_mode: Some(admission_mode),
+            admission_mode,
             provider_name,
             output,
         }

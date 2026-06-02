@@ -462,6 +462,7 @@ impl<'a> BootstrapLoader<'a> {
 
         let aliases = synthesize_aliases_from_verbs(&verbs);
         check_alias_collisions(&aliases)?;
+        check_hosted_policy_uniqueness(&hosted_node_policies)?;
 
         Ok(NodeConfigSnapshot {
             bundles: loaded_bundles,
@@ -471,6 +472,22 @@ impl<'a> BootstrapLoader<'a> {
             hosted_node_policies,
         })
     }
+}
+
+fn check_hosted_policy_uniqueness(records: &[HostedNodePolicyRecord]) -> Result<()> {
+    if records.len() <= 1 {
+        return Ok(());
+    }
+
+    let sources = records
+        .iter()
+        .map(|record| record.source_file.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "multiple hosted-node policies loaded; refusing ambiguous hosted policy set: {}",
+        sources
+    )
 }
 
 fn synthesize_aliases_from_verbs(verbs: &[VerbRecord]) -> Vec<AliasRecord> {
@@ -576,6 +593,10 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node_config::sections::hosted_node::{
+        HostedNodeAdmissionPolicy, HostedNodeAuthorizationPolicy, HostedNodeDescriptorPolicy,
+        HostedNodeOperationsPolicy, HostedNodeTransportPolicy,
+    };
 
     #[test]
     fn strip_signature_removes_signed_line() {
@@ -968,6 +989,60 @@ mod tests {
             policy.source_file.ends_with(".ai/node/hosted/policy.yaml"),
             "policy source should be the hosted node section, got {}",
             policy.source_file.display()
+        );
+    }
+
+    #[test]
+    fn hosted_policy_uniqueness_rejects_multiple_policies() {
+        let mk_record = |source_file: &str| HostedNodePolicyRecord {
+            category: "hosted".into(),
+            section: "hosted".into(),
+            version: "0.1.0".into(),
+            schema_version: "1.0.0".into(),
+            description: "test".into(),
+            transport: HostedNodeTransportPolicy {
+                public_https_required: true,
+                loopback_http_allowed: true,
+            },
+            admission: HostedNodeAdmissionPolicy {
+                mode: "one_time_token".into(),
+                token_ttl_secs: 600,
+                reject_wildcard_scopes: true,
+                token_delivery: "out_of_band".into(),
+            },
+            descriptor: HostedNodeDescriptorPolicy {
+                require_live_identity_match: true,
+                advertised_capabilities: vec![],
+            },
+            authorization: HostedNodeAuthorizationPolicy {
+                authority: "target_node_authorized_keys".into(),
+                central_bearer_tokens_allowed: false,
+                implicit_cross_node_authority_allowed: false,
+            },
+            operations: HostedNodeOperationsPolicy {
+                audit_admission_events: true,
+                audit_grant_changes: true,
+                prefer_isolated_node_per_principal: true,
+                shared_daemon_multitenancy_enabled: false,
+            },
+            source_file: std::path::PathBuf::from(source_file),
+        };
+
+        let err = check_hosted_policy_uniqueness(&[
+            mk_record("/bundle/.ai/node/hosted/policy.yaml"),
+            mk_record("/state/.ai/node/hosted/policy.yaml"),
+        ])
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("multiple hosted-node policies"), "got: {msg}");
+        assert!(
+            msg.contains("/bundle/.ai/node/hosted/policy.yaml"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("/state/.ai/node/hosted/policy.yaml"),
+            "got: {msg}"
         );
     }
 

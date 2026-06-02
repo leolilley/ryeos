@@ -199,11 +199,72 @@ async fn admission_claim_rejects_wrong_audience_signature() {
     assert!(matches!(result, Err(HandlerError::Forbidden(_))));
 }
 
+#[tokio::test]
+async fn admission_claim_enforces_hosted_policy_token_ttl() {
+    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(60);
+    let token = "too-long-hosted-token";
+    write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let req = signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine"));
+
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+
+    assert!(matches!(result, Err(HandlerError::Forbidden(_))));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("hosted-node policy maximum"),);
+}
+
+#[tokio::test]
+async fn admission_claim_rejects_aged_overlong_hosted_policy_token() {
+    let (_tmp, state) = test_state::build_test_state_with_hosted_policy(60);
+    let token = "aged-too-long-hosted-token";
+    let issued_at_unix = now_unix() - 540;
+    write_admission_token_file_with_issued_at(
+        &state,
+        token,
+        PUSH_SCOPES,
+        None,
+        issued_at_unix,
+        600,
+    );
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let req = signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine"));
+
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+
+    assert!(matches!(result, Err(HandlerError::Forbidden(_))));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("hosted-node policy maximum"),);
+}
+
 fn write_admission_token_file(
     state: &ryeos_app::state::AppState,
     token: &str,
     scopes: &[&str],
     label: Option<&str>,
+    ttl_secs: u64,
+) {
+    let issued_at_unix = now_unix();
+    write_admission_token_file_with_issued_at(
+        state,
+        token,
+        scopes,
+        label,
+        issued_at_unix,
+        ttl_secs,
+    );
+}
+
+fn write_admission_token_file_with_issued_at(
+    state: &ryeos_app::state::AppState,
+    token: &str,
+    scopes: &[&str],
+    label: Option<&str>,
+    issued_at_unix: u64,
     ttl_secs: u64,
 ) {
     let token_hash = lillux::cas::sha256_hex(token.as_bytes());
@@ -215,9 +276,9 @@ fn write_admission_token_file(
         .join("admission")
         .join("tokens");
     std::fs::create_dir_all(&token_dir).unwrap();
-    let expires_at_unix = now_unix() + ttl_secs;
+    let expires_at_unix = issued_at_unix + ttl_secs;
     let mut doc = format!(
-        "version = 1\ntoken_hash = \"{token_hash}\"\nscopes = [{}]\nexpires_at_unix = {expires_at_unix}\n",
+        "version = 1\ntoken_hash = \"{token_hash}\"\nscopes = [{}]\nissued_at_unix = {issued_at_unix}\nttl_secs = {ttl_secs}\nexpires_at_unix = {expires_at_unix}\n",
         scopes
             .iter()
             .map(|scope| format!("\"{scope}\""))

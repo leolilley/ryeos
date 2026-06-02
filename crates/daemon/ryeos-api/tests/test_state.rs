@@ -83,6 +83,63 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     )
 }
 
+#[allow(dead_code)]
+pub fn build_test_state_with_hosted_policy(token_ttl_secs: u64) -> (tempfile::TempDir, AppState) {
+    let (tmpdir, mut state) = build_test_state();
+    state.node_config = Arc::new(ryeos_app::node_config::NodeConfigSnapshot {
+        bundles: vec![],
+        routes: vec![],
+        verbs: vec![],
+        aliases: vec![],
+        hosted_node_policies: vec![
+            ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord {
+                category: "hosted".into(),
+                section: "hosted".into(),
+                version: "0.1.0".into(),
+                schema_version: "1.0.0".into(),
+                description: "test hosted policy".into(),
+                transport:
+                    ryeos_app::node_config::sections::hosted_node::HostedNodeTransportPolicy {
+                        public_https_required: true,
+                        loopback_http_allowed: true,
+                    },
+                admission:
+                    ryeos_app::node_config::sections::hosted_node::HostedNodeAdmissionPolicy {
+                        mode: "one_time_token".into(),
+                        token_ttl_secs,
+                        reject_wildcard_scopes: true,
+                        token_delivery: "out_of_band".into(),
+                    },
+                descriptor:
+                    ryeos_app::node_config::sections::hosted_node::HostedNodeDescriptorPolicy {
+                        require_live_identity_match: true,
+                        advertised_capabilities: vec![
+                            "remote-execute".into(),
+                            "bundle-install".into(),
+                        ],
+                    },
+                authorization:
+                    ryeos_app::node_config::sections::hosted_node::HostedNodeAuthorizationPolicy {
+                        authority: "target_node_authorized_keys".into(),
+                        central_bearer_tokens_allowed: false,
+                        implicit_cross_node_authority_allowed: false,
+                    },
+                operations:
+                    ryeos_app::node_config::sections::hosted_node::HostedNodeOperationsPolicy {
+                        audit_admission_events: true,
+                        audit_grant_changes: true,
+                        prefer_isolated_node_per_principal: true,
+                        shared_daemon_multitenancy_enabled: false,
+                    },
+                source_file: tmpdir
+                    .path()
+                    .join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml"),
+            },
+        ],
+    });
+    (tmpdir, state)
+}
+
 fn build_app_state(
     tmpdir: tempfile::TempDir,
     config: ryeos_app::config::Config,

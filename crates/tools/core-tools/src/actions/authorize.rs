@@ -17,6 +17,8 @@ use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use rand::RngCore;
 
+use crate::actions::hosted_policy::load_hosted_policy;
+
 /// Parameters for the authorize-client action.
 pub struct AuthorizeClientParams {
     /// System space directory (contains `.ai/node/identity/`).
@@ -60,6 +62,10 @@ pub struct MintAdmissionTokenResult {
     pub token_hash: String,
     /// Path of the target-node-local token file.
     pub path: PathBuf,
+    /// Unix timestamp when the token was minted.
+    pub issued_at_unix: u64,
+    /// Original requested token lifetime in seconds.
+    pub ttl_secs: u64,
     /// Unix expiry timestamp.
     pub expires_at_unix: u64,
     /// Scopes this token may grant.
@@ -75,6 +81,8 @@ struct AdmissionTokenFile<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<&'a str>,
     scopes: &'a [String],
+    issued_at_unix: u64,
+    ttl_secs: u64,
     expires_at_unix: u64,
 }
 
@@ -145,6 +153,16 @@ pub fn run_mint_admission_token(
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
     }
+    if let Some(policy) = load_hosted_policy(&params.system_space_dir)? {
+        if params.ttl_secs > policy.admission.token_ttl_secs {
+            bail!(
+                "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
+                params.ttl_secs,
+                policy.admission.token_ttl_secs,
+                policy.source_file.display()
+            );
+        }
+    }
 
     let mut scopes = params
         .scopes
@@ -198,6 +216,8 @@ pub fn run_mint_admission_token(
         token_hash: &token_hash,
         label: label.as_deref(),
         scopes: &scopes,
+        issued_at_unix: now,
+        ttl_secs: params.ttl_secs,
         expires_at_unix,
     })?;
     std::fs::write(&tmp, doc).with_context(|| {
@@ -213,6 +233,8 @@ pub fn run_mint_admission_token(
         token,
         token_hash,
         path,
+        issued_at_unix: now,
+        ttl_secs: params.ttl_secs,
         expires_at_unix,
         scopes,
         label,
@@ -222,4 +244,68 @@ pub fn run_mint_admission_token(
 /// Load the node signing key from a PKCS#8 PEM file.
 fn load_node_key(path: &std::path::Path) -> Result<lillux::crypto::SigningKey> {
     lillux::crypto::load_signing_key(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_hosted_policy(system_space_dir: &std::path::Path, token_ttl_secs: u64) {
+        let path = system_space_dir.join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                r#"
+category: "hosted"
+section: "hosted"
+version: "0.1.0"
+schema_version: "1.0.0"
+description: "test hosted policy"
+transport:
+  public_https_required: true
+  loopback_http_allowed: true
+admission:
+  mode: "one_time_token"
+  token_ttl_secs: {token_ttl_secs}
+  reject_wildcard_scopes: true
+  token_delivery: "out_of_band"
+descriptor:
+  require_live_identity_match: true
+  advertised_capabilities: []
+authorization:
+  authority: "target_node_authorized_keys"
+  central_bearer_tokens_allowed: false
+  implicit_cross_node_authority_allowed: false
+operations:
+  audit_admission_events: true
+  audit_grant_changes: true
+  prefer_isolated_node_per_principal: true
+  shared_daemon_multitenancy_enabled: false
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mint_admission_token_rejects_ttl_above_hosted_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_hosted_policy(tmp.path(), 60);
+
+        let err = match run_mint_admission_token(MintAdmissionTokenParams {
+            system_space_dir: tmp.path().to_path_buf(),
+            scopes: vec!["ryeos.execute.service.threads".into()],
+            label: None,
+            ttl_secs: 600,
+        }) {
+            Ok(_) => panic!("minting should reject TTL above hosted policy"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("hosted-node policy maximum"),
+            "got: {err:#}"
+        );
+    }
 }

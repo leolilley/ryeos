@@ -383,7 +383,15 @@ pub fn validate_url(url: &str) -> Result<()> {
         .with_context(|| format!("invalid URL: {}", url))?;
 
     let host = parsed.host_str().unwrap_or("");
-    let is_loopback = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let is_loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
     match parsed.scheme() {
         "https" => {}
         "http" if is_loopback => {}
@@ -590,6 +598,13 @@ node:
     fn validate_accepts_localhost_http() {
         assert!(validate_url("http://localhost:7400").is_ok());
         assert!(validate_url("http://127.0.0.1:7400").is_ok());
+        assert!(validate_url("http://127.0.0.2:7400").is_ok());
+        assert!(validate_url("http://[::1]:7400").is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_loopback_looking_hostname() {
+        assert!(validate_url("http://127.example.com").is_err());
     }
 
     #[test]
