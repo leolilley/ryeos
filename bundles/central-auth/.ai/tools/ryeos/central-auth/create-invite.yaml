@@ -1,0 +1,43 @@
+# ryeos:signed:2026-06-02T03:52:10Z:1f61fe9a8459d3258b0c3c575547cdadc75886cb478a9222fe862faa3fc1ca79:r76RumJdiRsiA8Ra2jJsbo27VNtlWjd/jefY0fePZ/NvJJwriUpGdXD5DMC6EleizUMNrQBvDl2G8Q+z309DAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+version: "0.1.0"
+category: "ryeos/central-auth"
+name: "create-invite"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.ryeos.central-auth.create-invite"]
+description: "Create a high-entropy one-time invite code for a realm."
+
+config:
+  command: "python3"
+  args:
+    - "{tool_dir}/../../../bin/central_auth.py"
+    - "create-invite"
+  input_data: "{params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root used for .ai/state/central-auth storage."
+    state_root:
+      type: string
+      description: "Optional absolute central-auth state root override."
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. tv-tracker."
+    roles:
+      type: array
+      items: { type: string }
+      default: []
+    capabilities:
+      type: array
+      items: { type: string }
+      default: []
+    ttl_secs:
+      type: integer
+      default: 86400
+    max_uses:
+      type: integer
+      default: 1
+  required: [realm_id]

@@ -1,0 +1,32 @@
+# ryeos:signed:2026-06-02T03:52:08Z:8c9c97733ccca825a9e28e2eea3136438cf312a7e34e96e7fca07bd631c2321e:jXQ4qDDKv1wyYEbTkheyd30OOCvmwRMSaMT0aLNsH1JoDzyfq5SAUbIFqGTbmOeo6rVHB1dwzfaLLhrchsw1DA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+version: "0.1.0"
+category: "ryeos/central-auth"
+name: "set-policy"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.ryeos.central-auth.set-policy"]
+description: "Store the central-auth role/capability policy for a realm."
+
+config:
+  command: "python3"
+  args:
+    - "{tool_dir}/../../../bin/central_auth.py"
+    - "set-policy"
+  input_data: "{params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root used for .ai/state/central-auth storage."
+    state_root:
+      type: string
+      description: "Optional absolute central-auth state root override."
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. tv-tracker."
+    policy:
+      type: object
+      description: "Policy object with roles and allowed_capabilities."
+  required: [realm_id, policy]

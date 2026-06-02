@@ -1,0 +1,25 @@
+# ryeos:signed:2026-06-02T03:52:19Z:9499b5ceb6586f643bf328cc74ed27b6e1915401b5f618ce5c14a735b96185b9:9QIJaioEnlhgaXorND91/+PLCeil+Lc+3+lpTq6BXrpkkWVNRbbWShIGmNEPUEVaqxv7g6BTUnDorKgsUZGICg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: "central-auth"
+version: "0.1.0"
+description: "JSON-schema-style contract for central-auth realm policies."
+
+type: object
+required:
+  - roles
+  - allowed_capabilities
+properties:
+  roles:
+    type: object
+    additionalProperties:
+      type: object
+      required:
+        - capabilities
+      properties:
+        capabilities:
+          type: array
+          items:
+            type: string
+  allowed_capabilities:
+    type: array
+    items:
+      type: string

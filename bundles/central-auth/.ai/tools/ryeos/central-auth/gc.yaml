@@ -1,0 +1,29 @@
+# ryeos:signed:2026-06-02T03:52:16Z:b7b71bdcdba316a82b8dccd6efe8e69646fe910fecdc87e973f38f3e722b9454:CXVUuU+D+GOAj142AZRuxkDTaot66kr9m2D9aR6zlXnXOlnQ0hZMGkZYjHKTSPl5tCxcLRt8DRvpJk+PFsDzAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+version: "0.1.0"
+category: "ryeos/central-auth"
+name: "gc"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.ryeos.central-auth.gc"]
+description: "Remove expired sessions and exhausted or expired invites."
+
+config:
+  command: "python3"
+  args:
+    - "{tool_dir}/../../../bin/central_auth.py"
+    - "gc"
+  input_data: "{params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root used for .ai/state/central-auth storage."
+    state_root:
+      type: string
+      description: "Optional absolute central-auth state root override."
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. tv-tracker."
+  required: [realm_id]
