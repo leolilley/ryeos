@@ -14,21 +14,21 @@ let typerLinesSignature = "";
 let transientTopbarUntil = 0;
 
 const FALLBACK_TYPER_LINES = [
-  "solve once, solve everywhere.",
-  "swap the model. the substrate remains.",
-  "four tools. one substrate.",
-  "directives, tools, knowledge — signed and portable.",
-  "ed25519 seals every item.",
-  "tampered items fail closed.",
-  "runtimes live in yaml, not code.",
-  "space resolves: project → user → system.",
-  "data-driven execution engine.",
-  "lillux microkernel.",
-  "any tool. two primitives.",
-  "tool → runtime → primitive. verified chain.",
-  "pull from the registry. trust the author.",
-  "content-addressed. immutable. keyed by hash.",
-  "search. load. execute. sign.",
+  "hashes for truth. signatures for agency. attestations for proof.",
+  "content-addressed. tamper-evident. verified by math.",
+  "identity is a keypair. trust is a pin. authority is local.",
+  "every item carries a chain of custody. every node verifies it.",
+  "descriptors are trust pins, not credentials.",
+  "wildcards rejected. capabilities attenuate. no escalation.",
+  "the CAS is the commitment. the attestation is the proof.",
+  "admission is proof of possession. not proof of account.",
+  "two nodes, zero prior relationship, shared verified state.",
+  "swap the model. swap the machine. the signatures hold.",
+  "no central authority. no bearer tokens. no provider in the loop.",
+  "closure complete, hashes verified, attestation signed.",
+  "staged. mirrored. accepted. every byte accounted for.",
+  "the hosting provider runs dns. the node runs authority.",
+  "convergence without consensus. trust without coordination.",
 ];
 
 export function studioHome(vm, scene, shell) {
