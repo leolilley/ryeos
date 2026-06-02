@@ -89,6 +89,7 @@ pub fn build_tile_view(
         ViewSpec::Projects => projects::build(model, inner_w, inner_h),
         ViewSpec::SpaceBrowser { .. } => space::build(model, tile_id, inner_w, inner_h),
         ViewSpec::Trust => trust::build(model, inner_w, inner_h),
+        ViewSpec::Atlas => graph::build(model, inner_w, inner_h),
         ViewSpec::Graph { .. } => graph::build(model, inner_w, inner_h),
     };
 

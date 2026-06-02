@@ -49,10 +49,14 @@ export function launcherDialog(state, shell) {
     const row = el("button", `studio-command-choice${index === selected ? " selected" : ""}`);
     row.type = "button";
     row.append(textEl("strong", item.label || "View"), textEl("span", item.hint || ""));
-    row.addEventListener("mouseenter", () => {
-      if (index !== state.selected) shell.moveLauncher?.(index - (state.selected || 0));
+    row.addEventListener("click", () => {
+      if (item.action && shell.dispatchUi) {
+        shell.dispatchUi({ type: "activate", action: item.action });
+        shell.closeLauncher?.();
+      } else {
+        shell.chooseLauncher?.(false);
+      }
     });
-    row.addEventListener("click", () => shell.chooseLauncher?.(false));
     list.append(row);
   });
 

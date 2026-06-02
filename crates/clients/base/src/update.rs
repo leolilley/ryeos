@@ -1561,6 +1561,7 @@ fn list_item_count(model: &AppModel) -> usize {
                 .unwrap_or(0),
             ViewSpec::Remotes => model.store.remotes.len(),
             ViewSpec::Trust => model.store.trust_alerts.len(),
+            ViewSpec::Atlas => model.store.items.len(),
             ViewSpec::Thread { .. } => {
                 // Parts count for thread view
                 model

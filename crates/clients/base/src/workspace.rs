@@ -24,6 +24,7 @@ pub enum ViewSpec {
     Projects,
     SpaceBrowser { project: Option<String> },
     Trust,
+    Atlas,
     Graph { graph_id: Option<String> },
     EventInspector,
 }
@@ -137,9 +138,11 @@ impl ViewSpec {
                 cursor: 0,
                 scroll: 0,
             },
-            ViewSpec::Overview | ViewSpec::Remotes | ViewSpec::Trust | ViewSpec::Graph { .. } => {
-                ViewLocalState::None
-            }
+            ViewSpec::Overview
+            | ViewSpec::Remotes
+            | ViewSpec::Trust
+            | ViewSpec::Atlas
+            | ViewSpec::Graph { .. } => ViewLocalState::None,
         }
     }
 
@@ -157,6 +160,7 @@ impl ViewSpec {
             | ViewSpec::GcStatus
             | ViewSpec::Projects
             | ViewSpec::Trust
+            | ViewSpec::Atlas
             | ViewSpec::Graph { .. } => InputCapability::None,
         }
     }
@@ -182,6 +186,7 @@ impl ViewSpec {
             ViewSpec::Projects => "projects",
             ViewSpec::SpaceBrowser { .. } => "search items",
             ViewSpec::Trust => "trust",
+            ViewSpec::Atlas => "atlas",
             ViewSpec::Graph { .. } => "graph",
             ViewSpec::EventInspector => "events filter",
         }
@@ -208,6 +213,7 @@ impl ViewSpec {
             ViewSpec::Projects => "Projects".into(),
             ViewSpec::SpaceBrowser { .. } => "Items".into(),
             ViewSpec::Trust => "Trust".into(),
+            ViewSpec::Atlas => "Atlas".into(),
             ViewSpec::Graph { graph_id } => {
                 if let Some(id) = graph_id {
                     format!("Graph: {}", id)

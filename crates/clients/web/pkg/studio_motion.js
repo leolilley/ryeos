@@ -1,4 +1,4 @@
-const MOTION_MS = 220;
+const MOTION_MS = 180;
 
 export function captureWorkspaceMotion(root) {
   const appRect = root?.getBoundingClientRect?.();
@@ -8,9 +8,11 @@ export function captureWorkspaceMotion(root) {
     const tileId = tile.dataset.tileId;
     if (!tileId) return;
     const rect = tile.getBoundingClientRect();
+    const title = tile.querySelector("h2,strong")?.textContent?.trim() || "closing";
     tiles.set(tileId, {
       rect,
-      clone: tile.cloneNode(true),
+      focused: tile.classList.contains("focused"),
+      title,
     });
   });
   return { appRect, tiles };
@@ -69,7 +71,8 @@ function animateRetainedExits(root, snapshot, currentTileIds) {
   root.append(layer);
 
   for (const [tileId, old] of exits) {
-    const clone = old.clone;
+    const clone = document.createElement("section");
+    clone.className = `studio-tile${old.focused ? " focused" : ""} studio-tile-ghost`;
     const rect = old.rect;
     clone.dataset.tileId = tileId;
     clone.dataset.motion = "exit";
@@ -77,6 +80,9 @@ function animateRetainedExits(root, snapshot, currentTileIds) {
     clone.style.top = `${rect.top - snapshot.appRect.top}px`;
     clone.style.width = `${rect.width}px`;
     clone.style.height = `${rect.height}px`;
+    const label = document.createElement("span");
+    label.textContent = old.title;
+    clone.append(label);
     layer.append(clone);
   }
 

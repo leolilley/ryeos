@@ -1,5 +1,11 @@
 import { code, el, textEl } from "/ui/assets/studio_components_primitives.js";
 
+const atlasViewport = {
+  panX: 0,
+  panY: 0,
+  zoom: 1,
+};
+
 export function studioWorkspace(vm, motion, dispatchUi) {
   const main = el("main", "studio-workspace");
   if (!vm?.root) {
@@ -60,6 +66,9 @@ function view(viewVm, tileId, dispatchUi) {
   switch (viewVm.type) {
     case "map":
       body.append(sceneMap(viewVm.scene, dispatchUi));
+      break;
+    case "atlas":
+      body.append(atlasTile(viewVm.scene, dispatchUi));
       break;
     case "overview":
       body.append(metrics(viewVm.metrics || [], dispatchUi));
@@ -191,7 +200,6 @@ function metrics(items, dispatchUi) {
 
 function sceneMap(scene, dispatchUi) {
   const wrap = el("section", "studio-scene");
-  if (scene?.atlas) return atlasMap(scene.atlas, dispatchUi, wrap);
   const header = el("div", "studio-scene-header");
   header.append(textEl("h2", "Graph"), textEl("p", "Local node, remotes, and workspace topology."));
   const stage = el("div", "studio-scene-stage");
@@ -207,6 +215,15 @@ function sceneMap(scene, dispatchUi) {
     stage.append(node);
   }
   wrap.append(header, stage);
+  return wrap;
+}
+
+function atlasTile(scene, dispatchUi) {
+  const wrap = el("section", "studio-scene studio-atlas-map");
+  if (scene?.atlas) return atlasMap(scene.atlas, dispatchUi, wrap);
+  const empty = el("div", "studio-atlas-empty");
+  empty.append(textEl("h2", "Namespace Atlas"), textEl("p", "Loading item graph…"));
+  wrap.append(empty);
   return wrap;
 }
 
@@ -252,7 +269,11 @@ function atlasMap(atlas, dispatchUi, wrap = el("section", "studio-scene")) {
   }
   header.append(title, controls, legend);
 
-  const stage = el("div", "studio-scene-stage studio-atlas-stage");
+  const stage = el("div", "studio-scene-stage studio-atlas-stage simple");
+  const viewport = el("div", "studio-atlas-viewport");
+  viewport.append(el("div", "studio-atlas-grid"));
+  applyAtlasViewport(viewport);
+  wireAtlasViewport(stage, viewport);
   const bounds = atlas.bounds || {};
   const xMin = bounds.x_min ?? -1;
   const xMax = bounds.x_max ?? 1;
@@ -263,97 +284,100 @@ function atlasMap(atlas, dispatchUi, wrap = el("section", "studio-scene")) {
   const position = (node) => {
     const p = node.position || [0, 0, 0];
     return {
-      left: 8 + ((p[0] - xMin) / xSpan) * 84,
-      top: 8 + ((p[2] - zMin) / zSpan) * 84,
+      left: 12 + ((p[0] - xMin) / xSpan) * 76,
+      top: 12 + ((p[2] - zMin) / zSpan) * 76,
     };
   };
 
-  for (const region of atlas.regions || []) {
-    const regionEl = el("div", "studio-atlas-region");
-    regionEl.title = region.capability || "capability";
-    const angle = ((region.angle_start || 0) + (region.angle_end || 0)) / 2;
-    const radius = region.radius_max || region.radius_min || 0;
-    const marker = position({ position: [Math.cos(angle) * radius, 0, Math.sin(angle) * radius] });
-    regionEl.style.left = `${marker.left}%`;
-    regionEl.style.top = `${marker.top}%`;
-    regionEl.textContent = "cap";
-    stage.append(regionEl);
-  }
-
   const nodes = atlas.nodes || [];
-  const nodeByKey = new Map(nodes.map((node) => [node.namespace_key || "", node]));
-  const nodeById = new Map(nodes.map((node) => [node.id || "", node]));
-  for (const node of nodes) {
-    if (!node.path?.length) continue;
-    const parent = nodeByKey.get(node.path.slice(0, -1).join("/"));
-    if (!parent) continue;
-    const a = position(parent);
-    const b = position(node);
-    const dx = b.left - a.left;
-    const dy = b.top - a.top;
-    const len = Math.hypot(dx, dy);
-    const branch = el("div", `studio-atlas-branch${(node.stack || []).length ? " terminal" : ""}`);
-    branch.style.left = `${a.left}%`;
-    branch.style.top = `${a.top}%`;
-    branch.style.width = `${len}%`;
-    branch.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
-    stage.append(branch);
-  }
-
-  for (const link of atlas.links || []) {
-    const from = nodeById.get(link.from);
-    const to = nodeById.get(link.to);
-    if (!from || !to) continue;
-    const a = position(from);
-    const b = position(to);
-    const dx = b.left - a.left;
-    const dy = b.top - a.top;
-    const len = Math.hypot(dx, dy);
-    const contextLink = el("div", `studio-atlas-context-link ${link.kind || "context"}`);
-    contextLink.style.left = `${a.left}%`;
-    contextLink.style.top = `${a.top}%`;
-    contextLink.style.width = `${len}%`;
-    contextLink.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
-    stage.append(contextLink);
-  }
-
-  for (const node of nodes) {
-    const stack = node.stack || [];
-    const visibleStack = stack.filter((item) => atlasItemVisible(atlas, item));
-    if (!visibleStack.length && !node.state?.selected && !node.state?.highlighted) continue;
-    const p = position(node);
-    const nodeEl = el("div", `studio-atlas-stack${node.state?.selected ? " selected" : ""}${node.state?.highlighted ? " highlighted" : ""}${node.state?.dimmed ? " dimmed" : ""}${visibleStack.length ? "" : " anchor-only"}`);
-    nodeEl.style.left = `${p.left}%`;
-    nodeEl.style.top = `${p.top}%`;
-    nodeEl.title = node.namespace_key || node.label || "namespace";
-    for (const item of visibleStack) {
-      const button = el("button", `studio-atlas-layer ${item.kind || "other"}`);
-      button.classList.add(`scope-${item.scope || "unknown"}`);
-      button.type = "button";
-      button.title = item.canonical_ref || item.label || node.namespace_key;
-      button.textContent = atlasGlyph(item.kind);
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (!item.canonical_ref) return;
-        dispatchUi({ type: "activate", action: { type: "inspect_item", canonical_ref: item.canonical_ref } });
-      });
-      nodeEl.append(button);
+  const kinds = ["directive", "tool", "knowledge", "config", "other"];
+  for (const kind of kinds) {
+    const layer = el("div", `studio-atlas-kind-layer ${kind}`);
+    if (!visibleLayers.has(kind)) layer.hidden = true;
+    for (const node of nodes) {
+      const stack = (node.stack || []).filter((item) => (item.kind || "other") === kind && atlasItemVisible(atlas, item));
+      if (!stack.length) continue;
+      const p = position(node);
+      const cluster = el("div", `studio-atlas-cluster ${kind}${node.state?.selected ? " selected" : ""}${node.state?.highlighted ? " highlighted" : ""}`);
+      cluster.style.left = `${p.left}%`;
+      cluster.style.top = `${p.top}%`;
+      cluster.title = node.namespace_key || node.label || kind;
+      for (const [index, item] of stack.slice(0, 5).entries()) {
+        const dot = el("button", `studio-atlas-dot ${item.kind || "other"}`);
+        dot.classList.add(`scope-${item.scope || "unknown"}`);
+        dot.type = "button";
+        dot.style.setProperty("--dot-index", String(index));
+        dot.title = item.canonical_ref || item.label || node.namespace_key;
+        dot.textContent = stack.length > 1 && index === 4 ? "+" : "";
+        dot.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (!item.canonical_ref) return;
+          dispatchUi({ type: "activate", action: { type: "inspect_item", canonical_ref: item.canonical_ref } });
+        });
+        cluster.append(dot);
+      }
+      const label = textEl("span", node.label || node.namespace_key || kind);
+      label.className = "studio-atlas-cluster-label";
+      cluster.append(label);
+      layer.append(cluster);
     }
-    const label = textEl("span", node.label || node.namespace_key || "node");
-    label.className = "studio-atlas-stack-label";
-    nodeEl.append(label);
-    stage.append(nodeEl);
+    viewport.append(layer);
   }
-
-  const directives = atlasDirectiveList(nodes, dispatchUi);
-  if (directives) {
-    const atlasBody = el("div", "studio-atlas-body");
-    atlasBody.append(stage, directives);
-    wrap.append(header, atlasBody);
-  } else {
-    wrap.append(header, stage);
-  }
+  stage.append(viewport);
+  wrap.append(header, stage);
   return wrap;
+}
+
+function applyAtlasViewport(viewport) {
+  viewport.style.transform = `translate(${atlasViewport.panX}px, ${atlasViewport.panY}px) scale(${atlasViewport.zoom})`;
+  viewport.style.setProperty("--atlas-grid-scale", String(atlasViewport.zoom));
+}
+
+function wireAtlasViewport(stage, viewport) {
+  stage.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    const cursorX = event.clientX - rect.left;
+    const cursorY = event.clientY - rect.top;
+    const previousZoom = atlasViewport.zoom;
+    const nextZoom = clamp(previousZoom * Math.exp(-event.deltaY * 0.0012), 0.45, 3.8);
+    const ratio = nextZoom / previousZoom;
+    atlasViewport.panX = cursorX - (cursorX - atlasViewport.panX) * ratio;
+    atlasViewport.panY = cursorY - (cursorY - atlasViewport.panY) * ratio;
+    atlasViewport.zoom = nextZoom;
+    applyAtlasViewport(viewport);
+  }, { passive: false });
+
+  let drag = null;
+  stage.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button")) return;
+    drag = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      panX: atlasViewport.panX,
+      panY: atlasViewport.panY,
+    };
+    stage.setPointerCapture?.(event.pointerId);
+    stage.classList.add("panning");
+  });
+  stage.addEventListener("pointermove", (event) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    atlasViewport.panX = drag.panX + event.clientX - drag.x;
+    atlasViewport.panY = drag.panY + event.clientY - drag.y;
+    applyAtlasViewport(viewport);
+  });
+  const endDrag = (event) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    drag = null;
+    stage.classList.remove("panning");
+  };
+  stage.addEventListener("pointerup", endDrag);
+  stage.addEventListener("pointercancel", endDrag);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function atlasItemVisible(atlas, item) {

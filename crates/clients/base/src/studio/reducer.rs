@@ -729,7 +729,7 @@ impl StudioCore {
             ViewSpec::Projects => {
                 vec![self.emit(StudioEffectKind::FetchProjects)]
             }
-            ViewSpec::Graph { graph_id: None } => vec![
+            ViewSpec::Atlas => vec![
                 self.emit(StudioEffectKind::FetchSnapshot),
                 self.emit(StudioEffectKind::FetchItems {
                     tile_id: None,
@@ -743,7 +743,7 @@ impl StudioCore {
             | ViewSpec::Services
             | ViewSpec::ItemInspector
             | ViewSpec::Trust
-            | ViewSpec::Graph { graph_id: Some(_) }
+            | ViewSpec::Graph { .. }
             | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchSnapshot)],
         }
     }
@@ -1137,6 +1137,7 @@ fn file_root_requires_project(root: &str) -> bool {
 fn view_from_route(route: &str) -> Option<ViewSpec> {
     match route.trim_start_matches('#') {
         "" | "graph" => Some(ViewSpec::Graph { graph_id: None }),
+        "atlas" => Some(ViewSpec::Atlas),
         "overview" => Some(ViewSpec::Overview),
         "threads" => Some(ViewSpec::ThreadList),
         "items" => Some(ViewSpec::SpaceBrowser { project: None }),
@@ -1152,6 +1153,7 @@ fn view_from_route(route: &str) -> Option<ViewSpec> {
 
 fn route_for_view(view: &ViewSpec) -> Option<&'static str> {
     match view {
+        ViewSpec::Atlas => Some("atlas"),
         ViewSpec::Graph { graph_id: None } => Some("graph"),
         ViewSpec::Overview => Some("overview"),
         ViewSpec::ThreadList => Some("threads"),

@@ -143,6 +143,7 @@ impl From<&ViewSpec> for ViewSpecSer {
             ViewSpec::Projects => ViewSpecSer::Projects,
             ViewSpec::SpaceBrowser { .. } => ViewSpecSer::SpaceBrowser,
             ViewSpec::Trust => ViewSpecSer::Trust,
+            ViewSpec::Atlas => ViewSpecSer::Graph,
             ViewSpec::Graph { .. } => ViewSpecSer::Graph,
             ViewSpec::EventInspector => ViewSpecSer::EventInspector,
         }

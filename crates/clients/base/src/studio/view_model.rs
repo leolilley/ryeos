@@ -238,6 +238,9 @@ pub enum StudioViewVm {
     Map {
         scene: StudioSceneModel,
     },
+    Atlas {
+        scene: StudioSceneModel,
+    },
     Inspector(StudioInspectorVm),
     Placeholder {
         title: String,
@@ -772,6 +775,9 @@ fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm
                 .map(|gc| gc.recent_events.clone())
                 .unwrap_or_default(),
         },
+        ViewSpec::Atlas => StudioViewVm::Atlas {
+            scene: build_scene_model(core),
+        },
         ViewSpec::Graph { .. } => StudioViewVm::Map {
             scene: build_scene_model(core),
         },
@@ -829,11 +835,7 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
 
 fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 8] {
     [
-        (
-            "Graph",
-            "Workspace topology",
-            ViewSpec::Graph { graph_id: None },
-        ),
+        ("Atlas", "2D namespace map", ViewSpec::Atlas),
         (
             "Items",
             "RyeOS objects",

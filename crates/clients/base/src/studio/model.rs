@@ -274,7 +274,7 @@ impl StudioCore {
             match tile.view {
                 ViewSpec::Thread { .. } | ViewSpec::ThreadList => needs_threads = true,
                 ViewSpec::SpaceBrowser { .. } => item_tiles.push((tile_id, tile.local.clone())),
-                ViewSpec::Graph { graph_id: None } => needs_atlas_items = true,
+                ViewSpec::Atlas => needs_atlas_items = true,
                 ViewSpec::Schedules => needs_schedules = true,
                 ViewSpec::GcStatus => needs_gc = true,
                 ViewSpec::Files => file_tiles.push((tile_id, tile.local.clone())),
