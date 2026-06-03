@@ -13,6 +13,7 @@ fn launch_context(project_path: Option<String>) -> LaunchContext {
         project_path,
         read_only: false,
         granted_caps: vec!["ui.read".into()],
+        user_principal_id: None,
     }
 }
 

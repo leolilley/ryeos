@@ -27,6 +27,7 @@ async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
         project_path: Some(workspace_root()),
         read_only: true,
         granted_caps: vec!["ui.read".into()],
+        user_principal_id: None,
     };
     let (session_id, _token) = get_ui_state(&state)
         .expect("ui state registered")

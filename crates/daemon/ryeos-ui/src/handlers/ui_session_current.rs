@@ -33,6 +33,8 @@ pub struct Response {
     pub effective_surface: Option<Value>,
     pub project_path: Option<String>,
     pub read_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_principal_id: Option<String>,
     pub events_url: String,
 }
 
@@ -82,6 +84,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         effective_surface,
         project_path,
         read_only: session.read_only,
+        user_principal_id: session.user_principal_id.clone(),
         events_url: format!("/ui/events/session/{}", session.session_id),
     };
 

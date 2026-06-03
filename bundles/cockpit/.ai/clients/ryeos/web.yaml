@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-29T13:38:01Z:869f08603f331e247f548f3120382efb34947b9332a0c62d531a7e1d2f2ffd1a:U55alR8b8uPg8Rjz7bLXx2Fz+3XuI/vqSth5DC8OyjgSGwNoNMQEehovwyk2STRTQ3FXVHLUbQDt0nzGi8ilAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-03T02:22:20Z:9a15cf731bd00f3f08371ee27af632d2bc578eff51e7a67c10bedacaf6ec595e:kOo9BFvxrQZb7ON5VyJoX6mlflrJJ5TaYm0wAtpVQBjN8TYh7NYiyKLLVORDxf9ohCK/pZj8qSmsgcAtbRgxCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 kind: client
 name: web
 version: "1.0.0"
@@ -17,6 +17,7 @@ launch:
     allow_actions: "--allow-actions"
     print_url: "--print-url"
     no_open: "--no-open"
+    hosted_principal: "--hosted-principal"
     project: "--project"
 
 capabilities:

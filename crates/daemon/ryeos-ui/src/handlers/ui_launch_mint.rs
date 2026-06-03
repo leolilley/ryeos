@@ -1,9 +1,8 @@
 //! `ui.launch.mint` — mint a launch token bound to a session.
 //!
-//! Called by the web launcher binary over the daemon's local transport
-//! (UDS or trusted-client HTTP). Creates a session record with full
-//! context (surface_ref, project_path, read_only) and returns a
-//! one-shot launch token + the URL the browser should open.
+//! Called by the web launcher binary with a verified signed caller. Creates
+//! a session record with full context (surface_ref, project_path, read_only)
+//! and returns a one-shot launch token + the URL the browser should open.
 
 use std::sync::Arc;
 
@@ -28,6 +27,8 @@ pub struct Request {
     pub project_path: Option<String>,
     #[serde(default = "default_read_only")]
     pub read_only: bool,
+    #[serde(default)]
+    pub user_principal_id: Option<String>,
 }
 
 fn default_read_only() -> bool {
@@ -43,19 +44,35 @@ pub struct Response {
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    // Require local-trust auth. The mint endpoint must not be exposed
-    // to remote callers.
+    // Require a verified signed caller. Hosted principal launches bind
+    // user-space storage to this caller's fingerprint.
     if !ctx.is_present() {
-        return Err(
-            HandlerError::Forbidden("ui.launch.mint requires local-trust auth".into()).into(),
-        );
+        return Err(HandlerError::Forbidden(
+            "ui.launch.mint requires verified signed caller".into(),
+        )
+        .into());
     }
+
+    let user_principal_id = req
+        .user_principal_id
+        .map(|principal| {
+            ryeos_app::user_space::principal_storage_key(&principal)
+                .map_err(|err| HandlerError::BadRequest(err.to_string()))?;
+            if principal != ctx.fingerprint {
+                return Err(HandlerError::Forbidden(
+                    "user_principal_id must match verified caller".into(),
+                ));
+            }
+            Ok::<_, HandlerError>(principal)
+        })
+        .transpose()?;
 
     let launch_ctx = LaunchContext {
         surface_ref: req.surface_ref,
         project_path: req.project_path,
         read_only: req.read_only,
         granted_caps: vec!["ui.read".into()],
+        user_principal_id,
     };
 
     let (session_id, token) = get_ui_state(&state)

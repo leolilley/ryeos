@@ -5,9 +5,11 @@
 //! instead of constructing `<user_root>/.ai/...` ad hoc.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::{Mutex, MutexGuard};
 
 /// Synthetic principal for the current local single-user install.
 ///
@@ -15,6 +17,8 @@ use serde::{de::DeserializeOwned, Serialize};
 /// authenticated caller and resolve through [`UserSpaceResolver`] without
 /// changing callers that operate on [`UserSpacePaths`].
 pub const LOCAL_PRINCIPAL_ID: &str = "local";
+
+static USER_SPACE_YAML_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSpacePaths {
@@ -77,6 +81,111 @@ impl UserSpaceResolver for LocalUserSpaceResolver {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PrincipalUserSpaceResolver {
+    principal_root: PathBuf,
+}
+
+impl PrincipalUserSpaceResolver {
+    pub fn for_system_space(system_space_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            principal_root: system_space_dir.into().join(".ai").join("principals"),
+        }
+    }
+}
+
+impl UserSpaceResolver for PrincipalUserSpaceResolver {
+    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+        let principal_key = principal_storage_key(principal_id)?;
+        Ok(UserSpacePaths::new(
+            self.principal_root.join(principal_key).join("user-space"),
+        ))
+    }
+}
+
+pub fn principal_storage_key(principal_id: &str) -> Result<String> {
+    let raw = principal_id
+        .strip_prefix("fp:")
+        .ok_or_else(|| anyhow::anyhow!("principal id must be in fp:<hex> format"))?;
+    if raw.len() != 64 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("principal id must be in fp:<64 hex> format");
+    }
+    Ok(raw.to_ascii_lowercase())
+}
+
+#[derive(Debug, Clone)]
+pub struct UserSpaceStore {
+    paths: UserSpacePaths,
+}
+
+pub struct LockedUserSpaceStore {
+    store: UserSpaceStore,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl UserSpaceStore {
+    pub fn resolve_principal(principal_id: &str) -> Result<Self> {
+        Self::resolve_with(&LocalUserSpaceResolver, principal_id)
+    }
+
+    pub fn resolve_with<R>(resolver: &R, principal_id: &str) -> Result<Self>
+    where
+        R: UserSpaceResolver,
+    {
+        Ok(Self {
+            paths: resolver.resolve(principal_id)?,
+        })
+    }
+
+    pub async fn locked_principal(principal_id: &str) -> Result<LockedUserSpaceStore> {
+        Self::locked_with(&LocalUserSpaceResolver, principal_id).await
+    }
+
+    pub async fn locked_with<R>(resolver: &R, principal_id: &str) -> Result<LockedUserSpaceStore>
+    where
+        R: UserSpaceResolver,
+    {
+        let store = Self::resolve_with(resolver, principal_id)?;
+        let guard = user_space_yaml_lock().lock().await;
+        Ok(LockedUserSpaceStore {
+            store,
+            _guard: guard,
+        })
+    }
+
+    pub fn paths(&self) -> &UserSpacePaths {
+        &self.paths
+    }
+
+    pub fn load_yaml<T>(&self, path: &Path) -> Result<T>
+    where
+        T: DeserializeOwned + Default,
+    {
+        read_yaml_or_default(path)
+    }
+}
+
+impl LockedUserSpaceStore {
+    pub fn write_yaml<T>(&self, path: &Path, value: &T) -> Result<()>
+    where
+        T: Serialize,
+    {
+        write_yaml_atomic(path, value)
+    }
+}
+
+impl std::ops::Deref for LockedUserSpaceStore {
+    type Target = UserSpaceStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+fn user_space_yaml_lock() -> &'static Mutex<()> {
+    USER_SPACE_YAML_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn read_yaml_or_default<T>(path: &Path) -> Result<T>
 where
     T: DeserializeOwned + Default,
@@ -107,17 +216,20 @@ fn ensure_private_parent_dirs(path: &Path) -> Result<()> {
             .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
         let mut dirs = Vec::new();
         let mut current = Some(parent);
-        let mut found_ai_dir = false;
+        let mut outermost_ai_dir_index = None;
         while let Some(dir) = current {
-            dirs.push(dir);
             if dir.file_name().is_some_and(|name| name == ".ai") {
-                found_ai_dir = true;
-                break;
+                outermost_ai_dir_index = Some(dirs.len());
             }
+            dirs.push(dir);
             current = dir.parent();
         }
-        let dirs_to_chmod: Vec<&Path> = if found_ai_dir {
-            dirs.into_iter().rev().collect()
+        let dirs_to_chmod: Vec<&Path> = if let Some(outermost_ai_dir_index) = outermost_ai_dir_index
+        {
+            dirs.into_iter()
+                .take(outermost_ai_dir_index + 1)
+                .rev()
+                .collect()
         } else {
             vec![parent]
         };
@@ -165,6 +277,19 @@ mod tests {
         value: String,
     }
 
+    struct FixedResolver {
+        root: PathBuf,
+    }
+
+    impl UserSpaceResolver for FixedResolver {
+        fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+            if principal_id != "fp:test" {
+                anyhow::bail!("unexpected principal {principal_id}");
+            }
+            Ok(UserSpacePaths::new(self.root.clone()))
+        }
+    }
+
     #[test]
     fn logical_paths_live_under_user_ai_config_and_state() {
         let paths = UserSpacePaths::new(PathBuf::from("/tmp/user"));
@@ -190,6 +315,31 @@ mod tests {
     }
 
     #[test]
+    fn principal_resolver_maps_fp_to_isolated_user_space() {
+        let resolver = PrincipalUserSpaceResolver::for_system_space("/tmp/system");
+        let principal = format!("fp:{}", "AB".repeat(32));
+        let paths = resolver.resolve(&principal).unwrap();
+
+        assert_eq!(principal_storage_key(&principal).unwrap(), "ab".repeat(32));
+        assert_eq!(
+            paths.root,
+            PathBuf::from(format!(
+                "/tmp/system/.ai/principals/{}/user-space",
+                "ab".repeat(32)
+            ))
+        );
+    }
+
+    #[test]
+    fn principal_storage_key_rejects_non_fp_principals() {
+        let err = principal_storage_key("session:abc").unwrap_err();
+        assert!(err.to_string().contains("fp:<hex>"));
+
+        let err = principal_storage_key("fp:not-hex").unwrap_err();
+        assert!(err.to_string().contains("fp:<64 hex>"));
+    }
+
+    #[test]
     fn yaml_helpers_round_trip_atomically() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested/config.yaml");
@@ -202,6 +352,28 @@ mod tests {
         let loaded: Demo = read_yaml_or_default(&path).unwrap();
         assert_eq!(loaded.value, "ok");
         assert!(!path.with_extension("tmp~").exists());
+    }
+
+    #[tokio::test]
+    async fn user_space_store_resolves_principal_and_serializes_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolver = FixedResolver {
+            root: tmp.path().to_path_buf(),
+        };
+        let store = UserSpaceStore::resolve_with(&resolver, "fp:test").unwrap();
+        let path = store.paths().studio_config();
+
+        let missing: Demo = store.load_yaml(&path).unwrap();
+        assert_eq!(missing, Demo::default());
+
+        let locked = UserSpaceStore::locked_with(&resolver, "fp:test")
+            .await
+            .expect("locked store should resolve through supplied resolver");
+        locked
+            .write_yaml(&path, &Demo { value: "ok".into() })
+            .unwrap();
+        let loaded: Demo = store.load_yaml(&path).unwrap();
+        assert_eq!(loaded.value, "ok");
     }
 
     #[cfg(unix)]
@@ -237,6 +409,41 @@ mod tests {
 
         for dir in [".ai", ".ai/state", ".ai/state/studio"] {
             let mode = std::fs::metadata(tmp.path().join(dir))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "{dir} should be private");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn yaml_helpers_make_hosted_principal_dir_chain_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(".ai")
+            .join("principals")
+            .join("ab".repeat(32))
+            .join("user-space")
+            .join(".ai")
+            .join("config")
+            .join("studio.yaml");
+
+        write_yaml_atomic(&path, &Demo { value: "ok".into() }).unwrap();
+
+        let principal_key = "ab".repeat(32);
+        let dirs = vec![
+            ".ai".to_string(),
+            ".ai/principals".to_string(),
+            format!(".ai/principals/{principal_key}"),
+            format!(".ai/principals/{principal_key}/user-space"),
+            format!(".ai/principals/{principal_key}/user-space/.ai"),
+            format!(".ai/principals/{principal_key}/user-space/.ai/config"),
+        ];
+        for dir in dirs {
+            let mode = std::fs::metadata(tmp.path().join(&dir))
                 .unwrap()
                 .permissions()
                 .mode()

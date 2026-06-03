@@ -45,6 +45,10 @@ struct Cli {
     /// Mint a launch URL but do not open a browser.
     #[arg(long = "no-open")]
     no_open: bool,
+
+    /// Bind Studio user-space storage to this launcher's signing-key principal.
+    #[arg(long = "hosted-principal")]
+    hosted_principal: bool,
 }
 
 /// Request body for `ui.launch.mint`.
@@ -55,6 +59,8 @@ struct MintRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     project_path: Option<String>,
     read_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_principal_id: Option<String>,
 }
 
 /// Response from `ui.launch.mint`.
@@ -100,6 +106,9 @@ async fn main() -> Result<()> {
         surface_ref,
         project_path: project_path.map(|p| p.to_string_lossy().to_string()),
         read_only: cli.read_only || !cli.allow_actions,
+        user_principal_id: cli
+            .hosted_principal
+            .then(|| format!("fp:{}", signer.fingerprint)),
     };
 
     let body = serde_json::to_vec(&mint_req).context("serialize mint request")?;
@@ -384,6 +393,7 @@ mod tests {
             surface_ref: "surface:ryeos/studio/base".to_string(),
             project_path: Some("/tmp/proj".to_string()),
             read_only: false,
+            user_principal_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["surface_ref"], "surface:ryeos/studio/base");
@@ -397,6 +407,7 @@ mod tests {
             surface_ref: "surface:x/y/z".to_string(),
             project_path: None,
             read_only: true,
+            user_principal_id: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -404,6 +415,18 @@ mod tests {
             "should skip_serializing_if None"
         );
         assert!(json.contains("read_only"));
+    }
+
+    #[test]
+    fn mint_request_includes_user_principal_when_bound() {
+        let req = MintRequest {
+            surface_ref: "surface:x/y/z".to_string(),
+            project_path: None,
+            read_only: true,
+            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["user_principal_id"], format!("fp:{}", "ab".repeat(32)));
     }
 
     #[test]

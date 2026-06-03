@@ -14,6 +14,7 @@ fn test_context() -> LaunchContext {
         project_path: Some("/tmp/project".into()),
         read_only: false,
         granted_caps: vec!["ui.read".into()],
+        user_principal_id: None,
     }
 }
 
@@ -95,6 +96,7 @@ async fn session_current_with_read_only_flag() {
         project_path: None,
         read_only: true,
         granted_caps: vec![],
+        user_principal_id: None,
     };
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
@@ -113,4 +115,32 @@ async fn session_current_with_read_only_flag() {
 
     assert!(result["read_only"].as_bool().unwrap());
     assert_eq!(result["project_path"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn session_current_returns_durable_user_principal_when_present() {
+    let (_tmp, state) = build_test_state();
+    let user_principal_id = format!("fp:{}", "cd".repeat(32));
+    let ctx = LaunchContext {
+        surface_ref: "surface:ryeos/cockpit/base".into(),
+        project_path: None,
+        read_only: false,
+        granted_caps: vec!["ui.read".into()],
+        user_principal_id: Some(user_principal_id.clone()),
+    };
+    let (session_id, _token) = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .mint_token(ctx);
+    let hctx = HandlerContext::new(format!("session:{session_id}"), vec![], false);
+
+    let result = (ryeos_ui::handlers::ui_session_current::DESCRIPTOR.handler)(
+        serde_json::json!(null),
+        hctx,
+        Arc::new(state),
+    )
+    .await
+    .expect("should succeed");
+
+    assert_eq!(result["user_principal_id"], user_principal_id);
 }
