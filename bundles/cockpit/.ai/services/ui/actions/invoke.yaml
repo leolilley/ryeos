@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-31T08:15:58Z:d315fb3b3e90b238788906740c089b6d6a6b4bd0f22fe033032cb4b075d2f26e:7t0gs8O1xSnQSxZ5+ClmcDVAQfc9DvQqTJgFc/HbofzaSEbHZh/o1CRd+qZs3IzZQJgJCU4b95WA8eVJrc4zBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-name: actions/invoke
-version: "1.0.0"
-description: Browser-side action invocation through session-authenticated endpoint.
-endpoint: ui.actions.invoke
-availability: both

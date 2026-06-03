@@ -6,8 +6,8 @@
 //!
 //! Section directories (routes, verbs) support recursive subfolders:
 //!
-//!   .ai/node/routes/ui/cockpit/snapshot.yaml
-//!   .ai/node/routes/ui/cockpit/items/list.yaml
+//!   .ai/node/routes/ui/studio/dimension-get.yaml
+//!   .ai/node/routes/ui/studio/items/list.yaml
 //!   .ai/node/verbs/web.yaml
 //!
 //! The `bundles` section remains flat (no subdirectories).

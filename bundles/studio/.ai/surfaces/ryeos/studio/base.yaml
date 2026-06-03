@@ -1,0 +1,35 @@
+# ryeos:signed:2026-06-03T06:02:35Z:7e6a4d58b06b5013970aee5f8d45971e2e69a165e7ec3b50fea11c75cf3a7907:0uyrpxs8bFXzuJY1y0P278sQe41AAyytCzi1dcmVCxwB/t24hLXBsoaJBfqtsDKX7UQ4/rvkRn+WrPRJoBrEBw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+name: studio-base
+version: "1.0.0"
+description: RyeOS Studio home space
+
+layout:
+  root: home
+  nodes:
+    home:
+      type: pane
+      view: graph
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.graph
+    label: Graph
+    category: View
+  - id: view.items
+    label: Items
+    category: View
+  - id: view.files
+    label: Files
+    category: View
+  - id: view.item_inspector
+    label: Inspector
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.services
+    label: Services
+    category: View

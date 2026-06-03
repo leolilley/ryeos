@@ -132,8 +132,8 @@ mod tests {
 
     fn minimal_response() -> serde_json::Value {
         serde_json::json!({
-            "requested_ref": "surface:ryeos/cockpit/base",
-            "canonical_ref": "surface:ryeos/cockpit/base",
+            "requested_ref": "surface:ryeos/studio/base",
+            "canonical_ref": "surface:ryeos/studio/base",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_system",
@@ -160,7 +160,7 @@ mod tests {
         let es = EffectiveSurface::from_effective_item(minimal_response()).unwrap();
         assert_eq!(es.kind, "surface");
         assert!(es.trusted);
-        assert_eq!(es.canonical_ref, "surface:ryeos/cockpit/base");
+        assert_eq!(es.canonical_ref, "surface:ryeos/studio/base");
         assert_eq!(es.spec.name, "test");
     }
 

@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-03T06:08:15Z:486d79d3c03498b69340f8701fa4c9c35ed914a136d0aa75e3d7352a2cf08412:vUOBTDoXf931H0uT9+HOVxAp4wehSXJb5AJzYynZWgKdp+ux25ctV/HgbBqKQ6PEWdd4l1vgqa4PoXJc0TG1BQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/thread/inspect
+path: /ui/api/studio/thread/inspect
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 15000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/studio/thread/inspect"

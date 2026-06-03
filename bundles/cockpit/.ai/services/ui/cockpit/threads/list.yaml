@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-31T08:15:58Z:f5dbee18e55b79272fe7243b3f217cd7312f9720f1972444ab578b61af9dff18:MD1NGrBCFDrJhzy+MVFxuyuGbsVd4QhODT/Lo3kRZmJLs7qF6XaHx2SnlildkUvaVmheHL49mjaWlaZMWUbxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-name: cockpit/threads/list
-version: "1.0.0"
-description: Thread listing for the cockpit — returns recent threads with status, kind, item_ref, and timestamps.
-endpoint: ui.cockpit.threads.list
-availability: daemon_only

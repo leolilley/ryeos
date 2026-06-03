@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
-// Operational cockpit snapshot
+// Operational studio dimension
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitSnapshotModel {
+pub struct StudioDimensionModel {
     pub schema_version: String,
     pub generated_at: String,
     pub session: SessionModel,
@@ -373,7 +373,7 @@ pub struct EventRecord {
 pub struct Store {
     pub identity: Option<IdentityModel>,
     pub daemon: DaemonModel,
-    pub cockpit: Option<CockpitSnapshotModel>,
+    pub studio: Option<StudioDimensionModel>,
     pub schedules: ScheduleListModel,
     pub gc_status: Option<GcStatusModel>,
     pub files: Option<FileBrowserModel>,

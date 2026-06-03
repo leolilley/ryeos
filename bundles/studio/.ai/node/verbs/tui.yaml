@@ -1,0 +1,13 @@
+# ryeos:signed:2026-06-03T06:08:17Z:4ec001b3c54f6c8f7dc5dd59e58fbf9f2b438dfc5e68eee0da72876af9bcf42f:wqeVqyh6BGvLFouOnnSjReimQu+SD4b+825iFHDkGtS4Rf0HzEcQCoz/9kj88PWlAoyVFwE7/Fi/mGwn20pYBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: verbs
+section: verbs
+name: tui
+description: Open the terminal RyeOS Studio
+execute: client:ryeos/tui
+aliases:
+- tokens:
+  - tui
+  positional_forms:
+  - slots:
+    - field: surface
+  project_resolution: optional

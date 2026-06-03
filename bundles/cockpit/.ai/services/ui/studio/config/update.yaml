@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-31T08:15:58Z:a99e3492cc95bc35a8c398ab57c1fa079f64f97ffea684b1681671967c23db42:ESWesYu2oZEs5xCywMgazAKro39vGto98TrtjxcBWj0koMrvTE4ZcwDMAh7cl+ImIBouafNd/d657mJnteT/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-name: studio/config/update
-version: "1.0.0"
-description: Update durable local Studio user preferences.
-endpoint: ui.studio.config.update
-availability: daemon_only

@@ -4,6 +4,22 @@ use std::path::{Path, PathBuf};
 
 use lillux::crypto::{DecodePrivateKey, SigningKey};
 
+fn host_triple() -> String {
+    let output = std::process::Command::new("rustc")
+        .args(["-vV"])
+        .output()
+        .expect("rustc -vV");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find(|line| line.starts_with("host:"))
+        .expect("host triple in rustc -vV")
+        .strip_prefix("host:")
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -56,9 +72,33 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
+fn stage_core_handler_binaries(registry: &Path) {
+    let triple = host_triple();
+    let bin_dir = registry.join(ryeos_engine::AI_DIR).join("bin").join(triple);
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    for name in [
+        "rye-parser-yaml-document",
+        "rye-parser-yaml-header-document",
+        "rye-parser-regex-kv",
+        "rye-composer-identity",
+        "ryeos-core-tools",
+    ] {
+        let path = bin_dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho test {name}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+}
+
 fn prepare_core_registry(root: &Path, key: &SigningKey) -> PathBuf {
     let registry = root.join("core");
     copy_dir_recursive(&core_bundle(), &registry);
+    stage_core_handler_binaries(&registry);
     ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&registry, key)
         .unwrap_or_else(|e| panic!("prepare core registry failed: {e:#}"));
     registry

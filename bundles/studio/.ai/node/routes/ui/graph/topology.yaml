@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-03T06:08:02Z:3403c2c8be011abf26fc7632c3a99fdce4d6cb43514da2a9edb5379c92845fbb:qCygdqPLZRGRgGYJt2n48u1ojL5lwa9hbp+whzUt/0YIPGiywD/dQHbqUv2GUfX6VscHbCbgaWmlA1pEjx+CBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/graph
+section: routes
+id: ui/api/graph/topology
+path: /ui/api/graph/topology
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 128
+response:
+  mode: json
+  source: "service:ui/graph/topology"

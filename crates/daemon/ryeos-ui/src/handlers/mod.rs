@@ -3,18 +3,18 @@
 use ryeos_api::registry::ServiceDescriptor;
 
 pub mod ui_actions_invoke;
-pub mod ui_cockpit_files;
-pub mod ui_cockpit_gc;
-pub mod ui_cockpit_items;
-pub mod ui_cockpit_remotes;
-pub mod ui_cockpit_schedules;
-pub mod ui_cockpit_snapshot;
-pub mod ui_cockpit_threads;
 pub mod ui_graph_topology;
 pub mod ui_launch;
 pub mod ui_launch_mint;
 pub mod ui_session_current;
+pub mod ui_studio_dimension;
+pub mod ui_studio_files;
+pub mod ui_studio_gc;
+pub mod ui_studio_items;
 pub mod ui_studio_projects;
+pub mod ui_studio_remotes;
+pub mod ui_studio_schedules;
+pub mod ui_studio_threads;
 
 pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
@@ -22,15 +22,15 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_session_current::DESCRIPTOR,
     ui_actions_invoke::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
-    ui_cockpit_snapshot::STUDIO_DESCRIPTOR,
-    ui_cockpit_items::STUDIO_ITEMS_LIST_DESCRIPTOR,
-    ui_cockpit_items::STUDIO_ITEM_INSPECT_DESCRIPTOR,
-    ui_cockpit_threads::STUDIO_DESCRIPTOR,
-    ui_cockpit_threads::STUDIO_INSPECT_DESCRIPTOR,
-    ui_cockpit_schedules::STUDIO_DESCRIPTOR,
-    ui_cockpit_gc::STUDIO_DESCRIPTOR,
-    ui_cockpit_files::STUDIO_FILES_LIST_DESCRIPTOR,
-    ui_cockpit_files::STUDIO_FILES_READ_DESCRIPTOR,
+    ui_studio_dimension::DESCRIPTOR,
+    ui_studio_items::ITEMS_LIST_DESCRIPTOR,
+    ui_studio_items::ITEM_INSPECT_DESCRIPTOR,
+    ui_studio_threads::DESCRIPTOR,
+    ui_studio_threads::INSPECT_DESCRIPTOR,
+    ui_studio_schedules::DESCRIPTOR,
+    ui_studio_gc::DESCRIPTOR,
+    ui_studio_files::FILES_LIST_DESCRIPTOR,
+    ui_studio_files::FILES_READ_DESCRIPTOR,
     ui_studio_projects::PROJECTS_LIST_DESCRIPTOR,
     ui_studio_projects::PROJECTS_ADD_DESCRIPTOR,
     ui_studio_projects::PROJECTS_FORGET_DESCRIPTOR,
@@ -40,17 +40,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_studio_projects::RECENT_LIST_DESCRIPTOR,
     ui_studio_projects::CONFIG_GET_DESCRIPTOR,
     ui_studio_projects::CONFIG_UPDATE_DESCRIPTOR,
-    ui_cockpit_snapshot::DESCRIPTOR,
-    ui_cockpit_items::ITEMS_LIST_DESCRIPTOR,
-    ui_cockpit_items::ITEM_INSPECT_DESCRIPTOR,
-    ui_cockpit_threads::DESCRIPTOR,
-    ui_cockpit_threads::INSPECT_DESCRIPTOR,
-    ui_cockpit_schedules::DESCRIPTOR,
-    ui_cockpit_gc::DESCRIPTOR,
-    ui_cockpit_remotes::REMOTES_LIST_DESCRIPTOR,
-    ui_cockpit_remotes::REMOTES_PROBE_DESCRIPTOR,
-    ui_cockpit_files::FILES_LIST_DESCRIPTOR,
-    ui_cockpit_files::FILES_READ_DESCRIPTOR,
+    ui_studio_remotes::REMOTES_LIST_DESCRIPTOR,
+    ui_studio_remotes::REMOTES_PROBE_DESCRIPTOR,
 ];
 
 #[cfg(test)]

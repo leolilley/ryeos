@@ -1,7 +1,7 @@
 use super::dto::{
-    StudioAddProjectDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
+    StudioAddProjectDto, StudioDimensionDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
     StudioItemInspectionDto, StudioItemsDto, StudioOpenProjectDto, StudioSchedulesDto,
-    StudioSnapshotDto, StudioThreadInspectionDto, StudioThreadsDto,
+    StudioThreadInspectionDto, StudioThreadsDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::event::{
@@ -268,8 +268,8 @@ impl StudioCore {
                 }
                 Vec::new()
             }
-            StudioAction::SelectSnapshot => {
-                self.ui.inspector = StudioInspectorState::Snapshot;
+            StudioAction::SelectDimension => {
+                self.ui.inspector = StudioInspectorState::Dimension;
                 self.bump_generation();
                 Vec::new()
             }
@@ -457,7 +457,7 @@ impl StudioCore {
         self.data.tile_items.clear();
         self.data.tile_files.clear();
         self.data.file_read = None;
-        self.ui.inspector = StudioInspectorState::Snapshot;
+        self.ui.inspector = StudioInspectorState::Dimension;
         self.push_motion(StudioMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
         });
@@ -730,7 +730,7 @@ impl StudioCore {
                 vec![self.emit(StudioEffectKind::FetchProjects)]
             }
             ViewSpec::Atlas => vec![
-                self.emit(StudioEffectKind::FetchSnapshot),
+                self.emit(StudioEffectKind::FetchDimension),
                 self.emit(StudioEffectKind::FetchItems {
                     tile_id: None,
                     query: None,
@@ -744,7 +744,7 @@ impl StudioCore {
             | ViewSpec::ItemInspector
             | ViewSpec::Trust
             | ViewSpec::Graph { .. }
-            | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchSnapshot)],
+            | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchDimension)],
         }
     }
 
@@ -777,9 +777,9 @@ impl StudioCore {
         };
 
         match result.kind {
-            StudioEffectResultKind::Snapshot => {
-                self.apply_parsed::<StudioSnapshotDto>(data, "snapshot", |core, snapshot| {
-                    core.data.snapshot = Some(snapshot);
+            StudioEffectResultKind::Dimension => {
+                self.apply_parsed::<StudioDimensionDto>(data, "dimension", |core, dimension| {
+                    core.data.dimension = Some(dimension);
                 });
             }
             StudioEffectResultKind::Projects => {
@@ -841,14 +841,14 @@ impl StudioCore {
                         }
                     }
                 }
-                self.data.snapshot = None;
+                self.data.dimension = None;
                 self.data.items = None;
                 self.data.tile_items.clear();
                 self.data.files = None;
                 self.data.tile_files.clear();
                 self.data.file_read = None;
                 self.data.item_inspection = None;
-                self.ui.inspector = StudioInspectorState::Snapshot;
+                self.ui.inspector = StudioInspectorState::Dimension;
                 self.pending_effects
                     .retain(|_, kind| !effect_depends_on_project_binding(kind));
                 self.notice(
@@ -987,9 +987,9 @@ impl StudioCore {
             .map(|session| session.read_only)
             .or_else(|| {
                 self.data
-                    .snapshot
+                    .dimension
                     .as_ref()
-                    .map(|snapshot| snapshot.session.read_only)
+                    .map(|dimension| dimension.session.read_only)
             })
             .unwrap_or(true)
     }
@@ -1056,8 +1056,8 @@ fn effect_result_kind_matches(
     matches!(
         (expected, actual),
         (
-            StudioEffectKind::FetchSnapshot,
-            StudioEffectResultKind::Snapshot
+            StudioEffectKind::FetchDimension,
+            StudioEffectResultKind::Dimension
         ) | (
             StudioEffectKind::FetchProjects,
             StudioEffectResultKind::Projects
@@ -1107,7 +1107,7 @@ fn effect_result_kind_matches(
 fn effect_depends_on_project_binding(kind: &StudioEffectKind) -> bool {
     matches!(
         kind,
-        StudioEffectKind::FetchSnapshot
+        StudioEffectKind::FetchDimension
             | StudioEffectKind::FetchItems { .. }
             | StudioEffectKind::ListFiles { .. }
             | StudioEffectKind::ReadFile { .. }
@@ -1121,8 +1121,8 @@ fn current_project_path(core: &StudioCore) -> Option<String> {
         .as_ref()
         .and_then(|session| session.project_path.clone())
         .or_else(|| {
-            core.data.snapshot.as_ref().and_then(|snapshot| {
-                snapshot
+            core.data.dimension.as_ref().and_then(|dimension| {
+                dimension
                     .project
                     .as_ref()
                     .map(|project| project.path.clone())
@@ -1327,7 +1327,7 @@ mod tests {
         assert_eq!(effects.len(), 3);
         assert!(effects
             .iter()
-            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot)));
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
@@ -1399,7 +1399,7 @@ mod tests {
         );
         assert!(reloads
             .iter()
-            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot)));
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
         assert!(reloads
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
@@ -1651,19 +1651,19 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_effect_result_updates_view_model() {
+    fn dimension_effect_result_updates_view_model() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
         let effects = core.initial_effects();
-        let snapshot_id = effects
+        let dimension_id = effects
             .iter()
-            .find(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot))
+            .find(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension))
             .map(|effect| effect.id)
-            .expect("initial load should fetch snapshot");
+            .expect("initial load should fetch dimension");
         core.dispatch(StudioEvent::EffectResult {
             result: StudioEffectResult {
-                id: snapshot_id,
+                id: dimension_id,
                 ok: true,
-                kind: StudioEffectResultKind::Snapshot,
+                kind: StudioEffectResultKind::Dimension,
                 data: Some(serde_json::json!({
                     "schema_version": "studio.test",
                     "session": {
@@ -1842,7 +1842,7 @@ mod tests {
         )));
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
-            Some(StudioEffectKind::FetchSnapshot)
+            Some(StudioEffectKind::FetchDimension)
         ));
     }
 
@@ -2156,7 +2156,7 @@ mod tests {
             result: StudioEffectResult {
                 id: fetch_items.id,
                 ok: true,
-                kind: StudioEffectResultKind::Snapshot,
+                kind: StudioEffectResultKind::Dimension,
                 data: Some(serde_json::json!({
                     "schema_version": "studio.test",
                     "session": { "session_id": "session-1", "surface_ref": "surface:ryeos/studio/base", "read_only": true },
@@ -2166,7 +2166,7 @@ mod tests {
             },
         });
 
-        assert!(core.data.snapshot.is_none());
+        assert!(core.data.dimension.is_none());
         assert!(core.data.items.is_none());
         assert_eq!(core.ui.notices.len(), 1);
     }

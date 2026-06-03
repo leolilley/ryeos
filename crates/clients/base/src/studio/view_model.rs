@@ -484,9 +484,9 @@ fn presentation_metrics_vm(
         .map(|threads| threads.threads.len())
         .unwrap_or_else(|| {
             core.data
-                .snapshot
+                .dimension
                 .as_ref()
-                .map(|snapshot| snapshot.threads.active_count.max(0) as usize)
+                .map(|dimension| dimension.threads.active_count.max(0) as usize)
                 .unwrap_or_default()
         });
     let project_count = core
@@ -497,9 +497,9 @@ fn presentation_metrics_vm(
         .unwrap_or_default();
     let service_count = core
         .data
-        .snapshot
+        .dimension
         .as_ref()
-        .map(|snapshot| snapshot.local_node.services.len())
+        .map(|dimension| dimension.local_node.services.len())
         .unwrap_or_default();
     let schedule_count = core
         .data
@@ -508,16 +508,16 @@ fn presentation_metrics_vm(
         .map(|schedules| schedules.schedules.len())
         .or_else(|| {
             core.data
-                .snapshot
+                .dimension
                 .as_ref()
-                .map(|snapshot| snapshot.schedules.total)
+                .map(|dimension| dimension.schedules.total)
         })
         .unwrap_or_default();
     let active_thread_count = core
         .data
-        .snapshot
+        .dimension
         .as_ref()
-        .map(|snapshot| snapshot.threads.active_count)
+        .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
     let scene_object_count = build_scene_model(core).objects.len();
     let activity_level = presentation_activity_level(
@@ -798,24 +798,24 @@ fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm
 
 fn session_vm(core: &StudioCore) -> StudioSessionVm {
     let browser = core.data.session.as_ref();
-    let snapshot = core.data.snapshot.as_ref();
+    let dimension = core.data.dimension.as_ref();
     StudioSessionVm {
         session_id: browser
             .map(|session| session.session_id.clone())
-            .or_else(|| snapshot.map(|snapshot| snapshot.session.session_id.clone()))
+            .or_else(|| dimension.map(|dimension| dimension.session.session_id.clone()))
             .unwrap_or_default(),
         project_path: browser
             .and_then(|session| session.project_path.clone())
             .or_else(|| {
-                snapshot.and_then(|snapshot| snapshot.project.as_ref().map(|p| p.path.clone()))
+                dimension.and_then(|dimension| dimension.project.as_ref().map(|p| p.path.clone()))
             }),
         surface_ref: browser
             .map(|session| session.surface_ref.clone())
-            .or_else(|| snapshot.map(|snapshot| snapshot.session.surface_ref.clone()))
+            .or_else(|| dimension.map(|dimension| dimension.session.surface_ref.clone()))
             .unwrap_or_default(),
         read_only: browser
             .map(|session| session.read_only)
-            .or_else(|| snapshot.map(|snapshot| snapshot.session.read_only))
+            .or_else(|| dimension.map(|dimension| dimension.session.read_only))
             .unwrap_or(true),
     }
 }
@@ -960,7 +960,7 @@ fn overview(core: &StudioCore) -> StudioViewVm {
                 "Services",
                 &core
                     .data
-                    .snapshot
+                    .dimension
                     .as_ref()
                     .map(|x| x.local_node.services.len())
                     .unwrap_or(0)
@@ -983,7 +983,7 @@ fn overview(core: &StudioCore) -> StudioViewVm {
                 ),
                 ("Mode".to_string(), "RyeOS".to_string()),
             ],
-            action: Some(StudioAction::SelectSnapshot),
+            action: Some(StudioAction::SelectDimension),
         }],
     }
 }
@@ -1090,7 +1090,7 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
             .collect(),
         ViewSpec::Remotes => core
             .data
-            .snapshot
+            .dimension
             .as_ref()
             .map(|x| x.remotes.clone())
             .unwrap_or_default()
@@ -1110,7 +1110,7 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
             .collect(),
         ViewSpec::Services => core
             .data
-            .snapshot
+            .dimension
             .as_ref()
             .map(|x| x.local_node.services.clone())
             .unwrap_or_default()
@@ -1434,7 +1434,7 @@ fn file_state(tile: &TileState) -> (String, String) {
 
 fn inspector(core: &StudioCore) -> StudioInspectorVm {
     match &core.ui.inspector {
-        StudioInspectorState::Snapshot => StudioInspectorVm {
+        StudioInspectorState::Dimension => StudioInspectorVm {
             title: "RyeOS".to_string(),
             subtitle: Some("Current project and local node state".to_string()),
             sections: vec![StudioSectionVm {
@@ -1571,9 +1571,9 @@ fn join_path(base: &str, name: &str) -> String {
 
 fn health_label(core: &StudioCore) -> String {
     core.data
-        .snapshot
+        .dimension
         .as_ref()
-        .and_then(|snapshot| snapshot.local_node.health.get("status"))
+        .and_then(|dimension| dimension.local_node.health.get("status"))
         .and_then(|v| v.as_str())
         .unwrap_or("connecting")
         .to_string()
@@ -1581,9 +1581,9 @@ fn health_label(core: &StudioCore) -> String {
 
 fn ryeos_version(core: &StudioCore) -> String {
     core.data
-        .snapshot
+        .dimension
         .as_ref()
-        .and_then(|snapshot| snapshot.local_node.status.get("version"))
+        .and_then(|dimension| dimension.local_node.status.get("version"))
         .and_then(|v| v.as_str())
         .map(normalize_version_label)
         .unwrap_or_else(|| {

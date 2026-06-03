@@ -2752,7 +2752,7 @@ mod kind_contract_regressions {
         // Child surface with extends pointing to parent.
         // Validation only checks the composed value, not extends resolution.
         let value = serde_json::json!({
-            "extends": "surface:ryeos/cockpit/base",
+            "extends": "surface:ryeos/studio/base",
             "layout": { "root": "main" },
             "affordances": [
                 { "id": "view.graph", "label": "Graph", "category": "Graph" }

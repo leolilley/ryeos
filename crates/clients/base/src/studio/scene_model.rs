@@ -87,14 +87,14 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
         StudioTone::Neutral,
     ));
 
-    if let Some(snapshot) = &core.data.snapshot {
+    if let Some(dimension) = &core.data.dimension {
         scene.objects.push(scene_object(
             "project:core",
             StudioSceneObjectKind::ProjectCore,
             [0.0, -0.2, 0.0],
-            [scale_for_count(snapshot.project.iter().count()), 1.0, 1.0],
+            [scale_for_count(dimension.project.iter().count()), 1.0, 1.0],
             "#fe8019",
-            snapshot
+            dimension
                 .project
                 .as_ref()
                 .map(|project| project.path.clone()),
@@ -105,9 +105,9 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             "spaces:ring",
             StudioSceneObjectKind::SpaceRing,
             [0.0, -0.4, 0.0],
-            [scale_for_count(snapshot.local_node.spaces.len()), 1.0, 1.0],
+            [scale_for_count(dimension.local_node.spaces.len()), 1.0, 1.0],
             "#fabd2f",
-            Some(format!("{} spaces", snapshot.local_node.spaces.len())),
+            Some(format!("{} spaces", dimension.local_node.spaces.len())),
             StudioTone::Neutral,
         ));
 
@@ -116,12 +116,12 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             StudioSceneObjectKind::ServiceBeacon,
             [-2.6, 0.0, -2.8],
             [
-                scale_for_count(snapshot.local_node.services.len()),
+                scale_for_count(dimension.local_node.services.len()),
                 1.0,
                 1.0,
             ],
             "#83a598",
-            Some(format!("{} services", snapshot.local_node.services.len())),
+            Some(format!("{} services", dimension.local_node.services.len())),
             StudioTone::Neutral,
         ));
 
@@ -130,16 +130,16 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             StudioSceneObjectKind::ThreadFlow,
             [2.4, 0.0, -2.0],
             [
-                scale_for_count(snapshot.threads.active_count.max(0) as usize),
+                scale_for_count(dimension.threads.active_count.max(0) as usize),
                 1.0,
                 1.0,
             ],
             "#d3869b",
             Some(format!(
                 "{} active threads",
-                snapshot.threads.active_count.max(0)
+                dimension.threads.active_count.max(0)
             )),
-            if snapshot.threads.active_count > 0 {
+            if dimension.threads.active_count > 0 {
                 StudioTone::Accent
             } else {
                 StudioTone::Neutral
@@ -150,20 +150,20 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             "schedules:pulse",
             StudioSceneObjectKind::SchedulePulse,
             [3.2, 0.0, 2.4],
-            [scale_for_count(snapshot.schedules.enabled), 1.0, 1.0],
+            [scale_for_count(dimension.schedules.enabled), 1.0, 1.0],
             "#b8bb26",
             Some(format!(
                 "{} enabled / {} schedules",
-                snapshot.schedules.enabled, snapshot.schedules.total
+                dimension.schedules.enabled, dimension.schedules.total
             )),
-            if snapshot.schedules.enabled > 0 {
+            if dimension.schedules.enabled > 0 {
                 StudioTone::Good
             } else {
                 StudioTone::Neutral
             },
         ));
 
-        for (index, remote) in snapshot.remotes.iter().enumerate() {
+        for (index, remote) in dimension.remotes.iter().enumerate() {
             scene.objects.push(scene_object(
                 &format!("remote:{}", remote.name),
                 StudioSceneObjectKind::RemoteNode,
@@ -196,9 +196,9 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             .as_ref()
             .map(|session| session.granted_caps.clone())
             .unwrap_or_default();
-        if let Some(snapshot) = &core.data.snapshot {
-            capabilities.extend(snapshot.session.granted_caps.clone());
-            for service in &snapshot.local_node.services {
+        if let Some(dimension) = &core.data.dimension {
+            capabilities.extend(dimension.session.granted_caps.clone());
+            for service in &dimension.local_node.services {
                 capabilities.extend(service.required_caps.clone());
             }
         }

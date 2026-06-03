@@ -9,7 +9,7 @@ pub struct StudioEffect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioEffectKind {
-    FetchSnapshot,
+    FetchDimension,
     FetchProjects,
     AddProject {
         root: String,
@@ -71,7 +71,7 @@ pub struct StudioEffectResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StudioEffectResultKind {
-    Snapshot,
+    Dimension,
     Projects,
     ProjectAdded,
     ProjectOpened,

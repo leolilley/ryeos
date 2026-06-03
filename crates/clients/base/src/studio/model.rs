@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::dto::{
-    StudioFileReadDto, StudioFilesDto, StudioGcStatusDto, StudioItemInspectionDto, StudioItemsDto,
-    StudioProjectsDto, StudioSchedulesDto, StudioSnapshotDto, StudioThreadInspectionDto,
-    StudioThreadsDto,
+    StudioDimensionDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
+    StudioItemInspectionDto, StudioItemsDto, StudioProjectsDto, StudioSchedulesDto,
+    StudioThreadInspectionDto, StudioThreadsDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::scene_model::StudioSceneModel;
@@ -83,7 +83,7 @@ impl Default for StudioFilesState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StudioInspectorState {
     Empty,
-    Snapshot,
+    Dimension,
     Summary {
         title: String,
         detail: serde_json::Value,
@@ -163,7 +163,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StudioDataState {
     pub session: Option<BrowserSession>,
-    pub snapshot: Option<StudioSnapshotDto>,
+    pub dimension: Option<StudioDimensionDto>,
     pub projects: Option<StudioProjectsDto>,
     pub threads: Option<StudioThreadsDto>,
     pub items: Option<StudioItemsDto>,
@@ -217,7 +217,7 @@ impl StudioCore {
         core.data.session = Some(session);
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
-        core.ui.inspector = StudioInspectorState::Snapshot;
+        core.ui.inspector = StudioInspectorState::Dimension;
         core.workspace = workspace;
         core.workspaces = vec![studio_default_surface().to_workspace(); 9];
         core.workspaces[0] = core.workspace.clone();
@@ -243,15 +243,15 @@ impl StudioCore {
             .is_some_and(|path| !path.is_empty())
             || self
                 .data
-                .snapshot
+                .dimension
                 .as_ref()
-                .and_then(|snapshot| snapshot.project.as_ref())
+                .and_then(|dimension| dimension.project.as_ref())
                 .is_some_and(|project| !project.path.is_empty())
     }
 
     pub fn studio_projects_service_available(&self) -> bool {
-        self.data.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot
+        self.data.dimension.as_ref().is_some_and(|dimension| {
+            dimension
                 .local_node
                 .services
                 .iter()
@@ -290,7 +290,7 @@ impl StudioCore {
         }
 
         let mut effects = vec![
-            self.emit(StudioEffectKind::FetchSnapshot),
+            self.emit(StudioEffectKind::FetchDimension),
             self.emit(StudioEffectKind::FetchProjects),
         ];
         if needs_threads {

@@ -22,7 +22,7 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
 
     surface.draw_text(0, 0, "Overview", header);
 
-    let Some(snapshot) = &model.store.cockpit else {
+    let Some(snapshot) = &model.store.studio else {
         let msg = "Waiting for daemon snapshot";
         surface.draw_text(w.saturating_sub(msg.len()) / 2, h / 2, msg, muted);
         return surface;

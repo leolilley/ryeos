@@ -1,8 +1,8 @@
 export async function runEffect(effect) {
   const kind = effect.kind;
   switch (kind.type) {
-    case "fetch_snapshot":
-      return result(effect, "snapshot", await getJson("/ui/api/studio/snapshot"));
+    case "fetch_dimension":
+      return result(effect, "dimension", await getJson("/ui/api/studio/dimension"));
     case "fetch_projects":
       return result(effect, "projects", await optionalProjectsJson());
     case "add_project":
@@ -99,7 +99,7 @@ function result(effect, kind, data) {
 
 function resultKindFor(effect) {
   const type = effect?.kind?.type;
-  if (type === "fetch_snapshot") return "snapshot";
+  if (type === "fetch_dimension") return "dimension";
   if (type === "fetch_projects") return "projects";
   if (type === "add_project") return "project_added";
   if (type === "open_project") return "project_opened";

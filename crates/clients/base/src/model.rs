@@ -67,7 +67,7 @@ impl AppModel {
             workspace: spec.to_workspace(),
             surface: LoadedSurfaceSerde {
                 spec,
-                name: "cockpit-base".into(),
+                name: "studio-base".into(),
                 source_label: "builtin".into(),
                 is_trusted: false,
                 is_local_preview: false,
@@ -228,7 +228,7 @@ mod tests {
         };
         let model = AppModel::from_surface("/tmp/test", &loaded);
         assert_eq!(model.workspace.tiles.len(), 3);
-        assert_eq!(model.surface.name, "cockpit-base");
+        assert_eq!(model.surface.name, "studio-base");
     }
 
     #[test]

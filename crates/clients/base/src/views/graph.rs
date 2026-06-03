@@ -7,11 +7,11 @@ use crate::text_surface::TextSurface;
 pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
     let capabilities = model
         .store
-        .cockpit
+        .studio
         .as_ref()
-        .map(|cockpit| {
-            let mut caps = cockpit.session.granted_caps.clone();
-            for service in &cockpit.local_node.services {
+        .map(|studio| {
+            let mut caps = studio.session.granted_caps.clone();
+            for service in &studio.local_node.services {
                 caps.extend(service.required_caps.clone());
             }
             caps

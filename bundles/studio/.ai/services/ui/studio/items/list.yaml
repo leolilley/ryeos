@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-03T06:08:26Z:372e0f72df7e553d142dc737256b7840fad11a2af494fafc534585a07f3215ee:HbDQfFgbL2sqjTAtfkt58UgA7RbxKiowjoWsKt/H3Vyb4UKGQIOj/z/CA7eAT7Y4qwoAMWG9kk2Y5B4OC/BABw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+name: studio/items/list
+version: "1.0.0"
+description: Enumerate real schema-backed RyeOS items across active spaces with filtering by kind, space, and query substring.
+endpoint: ui.studio.items.list
+availability: daemon_only

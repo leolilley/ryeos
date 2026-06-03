@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StudioSnapshotDto {
+pub struct StudioDimensionDto {
     #[serde(default)]
     pub schema_version: String,
     #[serde(default)]

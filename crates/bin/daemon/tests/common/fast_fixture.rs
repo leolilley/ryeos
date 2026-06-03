@@ -292,30 +292,30 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
-    // Cockpit bundle was split from standard — tests that register
-    // standard also need cockpit for the UI service catalog self-check.
-    register_cockpit_bundle(state_path, fixture)?;
+    // Studio bundle was split from standard — tests that register
+    // standard also need Studio for the UI service catalog self-check.
+    register_studio_bundle(state_path, fixture)?;
     Ok(())
 }
 
 /// Write a `kind: node, section: bundles` record pointing at
-/// `bundles/cockpit`, signed with the publisher key. Use this when
-/// a test needs the cockpit bundle's UI routes and services.
-pub fn register_cockpit_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
-    let cockpit = super::workspace_root().join("bundles/cockpit");
-    if !cockpit.is_dir() {
-        anyhow::bail!("bundles/cockpit does not exist at {}", cockpit.display());
+/// `bundles/studio`, signed with the publisher key. Use this when
+/// a test needs the Studio bundle's UI routes and services.
+pub fn register_studio_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    let studio = super::workspace_root().join("bundles/studio");
+    if !studio.is_dir() {
+        anyhow::bail!("bundles/studio does not exist at {}", studio.display());
     }
-    let abs = cockpit.canonicalize()?;
+    let abs = studio.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = format!(
-        "kind: node\nsection: bundles\nid: cockpit\npath: {}\n",
+        "kind: node\nsection: bundles\nid: studio\npath: {}\n",
         abs.display()
     );
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
-    fs::write(dir.join("cockpit.yaml"), signed)?;
+    fs::write(dir.join("studio.yaml"), signed)?;
     Ok(())
 }
 
