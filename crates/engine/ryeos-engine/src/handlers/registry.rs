@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::binary_resolver::resolve_bundle_binary_ref;
+use crate::error::EngineError;
 use crate::handlers::descriptor::{HandlerDescriptor, HandlerServes};
 use crate::handlers::SUPPORTED_HANDLER_ABI_VERSION;
 use crate::resolution::TrustClass;
@@ -323,11 +324,14 @@ fn load_and_verify_handler(
     // Derive canonical ref from category + name.
     let canonical_ref = format!("handler:{}/{}", descriptor.category, descriptor.name);
 
-    // Resolve binary — on failure, register as Unresolved with a warn.
+    // Resolve binary. User-tier handlers may be unresolved only when the binary
+    // is genuinely absent on this node; integrity, hash, sidecar, trust, and
+    // containment failures always fail engine build instead of degrading to an
+    // uninvokable handler.
     let resolved = resolve_bundle_binary_ref(
         &descriptor.binary_ref,
         bundle_root,
-        |fp| trust_store.get(fp).is_some(),
+        |fp| trust_store.get(fp).map(|signer| signer.verifying_key),
         trust_class,
     );
 
@@ -340,7 +344,7 @@ fn load_and_verify_handler(
             descriptor_path: yaml_path.to_owned(),
             resolved_binary_path: res.absolute_path,
         }),
-        Err(e) => {
+        Err(e) if trust_class == TrustClass::TrustedUser && is_unresolved_handler_absence(&e) => {
             let reason = format!("{e}");
             tracing::warn!(
                 handler = %canonical_ref,
@@ -357,7 +361,20 @@ fn load_and_verify_handler(
                 reason,
             })
         }
+        Err(e) => Err(HandlerError::BinaryResolution {
+            name: descriptor.name,
+            detail: e.to_string(),
+        }),
     }
+}
+
+fn is_unresolved_handler_absence(error: &EngineError) -> bool {
+    matches!(
+        error,
+        EngineError::BinNotFound { .. }
+            | EngineError::BinManifestMissing { .. }
+            | EngineError::BinNotInManifest { .. }
+    )
 }
 
 /// Validate all invariants on a handler descriptor.

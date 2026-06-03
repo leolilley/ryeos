@@ -1,0 +1,30 @@
+# ryeos:signed:2026-06-03T03:45:48Z:3643b107764cbba71d84cb0fee55f6ef2a1b1710dcf87cea31e5be985fb10e13:d8mpcejG8hmFxN85EdqQSmBz0hMqdh6w5v1rxcOwR5PuUUlYlLsOLQnPVBqxw/ni/4Zfl+P0MjNBPimOf24DAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/bundle"
+name: "sign"
+executor_id: "@subprocess"
+required_caps: []
+description: "Sign all signable items in a bundle source tree and rebuild binary manifest sidecars when needed."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "bundle-sign"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 300
+
+config_schema:
+  type: object
+  properties:
+    source:
+      type: string
+      description: "Bundle source directory containing .ai/."
+    registry_root:
+      type: string
+      description: "Optional registry/dependency root supplying kind schemas, parsers, and handlers. May be repeated via registry_roots."
+    registry_roots:
+      type: array
+      items:
+        type: string
+      description: "Optional registry/dependency roots supplying kind schemas, parsers, and handlers."
+  required: [source]

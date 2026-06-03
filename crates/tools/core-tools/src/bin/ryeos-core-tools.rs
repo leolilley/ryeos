@@ -81,6 +81,17 @@ enum Cmd {
         registry_roots: Vec<PathBuf>,
     },
 
+    /// Sign all signable items in a bundle source tree.
+    BundleSign {
+        /// Bundle source root (directory containing `.ai/`).
+        source: Option<PathBuf>,
+
+        /// Registry/dependency root supplying kind schemas, parsers, and handlers.
+        /// Defaults to installed bundle roots. May be repeated.
+        #[arg(long = "registry-root")]
+        registry_roots: Vec<PathBuf>,
+    },
+
     /// Resolve, optionally verify, and read an item.
     Fetch {
         /// Canonical ref to fetch.
@@ -339,6 +350,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             source,
             registry_roots,
         } => run_bundle_verify(source, registry_roots, cli.stdin_json),
+        Cmd::BundleSign {
+            source,
+            registry_roots,
+        } => run_bundle_sign(source, registry_roots, cli.stdin_json),
         Cmd::Fetch {
             item_ref,
             with_content,
@@ -729,6 +744,121 @@ impl BundleVerifyParams {
             self.registry_roots.clone()
         }
     }
+}
+
+fn run_bundle_sign(
+    source: Option<PathBuf>,
+    registry_roots: Vec<PathBuf>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    let (source, registry_roots) = if stdin_json {
+        if source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional SOURCE");
+        }
+        let params: BundleSignParams = serde_json::from_value(read_stdin_json()?)?;
+        let registry_roots = params.registry_roots();
+        (params.source, registry_roots)
+    } else {
+        let source =
+            source.ok_or_else(|| anyhow::anyhow!("SOURCE required (or pass --stdin-json)"))?;
+        (source, registry_roots)
+    };
+
+    let source_path = canonical_bundle_source(&source)?;
+    let system_space_dir = std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .map(|d| d.join("ryeos"))
+                .expect("could not determine XDG data directory")
+        });
+    let user_root = ryeos_engine::roots::user_root()
+        .map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
+    let dependency_roots = bundle_verify_dependency_roots(
+        &source_path,
+        registry_roots,
+        &system_space_dir,
+        Some(&user_root),
+    )?;
+    let signing_key = load_user_signing_key(&user_root)?;
+    let trust_store =
+        ryeos_engine::trust::TrustStore::load_three_tier(None, Some(&user_root), &dependency_roots)
+            .context("load trust store for registry roots")?;
+
+    if source_path.join(ryeos_engine::AI_DIR).join("bin").is_dir() {
+        ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&source_path, &signing_key)
+            .context("rebuild source bundle binary manifest")?;
+    }
+
+    let report = ryeos_tools::actions::sign_bundle::sign_bundle_items_with_trust(
+        &source_path,
+        &dependency_roots,
+        &signing_key,
+        Some(&trust_store),
+    )
+    .context("bundle sign failed")?;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !report.is_total_success() {
+        anyhow::bail!(
+            "bundle sign failed for {} of {} item(s)",
+            report.failed.len(),
+            report.total()
+        );
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct BundleSignParams {
+    source: PathBuf,
+    #[serde(default)]
+    registry_root: Option<PathBuf>,
+    #[serde(default)]
+    registry_roots: Vec<PathBuf>,
+}
+
+impl BundleSignParams {
+    fn registry_roots(&self) -> Vec<PathBuf> {
+        if self.registry_roots.is_empty() {
+            self.registry_root.iter().cloned().collect()
+        } else {
+            self.registry_roots.clone()
+        }
+    }
+}
+
+fn canonical_bundle_source(root: &Path) -> anyhow::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(root)
+        .with_context(|| format!("resolve bundle source path {}", root.display()))?;
+    let ai_dir = canonical.join(ryeos_engine::AI_DIR);
+    if !ai_dir.is_dir() {
+        anyhow::bail!(
+            "bundle source {} has no {} directory",
+            canonical.display(),
+            ryeos_engine::AI_DIR
+        );
+    }
+    Ok(canonical)
+}
+
+fn load_user_signing_key(user_root: &Path) -> anyhow::Result<lillux::crypto::SigningKey> {
+    let key_path = user_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config")
+        .join("keys")
+        .join("signing")
+        .join("private_key.pem");
+
+    if !key_path.exists() {
+        anyhow::bail!(
+            "user signing key not found at {} — run `ryeos init` first",
+            key_path.display()
+        );
+    }
+
+    ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
+        .with_context(|| format!("load signing key from {}", key_path.display()))
 }
 
 fn run_sign(

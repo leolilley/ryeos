@@ -164,10 +164,19 @@ fn effective_item(
     project_path: &str,
     execute_ref: &str,
 ) -> Result<EffectiveItem, CliError> {
+    effective_item_from_project_root(engine, canonical, project_root(project_path), execute_ref)
+}
+
+fn effective_item_from_project_root(
+    engine: &ryeos_engine::engine::Engine,
+    canonical: CanonicalRef,
+    project_root: Option<PathBuf>,
+    execute_ref: &str,
+) -> Result<EffectiveItem, CliError> {
     let request = ryeos_engine::engine::EffectiveItemRequest {
         item_ref: canonical,
         expected_kind: None,
-        project_root: project_root(project_path),
+        project_root,
     };
 
     engine.effective_item(request).map_err(|e| CliError::Local {
@@ -261,7 +270,12 @@ fn exec_client(
     let resolved = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
         binary_ref,
         bundle_root,
-        |fp| engine.trust_store.is_trusted(fp),
+        |fp| {
+            engine
+                .trust_store
+                .get(fp)
+                .map(|signer| signer.verifying_key)
+        },
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .map_err(|e| CliError::Local {
@@ -370,7 +384,12 @@ fn exec_tool(
     let resolved = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
         &cmd,
         bundle_root,
-        |fp| engine.trust_store.is_trusted(fp),
+        |fp| {
+            engine
+                .trust_store
+                .get(fp)
+                .map(|signer| signer.verifying_key)
+        },
         ryeos_engine::resolution::TrustClass::TrustedSystem,
     )
     .map_err(|e| CliError::Local {
@@ -913,6 +932,18 @@ mod tests {
             this.write_manifest();
             this.write_registration();
             this.write_bundle_registration("core", &core_bundle);
+            for handler_bin in [
+                "rye-composer-identity",
+                "rye-parser-regex-kv",
+                "rye-parser-yaml-document",
+                "rye-parser-yaml-header-document",
+            ] {
+                this.write_bin_in_bundle(
+                    &core_bundle,
+                    handler_bin,
+                    fixture_handler_script().as_bytes(),
+                );
+            }
             this.write_echo_bin();
             this.write_standard_descriptors(Some("offline_execute: tool:custom/echo\n"));
             this
@@ -994,8 +1025,12 @@ mod tests {
         }
 
         fn write_bin(&self, name: &str, script: &[u8]) {
+            self.write_bin_in_bundle(&self.bundle, name, script);
+        }
+
+        fn write_bin_in_bundle(&self, bundle: &Path, name: &str, script: &[u8]) {
             let triple = host_triple();
-            let ai_dir = self.bundle.join(ryeos_engine::AI_DIR);
+            let ai_dir = bundle.join(ryeos_engine::AI_DIR);
             let bin_path = ai_dir.join("bin").join(triple).join(name);
             std::fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
             std::fs::write(&bin_path, script).unwrap();
@@ -1008,12 +1043,21 @@ mod tests {
 
             let cas = lillux::CasStore::new(ai_dir.join("objects"));
             let content_blob_hash = lillux::sha256_hex(script);
+            let item_ref = format!("bin/{triple}/{name}");
             let item_source = serde_json::json!({
+                "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
                 "signature_info": {
                     "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
                 }
             });
+            let sidecar_body = lillux::cas::canonical_json(&item_source);
+            let sidecar = lillux::signature::sign_content(&sidecar_body, &self.key, "#", None);
+            std::fs::write(
+                bin_path.with_file_name(format!("{name}.item_source.json")),
+                sidecar,
+            )
+            .unwrap();
             let item_source_hash = cas.store_object(&item_source).unwrap();
             let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
             let mut item_source_hashes = if ref_path.exists() {
@@ -1028,10 +1072,7 @@ mod tests {
             } else {
                 serde_json::Map::new()
             };
-            item_source_hashes.insert(
-                format!("bin/{triple}/{name}"),
-                Value::String(item_source_hash),
-            );
+            item_source_hashes.insert(item_ref, Value::String(item_source_hash));
             let manifest = serde_json::json!({ "item_source_hashes": item_source_hashes });
             let manifest_hash = cas.store_object(&manifest).unwrap();
             std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
@@ -1101,6 +1142,38 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    fn fixture_handler_script() -> &'static str {
+        r#"#!/usr/bin/python3
+import json
+import sys
+
+req = json.load(sys.stdin)
+cmd = req.get("command")
+
+if cmd in ("validate_parser_config", "validate_composer_config"):
+    print(json.dumps({"result": "validate_ok"}))
+elif cmd == "parse":
+    try:
+        import yaml
+        value = yaml.safe_load(req.get("content") or "")
+        if value is None:
+            value = {}
+        print(json.dumps({"result": "parse_ok", "value": value}))
+    except Exception as exc:
+        print(json.dumps({"result": "parse_err", "kind": "syntax", "message": str(exc)}))
+elif cmd == "compose":
+    root = req.get("root", {})
+    print(json.dumps({
+        "result": "compose_ok",
+        "composed": root.get("parsed", {}),
+        "derived": {},
+        "policy_facts": {},
+    }))
+else:
+    print(json.dumps({"result": "validate_err", "message": "unknown command"}))
+"#
     }
 
     #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
