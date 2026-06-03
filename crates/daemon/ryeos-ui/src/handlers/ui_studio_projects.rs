@@ -11,7 +11,9 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::{parse_request, HandlerError};
 use ryeos_app::state::AppState;
-use ryeos_app::user_space::{LockedUserSpaceStore, UserSpaceStore, LOCAL_PRINCIPAL_ID};
+use ryeos_app::user_space::{
+    LockedUserSpaceStore, PrincipalUserSpaceResolver, UserSpaceStore, LOCAL_PRINCIPAL_ID,
+};
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::state::get_ui_state;
@@ -146,7 +148,7 @@ pub async fn handle_projects_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let store = resolve_user_space_store(&ctx)?;
+    let store = resolve_user_space_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     Ok(json!({
         "version": projects.version,
@@ -163,7 +165,7 @@ pub async fn handle_projects_add(
     let req: AddProjectRequest = parse_request(params)?;
     let root = canonical_project_root(&req.root)?;
     let root_text = root.display().to_string();
-    let store = locked_user_space_store(&ctx).await?;
+    let store = locked_user_space_store(&ctx, &state).await?;
     let mut projects = store.load_projects()?;
 
     if let Some(existing) = projects.projects.iter_mut().find(|p| p.root == root_text) {
@@ -211,7 +213,7 @@ pub async fn handle_projects_forget(
         (None, None) => None,
     };
 
-    let store = locked_user_space_store(&ctx).await?;
+    let store = locked_user_space_store(&ctx, &state).await?;
     let mut projects = store.load_projects()?;
     let before = projects.projects.len();
     projects.projects.retain(|p| {
@@ -243,7 +245,7 @@ pub async fn handle_projects_resolve(
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
     let req: ResolveProjectRequest = parse_request(params)?;
-    let store = resolve_user_space_store(&ctx)?;
+    let store = resolve_user_space_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     let project = projects
         .projects
@@ -262,7 +264,7 @@ pub async fn handle_projects_open(
     let req: OpenProjectRequest = parse_request(params)?;
     let session_id = session_id_from_context(&ctx)
         .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let store = locked_user_space_store(&ctx).await?;
+    let store = locked_user_space_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
     let project = projects
         .projects
@@ -298,7 +300,7 @@ pub async fn handle_recent_touch(
 ) -> Result<Value> {
     ensure_writable_session(&ctx, &state)?;
     let req: TouchRecentRequest = parse_request(params)?;
-    let store = locked_user_space_store(&ctx).await?;
+    let store = locked_user_space_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
     if !projects.projects.iter().any(|p| p.local_id == req.local_id) {
         return Err(HandlerError::NotFound.into());
@@ -314,7 +316,7 @@ pub async fn handle_recent_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let store = resolve_user_space_store(&ctx)?;
+    let store = resolve_user_space_store(&ctx, &state)?;
     let recent = store.load_recent()?;
     Ok(json!(recent))
 }
@@ -325,7 +327,7 @@ pub async fn handle_config_get(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let store = resolve_user_space_store(&ctx)?;
+    let store = resolve_user_space_store(&ctx, &state)?;
     let config = store.load_studio_config()?;
     Ok(json!(config))
 }
@@ -350,7 +352,7 @@ pub async fn handle_config_update(
             &["normal", "read_only"],
         )?;
     }
-    let store = locked_user_space_store(&ctx).await?;
+    let store = locked_user_space_store(&ctx, &state).await?;
     let mut config = store.load_studio_config()?;
     if let Some(theme) = req.theme {
         config.theme = theme;
@@ -455,18 +457,35 @@ impl LockedStudioUserSpaceStoreExt for LockedUserSpaceStore {
     }
 }
 
-fn resolve_user_space_store(_ctx: &HandlerContext) -> Result<UserSpaceStore> {
-    // Local install is single-principal. The resolver call is the tenancy seam:
-    // hosted mode should derive a real principal from the caller/session here
-    // and swap in a principal-aware resolver.
+fn resolve_user_space_store(ctx: &HandlerContext, state: &AppState) -> Result<UserSpaceStore> {
+    if let Some(user_principal_id) = session_user_principal_id(ctx, state)? {
+        let resolver = PrincipalUserSpaceResolver::for_system_space(&state.config.system_space_dir);
+        return UserSpaceStore::resolve_with(&resolver, &user_principal_id);
+    }
     UserSpaceStore::resolve_principal(LOCAL_PRINCIPAL_ID)
 }
 
-async fn locked_user_space_store(_ctx: &HandlerContext) -> Result<LockedUserSpaceStore> {
-    // Local install is single-principal. The resolver call is the tenancy seam:
-    // hosted mode should derive a real principal from the caller/session here
-    // and swap in a principal-aware resolver.
+async fn locked_user_space_store(
+    ctx: &HandlerContext,
+    state: &AppState,
+) -> Result<LockedUserSpaceStore> {
+    if let Some(user_principal_id) = session_user_principal_id(ctx, state)? {
+        let resolver = PrincipalUserSpaceResolver::for_system_space(&state.config.system_space_dir);
+        return UserSpaceStore::locked_with(&resolver, &user_principal_id).await;
+    }
     UserSpaceStore::locked_principal(LOCAL_PRINCIPAL_ID).await
+}
+
+fn session_user_principal_id(ctx: &HandlerContext, state: &AppState) -> Result<Option<String>> {
+    let Some(session_id) = session_id_from_context(ctx) else {
+        return Ok(None);
+    };
+    let session = get_ui_state(state)
+        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+    Ok(session.user_principal_id)
 }
 
 fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {

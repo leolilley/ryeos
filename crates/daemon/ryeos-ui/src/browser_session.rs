@@ -31,6 +31,7 @@ pub struct LaunchContext {
     pub project_path: Option<String>,
     pub read_only: bool,
     pub granted_caps: Vec<String>,
+    pub user_principal_id: Option<String>,
 }
 
 /// Server-side browser session record exposed to handlers and verifiers.
@@ -43,6 +44,7 @@ pub struct BrowserSession {
     pub project_root: Option<String>,
     pub surface_ref: String,
     pub read_only: bool,
+    pub user_principal_id: Option<String>,
 }
 
 /// Single-use launch token that redeems for a session.
@@ -101,6 +103,7 @@ impl BrowserSessionStore {
             project_root: ctx.project_path,
             surface_ref: ctx.surface_ref,
             read_only: ctx.read_only,
+            user_principal_id: ctx.user_principal_id,
         };
 
         let token_bytes: [u8; 32] = rand::random();
@@ -190,6 +193,7 @@ mod tests {
             project_path: Some("/tmp/project".into()),
             read_only: false,
             granted_caps: vec!["ui.read".into()],
+            user_principal_id: None,
         }
     }
 
@@ -210,6 +214,7 @@ mod tests {
         assert_eq!(session.project_root, Some("/tmp/project".into()));
         assert_eq!(session.surface_ref, "surface:ryeos/cockpit/base");
         assert!(!session.read_only);
+        assert_eq!(session.user_principal_id, None);
     }
 
     #[test]
@@ -220,6 +225,7 @@ mod tests {
             project_path: None,
             read_only: true,
             granted_caps: vec![],
+            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
         };
         let (session_id, _token) = store.mint_token(ctx);
 
@@ -227,6 +233,10 @@ mod tests {
         assert_eq!(session.surface_ref, "surface:ryeos/test/ro");
         assert!(session.read_only);
         assert!(session.project_root.is_none());
+        assert_eq!(
+            session.user_principal_id,
+            Some(format!("fp:{}", "ab".repeat(32)))
+        );
     }
 
     #[test]
@@ -253,6 +263,7 @@ mod tests {
             project_path: None,
             read_only: true,
             granted_caps: vec![],
+            user_principal_id: None,
         });
 
         let updated = store.set_project_root(&session_id, Some("/tmp/project".into()));

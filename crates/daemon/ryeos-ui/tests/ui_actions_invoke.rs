@@ -14,6 +14,7 @@ fn test_context() -> LaunchContext {
         project_path: None,
         read_only: false,
         granted_caps: vec!["ui.read".into()],
+        user_principal_id: None,
     }
 }
 
@@ -23,6 +24,7 @@ fn read_only_context() -> LaunchContext {
         project_path: None,
         read_only: true,
         granted_caps: vec!["ui.read".into()],
+        user_principal_id: None,
     }
 }
 

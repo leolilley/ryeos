@@ -82,6 +82,38 @@ impl UserSpaceResolver for LocalUserSpaceResolver {
 }
 
 #[derive(Debug, Clone)]
+pub struct PrincipalUserSpaceResolver {
+    principal_root: PathBuf,
+}
+
+impl PrincipalUserSpaceResolver {
+    pub fn for_system_space(system_space_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            principal_root: system_space_dir.into().join(".ai").join("principals"),
+        }
+    }
+}
+
+impl UserSpaceResolver for PrincipalUserSpaceResolver {
+    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+        let principal_key = principal_storage_key(principal_id)?;
+        Ok(UserSpacePaths::new(
+            self.principal_root.join(principal_key).join("user-space"),
+        ))
+    }
+}
+
+pub fn principal_storage_key(principal_id: &str) -> Result<String> {
+    let raw = principal_id
+        .strip_prefix("fp:")
+        .ok_or_else(|| anyhow::anyhow!("principal id must be in fp:<hex> format"))?;
+    if raw.len() != 64 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("principal id must be in fp:<64 hex> format");
+    }
+    Ok(raw.to_ascii_lowercase())
+}
+
+#[derive(Debug, Clone)]
 pub struct UserSpaceStore {
     paths: UserSpacePaths,
 }
@@ -184,17 +216,20 @@ fn ensure_private_parent_dirs(path: &Path) -> Result<()> {
             .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
         let mut dirs = Vec::new();
         let mut current = Some(parent);
-        let mut found_ai_dir = false;
+        let mut outermost_ai_dir_index = None;
         while let Some(dir) = current {
-            dirs.push(dir);
             if dir.file_name().is_some_and(|name| name == ".ai") {
-                found_ai_dir = true;
-                break;
+                outermost_ai_dir_index = Some(dirs.len());
             }
+            dirs.push(dir);
             current = dir.parent();
         }
-        let dirs_to_chmod: Vec<&Path> = if found_ai_dir {
-            dirs.into_iter().rev().collect()
+        let dirs_to_chmod: Vec<&Path> = if let Some(outermost_ai_dir_index) = outermost_ai_dir_index
+        {
+            dirs.into_iter()
+                .take(outermost_ai_dir_index + 1)
+                .rev()
+                .collect()
         } else {
             vec![parent]
         };
@@ -280,6 +315,31 @@ mod tests {
     }
 
     #[test]
+    fn principal_resolver_maps_fp_to_isolated_user_space() {
+        let resolver = PrincipalUserSpaceResolver::for_system_space("/tmp/system");
+        let principal = format!("fp:{}", "AB".repeat(32));
+        let paths = resolver.resolve(&principal).unwrap();
+
+        assert_eq!(principal_storage_key(&principal).unwrap(), "ab".repeat(32));
+        assert_eq!(
+            paths.root,
+            PathBuf::from(format!(
+                "/tmp/system/.ai/principals/{}/user-space",
+                "ab".repeat(32)
+            ))
+        );
+    }
+
+    #[test]
+    fn principal_storage_key_rejects_non_fp_principals() {
+        let err = principal_storage_key("session:abc").unwrap_err();
+        assert!(err.to_string().contains("fp:<hex>"));
+
+        let err = principal_storage_key("fp:not-hex").unwrap_err();
+        assert!(err.to_string().contains("fp:<64 hex>"));
+    }
+
+    #[test]
     fn yaml_helpers_round_trip_atomically() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested/config.yaml");
@@ -349,6 +409,41 @@ mod tests {
 
         for dir in [".ai", ".ai/state", ".ai/state/studio"] {
             let mode = std::fs::metadata(tmp.path().join(dir))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "{dir} should be private");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn yaml_helpers_make_hosted_principal_dir_chain_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(".ai")
+            .join("principals")
+            .join("ab".repeat(32))
+            .join("user-space")
+            .join(".ai")
+            .join("config")
+            .join("studio.yaml");
+
+        write_yaml_atomic(&path, &Demo { value: "ok".into() }).unwrap();
+
+        let principal_key = "ab".repeat(32);
+        let dirs = vec![
+            ".ai".to_string(),
+            ".ai/principals".to_string(),
+            format!(".ai/principals/{principal_key}"),
+            format!(".ai/principals/{principal_key}/user-space"),
+            format!(".ai/principals/{principal_key}/user-space/.ai"),
+            format!(".ai/principals/{principal_key}/user-space/.ai/config"),
+        ];
+        for dir in dirs {
+            let mode = std::fs::metadata(tmp.path().join(&dir))
                 .unwrap()
                 .permissions()
                 .mode()

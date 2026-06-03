@@ -75,6 +75,9 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
                 if let Some(ref root) = session.project_root {
                     m.insert("project_root".into(), root.clone());
                 }
+                if let Some(ref principal_id) = session.user_principal_id {
+                    m.insert("user_principal_id".into(), principal_id.clone());
+                }
                 m
             },
         }))
