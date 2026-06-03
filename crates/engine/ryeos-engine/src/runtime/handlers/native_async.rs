@@ -37,8 +37,13 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::canonical_ref::CanonicalRef;
+use crate::config_loading::ConfigLoadContext;
 use crate::contracts::{CancellationMode, NativeAsyncSpec};
 use crate::error::EngineError;
+use crate::execution_policy::{
+    value_has_execution_policy_shape, ExecutionPolicyResolver, PolicySourceKind,
+};
 use crate::runtime::{CompileContext, RuntimeHandler};
 
 pub const KEY: &str = "native_async";
@@ -55,9 +60,9 @@ const DEFAULT_GRACEFUL_SECS: u64 = 5;
 /// defaults when the entry is missing.
 struct ResolvedPolicy {
     mode: String,
-    mode_source: &'static str,
+    mode_source: String,
     grace_secs: u64,
-    grace_source: &'static str,
+    grace_source: String,
 }
 
 fn resolve_policy_from_config(
@@ -67,49 +72,56 @@ fn resolve_policy_from_config(
     apply_defaults: bool,
 ) -> Result<ResolvedPolicy, EngineError> {
     let mut mode = default_mode.to_owned();
-    let mut mode_source = "native_async default";
+    let mut mode_source = "native_async default".to_string();
     let mut grace = default_grace;
-    let mut grace_source = "native_async default";
+    let mut grace_source = "native_async default".to_string();
 
-    if let Some(resolved) = ctx.params.get("resolved_config") {
-        // Layer 1: system / user / project defaults (already merged by
-        // `ConfigResolveHandler` deep_merge resolution). Runtime descriptor rich
-        // form is also an implementation default, so callers may skip this layer
-        // when preserving an item-local rich form while still allowing exact
-        // execution.yaml item overrides below.
-        if apply_defaults {
-            if let Some(defaults) = resolved.get("defaults") {
-                if let Some(s) = defaults.get("cancellation_mode").and_then(Value::as_str) {
-                    mode = s.to_owned();
-                    mode_source = "resolved_config.defaults.cancellation_mode";
-                }
-                if let Some(n) = defaults
-                    .get("cancellation_grace_secs")
-                    .and_then(Value::as_u64)
-                {
-                    grace = n;
-                    grace_source = "resolved_config.defaults.cancellation_grace_secs";
-                }
+    let root_ref = CanonicalRef::parse(&ctx.chain[0].resolved_ref).map_err(|e| {
+        EngineError::InvalidRuntimeConfig {
+            path: ctx.chain[0].source_path.display().to_string(),
+            reason: format!("invalid root item ref for execution policy: {e}"),
+        }
+    })?;
+    let direct_policy = ExecutionPolicyResolver::new(ConfigLoadContext {
+        roots: ctx.roots,
+        parsers: ctx.parsers,
+        kinds: ctx.kinds,
+        trust_store: ctx.trust_store,
+    })
+    .resolve_for_item(&root_ref)?;
+    let policy = if direct_policy.loaded_layers.is_empty() {
+        ctx.params
+            .get("resolved_config")
+            .filter(|resolved| value_has_execution_policy_shape(resolved))
+            .map(|resolved| {
+                ExecutionPolicyResolver::resolve_from_value_for_item(
+                    resolved, &root_ref, None, None,
+                )
+            })
+            .transpose()?
+            .unwrap_or(direct_policy)
+    } else {
+        direct_policy
+    };
+
+    if !policy.loaded_layers.is_empty() || ctx.params.get("resolved_config").is_some() {
+        // Runtime descriptor rich form is also an implementation default, so
+        // callers may skip execution-policy defaults while still allowing exact
+        // item overrides to win over that descriptor default.
+        if let Some(resolved_mode) = policy.cancellation_mode {
+            if apply_defaults
+                || resolved_mode.source.kind == PolicySourceKind::ExecutionYamlItemOverride
+            {
+                mode = resolved_mode.value.as_str().to_owned();
+                mode_source = resolved_mode.source.describe();
             }
         }
-
-        // Layer 2: per-tool overrides keyed by the root item id, not by the
-        // runtime selected by that item.
-        let root_tool_id = crate::runtime::root_item_bare_id(ctx.chain)?;
-        if let Some(tool_overrides) = resolved.get("tools").and_then(|t| t.get(&root_tool_id)) {
-            if let Some(s) = tool_overrides
-                .get("cancellation_mode")
-                .and_then(Value::as_str)
+        if let Some(resolved_grace) = policy.cancellation_grace_secs {
+            if apply_defaults
+                || resolved_grace.source.kind == PolicySourceKind::ExecutionYamlItemOverride
             {
-                mode = s.to_owned();
-                mode_source = "resolved_config.tools.<root>.cancellation_mode";
-            }
-            if let Some(n) = tool_overrides
-                .get("cancellation_grace_secs")
-                .and_then(Value::as_u64)
-            {
-                grace = n;
-                grace_source = "resolved_config.tools.<root>.cancellation_grace_secs";
+                grace = resolved_grace.value;
+                grace_source = resolved_grace.source.describe();
             }
         }
     }
@@ -121,7 +133,7 @@ fn resolve_policy_from_config(
     if let Some(raw_mode) = ctx.params.get("cancellation_mode") {
         if let Some(s) = raw_mode.as_str() {
             mode = s.to_owned();
-            mode_source = "params.cancellation_mode";
+            mode_source = "params.cancellation_mode".to_string();
         } else {
             return Err(EngineError::InvalidRuntimeConfig {
                 path: ctx.chain[ctx.current_index]
@@ -135,7 +147,7 @@ fn resolve_policy_from_config(
     if let Some(raw_grace) = ctx.params.get("cancellation_grace_secs") {
         if let Some(n) = raw_grace.as_u64() {
             grace = n;
-            grace_source = "params.cancellation_grace_secs";
+            grace_source = "params.cancellation_grace_secs".to_string();
         } else {
             return Err(EngineError::InvalidRuntimeConfig {
                 path: ctx.chain[ctx.current_index]

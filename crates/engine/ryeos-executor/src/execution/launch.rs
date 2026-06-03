@@ -11,7 +11,7 @@ use super::launch_envelope::{
     LaunchEnvelopeBuilder, RuntimeResult,
 };
 use super::limits::{
-    apply_execution_policy_overrides, compute_effective_limits, load_execution_policy_limits,
+    apply_caller_limit_overrides, apply_execution_policy_overrides, compute_effective_limits,
     load_limits_config,
 };
 use super::thread_meta::ThreadMeta;
@@ -617,17 +617,30 @@ pub async fn build_and_launch(
     };
     let thread_id = thread.thread_id.clone();
 
+    let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
+    let effective_parsers = engine
+        .effective_parser_dispatcher(Some(project_path))
+        .map_err(|e| anyhow::anyhow!("effective parser dispatcher: {e}"))?;
+
     // 2. Compute limits (root execution: depth = 0)
     let root_item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&resolved.item_ref)
         .map_err(|e| anyhow::anyhow!("build_and_launch: invalid root item ref: {e}"))?;
-    let execution_policy_limits = load_execution_policy_limits(project_path, &root_item_ref)
-        .with_context(|| {
-            format!(
-                "loading execution policy for item {} in project {}",
-                resolved.item_ref,
-                project_path.display()
-            )
-        })?;
+    let execution_policy = ryeos_engine::execution_policy::ExecutionPolicyResolver::new(
+        ryeos_engine::config_loading::ConfigLoadContext {
+            roots: &engine_roots,
+            parsers: &effective_parsers,
+            kinds: &engine.kinds,
+            trust_store: &engine.trust_store,
+        },
+    )
+    .resolve_for_item(&root_item_ref)
+    .with_context(|| {
+        format!(
+            "loading execution policy for item {} in project {}",
+            resolved.item_ref,
+            project_path.display()
+        )
+    })?;
     let limits_config = load_limits_config(project_path).with_context(|| {
         format!(
             "loading limits config for project {}",
@@ -635,33 +648,44 @@ pub async fn build_and_launch(
         )
     })?;
     let limits_config = limits_config.unwrap_or_default();
-    let requested_limits = execution_policy_limits
-        .as_ref()
-        .map(|policy| apply_execution_policy_overrides(&limits_config.defaults, policy));
+    let requested_limits =
+        apply_execution_policy_overrides(&limits_config.defaults, &execution_policy);
+    let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
     let hard_limits = compute_effective_limits(
-        requested_limits.as_ref(),
+        Some(&requested_limits),
         &limits_config.defaults,
         &limits_config.caps,
         None,
         0,
     );
-    let duration_source = execution_policy_limits
-        .as_ref()
-        .and_then(|policy| policy.duration_seconds_source.as_deref())
-        .unwrap_or("ryeos-runtime/limits.yaml defaults or built-in default");
-    let turns_source = execution_policy_limits
-        .as_ref()
-        .and_then(|policy| policy.turns_source.as_deref())
-        .unwrap_or("ryeos-runtime/limits.yaml defaults or built-in default");
+    let duration_source = if parameters.get("timeout").is_some() {
+        "caller param `timeout`".to_string()
+    } else {
+        execution_policy
+            .timeout
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
+    let turns_source = if parameters.get("max_steps").is_some() {
+        "caller param `max_steps`".to_string()
+    } else {
+        execution_policy
+            .max_steps
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
     tracing::info!(
         item_ref = %resolved.item_ref,
         duration_seconds = hard_limits.duration_seconds,
         duration_source,
         duration_cap = ?limits_config.caps.duration_seconds,
         turns = hard_limits.turns,
-        turns_source,
+        turns_source = %turns_source,
         turns_cap = ?limits_config.caps.turns,
-        execution_policy_override = execution_policy_limits.is_some(),
+        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
+        caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
         "native launch execution policy resolved"
     );
 
@@ -673,8 +697,6 @@ pub async fn build_and_launch(
     //    the token instead of trusting the runtime to self-police.
 
     // 4. Build envelope
-    let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
-
     let user_root = engine_roots
         .ordered
         .iter()
@@ -708,12 +730,6 @@ pub async fn build_and_launch(
     // Pulling it back out here guarantees launcher and boot use the
     // **same** instance (no split-brain).
     let composers = &engine.composers;
-
-    // Per-request: build the effective parser dispatcher so any
-    // project-local `.ai/parsers/` overlay applies for this request.
-    let effective_parsers = engine
-        .effective_parser_dispatcher(Some(project_path))
-        .map_err(|e| anyhow::anyhow!("effective parser dispatcher: {e}"))?;
 
     let mut resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &resolved.resolved_item.canonical_ref,

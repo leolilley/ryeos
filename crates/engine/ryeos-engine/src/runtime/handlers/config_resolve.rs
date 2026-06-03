@@ -21,47 +21,23 @@
 //! YAML is parsed via the `config` kind's parser dispatch entry.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::contracts::ItemSpace;
+use crate::canonical_ref::CanonicalRef;
+use crate::config_loading::{resolve_config_spec, ConfigLoadContext, ConfigSpec};
 use crate::error::EngineError;
-use crate::item_resolution::parse_signature_header;
+use crate::execution_policy::{
+    value_has_execution_policy_shape, ExecutionPolicyResolver, PolicySourceKind,
+};
 use crate::runtime::{CompileContext, RuntimeHandler};
-use crate::trust::{content_hash_after_signature, verify_item_signature};
 
 pub const KEY: &str = "config_resolve";
 
 /// Universal execution-config keys allowed on every runtime element,
 /// regardless of its declared `execution_params`.
 const UNIVERSAL_EXEC_KEYS: &[&str] = &["timeout", "cancellation_mode", "cancellation_grace_secs"];
-
-/// One config spec — relative path under `.ai/config/` plus a
-/// resolution mode. `#[serde(deny_unknown_fields)]` so typos surface
-/// as hard errors rather than silent no-ops.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigSpec {
-    /// Relative path under `.ai/config/`, e.g. `"execution/execution.yaml"`.
-    pub path: String,
-    #[serde(default)]
-    pub mode: ResolveMode,
-}
-
-/// Resolution strategy for a single `ConfigSpec`.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum ResolveMode {
-    /// system → user → project; deep-merge each layer (later wins).
-    /// `extends` is excluded from merging (Python parity).
-    #[default]
-    DeepMerge,
-    /// project → user → system; first existing file wins, returned
-    /// as-is.
-    FirstMatch,
-}
 
 /// `config_resolve` block accepts either a single spec or a list of
 /// specs (Python parity — `_resolve_tool_config` switches on type).
@@ -140,31 +116,34 @@ impl RuntimeHandler for ConfigResolveHandler {
             // `tool:snap-track/scrapers/hydrate-shows` may execute through
             // `tool:snap-track/runtimes/python-function`, but the config key
             // is `tools."snap-track/scrapers/hydrate-shows"`.
-            let root_tool_id = crate::runtime::root_item_bare_id(ctx.chain)?;
-
-            let exec_defaults = resolved
-                .get("defaults")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let defaults_present = !exec_defaults.is_empty();
-            let tool_override_present = resolved
-                .get("tools")
-                .and_then(|t| t.get(&root_tool_id))
-                .and_then(Value::as_object)
-                .is_some();
-            let tool_overrides = resolved
-                .get("tools")
-                .and_then(|t| t.get(&root_tool_id))
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-
-            // Merge defaults + per-tool overrides (per-tool wins).
-            let mut exec_config = exec_defaults;
-            for (k, v) in tool_overrides {
-                exec_config.insert(k, v);
-            }
+            let root_ref = CanonicalRef::parse(&ctx.chain[0].resolved_ref).map_err(|e| {
+                EngineError::InvalidRuntimeConfig {
+                    path: ctx.chain[0].source_path.display().to_string(),
+                    reason: format!(
+                        "invalid root item ref `{}` in executor chain: {e}",
+                        ctx.chain[0].resolved_ref
+                    ),
+                }
+            })?;
+            let load_ctx = ConfigLoadContext {
+                roots: ctx.roots,
+                parsers: ctx.parsers,
+                kinds: ctx.kinds,
+                trust_store: ctx.trust_store,
+            };
+            let direct_policy =
+                ExecutionPolicyResolver::new(load_ctx).resolve_for_item(&root_ref)?;
+            let policy = if direct_policy.loaded_layers.is_empty() {
+                if value_has_execution_policy_shape(&resolved) {
+                    ExecutionPolicyResolver::resolve_from_value_for_item(
+                        &resolved, &root_ref, None, None,
+                    )?
+                } else {
+                    direct_policy
+                }
+            } else {
+                direct_policy
+            };
 
             // Allowed keys = universal ∪ this element's
             // `execution_params`. Shape is type-validated by
@@ -187,30 +166,40 @@ impl RuntimeHandler for ConfigResolveHandler {
                 }
             }
 
-            let mut injected_keys = Vec::new();
-            let mut caller_won_keys = Vec::new();
-            let mut filtered_keys = Vec::new();
-            for (ek, ev) in exec_config {
-                if !allowed.contains(&ek) {
-                    filtered_keys.push(ek);
+            let mut injected_keys: Vec<String> = Vec::new();
+            let mut caller_won_keys: Vec<String> = Vec::new();
+            let mut injected_sources: Vec<String> = Vec::new();
+            for ek in &allowed {
+                let Some(ev) = policy.get_runtime_param(ek) else {
                     continue;
-                }
+                };
                 if param_already_present(&ctx.params, &ek) {
-                    caller_won_keys.push(ek);
+                    caller_won_keys.push(ek.clone());
                     continue;
                 }
                 injected_keys.push(ek.clone());
+                if let Some(source) = policy.source_for(ek) {
+                    injected_sources.push(format!("{ek}:{}", source.describe()));
+                }
                 insert_param(&mut ctx.params, &ek, ev);
             }
             tracing::info!(
                 root_item_ref = %ctx.chain[0].resolved_ref,
                 runtime_item_ref = %intermediate.resolved_ref,
-                lookup_key = %format!("tools.{root_tool_id}"),
-                defaults_present,
-                item_override_present = tool_override_present,
+                lookup_key = %format!("{}s.{}", root_ref.kind, root_ref.bare_id),
+                defaults_present = policy.timeout.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlDefault)
+                    || policy.max_steps.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlDefault)
+                    || policy.max_concurrency.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlDefault)
+                    || policy.cancellation_mode.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlDefault)
+                    || policy.cancellation_grace_secs.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlDefault),
+                item_override_present = policy.timeout.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
+                    || policy.max_steps.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
+                    || policy.max_concurrency.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
+                    || policy.cancellation_mode.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
+                    || policy.cancellation_grace_secs.as_ref().is_some_and(|v| v.source.kind == PolicySourceKind::ExecutionYamlItemOverride),
                 injected_keys = ?injected_keys,
+                injected_sources = ?injected_sources,
                 caller_won_keys = ?caller_won_keys,
-                filtered_keys = ?filtered_keys,
                 "execution config resolved for runtime hop"
             );
         }
@@ -237,185 +226,21 @@ fn param_already_present(params: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve one `ConfigSpec` against the full set of resolution roots.
 fn resolve_single(spec: &ConfigSpec, ctx: &CompileContext<'_>) -> Result<Value, EngineError> {
-    match spec.mode {
-        ResolveMode::DeepMerge => {
-            // system(s) → user → project (lowest to highest priority).
-            // `roots.ordered` is already in that order.
-            let mut merged = Value::Object(Map::new());
-            for root in &ctx.roots.ordered {
-                let candidate = root.ai_root.join("config").join(&spec.path);
-                if candidate.exists() {
-                    tracing::info!(
-                        config_path = %candidate.display(),
-                        space = ?root.space,
-                        mode = "deep_merge",
-                        "config_resolve loaded config layer"
-                    );
-                    let layer = load_and_verify_config_file(&candidate, ctx)?;
-                    merged = deep_merge(merged, layer);
-                }
-            }
-            Ok(merged)
-        }
-        ResolveMode::FirstMatch => {
-            // project → user → system. Reverse-walk roots so
-            // project wins. `ordered` is system-first, so we
-            // partition by space then check project, user, system in
-            // turn.
-            for target in &[ItemSpace::Project, ItemSpace::User, ItemSpace::System] {
-                for root in ctx.roots.ordered.iter().filter(|r| r.space == *target) {
-                    let candidate = root.ai_root.join("config").join(&spec.path);
-                    if candidate.exists() {
-                        tracing::info!(
-                            config_path = %candidate.display(),
-                            space = ?root.space,
-                            mode = "first_match",
-                            "config_resolve selected config file"
-                        );
-                        return load_and_verify_config_file(&candidate, ctx);
-                    }
-                }
-            }
-            Ok(Value::Object(Map::new()))
-        }
-    }
-}
-
-/// Read, verify (warn-if-unsigned, fail-loud on tampered), and parse
-/// a config YAML.
-fn load_and_verify_config_file(
-    path: &Path,
-    ctx: &CompileContext<'_>,
-) -> Result<Value, EngineError> {
-    let content = std::fs::read_to_string(path).map_err(|e| EngineError::InvalidRuntimeConfig {
-        path: path.display().to_string(),
-        reason: format!("could not read config file: {e}"),
-    })?;
-
-    // Look up the `config` kind's `.yaml` extension spec for the
-    // signature envelope + parser ref.
-    let kind_schema = ctx
-        .kinds
-        .get("config")
-        .ok_or_else(|| EngineError::InvalidRuntimeConfig {
-            path: path.display().to_string(),
-            reason: "config kind not registered — required for config_resolve".to_string(),
-        })?;
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!(".{e}"))
-        .unwrap_or_else(|| ".yaml".to_owned());
-    let ext_spec = kind_schema
-        .spec_for(&ext)
-        .or_else(|| kind_schema.spec_for(".yaml"))
-        .ok_or_else(|| EngineError::InvalidRuntimeConfig {
-            path: path.display().to_string(),
-            reason: format!("config kind has no extension spec for `{ext}`"),
-        })?;
-    let envelope = &ext_spec.signature;
-
-    // Verify integrity. Mirrors `verify_item(... allow_unsigned=True)`:
-    //   * No header     → warn, continue (unsigned is allowed).
-    //   * Header present → recompute hash; mismatch is fatal.
-    //                      Untrusted signer is logged but not fatal.
-    match parse_signature_header(&content, envelope) {
-        None => {
-            tracing::warn!(
-                config_path = %path.display(),
-                "config file is unsigned (allow_unsigned=true)"
-            );
-        }
-        Some(header) => {
-            let recomputed = content_hash_after_signature(&content, envelope).ok_or_else(|| {
-                EngineError::InvalidRuntimeConfig {
-                    path: path.display().to_string(),
-                    reason: "could not locate signature line in config file".to_string(),
-                }
-            })?;
-            if recomputed != header.content_hash {
-                return Err(EngineError::ContentHashMismatch {
-                    canonical_ref: path.display().to_string(),
-                    expected: header.content_hash.clone(),
-                    actual: recomputed,
-                });
-            }
-            // Also try full sig verification — trust class is
-            // logged, never fatal (matches `allow_unsigned=True`).
-            match verify_item_signature(&content, &header, envelope, ctx.trust_store) {
-                Ok((trust, _fp)) => {
-                    tracing::debug!(
-                        config_path = %path.display(),
-                        ?trust,
-                        "config file signature verified"
-                    );
-                }
-                Err(EngineError::ContentHashMismatch {
-                    expected, actual, ..
-                }) => {
-                    // Re-raise with the file path attached.
-                    return Err(EngineError::ContentHashMismatch {
-                        canonical_ref: path.display().to_string(),
-                        expected,
-                        actual,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        config_path = %path.display(),
-                        error = %e,
-                        "config file signature trust check failed (allow_unsigned=true)"
-                    );
-                }
-            }
-        }
-    }
-
-    // Parse via the engine's parser dispatcher using the config
-    // kind's parser ref.
-    let parsed = ctx
-        .parsers
-        .dispatch(&ext_spec.parser, &content, Some(path), envelope)?;
-
-    // Match Python: `_yaml.safe_load(f) or {}` — null/empty yaml
-    // becomes an empty mapping so the deep-merge stays sane.
-    if parsed.is_null() {
-        Ok(Value::Object(Map::new()))
-    } else {
-        Ok(parsed)
-    }
-}
-
-/// Recursive deep merge: `override` wins. Dicts merge key-by-key;
-/// scalars and lists are replaced wholesale. The `"extends"` key is
-/// excluded (Python `_deep_merge_config` line 1219).
-pub(crate) fn deep_merge(base: Value, override_: Value) -> Value {
-    match (base, override_) {
-        (Value::Object(mut b), Value::Object(o)) => {
-            for (k, v) in o {
-                if k == "extends" {
-                    continue;
-                }
-                let existing = b.remove(&k);
-                let merged = match existing {
-                    Some(existing_val) => deep_merge(existing_val, v),
-                    None => v,
-                };
-                b.insert(k, merged);
-            }
-            Value::Object(b)
-        }
-        // override is non-object OR base is non-object → override wins.
-        (_, o) => o,
-    }
+    let load_ctx = ConfigLoadContext {
+        roots: ctx.roots,
+        parsers: ctx.parsers,
+        kinds: ctx.kinds,
+        trust_store: ctx.trust_store,
+    };
+    Ok(resolve_config_spec(spec, &load_ctx)?.value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::config_loading::deep_merge;
     use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
     use crate::kind_registry::KindRegistry;
     use crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors;
@@ -752,12 +577,13 @@ metadata:
     fn chain_non_root_filters_to_execution_params_plus_universal_timeout() {
         let rig = build_rig();
         // Config has timeout (universal), max_steps (declared),
-        // and forbidden_field (not in execution_params, not universal).
+        // and max_concurrency (known policy field, but not in
+        // execution_params and not universal for this runtime hop).
         // Plus a per-tool override that bumps timeout for `mytool`.
         write_signed_config(
             &rig.project_ai,
             "exec.yaml",
-            "defaults:\n  timeout: 30\n  max_steps: 5\n  forbidden_field: nope\n\
+            "defaults:\n  timeout: 30\n  max_steps: 5\n  max_concurrency: 2\n\
              tools:\n  mytool:\n    timeout: 60\n",
         );
 
@@ -780,10 +606,10 @@ metadata:
         assert_eq!(params["timeout"], json!(60));
         // Declared execution_param surfaces.
         assert_eq!(params["max_steps"], json!(5));
-        // Non-allowed field MUST NOT leak in.
+        // Known but non-allowed execution-policy field MUST NOT leak in.
         assert!(
-            params.get("forbidden_field").is_none(),
-            "forbidden_field bled through filter: {params:?}"
+            params.get("max_concurrency").is_none(),
+            "max_concurrency bled through filter: {params:?}"
         );
         // Root-tool sentinel must NOT appear on a non-root call.
         assert!(params.get("resolved_config").is_none());

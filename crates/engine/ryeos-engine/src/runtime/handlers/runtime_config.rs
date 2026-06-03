@@ -11,8 +11,11 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::canonical_ref::CanonicalRef;
+use crate::config_loading::ConfigLoadContext;
 use crate::contracts::RuntimeEnvSource;
 use crate::error::EngineError;
+use crate::execution_policy::ExecutionPolicyResolver;
 use crate::runtime::{expand_template, is_reserved_env_name, CompileContext, RuntimeHandler};
 
 pub const KEY: &str = "config";
@@ -56,6 +59,48 @@ fn timeout_secs_from_params(
         })
 }
 
+fn timeout_secs_for_config(
+    ctx: &CompileContext<'_>,
+    descriptor_timeout_secs: u64,
+    source_path: &Path,
+) -> Result<(u64, String), EngineError> {
+    if ctx.original_params.get("timeout").is_some() {
+        return Ok((
+            timeout_secs_from_params(ctx.original_params, descriptor_timeout_secs, source_path)?,
+            "caller param `timeout`".to_string(),
+        ));
+    }
+
+    let root_ref = CanonicalRef::parse(&ctx.chain[0].resolved_ref).map_err(|e| {
+        EngineError::InvalidRuntimeConfig {
+            path: ctx.chain[0].source_path.display().to_string(),
+            reason: format!("invalid root item ref for execution policy: {e}"),
+        }
+    })?;
+    let policy = ExecutionPolicyResolver::new(ConfigLoadContext {
+        roots: ctx.roots,
+        parsers: ctx.parsers,
+        kinds: ctx.kinds,
+        trust_store: ctx.trust_store,
+    })
+    .resolve_for_item(&root_ref)?;
+    if let Some(timeout) = policy.timeout {
+        return Ok((timeout.value, timeout.source.describe()));
+    }
+
+    if ctx.params.get("timeout").is_some() {
+        return Ok((
+            timeout_secs_from_params(&ctx.params, descriptor_timeout_secs, source_path)?,
+            "execution policy param `timeout`".to_string(),
+        ));
+    }
+
+    Ok((
+        descriptor_timeout_secs,
+        "runtime descriptor `config.timeout_secs`".to_string(),
+    ))
+}
+
 pub struct RuntimeConfigHandler;
 
 impl RuntimeHandler for RuntimeConfigHandler {
@@ -96,8 +141,15 @@ impl RuntimeHandler for RuntimeConfigHandler {
                 reason: format!("{e}"),
             }
         })?;
-        let timeout_secs =
-            timeout_secs_from_params(&ctx.params, config.timeout_secs, &intermediate.source_path)?;
+        let (timeout_secs, timeout_source) =
+            timeout_secs_for_config(ctx, config.timeout_secs, &intermediate.source_path)?;
+        tracing::info!(
+            item_ref = %intermediate.resolved_ref,
+            timeout_secs,
+            timeout_source,
+            descriptor_timeout_secs = config.timeout_secs,
+            "runtime config timeout resolved"
+        );
 
         ctx.spec_overrides.command = Some(config.command);
         ctx.spec_overrides.args = Some(config.args);

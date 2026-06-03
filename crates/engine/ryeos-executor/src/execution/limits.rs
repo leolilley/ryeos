@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use anyhow::Context as _;
+use ryeos_engine::execution_policy::ResolvedExecutionPolicy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::Value;
 
 use super::launch_envelope::HardLimits;
 
@@ -188,151 +189,37 @@ pub fn load_limits_config(project_root: &Path) -> anyhow::Result<Option<LimitsCo
     Ok(Some(config))
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionPolicyConfig {
-    #[serde(default)]
-    pub category: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub schema_version: Option<String>,
-    #[serde(default)]
-    pub defaults: ExecutionPolicyValues,
-    #[serde(default)]
-    pub tools: HashMap<String, ExecutionPolicyValues>,
-    #[serde(default)]
-    pub graphs: HashMap<String, ExecutionPolicyValues>,
-    #[serde(default)]
-    pub directives: HashMap<String, ExecutionPolicyValues>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionPolicyValues {
-    pub timeout: Option<u64>,
-    pub max_steps: Option<u32>,
-    pub max_concurrency: Option<u32>,
-    pub cancellation_mode: Option<String>,
-    pub cancellation_grace_secs: Option<u64>,
-}
-
-impl ExecutionPolicyValues {
-    fn merge_from(&mut self, higher: &ExecutionPolicyValues) {
-        if higher.timeout.is_some() {
-            self.timeout = higher.timeout;
-        }
-        if higher.max_steps.is_some() {
-            self.max_steps = higher.max_steps;
-        }
-        if higher.max_concurrency.is_some() {
-            self.max_concurrency = higher.max_concurrency;
-        }
-        if higher.cancellation_mode.is_some() {
-            self.cancellation_mode.clone_from(&higher.cancellation_mode);
-        }
-        if higher.cancellation_grace_secs.is_some() {
-            self.cancellation_grace_secs = higher.cancellation_grace_secs;
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecutionPolicyLimitOverrides {
-    pub duration_seconds: Option<u64>,
-    pub duration_seconds_source: Option<String>,
-    pub turns: Option<u32>,
-    pub turns_source: Option<String>,
-}
-
 pub fn apply_execution_policy_overrides(
     defaults: &LimitValues,
-    policy: &ExecutionPolicyLimitOverrides,
+    policy: &ResolvedExecutionPolicy,
 ) -> LimitValues {
     let mut requested = defaults.clone();
-    if let Some(duration_seconds) = policy.duration_seconds {
-        requested.duration_seconds = duration_seconds;
+    if let Some(timeout) = &policy.timeout {
+        requested.duration_seconds = timeout.value;
     }
-    if let Some(turns) = policy.turns {
-        requested.turns = turns;
+    if let Some(max_steps) = &policy.max_steps {
+        requested.turns = max_steps.value;
     }
     requested
 }
 
-/// Load root-item execution policy from `.ai/config/execution/execution.yaml`
-/// and translate the fields enforced by the native launch envelope into
-/// [`LimitValues`]. Missing config returns `Ok(None)`; malformed config is a
-/// loud error so policy typos do not silently fall back to the 300s default.
-pub fn load_execution_policy_limits(
-    project_root: &Path,
-    item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
-) -> anyhow::Result<Option<ExecutionPolicyLimitOverrides>> {
-    let config_path = project_root
-        .join(".ai")
-        .join("config")
-        .join("execution")
-        .join("execution.yaml");
-
-    if !config_path.is_file() {
-        return Ok(None);
+pub fn apply_caller_limit_overrides(
+    mut requested: LimitValues,
+    parameters: &Value,
+) -> anyhow::Result<LimitValues> {
+    if let Some(raw) = parameters.get("timeout") {
+        requested.duration_seconds = raw.as_u64().ok_or_else(|| {
+            anyhow::anyhow!("invalid caller timeout: expected unsigned integer seconds, got {raw}")
+        })?;
     }
-
-    let contents = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("execution policy: cannot read {}", config_path.display()))?;
-
-    let config: ExecutionPolicyConfig = serde_yaml::from_str(&contents).with_context(|| {
-        format!(
-            "execution policy: malformed YAML in {} — fix the file or remove it to use defaults",
-            config_path.display()
-        )
-    })?;
-
-    let mut policy = config.defaults.clone();
-    let mut timeout_source = policy
-        .timeout
-        .map(|_| format!("{}.defaults.timeout", config_path.display()));
-    let mut max_steps_source = policy
-        .max_steps
-        .map(|_| format!("{}.defaults.max_steps", config_path.display()));
-    let kind_overrides = match item_ref.kind.as_str() {
-        "tool" => config.tools.get(&item_ref.bare_id).map(|v| ("tools", v)),
-        "graph" => config.graphs.get(&item_ref.bare_id).map(|v| ("graphs", v)),
-        "directive" => config
-            .directives
-            .get(&item_ref.bare_id)
-            .map(|v| ("directives", v)),
-        _ => None,
-    };
-    if let Some((section, overrides)) = kind_overrides {
-        if overrides.timeout.is_some() {
-            timeout_source = Some(format!(
-                "{}.{}.{}/timeout",
-                config_path.display(),
-                section,
-                item_ref.bare_id
-            ));
-        }
-        if overrides.max_steps.is_some() {
-            max_steps_source = Some(format!(
-                "{}.{}.{}/max_steps",
-                config_path.display(),
-                section,
-                item_ref.bare_id
-            ));
-        }
-        policy.merge_from(overrides);
+    if let Some(raw) = parameters.get("max_steps") {
+        let value = raw.as_u64().ok_or_else(|| {
+            anyhow::anyhow!("invalid caller max_steps: expected unsigned integer, got {raw}")
+        })?;
+        requested.turns = u32::try_from(value)
+            .map_err(|_| anyhow::anyhow!("invalid caller max_steps: exceeds u32"))?;
     }
-
-    if policy.timeout.is_none() && policy.max_steps.is_none() {
-        return Ok(None);
-    }
-
-    Ok(Some(ExecutionPolicyLimitOverrides {
-        duration_seconds: policy.timeout,
-        duration_seconds_source: timeout_source,
-        turns: policy.max_steps,
-        turns_source: max_steps_source,
-    }))
+    Ok(requested)
 }
 
 #[cfg(test)]
@@ -455,45 +342,23 @@ mod tests {
 
     #[test]
     fn execution_policy_graph_override_maps_to_duration_and_turns() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_path = temp.path().join(".ai").join("config").join("execution");
-        std::fs::create_dir_all(&config_path).unwrap();
-        std::fs::write(
-            config_path.join("execution.yaml"),
-            "defaults:\n  timeout: 300\n  max_steps: 5\ngraphs:\n  snap-track/show_rescrape:\n    timeout: 7200\n    max_steps: 20\n",
-        )
-        .unwrap();
-
         let item_ref =
             ryeos_engine::canonical_ref::CanonicalRef::parse("graph:snap-track/show_rescrape")
                 .unwrap();
-        let overrides = load_execution_policy_limits(temp.path(), &item_ref)
-            .unwrap()
-            .expect("policy limits");
-        assert_eq!(overrides.duration_seconds, Some(7200));
-        assert_eq!(overrides.turns, Some(20));
-    }
-
-    #[test]
-    fn execution_policy_accepts_known_ignored_fields() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_path = temp.path().join(".ai").join("config").join("execution");
-        std::fs::create_dir_all(&config_path).unwrap();
-        std::fs::write(
-            config_path.join("execution.yaml"),
-            "category: execution\nversion: 1\nschema_version: v1\ndefaults:\n  timeout: 300\n  max_steps: 5\n  max_concurrency: 10\n  cancellation_mode: graceful\n  cancellation_grace_secs: 5\ntools:\n  snap-track/scrapers/daily-scheduler:\n    timeout: 14400\n",
-        )
-        .unwrap();
-
-        let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(
-            "tool:snap-track/scrapers/daily-scheduler",
-        )
-        .unwrap();
-        let overrides = load_execution_policy_limits(temp.path(), &item_ref)
-            .unwrap()
-            .expect("policy limits");
-        assert_eq!(overrides.duration_seconds, Some(14400));
-        assert_eq!(overrides.turns, Some(5));
+        let value = serde_json::json!({
+            "defaults": { "timeout": 300, "max_steps": 5 },
+            "graphs": {
+                "snap-track/show_rescrape": { "timeout": 7200, "max_steps": 20 }
+            }
+        });
+        let policy =
+            ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &value, &item_ref, None, None,
+            )
+            .unwrap();
+        let limits = apply_execution_policy_overrides(&LimitValues::default(), &policy);
+        assert_eq!(limits.duration_seconds, 7200);
+        assert_eq!(limits.turns, 20);
     }
 
     #[test]
@@ -506,17 +371,60 @@ mod tests {
         };
         let requested = apply_execution_policy_overrides(
             &defaults,
-            &ExecutionPolicyLimitOverrides {
-                duration_seconds: Some(7200),
-                duration_seconds_source: None,
-                turns: None,
-                turns_source: None,
-            },
+            &ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &serde_json::json!({"tools": {"x": {"timeout": 7200}}}),
+                &ryeos_engine::canonical_ref::CanonicalRef::parse("tool:x").unwrap(),
+                None,
+                None,
+            )
+            .unwrap(),
         );
 
         assert_eq!(requested.duration_seconds, 7200);
         assert_eq!(requested.tokens, 123_456);
         assert_eq!(requested.spawns, 42);
         assert_eq!(requested.spend_usd, 9.0);
+    }
+
+    #[test]
+    fn caller_limit_overrides_beat_execution_policy_before_caps() {
+        let policy =
+            ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &serde_json::json!({"defaults": {"timeout": 300, "max_steps": 5}}),
+                &ryeos_engine::canonical_ref::CanonicalRef::parse("tool:x").unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        let requested = apply_execution_policy_overrides(&LimitValues::default(), &policy);
+        let requested = apply_caller_limit_overrides(
+            requested,
+            &serde_json::json!({"timeout": 7200, "max_steps": 20}),
+        )
+        .unwrap();
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps {
+                duration_seconds: Some(600),
+                ..Default::default()
+            },
+            None,
+            0,
+        );
+
+        assert_eq!(requested.duration_seconds, 7200);
+        assert_eq!(requested.turns, 20);
+        assert_eq!(hard.duration_seconds, 600);
+    }
+
+    #[test]
+    fn caller_max_steps_must_fit_turns_type() {
+        let err = apply_caller_limit_overrides(
+            LimitValues::default(),
+            &serde_json::json!({"max_steps": u64::from(u32::MAX) + 1}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exceeds u32"), "got {err}");
     }
 }
