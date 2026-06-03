@@ -102,6 +102,11 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         let tail = &cli.rest[2..];
         let parameters = if let Some(input_val) = crate::arg_bind::parse_input_arg(tail)? {
             input_val
+        } else if let [json_arg] = tail {
+            match serde_json::from_str::<Value>(json_arg) {
+                Ok(value) if value.is_object() => value,
+                _ => crate::arg_bind::bind_tail(tail)?,
+            }
         } else {
             crate::arg_bind::bind_tail(tail)?
         };

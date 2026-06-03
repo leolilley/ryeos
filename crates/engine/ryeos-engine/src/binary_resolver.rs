@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use lillux::crypto::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 use crate::error::EngineError;
@@ -59,7 +60,7 @@ pub struct ResolvedBinary {
 pub fn resolve_bundle_binary_ref(
     binary_ref: &str,
     bundle_root: &Path,
-    trust_store_has_fingerprint: impl Fn(&str) -> bool,
+    trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
     root_trust_class: TrustClass,
 ) -> Result<ResolvedBinary, EngineError> {
     let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
@@ -247,6 +248,14 @@ pub fn resolve_bundle_binary_ref(
             ))
         })?;
 
+    let signed_sidecar_fingerprint = verify_item_source_sidecar(
+        &bin_name,
+        &bin_path,
+        &item_ref,
+        &item_source,
+        &trusted_verifying_key,
+    )?;
+
     let content_blob_hash = item_source
         .get("content_blob_hash")
         .and_then(|v| v.as_str())
@@ -270,7 +279,7 @@ pub fn resolve_bundle_binary_ref(
 
     let (trust_class, fingerprint) = crate::executor_resolution::verify_executor_trust(
         &item_source,
-        trust_store_has_fingerprint,
+        |fp| trusted_verifying_key(fp).is_some(),
         root_trust_class,
     );
 
@@ -281,12 +290,92 @@ pub fn resolve_bundle_binary_ref(
         });
     }
     let signer_fingerprint = fingerprint.unwrap_or_else(|| "<unknown>".to_string());
+    if signer_fingerprint != signed_sidecar_fingerprint {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name,
+            reason: format!(
+                "sidecar signer `{signed_sidecar_fingerprint}` does not match item_source signature_info fingerprint `{signer_fingerprint}`"
+            ),
+        });
+    }
 
     Ok(ResolvedBinary {
         absolute_path: bin_path,
         manifest_hash,
         signer_fingerprint,
     })
+}
+
+fn verify_item_source_sidecar(
+    bin_name: &str,
+    bin_path: &Path,
+    expected_item_ref: &str,
+    item_source: &serde_json::Value,
+    trusted_verifying_key: &impl Fn(&str) -> Option<VerifyingKey>,
+) -> Result<String, EngineError> {
+    let sidecar_path = bin_path.with_file_name(format!("{bin_name}.item_source.json"));
+    let signed =
+        std::fs::read_to_string(&sidecar_path).map_err(|e| EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("read {}: {e}", sidecar_path.display()),
+        })?;
+
+    let header = signed
+        .lines()
+        .next()
+        .and_then(|line| lillux::signature::parse_signature_line(line, "#", None))
+        .ok_or_else(|| EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!(
+                "missing or malformed signature line in {}",
+                sidecar_path.display()
+            ),
+        })?;
+
+    let Some(verifying_key) = trusted_verifying_key(&header.signer_fingerprint) else {
+        return Err(EngineError::BinUntrusted {
+            bin: bin_name.to_string(),
+            fingerprint: header.signer_fingerprint,
+        });
+    };
+
+    let body = lillux::signature::strip_signature_lines_with_envelope(&signed, "#", None);
+    if !lillux::signature::is_valid_signature_for(
+        &header.content_hash,
+        &header.signature_b64,
+        &header.signer_fingerprint,
+        &body,
+        &verifying_key,
+        &header.signer_fingerprint,
+    ) {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: "signature verification failed".to_string(),
+        });
+    }
+
+    let canonical_item_source = lillux::cas::canonical_json(item_source);
+    if body != canonical_item_source {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: "signed sidecar body does not match CAS item_source object".to_string(),
+        });
+    }
+
+    let actual_item_ref = item_source
+        .get("item_ref")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if actual_item_ref != expected_item_ref {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!(
+                "item_source item_ref `{actual_item_ref}` does not match resolved binary ref `{expected_item_ref}`"
+            ),
+        });
+    }
+
+    Ok(header.signer_fingerprint)
 }
 
 /// Validate a binary name for both `bin:<name>` and `bin/<triple>/<name>`.
@@ -358,6 +447,7 @@ fn is_dispatchable_trust_class(tc: TrustClass) -> bool {
 mod tests {
     use super::*;
     use crate::executor_resolution::verify_executor_trust;
+    use lillux::crypto::SigningKey;
     use serde_json::json;
 
     /// Descriptor=System, binary signed by a system-trusted key.
@@ -436,8 +526,8 @@ mod tests {
     /// Build a minimally valid bundle in `bundle_root` containing a
     /// single binary named `bin_name`, its CAS-stored item_source/manifest,
     /// and the `refs/bundles/manifest` pointer. Returns the signer
-    /// fingerprint embedded in the item_source.
-    fn write_resolver_fixture(bundle_root: &Path, bin_name: &str) -> String {
+    /// fingerprint and signing key used for the signed item-source sidecar.
+    fn write_resolver_fixture(bundle_root: &Path, bin_name: &str) -> (String, SigningKey) {
         let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
         let ai = bundle_root.join(crate::AI_DIR);
         let bin_dir = ai.join("bin").join(triple);
@@ -448,14 +538,28 @@ mod tests {
         let content_blob_hash = lillux::sha256_hex(bin_bytes);
 
         let cas = lillux::cas::CasStore::new(ai.join("objects"));
+        let signing_key = SigningKey::from_bytes(&[31u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
+        let item_ref = format!("bin/{triple}/{bin_name}");
         let item_source = serde_json::json!({
+            "item_ref": item_ref,
             "content_blob_hash": content_blob_hash,
-            "signature_info": { "fingerprint": "test-fp" }
+            "integrity": format!("sha256:{content_blob_hash}"),
+            "signature_info": { "fingerprint": fingerprint },
+            "mode": 0o644,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();
+        let sidecar_body = lillux::cas::canonical_json(&item_source);
+        let signed_sidecar =
+            lillux::signature::sign_content(&sidecar_body, &signing_key, "#", None);
+        std::fs::write(
+            bin_path.with_file_name(format!("{bin_name}.item_source.json")),
+            signed_sidecar,
+        )
+        .unwrap();
         let manifest = serde_json::json!({
             "item_source_hashes": {
-                format!("bin/{triple}/{bin_name}"): item_source_hash
+                item_ref: item_source_hash
             }
         });
         let manifest_hash = cas.store_object(&manifest).unwrap();
@@ -464,7 +568,14 @@ mod tests {
         std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
         std::fs::write(ref_path, manifest_hash).unwrap();
 
-        "test-fp".into()
+        (fingerprint, signing_key)
+    }
+
+    fn trusted_key_for<'a>(
+        expected_fp: &'a str,
+        key: &'a SigningKey,
+    ) -> impl Fn(&str) -> Option<lillux::crypto::VerifyingKey> + 'a {
+        move |fp| (fp == expected_fp).then(|| key.verifying_key())
     }
 
     /// `bin/{triple}/<name>` resolves identically to the canonical
@@ -473,12 +584,12 @@ mod tests {
     fn placeholder_triple_resolves_against_host_triple() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
-        let fp = write_resolver_fixture(&bundle, "demo");
+        let (fp, key) = write_resolver_fixture(&bundle, "demo");
 
         let resolved = resolve_bundle_binary_ref(
             "bin/{triple}/demo",
             &bundle,
-            |f| f == fp,
+            trusted_key_for(&fp, &key),
             TrustClass::TrustedSystem,
         )
         .expect("placeholder triple ref must resolve");
@@ -497,21 +608,73 @@ mod tests {
     fn short_form_and_placeholder_form_resolve_to_same_path() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
-        let fp = write_resolver_fixture(&bundle, "demo");
+        let (fp, key) = write_resolver_fixture(&bundle, "demo");
 
-        let short =
-            resolve_bundle_binary_ref("bin:demo", &bundle, |f| f == fp, TrustClass::TrustedSystem)
-                .expect("short form must resolve");
+        let short = resolve_bundle_binary_ref(
+            "bin:demo",
+            &bundle,
+            trusted_key_for(&fp, &key),
+            TrustClass::TrustedSystem,
+        )
+        .expect("short form must resolve");
         let placeholder = resolve_bundle_binary_ref(
             "bin/{triple}/demo",
             &bundle,
-            |f| f == fp,
+            trusted_key_for(&fp, &key),
             TrustClass::TrustedSystem,
         )
         .expect("placeholder form must resolve");
 
         assert_eq!(short.absolute_path, placeholder.absolute_path);
         assert_eq!(short.manifest_hash, placeholder.manifest_hash);
+    }
+
+    #[test]
+    fn forged_manifest_with_trusted_fingerprint_rejected_without_matching_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fp, key) = write_resolver_fixture(&bundle, "demo");
+        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        let ai = bundle.join(crate::AI_DIR);
+        let bin_path = ai.join("bin").join(triple).join("demo");
+
+        let forged_bytes = b"forged-binary\n";
+        std::fs::write(&bin_path, forged_bytes).unwrap();
+        let forged_hash = lillux::sha256_hex(forged_bytes);
+        let forged_item_source = serde_json::json!({
+            "item_ref": format!("bin/{triple}/demo"),
+            "content_blob_hash": forged_hash,
+            "integrity": format!("sha256:{forged_hash}"),
+            "signature_info": { "fingerprint": fp },
+            "mode": 0o644,
+        });
+        let cas = lillux::cas::CasStore::new(ai.join("objects"));
+        let forged_item_source_hash = cas.store_object(&forged_item_source).unwrap();
+        let forged_manifest = serde_json::json!({
+            "item_source_hashes": {
+                format!("bin/{triple}/demo"): forged_item_source_hash
+            }
+        });
+        let forged_manifest_hash = cas.store_object(&forged_manifest).unwrap();
+        std::fs::write(
+            ai.join("refs").join("bundles").join("manifest"),
+            forged_manifest_hash,
+        )
+        .unwrap();
+
+        let err = resolve_bundle_binary_ref(
+            "bin:demo",
+            &bundle,
+            trusted_key_for(&fp, &key),
+            TrustClass::TrustedSystem,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, EngineError::BinSidecarInvalid { ref reason, .. }
+                if reason.contains("does not match CAS item_source")),
+            "expected sidecar/CAS mismatch rejection, got: {err:?}"
+        );
     }
 
     // ── Phase 1A new tests ─────────────────────────────────────────
@@ -521,7 +684,7 @@ mod tests {
         let err = resolve_bundle_binary_ref(
             "bin:../demo",
             Path::new("/tmp/bundle"),
-            |_| false,
+            |_| None,
             TrustClass::TrustedSystem,
         )
         .unwrap_err();
@@ -540,7 +703,7 @@ mod tests {
         let err = resolve_bundle_binary_ref(
             "bin:subdir/demo",
             Path::new("/tmp/bundle"),
-            |_| false,
+            |_| None,
             TrustClass::TrustedSystem,
         )
         .unwrap_err();
@@ -556,7 +719,7 @@ mod tests {
         let err = resolve_bundle_binary_ref(
             &format!("bin/{triple}/"),
             Path::new("/tmp/bundle"),
-            |_| false,
+            |_| None,
             TrustClass::TrustedSystem,
         )
         .unwrap_err();
@@ -610,13 +773,9 @@ mod tests {
         std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
         std::fs::write(&ref_path, manifest_hash).unwrap();
 
-        let err = resolve_bundle_binary_ref(
-            "bin:escaped",
-            &bundle,
-            |f| f == "test-fp",
-            TrustClass::TrustedSystem,
-        )
-        .unwrap_err();
+        let err =
+            resolve_bundle_binary_ref("bin:escaped", &bundle, |_| None, TrustClass::TrustedSystem)
+                .unwrap_err();
 
         // The symlink resolves outside the bundle bin dir.
         // Either BinOutsideBundle or BinNotRegularFile is acceptable
@@ -644,7 +803,7 @@ mod tests {
         let err = resolve_bundle_binary_ref(
             "bin:not-a-file",
             &bundle,
-            |_| false,
+            |_| None,
             TrustClass::TrustedSystem,
         )
         .unwrap_err();

@@ -628,7 +628,7 @@ pub fn compile_with_handlers(
         let resolved = crate::binary_resolver::resolve_bundle_binary_ref(
             &cmd_expanded,
             &bundle_root,
-            |fp| trust_ref.get(fp).is_some(),
+            |fp| trust_ref.get(fp).map(|signer| signer.verifying_key),
             ctx.root_trust_class,
         )?;
         resolved.absolute_path.to_string_lossy().into_owned()

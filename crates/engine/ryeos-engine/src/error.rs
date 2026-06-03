@@ -207,6 +207,9 @@ pub enum EngineError {
     #[error("binary `{bin}` is not a regular file (symlink/FIFO/device outside bundle bin dir)")]
     BinNotRegularFile { bin: String },
 
+    #[error("binary `{bin}` item-source sidecar invalid: {reason}")]
+    BinSidecarInvalid { bin: String, reason: String },
+
     #[error("unknown template token: {{{token}}}")]
     UnknownTemplateToken { token: String },
 

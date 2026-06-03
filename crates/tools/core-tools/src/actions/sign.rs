@@ -623,7 +623,7 @@ pub struct SignatureReport {
     pub updated_at: String,
 }
 
-fn load_user_signing_key() -> Result<SigningKey> {
+pub fn load_user_signing_key() -> Result<SigningKey> {
     let path: PathBuf = match std::env::var("RYE_SIGNING_KEY") {
         Ok(p) => PathBuf::from(p),
         Err(_) => {

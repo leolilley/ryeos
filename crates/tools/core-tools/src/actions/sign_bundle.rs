@@ -44,7 +44,7 @@ impl SignBundleReport {
         self.failed.is_empty()
     }
 
-    pub fn total(self) -> usize {
+    pub fn total(&self) -> usize {
         self.validated.len() + self.signed.len() + self.failed.len()
     }
 }
@@ -68,15 +68,35 @@ pub fn sign_bundle_items(
     registry_roots: &[PathBuf],
     signing_key: &lillux::crypto::SigningKey,
 ) -> Result<SignBundleReport> {
+    sign_bundle_items_with_trust(source, registry_roots, signing_key, None)
+}
+
+/// Sign every signable item in the bundle at `source` using `signing_key`,
+/// while also trusting registry/dependency signer keys from `base_trust_store`.
+///
+/// This is intended for descriptor-driven offline authoring services, where
+/// kind schemas and parser descriptors come from already-installed bundles
+/// signed by the platform publisher, while source items are signed by the
+/// current user key.
+pub fn sign_bundle_items_with_trust(
+    source: &Path,
+    registry_roots: &[PathBuf],
+    signing_key: &lillux::crypto::SigningKey,
+    base_trust_store: Option<&TrustStore>,
+) -> Result<SignBundleReport> {
     let verifying_key = signing_key.verifying_key();
     let fingerprint = ryeos_engine::trust::compute_fingerprint(&verifying_key);
 
-    // 1. Build a TrustStore seeded with ONLY the author's key
-    let trust_store = TrustStore::from_signers(vec![TrustedSigner {
+    // 1. Build a TrustStore seeded with the author's key plus any
+    //    caller-provided registry/dependency trust.
+    let mut trust_store = TrustStore::from_signers(vec![TrustedSigner {
         fingerprint: fingerprint.clone(),
         verifying_key,
         label: Some("author".to_string()),
     }]);
+    if let Some(base) = base_trust_store {
+        trust_store.extend_from(base);
+    }
 
     // 2. Load KindRegistry from registry_roots AND source bundle's own kind
     //    schemas. Registry roots provide base/dependency kinds (core, standard,
@@ -137,8 +157,11 @@ pub fn sign_bundle_items(
         failed: Vec::new(),
     };
 
-    for kind_name in kinds.kinds() {
-        let kind_schema = match kinds.get(kind_name) {
+    let mut kind_names: Vec<String> = kinds.kinds().map(str::to_owned).collect();
+    kind_names.sort();
+
+    for kind_name in kind_names {
+        let kind_schema = match kinds.get(&kind_name) {
             Some(s) => s,
             None => continue,
         };
@@ -149,6 +172,7 @@ pub fn sign_bundle_items(
 
         let mut files: Vec<PathBuf> = Vec::new();
         collect_files_recursive(&kind_dir, &mut files);
+        files.sort();
 
         for file_path in files {
             let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -182,6 +206,10 @@ pub fn sign_bundle_items(
             }
         }
     }
+
+    report.validated.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
+    report.signed.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
+    report.failed.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
 
     Ok(report)
 }
