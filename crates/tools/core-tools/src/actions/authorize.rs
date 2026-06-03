@@ -249,14 +249,53 @@ fn load_node_key(path: &std::path::Path) -> Result<lillux::crypto::SigningKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::OsRng;
+    use std::sync::{Mutex, MutexGuard};
 
-    fn write_hosted_policy(system_space_dir: &std::path::Path, token_ttl_secs: u64) {
-        let path = system_space_dir.join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml");
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct HostedPolicyFixture {
+        _env_guard: MutexGuard<'static, ()>,
+        _user: std::path::PathBuf,
+        key: lillux::crypto::SigningKey,
+    }
+
+    impl HostedPolicyFixture {
+        fn new(root: &std::path::Path) -> Self {
+            let env_guard = ENV_MUTEX.lock().unwrap();
+            let user = root.join("user");
+            let trust_dir = user
+                .join(ryeos_engine::AI_DIR)
+                .join("config")
+                .join("keys")
+                .join("trusted");
+            std::fs::create_dir_all(&trust_dir).unwrap();
+            let key = lillux::crypto::SigningKey::generate(&mut OsRng);
+            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            std::env::set_var("USER_SPACE", &user);
+            Self {
+                _env_guard: env_guard,
+                _user: user,
+                key,
+            }
+        }
+    }
+
+    impl Drop for HostedPolicyFixture {
+        fn drop(&mut self) {
+            std::env::remove_var("USER_SPACE");
+        }
+    }
+
+    fn write_hosted_policy(
+        system_space_dir: &std::path::Path,
+        token_ttl_secs: u64,
+        key: &lillux::crypto::SigningKey,
+    ) {
+        let path = system_space_dir.join(".ai/node/hosted/policy.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            path,
-            format!(
-                r#"
+        let body = format!(
+            r#"
 category: "hosted"
 section: "hosted"
 version: "0.1.0"
@@ -283,15 +322,15 @@ operations:
   prefer_isolated_node_per_principal: true
   shared_daemon_multitenancy_enabled: false
 "#
-            ),
-        )
-        .unwrap();
+        );
+        std::fs::write(path, lillux::signature::sign_content(&body, key, "#", None)).unwrap();
     }
 
     #[test]
     fn mint_admission_token_rejects_ttl_above_hosted_policy() {
         let tmp = tempfile::tempdir().unwrap();
-        write_hosted_policy(tmp.path(), 60);
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), 60, &fixture.key);
 
         let err = match run_mint_admission_token(MintAdmissionTokenParams {
             system_space_dir: tmp.path().to_path_buf(),

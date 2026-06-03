@@ -304,13 +304,48 @@ fn fingerprint_for_ed25519_key(key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::OsRng;
+    use std::sync::{Mutex, MutexGuard};
 
-    fn write_hosted_policy(system_space_dir: &std::path::Path) {
-        let path = system_space_dir.join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml");
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct HostedPolicyFixture {
+        _env_guard: MutexGuard<'static, ()>,
+        _user: std::path::PathBuf,
+        key: lillux::crypto::SigningKey,
+    }
+
+    impl HostedPolicyFixture {
+        fn new(root: &std::path::Path) -> Self {
+            let env_guard = ENV_MUTEX.lock().unwrap();
+            let user = root.join("user");
+            let trust_dir = user
+                .join(ryeos_engine::AI_DIR)
+                .join("config")
+                .join("keys")
+                .join("trusted");
+            std::fs::create_dir_all(&trust_dir).unwrap();
+            let key = lillux::crypto::SigningKey::generate(&mut OsRng);
+            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            std::env::set_var("USER_SPACE", &user);
+            Self {
+                _env_guard: env_guard,
+                _user: user,
+                key,
+            }
+        }
+    }
+
+    impl Drop for HostedPolicyFixture {
+        fn drop(&mut self) {
+            std::env::remove_var("USER_SPACE");
+        }
+    }
+
+    fn write_hosted_policy(system_space_dir: &std::path::Path, key: &lillux::crypto::SigningKey) {
+        let path = system_space_dir.join(".ai/node/hosted/policy.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            path,
-            r#"
+        let body = r#"
 category: "hosted"
 section: "hosted"
 version: "0.1.0"
@@ -338,9 +373,8 @@ operations:
   audit_grant_changes: true
   prefer_isolated_node_per_principal: true
   shared_daemon_multitenancy_enabled: false
-"#,
-        )
-        .unwrap();
+"#;
+        std::fs::write(path, lillux::signature::sign_content(body, key, "#", None)).unwrap();
     }
 
     #[test]
@@ -351,7 +385,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
@@ -379,7 +414,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
@@ -406,7 +442,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
@@ -430,7 +467,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
@@ -454,7 +492,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
@@ -481,7 +520,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
@@ -509,7 +549,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
@@ -537,7 +578,8 @@ operations:
         identity
             .write_public_identity(&tmp.path().join(".ai/node/identity/public-identity.json"))
             .unwrap();
-        write_hosted_policy(tmp.path());
+        let fixture = HostedPolicyFixture::new(tmp.path());
+        write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
             system_space_dir: Some(tmp.path().to_string_lossy().to_string()),

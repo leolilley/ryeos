@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use std::sync::Arc;
 
 use ryeos_engine::contracts::{InstanceViolationCode, SignatureEnvelope};
@@ -262,6 +263,9 @@ fn preflight_verify_bundle_in_context_inner(
 
     let mut failures: Vec<String> = Vec::new();
     let mut warnings: Vec<PreflightIssue> = Vec::new();
+    for failure in collect_node_config_failures(&ai_dir, &trust_store) {
+        failures.push(failure);
+    }
     for kind_name in kinds.kinds() {
         let kind_schema = match kinds.get(kind_name) {
             Some(s) => s,
@@ -273,7 +277,16 @@ fn preflight_verify_bundle_in_context_inner(
         }
 
         let mut files: Vec<PathBuf> = Vec::new();
-        collect_files_recursive(&kind_dir, &mut files);
+        if let Err(e) = collect_files_recursive(&kind_dir, &mut files) {
+            failures.push(format!(
+                "{}: scan failed: {e}",
+                kind_dir
+                    .strip_prefix(&ai_dir)
+                    .unwrap_or(&kind_dir)
+                    .display()
+            ));
+            continue;
+        }
 
         for file_path in files {
             let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -493,18 +506,623 @@ pub fn verify_manifest_signature(
     Ok(())
 }
 
-fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let metadata = fs::symlink_metadata(dir)
+        .with_context(|| format!("failed to stat bundle path {}", dir.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        bail!("bundle scan encountered symlink at {}", dir.display());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
+        .with_context(|| format!("failed to read bundle dir {}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
-            collect_files_recursive(&path, out);
-        } else if path.is_file() {
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to stat bundle path {}", path.display()))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            bail!("bundle scan encountered symlink at {}", path.display());
+        }
+        if file_type.is_dir() {
+            collect_files_recursive(&path, out)?;
+        } else if file_type.is_file() {
             out.push(path);
         }
     }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightNodeBundleRecord {
+    #[allow(dead_code)]
+    kind: Option<String>,
+    section: String,
+    #[allow(dead_code)]
+    id: Option<String>,
+    path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightNodeRouteRecord {
+    #[allow(dead_code)]
+    #[serde(default)]
+    section: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    category: Option<String>,
+    id: String,
+    path: String,
+    methods: std::collections::HashSet<String>,
+    auth: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    auth_config: Option<serde_json::Value>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    limits: PreflightRawLimits,
+    response: PreflightRawResponseSpec,
+    #[allow(dead_code)]
+    #[serde(default)]
+    execute: Option<PreflightRawExecute>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    request: PreflightRawRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightRawLimits {
+    #[allow(dead_code)]
+    #[serde(default = "default_body_max")]
+    body_bytes_max: u64,
+    #[allow(dead_code)]
+    #[serde(default = "default_timeout")]
+    timeout_ms: u64,
+    #[allow(dead_code)]
+    #[serde(default = "default_concurrent_max")]
+    concurrent_max: u32,
+}
+
+impl Default for PreflightRawLimits {
+    fn default() -> Self {
+        Self {
+            body_bytes_max: default_body_max(),
+            timeout_ms: default_timeout(),
+            concurrent_max: default_concurrent_max(),
+        }
+    }
+}
+
+fn default_body_max() -> u64 {
+    1_048_576
+}
+
+fn default_timeout() -> u64 {
+    30_000
+}
+
+fn default_concurrent_max() -> u32 {
+    100
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightRawResponseSpec {
+    mode: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    source: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    source_config: serde_json::Value,
+    #[allow(dead_code)]
+    #[serde(default)]
+    status: Option<u16>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    content_type: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    body_b64: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightRawExecute {
+    item_ref: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PreflightRawRequest {
+    #[allow(dead_code)]
+    #[serde(default)]
+    body: PreflightRawRequestBody,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightRawRequestBody {
+    #[default]
+    None,
+    Raw,
+    Text,
+    Json,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightVerbRecord {
+    category: String,
+    section: String,
+    name: String,
+    description: String,
+    #[serde(default)]
+    execute: Option<String>,
+    #[serde(default)]
+    aliases: Vec<PreflightVerbAliasRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightVerbAliasRecord {
+    tokens: Vec<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    description: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    deprecated: Option<bool>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    replacement_tokens: Option<Vec<String>>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    removed_in: Option<String>,
+    #[serde(default)]
+    positional_forms: Vec<PreflightPositionalForm>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    project_resolution: PreflightProjectResolution,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightProjectResolution {
+    #[default]
+    None,
+    Required,
+    Optional,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightPositionalForm {
+    #[serde(default)]
+    slots: Vec<PreflightPositionalSlot>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightPositionalSlot {
+    field: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    matcher: PreflightPositionalMatcher,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightPositionalMatcher {
+    #[default]
+    Any,
+    CanonicalRef,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightHostedNodePolicyRecord {
+    category: String,
+    section: String,
+    #[allow(dead_code)]
+    version: String,
+    schema_version: String,
+    #[allow(dead_code)]
+    description: String,
+    transport: PreflightHostedNodeTransportPolicy,
+    admission: PreflightHostedNodeAdmissionPolicy,
+    descriptor: PreflightHostedNodeDescriptorPolicy,
+    authorization: PreflightHostedNodeAuthorizationPolicy,
+    operations: PreflightHostedNodeOperationsPolicy,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightHostedNodeTransportPolicy {
+    public_https_required: bool,
+    #[allow(dead_code)]
+    loopback_http_allowed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightHostedNodeAdmissionPolicy {
+    mode: String,
+    token_ttl_secs: u64,
+    reject_wildcard_scopes: bool,
+    token_delivery: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightHostedNodeDescriptorPolicy {
+    require_live_identity_match: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
+    advertised_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightHostedNodeAuthorizationPolicy {
+    authority: String,
+    central_bearer_tokens_allowed: bool,
+    implicit_cross_node_authority_allowed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightHostedNodeOperationsPolicy {
+    #[allow(dead_code)]
+    audit_admission_events: bool,
+    #[allow(dead_code)]
+    audit_grant_changes: bool,
+    #[allow(dead_code)]
+    prefer_isolated_node_per_principal: bool,
+    shared_daemon_multitenancy_enabled: bool,
+}
+
+fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<String> {
+    let node_dir = ai_dir.join("node");
+    let mut failures = Vec::new();
+    let metadata = match fs::symlink_metadata(&node_dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return failures,
+        Err(err) => {
+            failures.push(format!(
+                "node: node config scan failed: failed to stat {}: {err}",
+                node_dir.display()
+            ));
+            return failures;
+        }
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        failures.push(format!(
+            "node: node config scan failed: node config scan encountered symlink at {}",
+            node_dir.display()
+        ));
+        return failures;
+    }
+    if !file_type.is_dir() {
+        return failures;
+    }
+
+    let mut files = Vec::new();
+    if let Err(e) = collect_node_config_files_recursive(&node_dir, &mut files) {
+        failures.push(format!("node: node config scan failed: {e}"));
+        return failures;
+    }
+
+    for file_path in files {
+        let rel = file_path.strip_prefix(ai_dir).unwrap_or(&file_path);
+        let rel_str = rel.to_string_lossy();
+        if rel_str.starts_with("node/engine/kinds/") {
+            continue;
+        }
+
+        let Some(section) = file_path
+            .strip_prefix(&node_dir)
+            .ok()
+            .and_then(|path| path.components().next())
+            .and_then(|component| component.as_os_str().to_str())
+        else {
+            continue;
+        };
+
+        if !matches!(section, "bundles" | "hosted" | "routes" | "verbs") {
+            continue;
+        }
+
+        match validate_node_config_item(&file_path, &node_dir.join(section), section, trust_store) {
+            Ok(()) => {}
+            Err(e) => failures.push(format!(
+                "{}: node config validation failed: {e}",
+                rel.display()
+            )),
+        }
+    }
+
+    failures
+}
+
+fn collect_node_config_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let metadata = fs::symlink_metadata(dir)
+        .with_context(|| format!("failed to stat node config path {}", dir.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        bail!("node config scan encountered symlink at {}", dir.display());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
+        .with_context(|| format!("failed to read node config dir {}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to stat node config path {}", path.display()))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            bail!("node config scan encountered symlink at {}", path.display());
+        }
+        if file_type.is_dir() {
+            collect_node_config_files_recursive(&path, out)?;
+        } else if file_type.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn validate_node_config_item(
+    file_path: &Path,
+    section_root: &Path,
+    expected_section: &str,
+    trust_store: &TrustStore,
+) -> Result<()> {
+    if !file_path.is_file() || file_path.is_symlink() {
+        bail!("not a regular file (symlinks rejected)");
+    }
+    let ext = file_path.extension().and_then(|ext| ext.to_str());
+    if ext != Some("yaml") && ext != Some("yml") {
+        bail!("not a .yaml or .yml node config item");
+    }
+
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("failed to read {}", file_path.display()))?;
+    let envelope = SignatureEnvelope {
+        prefix: "#".into(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let header = parse_signature_header(&content, &envelope)
+        .context("node config item has no valid signature line")?;
+    if !trust_store.is_trusted(&header.signer_fingerprint) {
+        bail!(
+            "signer {} not in operator trust store",
+            header.signer_fingerprint
+        );
+    }
+    ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)
+        .context("signature verification failed")?;
+
+    if !file_path.starts_with(section_root) {
+        bail!("not under expected node config section directory");
+    }
+
+    let body_str = lillux::signature::strip_signature_lines(&content);
+    let body: serde_json::Value =
+        serde_yaml::from_str(&body_str).context("failed to parse YAML body")?;
+    let declared_section = body
+        .get("section")
+        .and_then(|value| value.as_str())
+        .context("missing 'section' field")?;
+    if declared_section != expected_section {
+        bail!(
+            "declares section '{}' but was loaded under section '{}'",
+            declared_section,
+            expected_section
+        );
+    }
+
+    match expected_section {
+        "bundles" => validate_node_bundle_record(file_path, &body),
+        "hosted" => validate_hosted_node_policy(file_path, &body),
+        "routes" => validate_node_route_record(&body),
+        "verbs" => validate_node_verb_record(file_path, &body),
+        _ => Ok(()),
+    }
+}
+
+fn validate_node_bundle_record(file_path: &Path, body: &serde_json::Value) -> Result<()> {
+    let record: PreflightNodeBundleRecord = serde_json::from_value(body.clone())
+        .context("failed to parse bundle node-config record")?;
+    if record.section != "bundles" {
+        bail!("bundle record section must be 'bundles'");
+    }
+    if !record.path.is_absolute() {
+        bail!("bundle record missing absolute 'path' field");
+    }
+    if file_path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        != Some("bundles")
+    {
+        bail!("bundle records must be flat under node/bundles");
+    }
+    Ok(())
+}
+
+fn validate_node_route_record(body: &serde_json::Value) -> Result<()> {
+    let record: PreflightNodeRouteRecord =
+        serde_json::from_value(body.clone()).context("failed to parse route node-config record")?;
+    if record.id.is_empty() {
+        bail!("route record missing non-empty 'id'");
+    }
+    if record.path.is_empty() {
+        bail!("route record missing non-empty 'path'");
+    }
+    if record.methods.is_empty() {
+        bail!("route record has empty or missing 'methods' list");
+    }
+    if record.auth.is_empty() {
+        bail!("route record missing non-empty 'auth'");
+    }
+    if record.response.mode.is_empty() {
+        bail!("route response missing non-empty 'mode'");
+    }
+    if let Some(execute) = &record.execute {
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&execute.item_ref)
+            .with_context(|| format!("invalid route execute item_ref '{}'", execute.item_ref))?;
+    }
+    Ok(())
+}
+
+fn validate_node_verb_record(file_path: &Path, body: &serde_json::Value) -> Result<()> {
+    let record: PreflightVerbRecord =
+        serde_json::from_value(body.clone()).context("failed to parse verb node-config record")?;
+    if record.category != "verbs" {
+        bail!("verb record category must be 'verbs'");
+    }
+    if record.section != "verbs" {
+        bail!("verb record section must be 'verbs'");
+    }
+    let filename = file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .context("verb record has no filename stem")?;
+    if record.name != filename {
+        bail!(
+            "verb record declares name '{}' but filename is '{}'",
+            record.name,
+            filename
+        );
+    }
+    if !is_valid_verb_name(&record.name) {
+        bail!(
+            "invalid verb name '{}': must match ^[a-z][a-z0-9-]*$",
+            record.name
+        );
+    }
+    if record.description.is_empty() {
+        bail!("verb record missing non-empty 'description'");
+    }
+    if let Some(execute) = &record.execute {
+        ryeos_engine::canonical_ref::CanonicalRef::parse(execute)
+            .with_context(|| format!("invalid execute ref '{execute}' in verb record"))?;
+    }
+    if record.execute.is_none() && !record.aliases.is_empty() {
+        bail!("abstract verb cannot declare aliases");
+    }
+    for (idx, alias) in record.aliases.iter().enumerate() {
+        validate_preflight_alias_tokens(&format!("{} aliases[{idx}]", record.name), &alias.tokens)?;
+        for (form_idx, form) in alias.positional_forms.iter().enumerate() {
+            for (slot_idx, slot) in form.slots.iter().enumerate() {
+                if slot.field.is_empty() {
+                    bail!(
+                        "{} aliases[{idx}] positional_forms[{form_idx}].slots[{slot_idx}] has empty field",
+                        record.name
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_hosted_node_policy(file_path: &Path, body: &serde_json::Value) -> Result<()> {
+    let record: PreflightHostedNodePolicyRecord = serde_json::from_value(body.clone())
+        .context("failed to parse hosted node-config policy")?;
+    if file_path.file_stem().and_then(|stem| stem.to_str()) != Some("policy") {
+        bail!("hosted-node policy filename must be 'policy'");
+    }
+    if record.category != "hosted" {
+        bail!("hosted policy category must be 'hosted'");
+    }
+    if record.section != "hosted" {
+        bail!("hosted policy section must be 'hosted'");
+    }
+    if record.schema_version != "1.0.0" {
+        bail!("hosted-node policy schema_version must be '1.0.0'");
+    }
+    if !record.transport.public_https_required {
+        bail!("hosted-node policy must require public HTTPS");
+    }
+    if record.admission.mode != "one_time_token" {
+        bail!("hosted-node admission.mode must be 'one_time_token'");
+    }
+    if record.admission.token_ttl_secs == 0 {
+        bail!("hosted-node admission.token_ttl_secs must be greater than zero");
+    }
+    if !record.admission.reject_wildcard_scopes {
+        bail!("hosted-node policy must reject wildcard admission scopes");
+    }
+    if record.admission.token_delivery != "out_of_band" {
+        bail!("hosted-node admission.token_delivery must be 'out_of_band'");
+    }
+    if !record.descriptor.require_live_identity_match {
+        bail!("hosted-node policy must require live descriptor identity matching");
+    }
+    if record.authorization.authority != "target_node_authorized_keys" {
+        bail!("hosted-node authorization.authority must be 'target_node_authorized_keys'");
+    }
+    if record.authorization.central_bearer_tokens_allowed {
+        bail!("hosted-node policy must not allow central bearer tokens");
+    }
+    if record.authorization.implicit_cross_node_authority_allowed {
+        bail!("hosted-node policy must not allow implicit cross-node authority");
+    }
+    if record.operations.shared_daemon_multitenancy_enabled {
+        bail!("hosted-node policy must not enable shared daemon multitenancy");
+    }
+    Ok(())
+}
+
+fn validate_preflight_alias_tokens(name: &str, tokens: &[String]) -> Result<()> {
+    if tokens.is_empty() {
+        bail!("alias '{}' has empty tokens list", name);
+    }
+    for token in tokens {
+        if token.is_empty() {
+            bail!("alias '{}' has empty token in tokens list", name);
+        }
+        if token.starts_with('-') {
+            bail!("alias '{}' has dash-prefixed token '{}'", name, token);
+        }
+    }
+    if let Some(first) = tokens.first() {
+        if first == "help" || first == "init" || first == "execute" {
+            bail!("alias '{}' uses reserved first token '{}'", name, first);
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_verb_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 #[cfg(test)]
@@ -709,6 +1327,17 @@ description: "fixed parser handler for preflight tests"
                 "signature_info": { "fingerprint": fingerprint },
                 "mode": 0o755,
             });
+            let sidecar_body = lillux::cas::canonical_json(&item_source);
+            let sidecar =
+                lillux::signature::sign_content(&sidecar_body, &self.signing_key, "#", None);
+            fs::write(
+                bin_path.with_file_name(format!(
+                    "{}.item_source.json",
+                    bin_path.file_name().unwrap().to_string_lossy()
+                )),
+                sidecar,
+            )
+            .unwrap();
             let item_source_hash = cas.store_object(&item_source).unwrap();
             let manifest = serde_json::json!({
                 "item_source_hashes": {
@@ -846,6 +1475,103 @@ description: "fixed parser handler for preflight tests"
         assert!(
             msg.contains("fake-kind"),
             "should mention claimed kind: {msg}"
+        );
+    }
+
+    #[test]
+    fn node_config_preflight_accepts_signed_valid_verb() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.sign_and_write(
+            "node/verbs/demo.yaml",
+            r#"category: verbs
+section: verbs
+name: demo
+description: Demo verb
+execute: tool:demo/run
+aliases:
+  - tokens: ["demo"]
+    description: Demo command
+"#,
+        );
+        let trust_store = layout.trust_store();
+
+        validate_node_config_item(
+            &layout.ai_dir.join("node/verbs/demo.yaml"),
+            &layout.ai_dir.join("node/verbs"),
+            "verbs",
+            &trust_store,
+        )
+        .expect("signed valid verb should pass node-config preflight");
+    }
+
+    #[test]
+    fn node_config_preflight_rejects_unsigned_verb() {
+        let layout = BundleLayout::new("test-bundle");
+        let path = layout.ai_dir.join("node/verbs/demo.yaml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"category: verbs
+section: verbs
+name: demo
+description: Demo verb
+execute: tool:demo/run
+"#,
+        )
+        .unwrap();
+        let trust_store = layout.trust_store();
+
+        let err = validate_node_config_item(
+            &path,
+            &layout.ai_dir.join("node/verbs"),
+            "verbs",
+            &trust_store,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains("no valid signature line"),
+            "expected unsigned node-config rejection, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_config_preflight_rejects_node_root_symlink() {
+        let layout = BundleLayout::new("test-bundle");
+        let target = layout._tmp.path().join("outside-node");
+        fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, layout.ai_dir.join("node")).unwrap();
+        let trust_store = layout.trust_store();
+
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("node config scan encountered symlink")),
+            "expected node root symlink rejection, got: {failures:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_config_preflight_rejects_nested_section_symlink() {
+        let layout = BundleLayout::new("test-bundle");
+        let target = layout._tmp.path().join("outside-verbs");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(layout.ai_dir.join("node")).unwrap();
+        std::os::unix::fs::symlink(&target, layout.ai_dir.join("node/verbs")).unwrap();
+        let trust_store = layout.trust_store();
+
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("node config scan encountered symlink")),
+            "expected nested section symlink rejection, got: {failures:?}"
         );
     }
 

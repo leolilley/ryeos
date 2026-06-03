@@ -10,8 +10,8 @@
 //! schema-specific structs needed.
 //!
 //! Alias and verb descriptors are node configuration (not engine kinds), so they
-//! are loaded directly from bundle roots with signature stripping (no verification
-//! at this layer — they come from verified installed bundles).
+//! are loaded from the verified node-config snapshot. Unsigned, tampered, or
+//! untrusted node config fails before any offline execution path is selected.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,27 +50,25 @@ pub fn try_offline_dispatch(
     system_space_dir: &Path,
     project_path: &str,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
-    // 1. Load installed bundle roots
-    let user_root = ryeos_engine::roots::user_root().ok();
-    let records = ryeos_bundle::installed::load_installed_bundle_records(
-        system_space_dir,
-        user_root.as_deref(),
-    )
-    .context("offline dispatch: load verified installed bundle registrations")
-    .map_err(local_err)?;
-    let bundle_roots: Vec<PathBuf> = records.into_iter().map(|r| r.bundle_root).collect();
+    // 1. Load verified node config from signed installed bundle registrations.
+    let snapshot =
+        crate::node_descriptors::load_verified_snapshot(system_space_dir).map_err(local_err)?;
+    let bundle_roots: Vec<PathBuf> = snapshot
+        .bundles
+        .iter()
+        .map(|record| record.path.clone())
+        .collect();
     if bundle_roots.is_empty() {
         return Ok(None);
     }
 
-    // 2. Load aliases + verbs from bundles
-    let aliases =
-        crate::node_descriptors::load_alias_descriptors(&bundle_roots).map_err(local_err)?;
+    // 2. Load aliases + verbs from the verified snapshot.
+    let aliases = crate::node_descriptors::load_alias_descriptors_from_snapshot(&snapshot);
     let Some((alias, consumed)) = match_alias(argv, &aliases).map_err(local_err)? else {
         return Ok(None);
     };
-    let Some(verb) = crate::node_descriptors::load_verb_descriptor(&bundle_roots, &alias.def.verb)
-        .map_err(local_err)?
+    let Some(verb) =
+        crate::node_descriptors::load_verb_descriptor_from_snapshot(&snapshot, &alias.def.verb)
     else {
         return Ok(None);
     };
@@ -957,7 +955,7 @@ mod tests {
                     .join("node")
                     .join("verbs")
                     .join("custom.yaml"),
-                "name: custom\nexecute: service:custom\naliases:\n  - tokens: [\"custom\"]\n    positional_forms:\n      - slots:\n          - field: name\n",
+                "category: verbs\nsection: verbs\nname: custom\ndescription: Custom offline command\nexecute: service:custom\naliases:\n  - tokens: [\"custom\"]\n    description: Custom offline command\n    positional_forms:\n      - slots:\n          - field: name\n",
             );
             let offline_execute_line = offline_execute_line.unwrap_or("");
             self.write_signed(
@@ -1286,14 +1284,14 @@ else:
                 .join("node")
                 .join("verbs")
                 .join("custom.yaml"),
-            "name: other\nexecute: service:other\naliases:\n  - tokens: [\"custom\"]\n",
+            "category: verbs\nsection: verbs\nname: custom\ndescription: Other offline command\nexecute: service:other\naliases:\n  - tokens: [\"custom\"]\n    description: Other offline command\n",
         );
 
         let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
         match err {
             CliError::Local { detail } => {
                 assert!(
-                    detail.contains("duplicate alias descriptor matches"),
+                    detail.contains("node config aliases have duplicate tokens"),
                     "{detail}"
                 );
             }
@@ -1365,7 +1363,7 @@ else:
                 .join("node")
                 .join("verbs")
                 .join("capture.yaml"),
-            "name: capture\nexecute: client:custom/capture\naliases:\n  - tokens: [\"capture\"]\n",
+            "category: verbs\nsection: verbs\nname: capture\ndescription: Capture offline client command\nexecute: client:custom/capture\naliases:\n  - tokens: [\"capture\"]\n    description: Capture offline client command\n",
         );
         fixture.write_signed(
             &fixture

@@ -167,7 +167,7 @@ fn canonicalize_tokens_from_alias_metadata(
     system_space_dir: &std::path::Path,
     default_project: Option<&std::path::Path>,
 ) -> Result<Vec<String>, CliError> {
-    let aliases = load_aliases_from_disk(system_space_dir);
+    let aliases = load_aliases_from_disk(system_space_dir)?;
     canonicalize_tokens_with_aliases_and_project(rest, &aliases, default_project)
 }
 
@@ -272,11 +272,12 @@ fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
     }
 }
 
-fn load_aliases_from_disk(system_space_dir: &std::path::Path) -> Vec<AliasDef> {
-    let bundle_roots = crate::node_descriptors::direct_bundle_roots(system_space_dir);
-    crate::node_descriptors::load_alias_descriptors(&bundle_roots)
+fn load_aliases_from_disk(system_space_dir: &std::path::Path) -> Result<Vec<AliasDef>, CliError> {
+    crate::node_descriptors::load_alias_descriptors(system_space_dir)
         .map(|aliases| aliases.into_iter().map(|alias| alias.def).collect())
-        .unwrap_or_default()
+        .map_err(|error| CliError::Local {
+            detail: format!("load verified node aliases: {error:#}"),
+        })
 }
 
 /// POST a JSON body to the daemon's /execute endpoint and return the response.

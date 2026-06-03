@@ -5,13 +5,12 @@
 //! so operator-side tools can align descriptor/admission behavior with the
 //! node-level policy loaded by the daemon.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use ryeos_app::node_config::sections::hosted_node::{
-    HostedNodePolicyRecord, HostedNodePolicySection,
-};
-use ryeos_app::node_config::NodeConfigSection;
+use ryeos_app::node_config::loader::BootstrapLoader;
+use ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord;
+use ryeos_app::node_config::SectionTable;
 
 /// Load the single installed hosted-node policy for `system_space_dir`.
 ///
@@ -19,27 +18,21 @@ use ryeos_app::node_config::NodeConfigSection;
 /// more than one policy is present because precedence/override semantics have
 /// not been designed yet.
 pub fn load_hosted_policy(system_space_dir: &Path) -> Result<Option<HostedNodePolicyRecord>> {
-    let mut paths = candidate_policy_paths(system_space_dir)?;
-    paths.sort();
-
-    let mut records = Vec::new();
-    let section = HostedNodePolicySection;
-    for path in paths {
-        let body = std::fs::read_to_string(&path)
-            .with_context(|| format!("read hosted policy {}", path.display()))?;
-        let value: serde_json::Value = serde_yaml::from_str(&body)
-            .with_context(|| format!("parse hosted policy YAML {}", path.display()))?;
-        let parsed = section
-            .parse("policy", &value)
-            .with_context(|| format!("validate hosted policy {}", path.display()))?;
-        let mut record = parsed
-            .as_any()
-            .downcast_ref::<HostedNodePolicyRecord>()
-            .context("HostedNodePolicySection::parse returned wrong type")?
-            .clone();
-        record.source_file = path;
-        records.push(record);
-    }
+    let user_root = ryeos_engine::roots::user_root().ok();
+    let trust_store =
+        ryeos_engine::trust::TrustStore::load_three_tier(None, user_root.as_deref(), &[])
+            .context("hosted policy: load trust store")?;
+    let loader = BootstrapLoader {
+        system_space_dir,
+        trust_store: &trust_store,
+    };
+    let bundles = loader
+        .load_bundle_section()
+        .context("hosted policy: load verified node bundle registrations")?;
+    let snapshot = loader
+        .load_full(&SectionTable::new(), &bundles)
+        .context("hosted policy: load verified node config")?;
+    let mut records = snapshot.hosted_node_policies;
 
     match records.len() {
         0 => Ok(None),
@@ -58,42 +51,13 @@ pub fn load_hosted_policy(system_space_dir: &Path) -> Result<Option<HostedNodePo
     }
 }
 
-fn candidate_policy_paths(system_space_dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    let state_policy = system_space_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("hosted")
-        .join("policy.yaml");
-    if state_policy.is_file() {
-        paths.push(state_policy);
-    }
-
-    let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
-    if bundles_dir.is_dir() {
-        let mut entries = std::fs::read_dir(&bundles_dir)
-            .with_context(|| format!("read bundles dir {}", bundles_dir.display()))?
-            .collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let policy = entry
-                .path()
-                .join(ryeos_engine::AI_DIR)
-                .join("node")
-                .join("hosted")
-                .join("policy.yaml");
-            if policy.is_file() {
-                paths.push(policy);
-            }
-        }
-    }
-
-    Ok(paths)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::OsRng;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     const POLICY: &str = r#"
 category: "hosted"
@@ -125,20 +89,63 @@ operations:
   shared_daemon_multitenancy_enabled: false
 "#;
 
-    fn write_policy(path: &Path) {
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        _env_guard: MutexGuard<'static, ()>,
+        system: std::path::PathBuf,
+        key: lillux::crypto::SigningKey,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let env_guard = ENV_MUTEX.lock().unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let user = tmp.path().join("user");
+            let trust_dir = user
+                .join(ryeos_engine::AI_DIR)
+                .join("config")
+                .join("keys")
+                .join("trusted");
+            std::fs::create_dir_all(&trust_dir).unwrap();
+            let key = lillux::crypto::SigningKey::generate(&mut OsRng);
+            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            std::env::set_var("USER_SPACE", &user);
+
+            Self {
+                system: tmp.path().join("system"),
+                _tmp: tmp,
+                _env_guard: env_guard,
+                key,
+            }
+        }
+
+        fn write_policy(&self, path: &Path) {
+            write_policy(path, &self.key);
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::env::remove_var("USER_SPACE");
+        }
+    }
+
+    fn write_policy(path: &Path, key: &lillux::crypto::SigningKey) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, POLICY).unwrap();
+        std::fs::write(
+            path,
+            lillux::signature::sign_content(POLICY, key, "#", None),
+        )
+        .unwrap();
     }
 
     #[test]
     fn load_hosted_policy_reads_installed_bundle_policy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp
-            .path()
-            .join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml");
-        write_policy(&path);
+        let fixture = Fixture::new();
+        let path = fixture.system.join(".ai/node/hosted/policy.yaml");
+        fixture.write_policy(&path);
 
-        let policy = load_hosted_policy(tmp.path())
+        let policy = load_hosted_policy(&fixture.system)
             .unwrap()
             .expect("policy should load");
 
@@ -152,18 +159,16 @@ operations:
 
     #[test]
     fn load_hosted_policy_rejects_multiple_policies() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_policy(&tmp.path().join(".ai/node/hosted/policy.yaml"));
-        write_policy(
-            &tmp.path()
-                .join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml"),
-        );
+        let fixture = Fixture::new();
+        fixture.write_policy(&fixture.system.join(".ai/node/hosted/policy.yaml"));
+        fixture.write_policy(&fixture.system.join(".ai/node/hosted/extra/policy.yaml"));
 
-        let err = load_hosted_policy(tmp.path()).unwrap_err();
+        let err = load_hosted_policy(&fixture.system).unwrap_err();
+        let rendered = format!("{err:#}");
 
         assert!(
-            err.to_string().contains("multiple hosted-node policies"),
-            "got: {err:#}"
+            rendered.contains("multiple hosted-node policies"),
+            "got: {rendered}"
         );
     }
 }

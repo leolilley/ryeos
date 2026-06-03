@@ -11,14 +11,16 @@ use std::path::{Path, PathBuf};
 
 use crate::error::CliError;
 use anyhow::Context;
+use ryeos_app::node_config::NodeConfigSnapshot;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::{EffectiveItemRequest, Engine};
 use serde_json::Value;
 
 use crate::node_descriptors::LoadedAliasDescriptor;
 
-/// Print top-level help. Best-effort: includes dynamic alias discovery
-/// from the system space if accessible, no daemon required.
+/// Print top-level help. Static lifecycle help always renders. Dynamic alias
+/// discovery is included only after installed node config verifies; verification
+/// failures are surfaced as warnings instead of being treated as absent config.
 pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(out, "ryeos — CLI for Rye OS")?;
     writeln!(out)?;
@@ -62,9 +64,24 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
 
     // ── Dynamic alias discovery from installed bundles ──
     let system_space_dir = discover_system_space_dir();
-    let bundle_roots = help_bundle_roots(&system_space_dir);
-    let engine = build_help_engine(&system_space_dir, ".", &bundle_roots).ok();
-    let discovered = discover_aliases_from_disk(&bundle_roots, engine.as_ref(), ".");
+    let snapshot = match crate::node_descriptors::load_verified_snapshot(&system_space_dir) {
+        Ok(snapshot) => Some(snapshot),
+        Err(err) => {
+            eprintln!("warning: installed node config failed verification: {err:#}");
+            None
+        }
+    };
+    let bundle_roots = snapshot
+        .as_ref()
+        .map(snapshot_bundle_roots)
+        .unwrap_or_default();
+    let engine = (!bundle_roots.is_empty())
+        .then(|| build_help_engine(&system_space_dir, ".", &bundle_roots).ok())
+        .flatten();
+    let discovered = snapshot
+        .as_ref()
+        .map(|snapshot| discover_aliases_from_snapshot(snapshot, engine.as_ref(), "."))
+        .unwrap_or_default();
 
     if !discovered.is_empty() {
         let mut offline_cmds: Vec<(&str, &str)> = Vec::new();
@@ -101,18 +118,15 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Scan installed bundles on disk for alias definitions.
+/// Discover aliases from verified installed node config.
 /// Returns (token_string, description, is_offline) tuples.
-fn discover_aliases_from_disk(
-    bundle_roots: &[PathBuf],
+fn discover_aliases_from_snapshot(
+    snapshot: &NodeConfigSnapshot,
     engine: Option<&Engine>,
     project_path: &str,
 ) -> Vec<(String, String, bool)> {
     let mut results = Vec::new();
-
-    let Ok(aliases) = crate::node_descriptors::load_alias_descriptors(bundle_roots) else {
-        return results;
-    };
+    let aliases = crate::node_descriptors::load_alias_descriptors_from_snapshot(snapshot);
 
     for alias in aliases {
         // Skip short aliases (s, f) — they're abbreviations.
@@ -120,13 +134,13 @@ fn discover_aliases_from_disk(
             continue;
         }
 
-        let metadata = crate::node_descriptors::load_verb_descriptor(bundle_roots, &alias.def.verb)
-            .ok()
-            .flatten()
-            .and_then(|verb| {
-                engine
-                    .and_then(|engine| resolve_effective_help(engine, &verb.execute, project_path))
-            });
+        let metadata =
+            crate::node_descriptors::load_verb_descriptor_from_snapshot(snapshot, &alias.def.verb)
+                .and_then(|verb| {
+                    engine.and_then(|engine| {
+                        resolve_effective_help(engine, &verb.execute, project_path)
+                    })
+                });
         let is_offline = metadata
             .as_ref()
             .is_some_and(ItemHelpMetadata::is_offline_dispatch);
@@ -292,13 +306,18 @@ fn print_installed_verb_help(
     system_space_dir: &std::path::Path,
     project_path: &str,
 ) -> std::io::Result<bool> {
-    let bundle_roots = help_bundle_roots(system_space_dir);
-    let Some(alias) = find_alias_help_from_roots(verb_tokens, &bundle_roots) else {
+    let snapshot =
+        crate::node_descriptors::load_verified_snapshot(system_space_dir).map_err(|err| {
+            std::io::Error::other(format!(
+                "installed node config failed verification: {err:#}"
+            ))
+        })?;
+    let bundle_roots = snapshot_bundle_roots(&snapshot);
+    let Some(alias) = crate::node_descriptors::find_alias(&snapshot, verb_tokens) else {
         return Ok(false);
     };
-    let verb = crate::node_descriptors::load_verb_descriptor(&bundle_roots, &alias.def.verb)
-        .ok()
-        .flatten();
+    let verb =
+        crate::node_descriptors::load_verb_descriptor_from_snapshot(&snapshot, &alias.def.verb);
     let engine = build_help_engine(system_space_dir, project_path, &bundle_roots).ok();
     let item = verb.as_ref().and_then(|v| {
         engine
@@ -415,49 +434,12 @@ fn usage_tail(alias: &LoadedAliasDescriptor, item: Option<&ItemHelpMetadata>) ->
     }
 }
 
-fn find_alias_help_from_roots(
-    verb_tokens: &[String],
-    bundle_roots: &[PathBuf],
-) -> Option<LoadedAliasDescriptor> {
-    crate::node_descriptors::load_alias_descriptors(bundle_roots)
-        .ok()?
-        .into_iter()
-        .find(|alias| alias.def.tokens == verb_tokens)
-}
-
-fn help_bundle_roots(system_space_dir: &Path) -> Vec<PathBuf> {
-    let user_root = ryeos_engine::roots::user_root().ok();
-    match ryeos_bundle::installed::load_installed_bundle_records(
-        system_space_dir,
-        user_root.as_deref(),
-    ) {
-        Ok(records) if !records.is_empty() => records
-            .into_iter()
-            .map(|record| record.bundle_root)
-            .collect(),
-        _ => discover_bundle_roots_direct(system_space_dir),
-    }
-}
-
-fn discover_bundle_roots_direct(system_space_dir: &Path) -> Vec<PathBuf> {
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
-    let Ok(entries) = std::fs::read_dir(&bundles_dir) else {
-        return Vec::new();
-    };
-    let mut roots = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') || name.ends_with(".backup.prev") {
-            continue;
-        }
-        let path = entry.path();
-        if path.join(".ai").is_dir() {
-            roots.push(path);
-        }
-    }
-    roots.sort();
-    roots
+fn snapshot_bundle_roots(snapshot: &NodeConfigSnapshot) -> Vec<PathBuf> {
+    snapshot
+        .bundles
+        .iter()
+        .map(|record| record.path.clone())
+        .collect()
 }
 
 fn build_help_engine(
@@ -607,42 +589,53 @@ fn discover_system_space_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_app::node_config::sections::alias as node_alias;
+    use ryeos_app::node_config::NodeConfigSnapshot;
 
     #[test]
     fn installed_help_reads_alias_verb_and_effective_item_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bundle_root = tmp.path().join(".ai/bundles/core");
-        let bundle = bundle_root.join(".ai");
-        std::fs::create_dir_all(bundle.join("node/verbs")).unwrap();
-        std::fs::write(
-            bundle.join("node/verbs/remote-doctor.yaml"),
-            r#"
-category: verbs
-section: verbs
-name: remote-doctor
-description: Diagnose remote setup
-execute: tool:remote/doctor
-aliases:
-  - tokens: ["remote", "doctor"]
-    project_resolution: optional
-    positional_forms:
-      - slots:
-          - field: remote
-"#,
-        )
-        .unwrap();
-
+        let snapshot = NodeConfigSnapshot {
+            bundles: vec![],
+            routes: vec![],
+            verbs: vec![ryeos_app::node_config::sections::verb::VerbRecord {
+                category: "verbs".into(),
+                section: "verbs".into(),
+                name: "remote-doctor".into(),
+                description: "Diagnose remote setup".into(),
+                execute: Some("tool:remote/doctor".into()),
+                aliases: vec![],
+                source_file: PathBuf::from("/tmp/remote-doctor.yaml"),
+            }],
+            aliases: vec![node_alias::AliasRecord {
+                category: "aliases".into(),
+                section: "aliases".into(),
+                tokens: vec!["remote".into(), "doctor".into()],
+                verb: "remote-doctor".into(),
+                description: "Diagnose remote setup".into(),
+                deprecated: None,
+                replacement_tokens: None,
+                removed_in: None,
+                positional_forms: vec![node_alias::PositionalForm {
+                    slots: vec![node_alias::PositionalSlot {
+                        field: "remote".into(),
+                        matcher: node_alias::PositionalMatcher::Any,
+                    }],
+                }],
+                project_resolution: node_alias::ProjectResolution::Optional,
+                source_file: PathBuf::from("/tmp/remote-doctor.yaml"),
+            }],
+            hosted_node_policies: vec![],
+        };
         let tokens = vec!["remote".to_string(), "doctor".to_string()];
-        let roots = vec![bundle_root];
-        let alias = find_alias_help_from_roots(&tokens, &roots).unwrap();
+        let alias = crate::node_descriptors::find_alias(&snapshot, &tokens).unwrap();
         assert_eq!(alias.def.verb, "remote-doctor");
         assert_eq!(
             alias.def.project_resolution,
             ryeos_runtime::ProjectResolution::Optional
         );
-        let verb = crate::node_descriptors::load_verb_descriptor(&roots, &alias.def.verb)
-            .unwrap()
-            .unwrap();
+        let verb =
+            crate::node_descriptors::load_verb_descriptor_from_snapshot(&snapshot, &alias.def.verb)
+                .unwrap();
         assert_eq!(verb.execute, "tool:remote/doctor");
 
         let item = ItemHelpMetadata::from_composed(&serde_json::json!({
