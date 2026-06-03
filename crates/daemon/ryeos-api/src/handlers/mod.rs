@@ -64,6 +64,7 @@ pub mod remote_vault_delete;
 pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod scheduler_deregister;
+pub mod scheduler_explain;
 pub mod scheduler_list;
 pub mod scheduler_pause;
 pub mod scheduler_register;
@@ -125,6 +126,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     authorize_key::DESCRIPTOR,
     scheduler_register::DESCRIPTOR,
     scheduler_deregister::DESCRIPTOR,
+    scheduler_explain::DESCRIPTOR,
     scheduler_list::DESCRIPTOR,
     scheduler_show_fires::DESCRIPTOR,
     scheduler_pause::DESCRIPTOR,

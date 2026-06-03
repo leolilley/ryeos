@@ -216,6 +216,8 @@ pub fn rebuild_specs_from_dir(
 
 /// Rebuild `schedule_fires` from `.ai/state/schedules/*/fires.jsonl`.
 pub fn rebuild_fires_from_dir(fires_dir: &Path, db: &SchedulerDb) -> Result<()> {
+    db.clear_fires()?;
+
     if !fires_dir.is_dir() {
         return Ok(());
     }
@@ -380,6 +382,14 @@ fn spec_record_from_body(
     } else {
         raw_misfire.to_string()
     };
+    let lateness_grace_secs = match body.get("lateness_grace_secs") {
+        Some(v) => match v.as_i64() {
+            Some(secs) if secs > 0 => secs,
+            Some(secs) => anyhow::bail!("lateness_grace_secs must be positive, got: {}", secs),
+            None => anyhow::bail!("lateness_grace_secs must be an integer"),
+        },
+        None => 60,
+    };
 
     Ok(ScheduleSpecRecord {
         schedule_id: body_str(body, "schedule_id"),
@@ -401,6 +411,7 @@ fn spec_record_from_body(
             .and_then(|v| v.as_str())
             .unwrap_or("skip")
             .to_string(),
+        lateness_grace_secs,
         enabled: body
             .get("enabled")
             .and_then(|v| v.as_bool())
@@ -502,6 +513,7 @@ execution:
         let spec = db.get_spec("my-schedule").unwrap().unwrap();
         assert_eq!(spec.schedule_type, "interval");
         assert_eq!(spec.expression, "60");
+        assert_eq!(spec.lateness_grace_secs, 60);
     }
 
     #[test]

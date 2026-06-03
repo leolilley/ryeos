@@ -26,6 +26,8 @@ pub struct ScheduleRecord {
     pub misfire_policy: Option<String>,
     #[serde(default)]
     pub overlap_policy: Option<String>,
+    #[serde(default)]
+    pub lateness_grace_secs: Option<i64>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -123,6 +125,12 @@ impl NodeConfigSection for ScheduleSection {
             }
         }
 
+        if let Some(secs) = record.lateness_grace_secs {
+            if secs <= 0 {
+                bail!("lateness_grace_secs must be positive, got: {}", secs);
+            }
+        }
+
         // at schedules in the past are rejected at registration time (service),
         // but not at load time (they may have been valid when registered).
 
@@ -188,11 +196,13 @@ mod tests {
         let mut body = valid_body();
         body["misfire_policy"] = serde_json::json!("fire_once_now");
         body["overlap_policy"] = serde_json::json!("cancel_previous");
+        body["lateness_grace_secs"] = serde_json::json!(30);
 
         let result = section.parse("my-schedule", &body).unwrap();
         let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
         assert_eq!(record.misfire_policy.as_deref(), Some("fire_once_now"));
         assert_eq!(record.overlap_policy.as_deref(), Some("cancel_previous"));
+        assert_eq!(record.lateness_grace_secs, Some(30));
     }
 
     #[test]
@@ -291,6 +301,16 @@ mod tests {
         let section = ScheduleSection;
         let mut body = valid_body();
         body["misfire_policy"] = serde_json::json!("invalid");
+
+        let result = section.parse("my-schedule", &body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_rejects_non_positive_lateness_grace() {
+        let section = ScheduleSection;
+        let mut body = valid_body();
+        body["lateness_grace_secs"] = serde_json::json!(0);
 
         let result = section.parse("my-schedule", &body);
         assert!(result.is_err());

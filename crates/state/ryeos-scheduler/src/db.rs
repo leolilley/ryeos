@@ -8,7 +8,8 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::types::{FireRecord, ScheduleSpecRecord};
+use super::planning;
+use super::types::{FireRecord, ScheduleCursorRecord, ScheduleSpecRecord};
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS schedule_specs (
     spec_hash            TEXT NOT NULL,
     registered_at        INTEGER NOT NULL,
     requester_fingerprint TEXT NOT NULL DEFAULT '',
-    capabilities          TEXT NOT NULL DEFAULT '[]'
+    capabilities          TEXT NOT NULL DEFAULT '[]',
+    lateness_grace_secs   INTEGER NOT NULL DEFAULT 60
 );
 
 CREATE TABLE IF NOT EXISTS schedule_fires (
@@ -45,6 +47,15 @@ CREATE TABLE IF NOT EXISTS schedule_fires (
     trigger_reason     TEXT NOT NULL DEFAULT 'normal',
     outcome            TEXT,
     signer_fingerprint TEXT
+);
+
+CREATE TABLE IF NOT EXISTS schedule_cursors (
+    schedule_id        TEXT PRIMARY KEY,
+    spec_hash          TEXT NOT NULL,
+    last_scheduled_at  INTEGER,
+    next_fire_at       INTEGER,
+    last_evaluated_at  INTEGER,
+    updated_at         INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_fires_schedule_id
@@ -157,6 +168,12 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: true,
                     },
+                    sqlite_schema::ColumnSpec {
+                        name: "lateness_grace_secs",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -224,6 +241,47 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "schedule_cursors",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "schedule_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spec_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_scheduled_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "next_fire_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_evaluated_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -248,6 +306,118 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
     }
 }
 
+fn prepare_owned_schema(
+    conn: &Connection,
+    spec: &sqlite_schema::SchemaSpec,
+    ddl: &str,
+    path: &Path,
+) -> Result<()> {
+    let app_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("failed to read PRAGMA application_id")?;
+
+    if app_id == spec.application_id {
+        migrate_owned_scheduler_db(conn)?;
+        sqlite_schema::assert_owned(conn, spec, path)?;
+        return Ok(());
+    }
+
+    if app_id == 0 && user_table_count(conn)? == 0 {
+        sqlite_schema::init_owned(conn, spec, ddl, path)?;
+        return Ok(());
+    }
+
+    if sqlite_schema::is_empty_or_owned(conn, spec.application_id)? {
+        sqlite_schema::init_owned(conn, spec, ddl, path)?;
+    } else {
+        sqlite_schema::assert_owned(conn, spec, path)?;
+    }
+    Ok(())
+}
+
+fn user_table_count(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )
+    .context("failed to count user tables")
+}
+
+fn migrate_owned_scheduler_db(conn: &Connection) -> Result<()> {
+    if !table_has_column(conn, "schedule_fires", "completed_at")? {
+        rebuild_schedule_fires_with_completed_at(conn)?;
+    }
+    if !table_has_column(conn, "schedule_specs", "lateness_grace_secs")? {
+        conn.execute(
+            "ALTER TABLE schedule_specs ADD COLUMN lateness_grace_secs INTEGER NOT NULL DEFAULT 60",
+            [],
+        )
+        .context("failed to migrate schedule_specs.lateness_grace_secs")?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS schedule_cursors (
+            schedule_id        TEXT PRIMARY KEY,
+            spec_hash          TEXT NOT NULL,
+            last_scheduled_at  INTEGER,
+            next_fire_at       INTEGER,
+            last_evaluated_at  INTEGER,
+            updated_at         INTEGER NOT NULL
+        );
+        "#,
+    )
+    .context("failed to migrate schedule_cursors")?;
+    Ok(())
+}
+
+fn rebuild_schedule_fires_with_completed_at(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE schedule_fires_new (
+            fire_id            TEXT PRIMARY KEY,
+            schedule_id        TEXT NOT NULL,
+            scheduled_at       INTEGER NOT NULL,
+            fired_at           INTEGER,
+            completed_at       INTEGER,
+            thread_id          TEXT,
+            status             TEXT NOT NULL,
+            trigger_reason     TEXT NOT NULL DEFAULT 'normal',
+            outcome            TEXT,
+            signer_fingerprint TEXT
+        );
+
+        INSERT INTO schedule_fires_new
+            (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
+             status, trigger_reason, outcome, signer_fingerprint)
+        SELECT
+            fire_id, schedule_id, scheduled_at, fired_at, NULL, thread_id,
+            status, trigger_reason, outcome, signer_fingerprint
+        FROM schedule_fires;
+
+        DROP TABLE schedule_fires;
+        ALTER TABLE schedule_fires_new RENAME TO schedule_fires;
+
+        CREATE INDEX IF NOT EXISTS idx_fires_schedule_id
+            ON schedule_fires(schedule_id);
+        CREATE INDEX IF NOT EXISTS idx_fires_status
+            ON schedule_fires(status);
+        CREATE INDEX IF NOT EXISTS idx_fires_schedule_scheduled
+            ON schedule_fires(schedule_id, scheduled_at DESC);
+        "#,
+    )
+    .context("failed to migrate schedule_fires.completed_at")?;
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(cols.iter().any(|name| name == column))
+}
+
 // ── Database wrapper ────────────────────────────────────────────────
 
 pub struct SchedulerDb {
@@ -265,11 +435,7 @@ impl SchedulerDb {
             .with_context(|| format!("failed to open scheduler db {}", path.display()))?;
 
         let spec = scheduler_schema_spec();
-        if sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
-            sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, path)?;
-        } else {
-            sqlite_schema::assert_owned(&conn, &spec, path)?;
-        }
+        prepare_owned_schema(&conn, &spec, SCHEMA_SQL, path)?;
         Ok(Self {
             inner: std::sync::Mutex::new(conn),
         })
@@ -280,7 +446,7 @@ impl SchedulerDb {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory scheduler db")?;
         let spec = scheduler_schema_spec();
-        sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, Path::new(":memory:"))?;
+        prepare_owned_schema(&conn, &spec, SCHEMA_SQL, Path::new(":memory:"))?;
         Ok(Self {
             inner: std::sync::Mutex::new(conn),
         })
@@ -302,8 +468,8 @@ impl SchedulerDb {
                 (schedule_id, item_ref, params, schedule_type, expression,
                  timezone, misfire_policy, overlap_policy, enabled,
                  project_root, signer_fingerprint, spec_hash, registered_at,
-                 requester_fingerprint, capabilities)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                 requester_fingerprint, capabilities, lateness_grace_secs)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
              ON CONFLICT(schedule_id) DO UPDATE SET
                 item_ref=excluded.item_ref, params=excluded.params,
                 schedule_type=excluded.schedule_type, expression=excluded.expression,
@@ -312,7 +478,8 @@ impl SchedulerDb {
                 project_root=excluded.project_root, signer_fingerprint=excluded.signer_fingerprint,
                 spec_hash=excluded.spec_hash, registered_at=excluded.registered_at,
                 requester_fingerprint=excluded.requester_fingerprint,
-                capabilities=excluded.capabilities",
+                capabilities=excluded.capabilities,
+                lateness_grace_secs=excluded.lateness_grace_secs",
                 params![
                     rec.schedule_id,
                     rec.item_ref,
@@ -329,6 +496,7 @@ impl SchedulerDb {
                     rec.registered_at,
                     rec.requester_fingerprint,
                     capabilities_json,
+                    rec.lateness_grace_secs,
                 ],
             )
             .with_context(|| format!("upsert_spec failed for {}", rec.schedule_id))?;
@@ -336,7 +504,12 @@ impl SchedulerDb {
     }
 
     pub fn delete_spec(&self, schedule_id: &str) -> Result<bool> {
-        let n = self.lock()?.execute(
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM schedule_cursors WHERE schedule_id = ?1",
+            params![schedule_id],
+        )?;
+        let n = conn.execute(
             "DELETE FROM schedule_specs WHERE schedule_id = ?1",
             params![schedule_id],
         )?;
@@ -349,7 +522,7 @@ impl SchedulerDb {
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
-                    requester_fingerprint, capabilities
+                    requester_fingerprint, capabilities, lateness_grace_secs
              FROM schedule_specs WHERE schedule_id = ?1",
         )?;
         stmt.query_row(params![schedule_id], |row| row_to_spec(row))
@@ -363,7 +536,7 @@ impl SchedulerDb {
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
-                    requester_fingerprint, capabilities
+                    requester_fingerprint, capabilities, lateness_grace_secs
              FROM schedule_specs WHERE enabled = 1",
         )?;
         let rows = stmt.query_map([], |row| row_to_spec(row))?;
@@ -382,7 +555,7 @@ impl SchedulerDb {
         let sel = "SELECT schedule_id, item_ref, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
                           project_root, signer_fingerprint, spec_hash, registered_at,
-                          requester_fingerprint, capabilities";
+                          requester_fingerprint, capabilities, lateness_grace_secs";
         let sql = match (enabled_only, schedule_type) {
             (true, Some(_)) => {
                 format!("{sel} FROM schedule_specs WHERE enabled = 1 AND schedule_type = ?")
@@ -417,7 +590,7 @@ impl SchedulerDb {
         let sel = "SELECT schedule_id, item_ref, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
                           project_root, signer_fingerprint, spec_hash, registered_at,
-                          requester_fingerprint, capabilities";
+                          requester_fingerprint, capabilities, lateness_grace_secs";
 
         // Build WHERE clause dynamically based on filters.
         let mut conditions: Vec<String> = Vec::new();
@@ -457,7 +630,9 @@ impl SchedulerDb {
 
     pub fn delete_stale_specs(&self, live_ids: &[&str]) -> Result<usize> {
         if live_ids.is_empty() {
-            let n = self.lock()?.execute("DELETE FROM schedule_specs", [])?;
+            let conn = self.lock()?;
+            conn.execute("DELETE FROM schedule_cursors", [])?;
+            let n = conn.execute("DELETE FROM schedule_specs", [])?;
             return Ok(n);
         }
         let placeholders: Vec<String> = live_ids
@@ -473,16 +648,124 @@ impl SchedulerDb {
             .iter()
             .map(|id| id as &dyn rusqlite::ToSql)
             .collect();
-        let n = self.lock()?.execute(&sql, params.as_slice())?;
+        let conn = self.lock()?;
+        let cursor_sql = format!(
+            "DELETE FROM schedule_cursors WHERE schedule_id NOT IN ({})",
+            placeholders.join(",")
+        );
+        conn.execute(&cursor_sql, params.as_slice())?;
+        let n = conn.execute(&sql, params.as_slice())?;
         Ok(n)
+    }
+
+    // ── schedule_cursors ────────────────────────────────────────
+
+    pub fn get_cursor(&self, schedule_id: &str) -> Result<Option<ScheduleCursorRecord>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT schedule_id, spec_hash, last_scheduled_at, next_fire_at,
+                    last_evaluated_at, updated_at
+             FROM schedule_cursors WHERE schedule_id = ?1",
+        )?;
+        stmt.query_row(params![schedule_id], |row| row_to_cursor(row))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn get_cursors_batch(
+        &self,
+        schedule_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, ScheduleCursorRecord>> {
+        if schedule_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders: Vec<String> = schedule_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT schedule_id, spec_hash, last_scheduled_at, next_fire_at,
+                    last_evaluated_at, updated_at
+             FROM schedule_cursors WHERE schedule_id IN ({})",
+            placeholders.join(","),
+        );
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = schedule_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), |row| row_to_cursor(row))?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let rec = row?;
+            map.insert(rec.schedule_id.clone(), rec);
+        }
+        Ok(map)
+    }
+
+    pub fn upsert_cursor(&self, rec: &ScheduleCursorRecord) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO schedule_cursors
+                (schedule_id, spec_hash, last_scheduled_at, next_fire_at,
+                 last_evaluated_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(schedule_id) DO UPDATE SET
+                spec_hash=excluded.spec_hash,
+                last_scheduled_at=excluded.last_scheduled_at,
+                next_fire_at=excluded.next_fire_at,
+                last_evaluated_at=excluded.last_evaluated_at,
+                updated_at=excluded.updated_at",
+            params![
+                rec.schedule_id,
+                rec.spec_hash,
+                rec.last_scheduled_at,
+                rec.next_fire_at,
+                rec.last_evaluated_at,
+                rec.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_cursor(&self, schedule_id: &str) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "DELETE FROM schedule_cursors WHERE schedule_id = ?1",
+            params![schedule_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn rebuild_cursors_for_specs(&self, specs: &[ScheduleSpecRecord], now: i64) -> Result<()> {
+        let schedule_ids: Vec<String> = specs.iter().map(|s| s.schedule_id.clone()).collect();
+        let last_fires = self.get_last_fires_batch(&schedule_ids)?;
+        for spec in specs {
+            let last_fire = last_fires.get(&spec.schedule_id);
+            let plan = planning::plan_schedule(spec, last_fire, now);
+            self.upsert_cursor(&ScheduleCursorRecord {
+                schedule_id: spec.schedule_id.clone(),
+                spec_hash: spec.spec_hash.clone(),
+                last_scheduled_at: plan.last_scheduled_at,
+                next_fire_at: plan.next_fire_at,
+                last_evaluated_at: Some(now),
+                updated_at: now,
+            })?;
+        }
+        Ok(())
     }
 
     // ── schedule_fires ──────────────────────────────────────────
 
+    pub fn clear_fires(&self) -> Result<usize> {
+        let n = self.lock()?.execute("DELETE FROM schedule_fires", [])?;
+        Ok(n)
+    }
+
     pub fn upsert_fire(&self, rec: &FireRecord) -> Result<()> {
-        self.lock()?
-            .execute(
-                "INSERT INTO schedule_fires
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO schedule_fires
                 (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                  status, trigger_reason, outcome, signer_fingerprint)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
@@ -494,28 +777,29 @@ impl SchedulerDb {
                 outcome=COALESCE(excluded.outcome, outcome),
                 trigger_reason=excluded.trigger_reason,
                 signer_fingerprint=COALESCE(excluded.signer_fingerprint, signer_fingerprint)",
-                params![
-                    rec.fire_id,
-                    rec.schedule_id,
-                    rec.scheduled_at,
-                    rec.fired_at,
-                    rec.completed_at,
-                    rec.thread_id,
-                    rec.status,
-                    rec.trigger_reason,
-                    rec.outcome,
-                    rec.signer_fingerprint,
-                ],
-            )
-            .with_context(|| format!("upsert_fire failed for {}", rec.fire_id))?;
+            params![
+                rec.fire_id,
+                rec.schedule_id,
+                rec.scheduled_at,
+                rec.fired_at,
+                rec.completed_at,
+                rec.thread_id,
+                rec.status,
+                rec.trigger_reason,
+                rec.outcome,
+                rec.signer_fingerprint,
+            ],
+        )
+        .with_context(|| format!("upsert_fire failed for {}", rec.fire_id))?;
+        best_effort_refresh_cursor(&conn, &rec.schedule_id, lillux::time::timestamp_millis());
         Ok(())
     }
 
     /// Atomic claim: INSERT if absent. Returns true if the insert succeeded
     /// (fire was claimed), false if it already existed.
     pub fn claim_fire(&self, rec: &FireRecord) -> Result<bool> {
-        let changed = self
-            .lock()?
+        let conn = self.lock()?;
+        let changed = conn
             .execute(
                 "INSERT OR IGNORE INTO schedule_fires
                 (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
@@ -535,6 +819,9 @@ impl SchedulerDb {
                 ],
             )
             .with_context(|| format!("claim_fire failed for {}", rec.fire_id))?;
+        if changed > 0 {
+            best_effort_refresh_cursor(&conn, &rec.schedule_id, lillux::time::timestamp_millis());
+        }
         Ok(changed > 0)
     }
 
@@ -579,6 +866,7 @@ impl SchedulerDb {
                 "UPDATE schedule_fires SET fired_at = ?1, thread_id = NULL WHERE fire_id = ?2",
                 params![lillux::time::timestamp_millis(), fire_id],
             )?;
+            best_effort_refresh_cursor_for_fire(&conn, fire_id);
             return Ok(true);
         }
 
@@ -587,6 +875,7 @@ impl SchedulerDb {
             "UPDATE schedule_fires SET fired_at = ?1 WHERE fire_id = ?2",
             params![lillux::time::timestamp_millis(), fire_id],
         )?;
+        best_effort_refresh_cursor_for_fire(&conn, fire_id);
         Ok(true)
     }
 
@@ -755,10 +1044,12 @@ impl SchedulerDb {
     }
 
     pub fn delete_fires_for_schedule(&self, schedule_id: &str) -> Result<usize> {
-        let n = self.lock()?.execute(
+        let conn = self.lock()?;
+        let n = conn.execute(
             "DELETE FROM schedule_fires WHERE schedule_id = ?1",
             params![schedule_id],
         )?;
+        best_effort_refresh_cursor(&conn, schedule_id, lillux::time::timestamp_millis());
         Ok(n)
     }
 
@@ -836,6 +1127,7 @@ fn row_to_spec(row: &rusqlite::Row<'_>) -> Result<ScheduleSpecRecord, rusqlite::
         registered_at: row.get("registered_at")?,
         requester_fingerprint: row.get("requester_fingerprint")?,
         capabilities,
+        lateness_grace_secs: row.get("lateness_grace_secs")?,
     })
 }
 
@@ -852,6 +1144,118 @@ fn row_to_fire(row: &rusqlite::Row<'_>) -> Result<FireRecord, rusqlite::Error> {
         outcome: row.get("outcome")?,
         signer_fingerprint: row.get("signer_fingerprint")?,
     })
+}
+
+fn row_to_cursor(row: &rusqlite::Row<'_>) -> Result<ScheduleCursorRecord, rusqlite::Error> {
+    Ok(ScheduleCursorRecord {
+        schedule_id: row.get("schedule_id")?,
+        spec_hash: row.get("spec_hash")?,
+        last_scheduled_at: row.get("last_scheduled_at")?,
+        next_fire_at: row.get("next_fire_at")?,
+        last_evaluated_at: row.get("last_evaluated_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn get_fire_conn(conn: &Connection, fire_id: &str) -> Result<Option<FireRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
+                status, trigger_reason, outcome, signer_fingerprint
+         FROM schedule_fires WHERE fire_id = ?1",
+    )?;
+    stmt.query_row(params![fire_id], |row| row_to_fire(row))
+        .optional()
+        .map_err(Into::into)
+}
+
+fn get_spec_conn(conn: &Connection, schedule_id: &str) -> Result<Option<ScheduleSpecRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT schedule_id, item_ref, params, schedule_type, expression,
+                timezone, misfire_policy, overlap_policy, enabled,
+                project_root, signer_fingerprint, spec_hash, registered_at,
+                requester_fingerprint, capabilities, lateness_grace_secs
+         FROM schedule_specs WHERE schedule_id = ?1",
+    )?;
+    stmt.query_row(params![schedule_id], |row| row_to_spec(row))
+        .optional()
+        .map_err(Into::into)
+}
+
+fn get_last_fire_conn(conn: &Connection, schedule_id: &str) -> Result<Option<FireRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
+                status, trigger_reason, outcome, signer_fingerprint
+         FROM schedule_fires
+         WHERE schedule_id = ?1
+         ORDER BY scheduled_at DESC LIMIT 1",
+    )?;
+    stmt.query_row(params![schedule_id], |row| row_to_fire(row))
+        .optional()
+        .map_err(Into::into)
+}
+
+fn refresh_cursor_for_schedule_conn(conn: &Connection, schedule_id: &str, now: i64) -> Result<()> {
+    let Some(spec) = get_spec_conn(conn, schedule_id)? else {
+        conn.execute(
+            "DELETE FROM schedule_cursors WHERE schedule_id = ?1",
+            params![schedule_id],
+        )?;
+        return Ok(());
+    };
+    let last_fire = get_last_fire_conn(conn, schedule_id)?;
+    let plan = planning::plan_schedule(&spec, last_fire.as_ref(), now);
+    conn.execute(
+        "INSERT INTO schedule_cursors
+            (schedule_id, spec_hash, last_scheduled_at, next_fire_at,
+             last_evaluated_at, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(schedule_id) DO UPDATE SET
+            spec_hash=excluded.spec_hash,
+            last_scheduled_at=excluded.last_scheduled_at,
+            next_fire_at=excluded.next_fire_at,
+            last_evaluated_at=excluded.last_evaluated_at,
+            updated_at=excluded.updated_at",
+        params![
+            spec.schedule_id,
+            spec.spec_hash,
+            plan.last_scheduled_at,
+            plan.next_fire_at,
+            now,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn best_effort_refresh_cursor(conn: &Connection, schedule_id: &str, now: i64) {
+    if let Err(e) = refresh_cursor_for_schedule_conn(conn, schedule_id, now) {
+        tracing::warn!(
+            schedule_id = %schedule_id,
+            error = %e,
+            "scheduler cursor refresh failed; fire mutation remains authoritative"
+        );
+    }
+}
+
+fn best_effort_refresh_cursor_for_fire(conn: &Connection, fire_id: &str) {
+    match get_fire_conn(conn, fire_id) {
+        Ok(Some(fire)) => {
+            best_effort_refresh_cursor(conn, &fire.schedule_id, lillux::time::timestamp_millis());
+        }
+        Ok(None) => {
+            tracing::warn!(
+                fire_id = %fire_id,
+                "scheduler cursor refresh skipped; fire row missing after mutation"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                fire_id = %fire_id,
+                error = %e,
+                "scheduler cursor refresh skipped; fire mutation remains authoritative"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -873,6 +1277,7 @@ mod tests {
             timezone: "UTC".to_string(),
             misfire_policy: "skip".to_string(),
             overlap_policy: "skip".to_string(),
+            lateness_grace_secs: 60,
             enabled: true,
             project_root: None,
             signer_fingerprint: "fp:test".to_string(),
@@ -897,6 +1302,83 @@ mod tests {
             outcome: None,
             signer_fingerprint: Some("fp:test".to_string()),
         }
+    }
+
+    #[test]
+    fn open_migrates_old_owned_schema_with_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduler.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE schedule_specs (
+                    schedule_id          TEXT PRIMARY KEY,
+                    item_ref             TEXT NOT NULL,
+                    params               TEXT NOT NULL DEFAULT '{}',
+                    schedule_type        TEXT NOT NULL,
+                    expression           TEXT NOT NULL,
+                    timezone             TEXT NOT NULL DEFAULT 'UTC',
+                    misfire_policy       TEXT NOT NULL DEFAULT 'skip',
+                    overlap_policy       TEXT NOT NULL DEFAULT 'skip',
+                    enabled              INTEGER NOT NULL DEFAULT 1,
+                    project_root         TEXT,
+                    signer_fingerprint   TEXT NOT NULL,
+                    spec_hash            TEXT NOT NULL,
+                    registered_at        INTEGER NOT NULL,
+                    requester_fingerprint TEXT NOT NULL DEFAULT '',
+                    capabilities          TEXT NOT NULL DEFAULT '[]'
+                );
+                CREATE TABLE schedule_fires (
+                    fire_id            TEXT PRIMARY KEY,
+                    schedule_id        TEXT NOT NULL,
+                    scheduled_at       INTEGER NOT NULL,
+                    fired_at           INTEGER,
+                    thread_id          TEXT,
+                    status             TEXT NOT NULL,
+                    trigger_reason     TEXT NOT NULL DEFAULT 'normal',
+                    outcome            TEXT,
+                    signer_fingerprint TEXT
+                );
+                CREATE INDEX idx_fires_schedule_id ON schedule_fires(schedule_id);
+                CREATE INDEX idx_fires_status ON schedule_fires(status);
+                CREATE INDEX idx_fires_schedule_scheduled ON schedule_fires(schedule_id, scheduled_at DESC);
+                "#,
+            )
+            .unwrap();
+            conn.execute_batch(&format!("PRAGMA application_id = {};", SCHEDULER_APP_ID))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO schedule_specs
+                 (schedule_id, item_ref, params, schedule_type, expression, timezone,
+                  misfire_policy, overlap_policy, enabled, project_root, signer_fingerprint,
+                  spec_hash, registered_at, requester_fingerprint, capabilities)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                params![
+                    "old-sched",
+                    "directive:test",
+                    "{}",
+                    "interval",
+                    "60",
+                    "UTC",
+                    "skip",
+                    "skip",
+                    1,
+                    Option::<String>::None,
+                    "fp:test",
+                    "hash",
+                    1000,
+                    "fp:test",
+                    r#"["ryeos.execute.*"]"#,
+                ],
+            )
+            .unwrap();
+        }
+
+        let db = SchedulerDb::open(&path).unwrap();
+        let spec = db.get_spec("old-sched").unwrap().unwrap();
+        assert_eq!(spec.lateness_grace_secs, 60);
+        assert_eq!(spec.expression, "60");
     }
 
     // ── Spec CRUD ──────────────────────────────────────────────
@@ -1070,6 +1552,26 @@ mod tests {
     fn get_last_fire_empty() {
         let db = test_db();
         assert!(db.get_last_fire("sched").unwrap().is_none());
+    }
+
+    #[test]
+    fn rebuild_cursors_for_specs_uses_latest_scheduled_boundary() {
+        let db = test_db();
+        let spec = make_spec("sched");
+        db.upsert_spec(&spec).unwrap();
+        db.upsert_fire(&make_fire("sched", 61_000, "completed"))
+            .unwrap();
+        db.upsert_fire(&make_fire("sched", 121_000, "skipped"))
+            .unwrap();
+
+        db.rebuild_cursors_for_specs(&[spec], 122_000).unwrap();
+        let cursor = db.get_cursor("sched").unwrap().unwrap();
+
+        assert_eq!(cursor.spec_hash, "abc123");
+        assert_eq!(cursor.last_scheduled_at, Some(121_000));
+        assert_eq!(cursor.next_fire_at, Some(181_000));
+        assert_eq!(cursor.last_evaluated_at, Some(122_000));
+        assert_eq!(cursor.updated_at, 122_000);
     }
 
     #[test]

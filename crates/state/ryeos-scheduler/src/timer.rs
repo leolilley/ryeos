@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use super::crontab;
 use super::misfire;
 use super::overlap;
+use super::planning;
 use super::projection;
 use super::types::{self, FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 use crate::SchedulerContext;
@@ -30,12 +30,8 @@ pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receive
             last_repair = now;
         }
 
-        // Collect all specs that are due right now (fire time <= now).
-        // We check by computing next fire relative to (now - 1ms) so that
-        // a fire exactly at `now` is included. This avoids the bug where
-        // compute_next_fire(interval, None) always returns now+interval,
-        // making is_due always false. Instead we compute each spec's
-        // scheduled_at from the DB last fire and check if it's in the past.
+        // Collect all specs that are due right now using the same planner
+        // consumed by diagnostics and recovery.
         let due_specs: Vec<ScheduleSpecRecord> = specs
             .iter()
             .filter(|s| spec_is_due(s, &ctx, now))
@@ -51,7 +47,7 @@ pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receive
         specs = load_specs_or_log(&ctx);
 
         let now = lillux::time::timestamp_millis();
-        let next_fire = compute_soonest_fire(&specs, now);
+        let next_fire = compute_soonest_fire(&specs, &ctx, now);
 
         let sleep_duration = match next_fire {
             Some(at) if at > now => std::time::Duration::from_millis((at - now) as u64),
@@ -228,120 +224,48 @@ fn load_specs_or_log<Ctx: SchedulerContext>(ctx: &Arc<Ctx>) -> Vec<ScheduleSpecR
     }
 }
 
-/// Check if a spec is due by computing its scheduled_at from the DB's last
-/// fire record. For the first fire of an interval schedule (no last fire),
-/// we use the spec's `registered_at` (immutable anchor) as the base.
+/// Check if a spec is due using the shared planner.
 fn spec_is_due<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx, now: i64) -> bool {
     let db = ctx.scheduler_db();
-    let last_fire_at = match db.get_last_fire(&spec.schedule_id) {
-        Ok(Some(f)) => Some(f.scheduled_at),
-        Ok(None) => None,
+    let last_fire = match db.get_last_fire(&spec.schedule_id) {
+        Ok(f) => f,
         Err(e) => {
             tracing::error!(
                 schedule_id = %spec.schedule_id,
                 error = %e,
-                "spec_is_due: failed to query last fire — treating as no prior fire"
+                "spec_is_due: failed to query last fire — treating as not due"
             );
-            None
-        }
-    };
-
-    // For interval schedules with no prior fire, use registration time as base
-    let effective_last = last_fire_at.or_else(|| {
-        if spec.schedule_type == "interval" || spec.schedule_type == "cron" {
-            Some(spec.registered_at)
-        } else {
-            None
-        }
-    });
-
-    let scheduled_at = match crontab::compute_scheduled_at(
-        &spec.schedule_type,
-        &spec.expression,
-        &spec.timezone,
-        now,
-        effective_last,
-        Some(spec.registered_at),
-    ) {
-        Some(at) => at,
-        None => {
-            // For interval with no last fire and no effective_last, the first
-            // fire is at registration_time + interval. compute_scheduled_at
-            // returns None when last_fire_at is None, so handle it here.
-            if spec.schedule_type == "interval" {
-                let interval_secs = match spec.expression.parse::<i64>() {
-                    Ok(secs) if secs > 0 => secs,
-                    Ok(_) => {
-                        tracing::error!(
-                            schedule_id = %spec.schedule_id,
-                            expression = %spec.expression,
-                            "spec_is_due: interval expression is zero or negative — skipping"
-                        );
-                        return false;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            schedule_id = %spec.schedule_id,
-                            expression = %spec.expression,
-                            error = %e,
-                            "spec_is_due: interval expression failed to parse — skipping"
-                        );
-                        return false;
-                    }
-                };
-                let first_fire = spec.registered_at + interval_secs * 1000;
-                return first_fire <= now;
-            }
-            // For at schedules, parse the expression directly
-            if spec.schedule_type == "at" {
-                return crontab::parse_iso_ts(&spec.expression).is_some_and(|ts| ts <= now);
-            }
             return false;
         }
     };
 
-    // Due if the scheduled time has passed
-    scheduled_at <= now
+    planning::plan_schedule(spec, last_fire.as_ref(), now)
+        .current_due_at
+        .is_some()
 }
 
-fn compute_soonest_fire(specs: &[ScheduleSpecRecord], now: i64) -> Option<i64> {
+fn compute_soonest_fire<Ctx: SchedulerContext>(
+    specs: &[ScheduleSpecRecord],
+    ctx: &Ctx,
+    now: i64,
+) -> Option<i64> {
+    let db = ctx.scheduler_db();
     specs
         .iter()
-        .filter_map(|s| {
-            // For interval schedules with no prior fires, the first fire is at
-            // registered_at + interval. For cron/at, compute_next_fire handles it.
-            if s.schedule_type == "interval" {
-                let interval_secs = match s.expression.parse::<i64>() {
-                    Ok(secs) if secs > 0 => secs,
-                    _ => return None, // skip invalid interval in sleep calculation
-                };
-                let interval_ms = interval_secs * 1000;
-                let first_fire = s.registered_at + interval_ms;
-                if first_fire > now {
-                    return Some(first_fire);
-                }
-                // Already due — return now so the timer wakes immediately
-                return Some(now);
-            }
-            match crontab::compute_next_fire(
-                &s.schedule_type,
-                &s.expression,
-                &s.timezone,
-                now,
-                None,
-            ) {
-                Ok(Some(at)) => Some(at),
-                Ok(None) => None,
+        .filter_map(|spec| {
+            let last_fire = match db.get_last_fire(&spec.schedule_id) {
+                Ok(f) => f,
                 Err(e) => {
-                    tracing::warn!(
-                        schedule_id = %s.schedule_id,
-                        expression = %s.expression,
+                    tracing::error!(
+                        schedule_id = %spec.schedule_id,
                         error = %e,
-                        "compute_soonest_fire: invalid expression — using 1s fallback"
+                        "compute_soonest_fire: failed to query last fire — skipping"
                     );
-                    None
+                    return None;
                 }
-            }
+            };
+            let plan = planning::plan_schedule(spec, last_fire.as_ref(), now);
+            plan.current_due_at.or(plan.next_fire_at)
         })
         .min()
 }
@@ -351,9 +275,8 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
 
     // Get last fire for this schedule to compute scheduled_at
     let db = ctx.scheduler_db();
-    let last_fire_at = match db.get_last_fire(&spec.schedule_id) {
-        Ok(Some(f)) => Some(f.scheduled_at),
-        Ok(None) => None,
+    let last_fire = match db.get_last_fire(&spec.schedule_id) {
+        Ok(f) => f,
         Err(e) => {
             tracing::error!(
                 schedule_id = %spec.schedule_id,
@@ -364,52 +287,32 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
         }
     };
 
-    let scheduled_at = match crontab::compute_scheduled_at(
-        &spec.schedule_type,
-        &spec.expression,
-        &spec.timezone,
-        now,
-        last_fire_at,
-        Some(spec.registered_at),
-    ) {
+    let plan = planning::plan_schedule(spec, last_fire.as_ref(), now);
+    let scheduled_at = match plan.current_due_at {
         Some(at) => at,
-        None => {
-            // Fallback for interval first-fire: registration_time + interval
-            if spec.schedule_type == "interval" {
-                let interval_ms = match spec.expression.parse::<i64>() {
-                    Ok(secs) if secs > 0 => secs * 1000,
-                    _ => {
-                        tracing::error!(
-                            schedule_id = %spec.schedule_id,
-                            expression = %spec.expression,
-                            "process_spec: invalid interval expression — skipping fire"
-                        );
-                        return;
-                    }
-                };
-                spec.registered_at + interval_ms
-            } else {
-                return;
-            }
-        }
+        None => return,
     };
 
     let fid = types::fire_id(&spec.schedule_id, scheduled_at);
 
     // ── Misfire evaluation ───────────────────────────────────
-    // Only evaluate fires before the current due boundary. The current fire
-    // is dispatched normally below, even when the timer wakes a few millis
-    // after the boundary.
-    let misfire_fires = misfire::evaluate_misfires_before(spec, ctx, scheduled_at, now).await;
+    // Only dispatch the current due boundary normally while it is within
+    // grace. Once it is beyond grace, include it in misfire policy
+    // evaluation instead of also dispatching it as a normal fire.
+    let current_within_grace = plan.current_due_within_grace.unwrap_or(false);
+    let misfire_horizon = plan.misfire_horizon_exclusive.unwrap_or(now);
+    let misfire_fires = misfire::evaluate_misfires_before(spec, ctx, misfire_horizon, now).await;
 
     // ── Build one ordered fire list (chronological) ──────────
     // Each fire gets its own overlap check before dispatch.
     let mut all_fires: Vec<PendingFire> = misfire_fires;
-    all_fires.push(PendingFire {
-        fire_id: fid,
-        scheduled_at,
-        reason: "normal",
-    });
+    if current_within_grace {
+        all_fires.push(PendingFire {
+            fire_id: fid,
+            scheduled_at,
+            reason: "normal",
+        });
+    }
     all_fires.sort_by_key(|f| f.scheduled_at);
 
     // ── Process each fire with overlap check ─────────────────

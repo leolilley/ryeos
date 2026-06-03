@@ -9,6 +9,7 @@
 use anyhow::Result;
 
 use super::misfire;
+use super::planning;
 use super::projection;
 use super::types::{FireRecord, ScheduleSpecRecord};
 use crate::SchedulerContext;
@@ -58,6 +59,8 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     }
 
     projection::rebuild_fires_from_dir(&fires_dir, &db)?;
+    let rebuilt_specs = db.list_specs(false, None)?;
+    db.rebuild_cursors_for_specs(&rebuilt_specs, lillux::time::timestamp_millis())?;
     tracing::info!(
         specs = live_ids.len(),
         "scheduler: projection rebuilt from CAS"
@@ -75,7 +78,10 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     let now = lillux::time::timestamp_millis();
 
     for spec in &specs {
-        let pending = misfire::evaluate_misfires_before(spec, ctx, now, now).await;
+        let last_fire = db.get_last_fire(&spec.schedule_id)?;
+        let plan = planning::plan_schedule(spec, last_fire.as_ref(), now);
+        let horizon = plan.misfire_horizon_exclusive.unwrap_or(now);
+        let pending = misfire::evaluate_misfires_before(spec, ctx, horizon, now).await;
         for p in pending {
             intents.push(ResumeIntent {
                 fire_id: p.fire_id,
@@ -164,14 +170,8 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                                 });
                             }
                             _ => {
-                                let fail_rec = FireRecord {
-                                    status: "failed".to_string(),
-                                    outcome: Some("thread_lost".to_string()),
-                                    fired_at: Some(lillux::time::timestamp_millis()),
-                                    completed_at: None,
-                                    ..fire.clone()
-                                };
-                                db.upsert_fire(&fail_rec)?;
+                                update_fire_terminal(ctx, fire, None, "failed", "thread_lost")
+                                    .await?;
                                 tracing::warn!(
                                     fire_id = %fire.fire_id,
                                     "recovered: thread row missing, schedule removed — marking fire as failed"
@@ -206,13 +206,14 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                         });
                     }
                     _ => {
-                        let skip_rec = FireRecord {
-                            status: "skipped".to_string(),
-                            outcome: Some("recovery_schedule_removed".to_string()),
-                            completed_at: None,
-                            ..fire.clone()
-                        };
-                        db.upsert_fire(&skip_rec)?;
+                        update_fire_terminal(
+                            ctx,
+                            fire,
+                            None,
+                            "skipped",
+                            "recovery_schedule_removed",
+                        )
+                        .await?;
                         tracing::info!(
                             fire_id = %fire.fire_id,
                             "recovered: schedule removed — skipping interrupted fire"
@@ -233,12 +234,22 @@ async fn update_fire_completed<Ctx: SchedulerContext>(
     status: &str,
     outcome: &str,
 ) -> Result<()> {
+    update_fire_terminal(ctx, fire, Some(thread_id), status, outcome).await
+}
+
+async fn update_fire_terminal<Ctx: SchedulerContext>(
+    ctx: &Ctx,
+    fire: &FireRecord,
+    thread_id: Option<&str>,
+    status: &str,
+    outcome: &str,
+) -> Result<()> {
     let now = lillux::time::timestamp_millis();
 
     let rec = FireRecord {
         status: status.to_string(),
         outcome: Some(outcome.to_string()),
-        fired_at: Some(now),
+        fired_at: Some(fire.fired_at.unwrap_or(now)),
         completed_at: Some(now),
         ..fire.clone()
     };
@@ -264,14 +275,13 @@ async fn update_fire_completed<Ctx: SchedulerContext>(
         .join("fires.jsonl");
 
     let db = ctx.scheduler_db();
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = db.upsert_fire(&rec) {
-            tracing::error!(fire_id = %rec.fire_id, error = %e, "failed to update reconciled fire status");
-        }
-        if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-            tracing::error!(fire_id = %rec.fire_id, error = %e, "failed to append reconciled fire entry");
-        }
-    }).await.map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        projection::append_jsonl_entry(&fires_path, &entry)?;
+        db.upsert_fire(&rec)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
 
     Ok(())
 }

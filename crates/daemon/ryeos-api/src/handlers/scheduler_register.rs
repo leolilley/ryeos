@@ -29,6 +29,8 @@ pub struct Request {
     pub misfire_policy: Option<String>,
     #[serde(default)]
     pub overlap_policy: Option<String>,
+    #[serde(default)]
+    pub lateness_grace_secs: Option<i64>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -66,6 +68,11 @@ pub async fn handle(
     if let Some(ref p) = req.misfire_policy {
         if !is_valid_misfire_policy(p) {
             bail!("invalid misfire_policy: {}", p);
+        }
+    }
+    if let Some(secs) = req.lateness_grace_secs {
+        if secs <= 0 {
+            bail!("lateness_grace_secs must be positive, got: {}", secs);
         }
     }
 
@@ -157,6 +164,11 @@ pub async fn handle(
         },
     };
     body["misfire_policy"] = Value::String(normalized_misfire.clone());
+    let lateness_grace_secs = req
+        .lateness_grace_secs
+        .or_else(|| existing_spec.as_ref().map(|spec| spec.lateness_grace_secs))
+        .unwrap_or(60);
+    body["lateness_grace_secs"] = Value::Number(lateness_grace_secs.into());
     if let Some(ref p) = req.overlap_policy {
         body["overlap_policy"] = Value::String(p.clone());
     }
@@ -169,15 +181,18 @@ pub async fn handle(
     } else {
         ctx.fingerprint.clone()
     };
-    let capabilities = if ctx.scopes.is_empty() {
+    let capabilities = if let Some(ref existing) = existing_spec {
+        existing.capabilities.clone()
+    } else if ctx.scopes.is_empty() {
         bail!("scheduler.register requires verified caller context with non-empty scopes");
     } else {
         ctx.scopes.clone()
     };
 
     // On UPDATE, preserve the existing requester_fingerprint — only the
-    // original owner (or admin) can update, but the owner identity stays
-    // the same. On CREATE, the caller becomes the owner.
+    // original owner (or admin) can update, but the owner identity and
+    // granted capabilities stay the same. On CREATE, the caller becomes
+    // the owner and current caller scopes become the schedule grant.
     let requester_fingerprint = if let Some(ref existing) = existing_spec {
         existing.requester_fingerprint.clone()
     } else {
@@ -232,6 +247,7 @@ pub async fn handle(
         timezone: timezone.to_string(),
         misfire_policy: normalized_misfire.clone(),
         overlap_policy: overlap_policy.clone(),
+        lateness_grace_secs,
         enabled: req.enabled,
         project_root: req.project_root.clone(),
         signer_fingerprint,
@@ -259,6 +275,7 @@ pub async fn handle(
         "timezone": timezone,
         "misfire_policy": normalized_misfire,
         "overlap_policy": overlap_policy,
+        "lateness_grace_secs": lateness_grace_secs,
         "enabled": req.enabled,
         "spec_path": spec_path.display().to_string(),
         "created": !was_existing,

@@ -13,6 +13,7 @@ pub struct ScheduleSpecRecord {
     pub timezone: String,
     pub misfire_policy: String,
     pub overlap_policy: String,
+    pub lateness_grace_secs: i64,
     pub enabled: bool,
     pub project_root: Option<String>,
     pub signer_fingerprint: String,
@@ -26,6 +27,19 @@ pub struct ScheduleSpecRecord {
     /// Capabilities granted at registration time. The schedule runs with
     /// only these capabilities — least privilege.
     pub capabilities: Vec<String>,
+}
+
+/// Advisory projection cursor for a schedule.
+///
+/// This is rebuildable cache state, not a source of idempotency.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleCursorRecord {
+    pub schedule_id: String,
+    pub spec_hash: String,
+    pub last_scheduled_at: Option<i64>,
+    pub next_fire_at: Option<i64>,
+    pub last_evaluated_at: Option<i64>,
+    pub updated_at: i64,
 }
 
 /// Projection record for a fire event in `scheduler.sqlite3`.

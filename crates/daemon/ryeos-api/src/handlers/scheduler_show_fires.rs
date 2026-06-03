@@ -55,6 +55,7 @@ pub async fn handle(
                 "schedule_id": f.schedule_id,
                 "scheduled_at": f.scheduled_at,
                 "fired_at": f.fired_at,
+                "completed_at": f.completed_at,
                 "thread_id": f.thread_id,
                 "status": f.status,
                 "trigger_reason": f.trigger_reason,

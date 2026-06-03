@@ -13,6 +13,7 @@ pub mod crontab;
 pub mod db;
 pub mod misfire;
 pub mod overlap;
+pub mod planning;
 pub mod projection;
 pub mod reconcile;
 pub mod timer;

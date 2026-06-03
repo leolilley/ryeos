@@ -314,6 +314,7 @@ mod tests {
             timezone: "UTC".to_string(),
             misfire_policy: misfire_policy.to_string(),
             overlap_policy: "skip".to_string(),
+            lateness_grace_secs: 60,
             enabled: true,
             project_root: None,
             signer_fingerprint: "fp:test".to_string(),

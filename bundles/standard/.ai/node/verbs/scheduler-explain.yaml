@@ -1,0 +1,6 @@
+# ryeos:signed:2026-06-03T05:37:35Z:26ad5d21a0e34617baad2abc87a03aa10bce5dd90764ef112fcb3269f5baabfd:nkZZywQlS8rWhjkMSSxzebgMFdewlPrgpUhXnpnI3Frokp+gM8i2nhMXUUyi24IM5YTD2bkPmC3nLazLKeGHDg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: "verbs"
+section: verbs
+name: scheduler-explain
+description: "Explain a schedule's current planning state"
+execute: service:scheduler/explain
