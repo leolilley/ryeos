@@ -30,7 +30,7 @@ pub use thread_event::{EventDurability, ThreadEvent};
 pub use thread_snapshot::{ThreadSnapshot, ThreadSnapshotBuilder, ThreadStatus, ThreadUsage};
 
 /// Schema version shared across all CAS object types.
-/// Bump when the object format changes in a backward-incompatible way.
+/// Bump when the object format changes in a incompatible way.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Validate that an object kind matches the expected value.

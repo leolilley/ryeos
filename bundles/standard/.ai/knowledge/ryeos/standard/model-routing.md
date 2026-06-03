@@ -71,7 +71,7 @@ Direct Anthropic Messages API access. Uses `x-api-key` auth,
 Direct OpenAI Chat Completions access. Uses `Bearer` token auth,
 standard `chat/completions` endpoint.
 
-Legacy provider tool descriptors were removed: the directive runtime now
+Prior provider tool descriptors were removed: the directive runtime now
 uses the runtime-level provider configs directly. Adding a provider means
 adding a signed config under `config/ryeos-runtime/model-providers/` and,
 if it should be selected by tier, pointing `model_routing.yaml` at that

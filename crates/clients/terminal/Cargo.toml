@@ -15,7 +15,7 @@ lillux = { path = "../../kernel/lillux" }
 ed25519-dalek = { version = "2", features = ["default"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-util", "net", "time", "sync"] }
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-util = { version = "0.1", features = ["http1", "tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 eventsource-stream = "0.2"

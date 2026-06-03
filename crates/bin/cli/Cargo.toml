@@ -17,7 +17,7 @@ dirs        = "5"
 hex         = "0.4"
 http-body-util = "0.1"
 hyper       = { version = "1", features = ["client", "http1"] }
-hyper-util  = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-util  = { version = "0.1", features = ["http1", "tokio"] }
 rand        = "0.8"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"

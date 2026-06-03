@@ -82,7 +82,7 @@ impl SignSource {
 /// `project_path` is required when `source = Project`; ignored
 /// otherwise. The user signing key is loaded from `RYE_SIGNING_KEY`
 /// env, `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the
-/// legacy `~/.ai/config/keys/signing/private_key.pem` fallback.
+/// old `~/.ai/config/keys/signing/private_key.pem` fallback.
 ///
 /// Returns a `BatchReport` always — single-item refs produce a one-
 /// element vec. Per-item failures are collected; a failed validator
@@ -520,7 +520,7 @@ fn build_parser_dispatcher(
 /// returned. Otherwise the file is (re-)signed atomically.
 ///
 /// Loads the user signing key from `RYE_SIGNING_KEY` env,
-/// `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the legacy
+/// `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the old
 /// `~/.ai/config/keys/signing/private_key.pem` fallback.
 fn sign_in_place(
     input: &Path,

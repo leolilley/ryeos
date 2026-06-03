@@ -445,7 +445,7 @@ async fn pin_service_over_tcp_succeeds() {
 // `/execute` to any terminator. This test documents that a `tool:*`
 // ref (Subprocess terminator) round-trips through the unified entry
 // and produces the V5.2 inline envelope shape — i.e. no silent
-// fallback into a legacy code path. Any future rerouting that
+// fallback into an old code path. Any future rerouting that
 // short-circuits dispatch.rs would change either the response shape
 // or the thread.kind/thread.executor_ref values asserted here.
 

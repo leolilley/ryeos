@@ -651,7 +651,7 @@ impl DaemonHarness {
     ///
     /// When the harness was created via `start_fast`, the request is
     /// signed with the user key. Otherwise the request is sent unsigned
-    /// (for legacy test paths that don't require auth).
+    /// (for old test paths that don't require auth).
     pub async fn post_execute(
         &self,
         item_ref: &str,

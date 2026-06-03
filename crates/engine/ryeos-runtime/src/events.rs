@@ -64,7 +64,7 @@ impl StorageClass {
 /// `RuntimeEventType::parse` / `as_str`. There is no separate
 /// allow-list to keep in sync.
 ///
-/// Wire form is `snake_case`, matching the legacy string vocabulary
+/// Wire form is `snake_case`, matching the old string vocabulary
 /// so existing persisted events round-trip unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

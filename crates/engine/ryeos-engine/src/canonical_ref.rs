@@ -29,7 +29,7 @@ pub enum RefSuffix {
 /// the parser kind-agnostic: adding a new kind requires only adding
 /// an extractor schema, not changing engine code.
 ///
-/// Rejects bare refs, legacy formats, and anything without an explicit
+/// Rejects bare refs, old formats, and anything without an explicit
 /// `kind:bare_id` structure.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanonicalRef {
@@ -44,7 +44,7 @@ pub struct CanonicalRef {
 impl CanonicalRef {
     /// Parse a canonical ref string.
     ///
-    /// Rejects bare refs, legacy formats, and anything without
+    /// Rejects bare refs, old formats, and anything without
     /// an explicit `kind:bare_id` structure. Does NOT validate the
     /// kind string against a registry — that happens at resolution time.
     pub fn parse(input: &str) -> Result<Self, EngineError> {

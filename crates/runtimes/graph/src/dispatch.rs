@@ -144,7 +144,7 @@ fn follow_continuation<'a>(
         }
 
         // Typed callback contract: continuation IDs live at the leaf
-        // result's top level. The legacy `.data.continuation_id`
+        // result's top level. The removed `.data.continuation_id`
         // sidechannel is gone — there is one source of truth here.
         let continuation_id = result.get("continuation_id").and_then(|v| v.as_str());
 
@@ -164,7 +164,7 @@ fn follow_continuation<'a>(
             .unwrap_or("unknown");
 
         if thread_status == "continued" {
-            // No silent fallback to the legacy `continuation.successor_thread_id`
+            // No silent fallback to the removed `continuation.successor_thread_id`
             // sidechannel: `runtime.get_thread` already returns a stable
             // `{ thread, result, artifacts, facets }` shape and continued
             // threads MUST advertise their successor under

@@ -3,7 +3,7 @@
 //!
 //! Moved from `crates/engine/ryeos-runtime/src/envelope.rs` so the protocol vocabulary
 //! module (in this crate) can reference them without creating a dependency
-//! cycle. `ryeos-runtime` re-exports these types for backward compatibility.
+//! cycle. `ryeos-runtime` re-exports these types for compatibility.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

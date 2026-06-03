@@ -110,7 +110,7 @@ pub struct DispatchRequest<'a> {
     /// `directive_launch` source mints the id up front so it can
     /// subscribe to the event hub *before* the launch task begins,
     /// which is required to avoid losing the very first lifecycle
-    /// event. `None` (the default) preserves the legacy
+    /// event. `None` (the default) preserves the old
     /// "mint inside `create_root_thread`" path.
     pub pre_minted_thread_id: Option<String>,
     /// **Op dispatch**: the operation name from the `/execute` request.

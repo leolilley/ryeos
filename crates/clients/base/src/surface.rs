@@ -1390,18 +1390,18 @@ id = "test"
     }
 
     #[test]
-    fn from_daemon_rejects_legacy_commands_field() {
+    fn from_daemon_rejects_old_commands_field() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/cockpit/legacy",
-            "canonical_ref": "surface:ryeos/cockpit/legacy",
+            "requested_ref": "surface:ryeos/cockpit/old",
+            "canonical_ref": "surface:ryeos/cockpit/old",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_system",
             "root_trust_class": "trusted_system",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/legacy.yaml" },
-            "provenance": provenance_json("surface:ryeos/cockpit/legacy", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/old.yaml" },
+            "provenance": provenance_json("surface:ryeos/cockpit/old", []),
             "composed_value": {
-                "name": "legacy",
+                "name": "old",
                 "layout": {
                     "root": "main",
                     "nodes": {
@@ -1415,7 +1415,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/cockpit/legacy", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/cockpit/old", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
                 assert!(message.contains("unknown field `commands`"));
@@ -1434,7 +1434,7 @@ id = "test"
             "trust_class": "trusted_system",
             "root_trust_class": "trusted_system",
             "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/bad-provenance.yaml" },
-            "provenance": ["legacy-string-list-is-invalid"],
+            "provenance": ["old-string-list-is-invalid"],
             "composed_value": {
                 "name": "bad-provenance",
                 "layout": {

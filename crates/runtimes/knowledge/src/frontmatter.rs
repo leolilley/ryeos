@@ -93,7 +93,7 @@ pub fn strip_signed_yaml_frontmatter(content: &str) -> String {
 /// Strip frontmatter from content, detecting whether it's markdown or YAML.
 /// Tries formats in the same order as the parser:
 ///   1. `---` frontmatter (canonical)
-///   2. ` ```yaml` fenced block at doc start (backward compat)
+///   2. ` ```yaml` fenced block at doc start (alternate input form)
 ///   3. Signed YAML `# ryeos:signed:...`
 pub fn strip_frontmatter(content: &str, item_id: &str) -> Result<String, KnowledgeError> {
     let trimmed = content.trim_start();

@@ -39,13 +39,13 @@ pub struct SubprocessSpec {
 
     /// Stdout shape declared by the protocol descriptor; the lillux
     /// bridge consults this to choose buffered vs streaming decode.
-    /// Default: `OpaqueBytes` (backward compatible with specs not yet
+    /// Default: `OpaqueBytes` (compatible with specs not yet
     /// routed through the builder).
     pub stdout_shape: StdoutShape,
 
     /// Callback channel kind; the launcher consults this to know
     /// whether to register a callback token before spawn.
-    /// Default: `None` (backward compatible).
+    /// Default: `None` (compatible).
     pub callback_channel: CallbackChannel,
 
     /// Provenance fields — used by tracing, callback wiring, and the

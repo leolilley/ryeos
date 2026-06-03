@@ -231,7 +231,7 @@ impl<'a> BootstrapLoader<'a> {
             let verified = match verify_and_parse(&path, &node_dir, "bundles", self.trust_store) {
                 Ok(v) => v,
                 Err(e) => {
-                    // For bundles, non-YAML files are silently skipped (backward compat)
+                    // For bundles, non-YAML files are silently skipped (compatibility)
                     let ext = path.extension().and_then(|e| e.to_str());
                     if ext == Some("yaml") || ext == Some("yml") {
                         return Err(e);

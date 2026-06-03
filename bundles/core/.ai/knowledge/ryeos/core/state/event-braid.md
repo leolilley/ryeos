@@ -114,7 +114,7 @@ of the last event). Default limit: 200.
 
 ### Projection Rebuild
 
-The projection rebuild walks the chain backward via
+The projection rebuild walks the chain toward earlier links via
 `prev_chain_event_hash`, starting from signed chain heads. It projects
 only durable events into the SQLite `events` table. This is a full CAS
 replay that produces an identical projection to the original.

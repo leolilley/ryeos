@@ -792,11 +792,11 @@ node:
             format!(
                 r#"
 remotes:
-  legacy:
-    name: legacy
+  old_remote:
+    name: old_remote
     url: https://example.com
-    principal_id: fp:legacy
-    vault_fingerprint: sha256:legacy
+    principal_id: fp:old
+    vault_fingerprint: sha256:old
     ingest_ignore:
       patterns: []
   good:
@@ -819,7 +819,7 @@ remotes:
              stale entries must not block listing other valid remotes",
         );
         assert!(
-            !loaded.contains_key("legacy"),
+            !loaded.contains_key("old_remote"),
             "malformed entry must be skipped, got: {loaded:?}"
         );
         assert!(

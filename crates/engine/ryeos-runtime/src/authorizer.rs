@@ -931,7 +931,7 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
     // Verb and kind tokens must not contain underscores.
     // Canonical caps use dot-separated path elements: verb tokens are
     // kebab-case or single words, kind tokens likewise. An underscore
-    // in these positions indicates a legacy or misspelled scope.
+    // in these positions indicates an old or misspelled scope.
     // Subject tokens (parts[3..]) may contain dots for their own
     // hierarchy (e.g. "bundle.install") — those are NOT checked.
     if parts.len() >= 2 && parts[1].contains('_') {

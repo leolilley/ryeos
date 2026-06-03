@@ -5,9 +5,9 @@ declare -a forbidden=(
     'content_wrap'
     'first.?cut'
     'v0\.3\.0-first'
-    'Legacy fallback'
+    'old fallback'
     'BACKCOMPAT'
-    'backwards.?compat'
+    'compat shim'
 )
 
 fail=0
@@ -16,7 +16,7 @@ for pat in "${forbidden[@]}"; do
         bundles/ crates/engine/ryeos-runtime/src crates/runtimes/directive/src docs/ \
         --glob '!target/**' 2>/dev/null || true)
     if [[ -n "$hits" ]]; then
-        echo "ERROR: forbidden legacy term '$pat' found:"
+        echo "ERROR: forbidden term '$pat' found:"
         echo "$hits"
         echo
         fail=1

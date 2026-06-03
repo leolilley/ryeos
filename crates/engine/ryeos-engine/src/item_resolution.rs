@@ -34,7 +34,7 @@ pub struct ResolutionRoots {
 }
 
 impl ResolutionRoots {
-    /// Legacy convenience: build from flat fields.
+    /// Convenience: build from flat fields.
     /// System roots are ordered first, then user, then project.
     pub fn from_flat(
         project: Option<PathBuf>,
@@ -167,7 +167,7 @@ pub fn resolve_item_full(
     }
 }
 
-/// Backward-compatible resolve: returns just the winner without clash info.
+/// Winner-only resolve: returns just the winner without clash info.
 pub fn resolve_item(
     roots: &ResolutionRoots,
     kind_schema: &KindSchema,

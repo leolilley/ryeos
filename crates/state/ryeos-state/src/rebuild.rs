@@ -215,7 +215,7 @@ struct ChainReport {
 }
 
 /// Rebuild a single chain's projection by walking chain_state history
-/// from the given head hash backward via prev_chain_state_hash.
+/// from the given head hash toward earlier links via prev_chain_state_hash.
 ///
 /// Projects all thread snapshots and durable events found along the way.
 fn rebuild_chain(
@@ -297,7 +297,7 @@ fn rebuild_chain(
         }
     }
 
-    // For events, walk from each thread's last_event_hash backward
+    // For events, walk from each thread's last_event_hash toward earlier links
     // via prev_chain_event_hash to get all events in the chain.
     // But we need the chain-level events, so we walk from chain_state's last_event_hash.
     if let Some(last_state_hash) = state_hashes.last() {
@@ -335,7 +335,7 @@ fn rebuild_chain_delta(
     from_hash: &str,
     to_hash: &str,
 ) -> Result<ChainReport> {
-    // Collect chain state hashes from `to_hash` backward until we reach `from_hash`
+    // Collect chain state hashes from `to_hash` toward earlier links until we reach `from_hash`
     let mut state_hashes = Vec::new();
     let mut current_hash = to_hash.to_string();
     let mut visited: HashSet<String> = HashSet::new();
@@ -452,7 +452,7 @@ fn load_thread_snapshot(cas_root: &Path, hash: &str) -> Result<ThreadSnapshot> {
     Ok(snapshot)
 }
 
-/// Walk event chain backward from last_event_hash, projecting all durable events.
+/// Walk event chain toward earlier links from last_event_hash, projecting all durable events.
 /// Returns count of events projected.
 fn walk_and_project_events(
     projection: &ProjectionDb,
@@ -462,7 +462,7 @@ fn walk_and_project_events(
     walk_and_project_events_from(projection, cas_root, last_event_hash, None)
 }
 
-/// Walk event chain backward from last_event_hash, optionally stopping at stop_after_hash.
+/// Walk event chain toward earlier links from last_event_hash, optionally stopping at stop_after_hash.
 /// Projects all durable events encountered. Returns count of events projected.
 fn walk_and_project_events_from(
     projection: &ProjectionDb,

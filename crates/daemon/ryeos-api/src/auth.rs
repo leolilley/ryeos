@@ -524,7 +524,7 @@ mod tests {
         // Hand-craft a TOML with short-form scopes that bypass the
         // canonical writer (which would reject them at write time).
         let body = format!(
-            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"bundle.install\", \"remote.admin\"]\nlabel = \"legacy-short-form\"\n"
+            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"bundle.install\", \"remote.admin\"]\nlabel = \"old-short-form\"\n"
         );
         let signed = lillux::signature::sign_content_at(
             &body,

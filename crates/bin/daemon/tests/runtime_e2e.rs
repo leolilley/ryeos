@@ -9,8 +9,8 @@
 //! - Direct `runtime:*` invocation routes through
 //!   `dispatch::dispatch_managed_subprocess` (proven via the synth
 //!   pin-fake-runtime YAML reaching the protocol-derived
-//!   `ProtocolCapabilities` resolution rather than any legacy native
-//!   branch — the legacy branch is gone).
+//!   `ProtocolCapabilities` resolution rather than any old native
+//!   branch — the old branch is gone).
 //! - Multi-default conflict at startup is fail-closed: two runtimes
 //!   declaring `serves: <kind>` AND `default: true` for the same kind
 //!   prevent the daemon from starting (build_from_bundles errors
@@ -158,7 +158,7 @@ async fn e2e_knowledge_ref_returns_501_in_v53() {
     // (no terminator) AND the `@knowledge` alias resolves to a tool
     // ref that no longer exists post-V5.3. Either way, the schema gate
     // must yield 501 (or a clear non-200) — not a generic 500 stack
-    // trace and not a silent fallback to legacy code.
+    // trace and not a silent fallback to old code.
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
         .post_execute("knowledge:any/note", ".", serde_json::json!({}))

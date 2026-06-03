@@ -1166,7 +1166,7 @@ execution:
     fn ed25519_none_trust_store_falls_back_to_hash_only() {
         // Without a trust store (None), schedules are accepted if the
         // content_hash matches — the existing behavior. This ensures
-        // backward compatibility for code paths that don't have a
+        // compatibility for code paths that don't have a
         // trust store available.
         let dir = tempfile::tempdir().unwrap();
         let sched_dir = dir.path().join("schedules");

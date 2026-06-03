@@ -236,13 +236,13 @@ fn preflight_verify_bundle_in_context_inner(
         &mut seen_roots,
     );
 
-    let legacy_trust = source_path
+    let old_trust = source_path
         .join(ryeos_engine::AI_DIR)
         .join("config/keys/trusted");
-    if legacy_trust.is_dir() {
+    if old_trust.is_dir() {
         tracing::warn!(
-            path = %legacy_trust.display(),
-            "bundle ships a legacy `.ai/config/keys/trusted/` dir which is \
+            path = %old_trust.display(),
+            "bundle ships a old `.ai/config/keys/trusted/` dir which is \
              ignored — pin the publisher key with `ryeos trust pin <fingerprint>` \
              instead"
         );

@@ -31,7 +31,7 @@ DENY=(
   'ryeos daemon rotate-key'        # phantom command (never implemented)
   'write_authorized_key_toml_with_wildcard'  # removed in favor of WildcardPolicy enum
   'next_port()'                    # removed in favor of `--bind 127.0.0.1:0`
-  'pick_free_port'                 # removed legacy alias
+  'pick_free_port'                 # removed alias
 )
 
 # Patterns that catch SHORT-FORM caps appearing as scope examples in

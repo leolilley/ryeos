@@ -1738,7 +1738,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             super::build_request_body(&provider, "gemini-3-flash", &msgs, None, &json!([]), false);
         assert_eq!(body["model_pinned"], "gemini-3-flash");
         assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
-        // No legacy keys when template is used.
+        // No deprecated keys when template is used.
         assert!(body.get("stream_options").is_none());
     }
 

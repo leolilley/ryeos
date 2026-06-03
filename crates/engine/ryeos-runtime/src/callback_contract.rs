@@ -111,22 +111,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_legacy_envelope_with_extra_fields() {
-        // Defense in depth: a legacy `{thread, result, data, status}`
+    fn rejects_old_envelope_with_extra_fields() {
+        // Defense in depth: an old `{thread, result, data, status}`
         // payload MUST fail to deserialize — the daemon must never
-        // emit the old shape, and a legacy emitter must surface
+        // emit the old shape, and an old emitter must surface
         // loudly rather than silently lose fields.
-        let legacy = json!({
+        let old_shape = json!({
             "thread": {"id": "T-x"},
             "result": "ok",
             "data": "ok",
             "status": "ok",
         });
-        let err = serde_json::from_value::<CallbackDispatchResponse>(legacy).unwrap_err();
+        let err = serde_json::from_value::<CallbackDispatchResponse>(old_shape).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("data") || msg.contains("status") || msg.contains("unknown field"),
-            "expected deny_unknown_fields error mentioning the legacy field, got: {msg}"
+            "expected deny_unknown_fields error mentioning the old field, got: {msg}"
         );
     }
 }

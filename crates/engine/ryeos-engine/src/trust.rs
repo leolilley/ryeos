@@ -4,7 +4,7 @@
 //! is **operator-tier state only**: the resolution order is project > user.
 //! Bundles never auto-trust their own keys — operators pin publisher keys
 //! explicitly via `ryeos init` (platform author) and `ryeos trust pin <fp>`
-//! (third parties). Legacy bundle-internal trust dirs are ignored.
+//! (third parties). Old bundle-internal trust dirs are ignored.
 //! Supports two key file formats:
 //!   - Raw `.pub`/`.key` files: base64-encoded 32-byte Ed25519 keys
 //!   - Signed `.toml` identity docs: structured TOML with PEM public keys
@@ -323,7 +323,7 @@ impl TrustStore {
     /// overridden by user.
     ///
     /// If any path in `system_roots` contains a `.ai/config/keys/trusted/`
-    /// directory, a warning is emitted to alert the operator to legacy
+    /// directory, a warning is emitted to alert the operator to old
     /// bundle-internal trust docs that the engine ignores.
     pub fn load_three_tier(
         project_root: Option<&Path>,
@@ -342,7 +342,7 @@ impl TrustStore {
             dirs.push(root.join(&trust_subdir));
         }
 
-        // Diagnostic: warn on legacy bundle-internal trust dirs that are
+        // Diagnostic: warn on old bundle-internal trust dirs that are
         // now ignored. Helps operators who paste-installed an old bundle
         // and wonder why trust didn't propagate.
         for root in system_roots {

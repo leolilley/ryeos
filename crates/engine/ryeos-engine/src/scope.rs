@@ -6,7 +6,7 @@
 //! **at least one** of:
 //!
 //! - `"*"` — the global wildcard
-//! - `"execute"` — legacy bare scope
+//! - `"execute"` — old bare scope
 //! - `"ryeos.execute.*"` or any `ryeos.execute.<kind>.<subject>` —
 //!   capability-style scopes granted by `authorize-key`
 //!
@@ -15,7 +15,7 @@
 use crate::contracts::EffectivePrincipal;
 use crate::error::EngineError;
 
-/// The legacy scope string required for item execution.
+/// The old scope string required for item execution.
 const EXECUTE_SCOPE: &str = "execute";
 
 /// The wildcard scope that grants all permissions.

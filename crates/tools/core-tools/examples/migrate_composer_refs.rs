@@ -2,7 +2,7 @@
 //!
 //! Reads each *.kind-schema.yaml under
 //! bundles/core/.ai/node/engine/kinds/, strips the signature
-//! line, rewrites the `composer:` field from the legacy native-handler
+//! line, rewrites the `composer:` field from the old native-handler
 //! ID style (`ryeos/core/<name_with_underscores>`) to the canonical
 //! handler ref (`handler:ryeos/core/<name-with-hyphens>`), and re-signs
 //! with the platform-author key.

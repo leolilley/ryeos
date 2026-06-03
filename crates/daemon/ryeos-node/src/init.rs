@@ -311,7 +311,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             // Re-write the signed registration unconditionally. This keeps init
             // aligned with the installed-registration loader's structured,
             // fail-closed semantics instead of preserving malformed-but-signed
-            // legacy records.
+            // old records.
             let node_dir = opts
                 .system_space_dir
                 .join(ryeos_engine::AI_DIR)

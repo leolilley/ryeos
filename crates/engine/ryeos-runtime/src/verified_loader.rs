@@ -588,7 +588,7 @@ impl VerifiedLoader {
             .map(|opt| opt.map(|(v, _contribs)| v))
     }
 
-    /// Permissive provenance loader — backward-compatible.
+    /// Permissive provenance loader — permissive.
     pub fn load_config_with_provenance<T: DeserializeOwned>(
         &self,
         config_id: &str,

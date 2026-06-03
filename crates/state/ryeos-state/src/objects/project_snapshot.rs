@@ -155,7 +155,7 @@ mod tests {
             "project_manifest_hash": "ab".repeat(32),
             "parent_hashes": [],
             "created_at": "2026-04-23T00:00:00Z",
-            "source": "legacy_push",
+            "source": "old_push",
         });
         let restored = ProjectSnapshot::from_value(&value).unwrap();
         assert_eq!(restored.project_sync_scope, ProjectSyncScope::default());

@@ -114,7 +114,7 @@ fn empty_object_schema() -> Value {
 }
 
 /// Default OpenAI tool serialization — used when no ToolSchemaConfig
-/// is provided (e.g. test code, legacy profiles). Produces the standard
+/// is provided (e.g. test code or minimal profiles). Produces the standard
 /// `{type: "function", function: {name, description, parameters}}` shape.
 fn serialize_openai_default(tools: &[ToolSchema]) -> Value {
     json!(tools

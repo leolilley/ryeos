@@ -901,7 +901,7 @@ handler: \"handler:ryeos/core/yaml-document\"
 parser_api_version: 1
 parser_config: {}
 ";
-        // Write to the schema-declared directory; the legacy
+        // Write to the schema-declared directory; the old
         // hardcoded `parsers` dir does NOT exist.
         let p = root.join(".ai/custom_parsers/ryeos/core/yaml/yaml.yaml");
         write_signed(&p, yaml, &sk);

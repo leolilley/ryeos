@@ -236,7 +236,7 @@ pub fn expand_env_value(
         }
     }
 
-    // Pass 2: legacy `{token}` expansion.
+    // Pass 2: old `{token}` expansion.
     expand_template(&out, template_ctx)
 }
 

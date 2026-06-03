@@ -667,7 +667,7 @@ pub struct ExecutionSchema {
     /// declared on any executable schema; pure absence is a load-time
     /// error.
     ///
-    /// There is NO silent fallback to a legacy dispatch path. If a
+    /// There is NO silent fallback to a old dispatch path. If a
     /// schema declares `execution:` with none of the three, that is a
     /// schema error caught at load time.
     ///
@@ -1865,7 +1865,7 @@ fn parse_execution_schema(
 
 /// Parse the `execution.thread_profile` block from a kind schema.
 ///
-/// Mapping-only. The legacy string form is intentionally rejected so
+/// Mapping-only. The old string form is intentionally rejected so
 /// thread lifecycle flags are explicit schema data, not parser defaults.
 fn parse_thread_profile(
     execution_value: &serde_yaml::Value,
@@ -2645,7 +2645,7 @@ composed_value_contract:
     }
 
     #[test]
-    fn legacy_string_thread_profile_rejected() {
+    fn old_string_thread_profile_rejected() {
         let yaml = "\
 execution:
   thread_profile: directive_run

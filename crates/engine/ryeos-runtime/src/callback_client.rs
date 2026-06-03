@@ -121,7 +121,7 @@ impl CallbackClient {
     /// endpoint and return the typed response.
     ///
     /// The daemon contract is `CallbackDispatchResponse` (see
-    /// `crate::callback_contract`). We deserialize STRICTLY — a legacy
+    /// `crate::callback_contract`). We deserialize STRICTLY — an old
     /// envelope (`{thread, result, data, status}`) fails loudly here
     /// rather than silently dropping fields into the model's
     /// tool-result bytes.

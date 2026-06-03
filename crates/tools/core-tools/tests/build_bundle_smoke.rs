@@ -214,7 +214,7 @@ fn bundle_cas_contains_binary_blob() {
 }
 
 #[test]
-fn standard_bundle_has_no_legacy_tool_descriptors() {
+fn standard_bundle_has_no_old_tool_descriptors() {
     let tools_dir = bundle_dir().join(".ai").join("tools").join("ryeos");
     if !tools_dir.is_dir() {
         return;
@@ -228,14 +228,14 @@ fn standard_bundle_has_no_legacy_tool_descriptors() {
     // native Rust binaries; model providers are config-driven.
     assert!(
         yaml_files.is_empty(),
-        "standard bundle's tools/ryeos/ must be empty after the legacy \
+        "standard bundle's tools/ryeos/ must be empty after the old \
          state-graph + provider tool descriptors were removed; found {:?}",
         yaml_files
     );
 }
 
 #[test]
-fn no_legacy_state_graph_executor_ids_in_fixtures() {
+fn no_old_state_graph_executor_ids_in_fixtures() {
     let workspace = workspace_root();
     let fixtures = workspace.join("tests/e2e/.ai");
     if !fixtures.exists() {
@@ -248,7 +248,7 @@ fn no_legacy_state_graph_executor_ids_in_fixtures() {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
             !content.contains("ryeos/core/runtimes/state-graph/runtime"),
-            "legacy state-graph executor_id remains in {}",
+            "old state-graph executor_id remains in {}",
             path.display()
         );
     }
