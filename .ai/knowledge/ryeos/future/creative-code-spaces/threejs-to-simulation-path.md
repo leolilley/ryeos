@@ -1,107 +1,69 @@
-<!-- ryeos:signed:2026-05-28T08:51:16Z:8cbb6eabd6188a76dfbc05078cd90b7480ac360b10ae6501b3f4b9a093b66898:BDTcQ/1UBHmXbwGz19wAACHnCj9BuvMFED2vqZLTDpShEgE3VXLj6gyxg5fOzJQVi8m/HV289NSDV5EPAXVFBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- rye:signed:2026-06-03T03:31:14Z:d8bc3e01059956ee65f4c4e3e6fe2329a995792ab4d81955f9459cf9d5d7e909:h0V2gxpPl3HFlLr_vgOtzBB-bAnN9gtJLvcSrlFRUA5MkNJJbAgSMihAyN7kMul5JBOh-TDDVFWroT2twWkhAg:4b987fd4e40303ac -->
 ```yaml
-category: ryeos/future
+category: ryeos/future/creative-code-spaces
 name: threejs-to-simulation-path
-title: From Shared Three.js Canvas to Deeper Simulation Frames
+title: From Three.js Dimensions to Simulation Frames
 entry_type: concept-note
-version: "0.1.0"
+version: "0.2.0"
 author: amp
 created_at: 2026-05-28T00:00:00Z
-updated_at: 2026-05-28T00:00:00Z
-description: Staged product path for starting signed creative code spaces as a shared Three.js scene and later extending the same substrate into deeper simulation software.
+updated_at: 2026-06-03T00:00:00Z
+description: Staged future path from a Three.js dimension over signed scene state toward behavior primitives, frame-specific simulation, directive inhabitants, replayable graph time, and constrained executable hooks.
 tags:
   - creative-code-spaces
   - threejs
-  - cockpit
-  - signed-modules
+  - dimensions
   - simulation
   - frames
-  - product-strategy
+  - cockpit
   - future-work
 ```
 
-# From Shared Three.js Canvas to Deeper Simulation Frames
+# From Three.js Dimensions to Simulation Frames
 
 ## Purpose
 
-This note captures the staged product path for signed creative code spaces.
+This note describes the staged rendering/runtime path for RyeOS worlds.
 
-The first version should not try to be a full universe simulator, generic game engine, or arbitrary AI-code runtime. Start with the simplest compelling thing: a shared Three.js creative scene where users prompt visual objects and simple behaviors into existence, sign them, submit them to a node, and let other people pull, see, and remix them.
-
-The deeper simulation platform should grow from that same substrate only after the visible creation loop is fun.
+Three.js is a strong first dimension because it makes signed state visible quickly. But Three.js is not the world itself. The world is signed state plus frame policy. Three.js is one projection/runtime interpretation of that state.
 
 ## Core strategy
 
-Start shallow, keep the foundation real.
+Start with a dimension, not a universe simulator.
 
 ```text
-v0: shared Three.js scene
-  -> signed module data
-  -> node attestation
-  -> peer sync
-  -> cockpit rendering
-  -> remix/provenance
-
-later: deeper simulation frames
-  -> richer behavior primitives
-  -> directive entities
-  -> graph/time processes
-  -> frame-specific simulation rules
-  -> optional constrained executable hooks
+Stage 1: Three.js dimension over signed scene objects
+Stage 2: Declarative behavior primitives
+Stage 3: Frame-specific simulation rules
+Stage 4: Directive/tool entities as inhabitants
+Stage 5: Replayable graph time
+Stage 6: Constrained executable hooks
 ```
 
-The first version is not disposable. It is the shallow end of the same architecture.
+The first stage should be shallow enough to build, but real enough that it uses the same signed object and frame model that deeper simulations will need.
 
-## Stage 1: visual creative space
+## Stage 1: Three.js dimension over signed scene objects
 
-The first product is a visible creative canvas.
+The first dimension renders signed scene objects through a small frame contract.
 
-User-facing loop:
+Object examples:
 
-```text
-open scene
-prompt thing
-see thing
-tweak thing
-sign thing
-submit thing
-share thing
-remix thing
-```
-
-The backend loop stays small:
-
-```text
-AI-generated module data
-  -> local validation
-  -> creator signature
-  -> CAS storage
-  -> node validation
-  -> node attestation
-  -> peer sync
-  -> Three.js renderer
-```
-
-Users create mostly visual modules:
-
-- meshes and primitive objects;
-- materials and color palettes;
-- labels and glyph overlays;
-- particle fields;
-- lighting treatments;
+- mesh primitives;
+- transforms;
+- materials;
+- lights;
+- labels;
+- particles;
 - style packs;
-- simple animations;
-- simple spatial relationships;
-- TUI and web projections.
+- camera hints;
+- simple animation descriptors.
 
-Example module:
+Example object:
 
 ```yaml
-frame: rye-canvas-v0
-kind: scene_object
+kind: scene-object/v1
+frame: threejs-scene-v0
 name: Blue Glass Moon
-author: ed25519:creator_key
-seed: b7d9
 geometry:
   primitive: sphere
   radius: 180
@@ -113,91 +75,30 @@ material:
   roughness: 0.15
   opacity: 0.72
 effects:
-  - primitive: aurora_particles
+  - primitive: aurora-particles
     color: "#6fffd2"
     intensity: 0.35
 behavior:
   kind: spin
   period: 90
-remix_of: null
 ```
 
-This is not arbitrary generated code. It is signed module data interpreted by a known frame runtime.
+The Cockpit should show both the dimension and the truth behind it:
 
-## Why Three.js first
+- rendered object;
+- object hash;
+- signer;
+- frame;
+- dependencies;
+- validation state;
+- hosted admission, if any;
+- remix/provenance lineage.
 
-Three.js is a good first visual substrate because it gives immediate payoff:
+## Stage 2: declarative behavior primitives
 
-- visible 3D objects;
-- camera movement;
-- lights/materials;
-- particle effects;
-- simple orbital/spatial layouts;
-- broad user familiarity;
-- easy demos;
-- enough expressive room for artists;
-- no need to solve full simulation before people can create.
+Once static objects work, add safe behavior primitives.
 
-The goal is to get to the magic moment quickly:
-
-```text
-I described something and now I can see it in the shared scene.
-```
-
-## What the first backend actually needs
-
-The first backend does not need deep simulation.
-
-It needs:
-
-1. A frame contract with a small schema.
-2. A prompt-to-module generator.
-3. A canonical module representation.
-4. Local validation.
-5. Creator signing.
-6. CAS storage.
-7. Node validation/attestation.
-8. Peer sync.
-9. A Three.js interpreter for accepted modules.
-10. A cockpit inspector showing provenance, signatures, validation, and remix lineage.
-
-Everything else can wait.
-
-## Stage 2: structured behavior primitives
-
-Once the visual loop works, add safe behavior primitives.
-
-These remain data, not arbitrary code.
-
-Examples:
-
-```yaml
-behavior:
-  kind: orbit
-  parent: red_star_hash
-  radius: 1200
-  period: 90
-```
-
-```yaml
-behavior:
-  kind: pulse
-  target: material.emissive_intensity
-  waveform: sine
-  period: 37
-  amplitude: 0.2
-```
-
-```yaml
-behavior:
-  kind: proximity_react
-  target: comet_hash
-  distance: 250
-  action:
-    set_material: glowing_blue
-```
-
-Useful primitive families:
+These remain data, not generated code:
 
 - orbit;
 - spin;
@@ -206,212 +107,178 @@ Useful primitive families:
 - proximity reaction;
 - bounded particle emission;
 - material transition;
-- collision event;
 - attachment/parenting;
-- visibility/phase change;
-- scheduled state transition.
+- visibility/phase changes;
+- scheduled state transitions.
 
-This makes the scene feel alive while preserving deterministic replay and easy validation.
+Example:
 
-## Stage 3: frame-specific simulation
+```yaml
+behavior:
+  kind: orbit
+  parent: red-star-hash
+  radius: 1200
+  period: 90
+```
 
-After people are creating and sharing, specific frames can deepen their own simulation rules.
+Validation should check bounds, determinism, supported primitive versions, and render/runtime budgets.
 
-For a cosmos frame:
+## Stage 3: frame-specific simulation rules
 
-- orbital constraints;
-- heat/light bands;
-- atmosphere tags;
-- biome descriptors;
-- artifact activation;
-- event chains;
-- civilization/story modules.
+After the visible loop is fun, frames can deepen their own rules.
 
-For a garden frame:
+Examples:
+
+### Garden frame
 
 - growth cycles;
 - light/water needs;
 - pollination;
 - decay;
-- species interaction;
-- seasonal palettes.
+- seasonal palettes;
+- visitor traces.
 
-For a city frame:
+### Fiction frame
 
-- roads;
-- districts;
-- traffic;
-- population flows;
-- zoning;
-- weather;
-- economy tags.
+- canon heads;
+- character state;
+- location consistency;
+- branch/merge rules;
+- narrator policy.
 
-For a dungeon frame:
+### Codebase frame
 
-- rooms;
-- doors;
-- enemies;
-- treasures;
-- traps;
-- encounter rules;
-- path connectivity.
+- dependency graph;
+- test/build state;
+- code ownership;
+- release gates;
+- directive/tool inhabitants.
 
-Each frame can have its own validator and node admission policy. The substrate stays the same.
+### Cosmos frame
 
-## Stage 4: directives as active entities
+- orbits;
+- heat/light bands;
+- atmosphere tags;
+- biome descriptors;
+- artifact activation;
+- civilization/story modules.
 
-After objects and behavior primitives exist, directives can become active entities inside a frame.
+Each frame owns its validator and policy. The substrate stays the same: signed state, validation, admission, sync, projection.
 
-A directive is naturally an entity because it already has:
+## Stage 4: directive/tool entities as inhabitants
 
-- context;
-- intent;
-- permissions;
-- model choice;
-- limits;
-- tool access;
-- resumability;
-- graph/process integration.
+Directives and tools can become active entities inside a dimension/world.
 
 Entity examples:
 
-- `worldsmith`: helps create valid modules;
-- `artist`: generates visual styles and material variants;
-- `curator`: reviews submissions and explains node policy;
-- `scheduler`: advances frame time;
-- `ecologist`: proposes biome/species changes;
-- `civilization`: simulates a society's choices;
-- `probe`: explores and reports remote regions.
+- `worldsmith` proposes valid objects;
+- `artist` creates visual style variants;
+- `curator` reviews admissions and explains policy;
+- `scheduler` advances frame time;
+- `ecologist` proposes garden/biome changes;
+- `test-agent` investigates a codebase region;
+- `probe` explores remote object graphs.
 
-The directive entity gets a scoped view of the scene/frame:
+An entity should receive scoped context:
 
 ```text
 selected object hashes
-nearby accepted modules
+visible region/window
 frame contract
 validator diagnostics
 allowed actions
 current tick/time window
-player request
-node policy
+principal/request context
+node/world policy
 ```
 
-It then proposes module changes, runs validation, asks the player for approval, or submits to the node if authorized.
+It should propose signed or signable outputs, not mutate world truth invisibly.
 
-## Stage 5: graphs and time
+## Stage 5: replayable graph time
 
-Graphs can model processes that unfold over time.
+Worlds should record time as signed graph evolution.
 
-The important refinement is: time can be graph replay. A world does not only advance through ticks; it records the graph of how each state came to exist.
+```text
+prior head
+  -> event/proposal
+  -> validator
+  -> admission/policy
+  -> new head
+```
 
-Examples:
+Graph time can represent:
 
-- validation pipeline;
-- animation/event sequence;
+- validation pipelines;
 - object lifecycle;
-- biome growth;
-- civilization decision loop;
-- scheduled seasonal update;
+- simulation ticks;
+- seasonal updates;
+- directive decisions;
+- moderation workflows;
 - multi-agent collaboration;
-- node moderation workflow.
+- branch/merge events.
 
-The key is to represent time as frame-defined ticks and signed events, not uncontrolled wall-clock mutation.
-
-```text
-tick N
-  -> graph evaluates state
-  -> directive/entity proposes event
-  -> event validates
-  -> event is signed/attested
-  -> peers sync
-  -> cockpit renders update
-```
-
-Wall-clock time can schedule work, but shared state should derive from signed modules, ticks, seeds, and event chains.
-
-Each graph node should be replayable when possible:
+The Cockpit can then replay, scrub, fork, compare, and explain state:
 
 ```text
-graph node
-  inputs: prior module hashes + frame hash + seed + directive version
-  execution: graph step / directive action / validator gate
-  outputs: proposed module/event hashes
-  acceptance: signer + node attestation + validation result
+Why did this tree turn silver?
+  -> event 42: visitor submitted winter-light prompt
+  -> event 43: artist directive generated material variant
+  -> event 44: validator reduced particle budget
+  -> event 45: hosted node admitted new head
 ```
-
-That makes time inspectable. The cockpit can scrub the graph, replay the world from an earlier node, fork from a prior moment, compare branches, or explain why a visible object changed.
-
-Time is therefore not just a numeric tick. It is the signed execution graph of the space.
 
 ## Stage 6: constrained executable hooks
 
-Only add deeper executable logic after the data primitives hit real limits.
+Only add executable hooks when declarative primitives are not enough.
 
 Possible progression:
 
-1. Declarative modules only.
-2. Behavior primitives.
-3. Tiny deterministic expression language.
-4. Sandboxed formula hooks.
-5. Deterministic WASM/Lua-like modules.
-6. Frame-specific plugin SDKs.
+1. tiny expression language;
+2. sandboxed formulas;
+3. deterministic WASM/Lua-like modules;
+4. frame-specific plugin SDKs;
+5. node-attested runtime plugins.
 
-Do not start here. Arbitrary generated code introduces security, determinism, performance, compatibility, and moderation problems before the product loop is proven.
+Any executable layer must enforce:
 
-## The continuity principle
+- explicit permissions;
+- no secret access by default;
+- no network/filesystem by default;
+- bounded CPU/memory;
+- deterministic seed/time inputs where replay matters;
+- versioned runtime;
+- validation parity between local and hosted nodes;
+- signed provenance of inputs and outputs.
 
-Every stage keeps the same core objects:
+Do not start here. Arbitrary generated code is powerful, but it is not required for the first portal realm.
 
-- frame contract;
-- signed module;
-- creator key;
-- CAS hash;
-- node validation;
-- node attestation;
-- peer sync;
-- cockpit rendering;
-- provenance/remix lineage.
+## Rendering failure mode
 
-At first, a module might be a sphere with a material. Later, a module might be a biome rule, civilization event, simulation primitive, or directive entity state. The protocol does not need to change its identity just because the modules get deeper.
+Dimensions must degrade gracefully.
 
-## What to avoid early
+If a client cannot render a primitive or frame, it should still show:
 
-Avoid making v0 depend on:
+- object data;
+- provenance;
+- signatures;
+- dependency status;
+- placeholder geometry;
+- required frame/runtime;
+- fetch/install options.
 
-- real astrophysics;
-- full game engine abstractions;
-- arbitrary user-generated scripts;
-- multiplayer action-game latency;
-- global consensus;
-- complex economy/governance;
-- generic frame authoring UI;
-- deep civilization simulation;
-- unbounded shaders or browser code.
+The state remains real even when a dimension cannot fully render it.
 
-The first product should be almost embarrassingly simple:
+## First vertical slice
 
-```text
-shared Three.js scene
-AI creates signed modules
-node accepts modules
-peers pull modules
-people remix modules
-```
+A useful future vertical slice:
 
-That is enough to test whether the creation loop is fun.
+1. Define `threejs-scene-v0` frame.
+2. Define signed scene-object schema.
+3. Render hand-authored signed objects in Cockpit.
+4. Show provenance/validation inspector.
+5. Generate one object from a prompt as local draft.
+6. Validate and sign it.
+7. Host it through a portal on hosted-node.
+8. Open the same portal from another browser/node.
 
-## Working product line
-
-Use the seed to reveal the platform gradually.
-
-Initial promise:
-
-> Prompt objects into a shared 3D scene. Sign them, publish them, and remix what others make.
-
-Underlying truth:
-
-> Every visible thing is a signed module accepted by a frame node.
-
-Long-term direction:
-
-> The same signed module substrate can grow into deeper simulation frames, directive entities, graph-driven time, and user-defined spaces.
+This proves the path without deep simulation.

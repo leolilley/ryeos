@@ -1,800 +1,319 @@
-<!-- ryeos:signed:2026-05-31T02:58:01Z:7b78dec0dfab35b4c0b2dfa7adaccee63b4d1153f653a8df48bb098ed5e6c455:4U9HpykXbig98I8wXSopSE2mS3bv7ukNE91mLhKCsx8ax3iXwQ/DepoSx2dNQAkuCasRLTae4Vtp8DLsCotYCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
-<!-- rye:signed:2026-05-30T04:39:09Z:0668ae4257fbe5688b500a1157ad8ac5198382509ae9c72cd645833e518f5a7a:e841rQssGRrzuBeI710Qifkd42zjk3tsSF5xZAfSg5Dt6uIk9vABZLz8yJLAFR4a2S5mMMb2nwpQFaoO7lUuCQ:4b987fd4e40303ac -->
+<!-- rye:signed:2026-06-03T03:31:26Z:90311c108d8b9def06dc694970c7156f7dc4931f43d274cfba6c4711467c701c:iPhzqfEROHLyZ7m3l5yZYyKNxCpo0n4qFF6EpusBHVFNjvQ9YAAyvCKmmxC1FAy1-GhRvIsLwEbTLNGZfwDLAw:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future
 name: studio-local-project-registry-and-multitenancy
-title: Studio Local Project Registry and Future Multi-Tenancy
+title: Future Principal Spaces, Project/World Registries, and Hosted Boundaries
 entry_type: implementation_guide
-version: "0.1.0"
+version: "0.2.0"
 author: amp
 created_at: 2026-05-30T00:00:00Z
-description: Layout and implementation direction for local Studio project discovery in regular RyeOS installs, with deferred hosted multi-tenant compatibility constraints.
+updated_at: 2026-06-03T00:00:00Z
+description: Future boundary design for principal spaces, project/world registries, hosted node boundaries, and multi-tenant constraints beyond the current local/hosted-principal Studio substrate.
 tags:
   - studio
+  - cockpit
   - project-registry
-  - user-space
-  - node-space
+  - world-registry
+  - principal-spaces
+  - hosted-node
   - multi-tenancy
   - future-work
 ```
 
-# Studio Local Project Registry and Future Multi-Tenancy
-
-## Implementation status as of 2026-05-31
-
-The first local-registry implementation pass has landed.
-
-Committed implementation milestones:
-
-- `011775ce` — hardened local user-space YAML persistence and registry/config handlers:
-  - atomic sibling-temp writes with parent-directory fsync;
-  - private user-space directory/file permissions;
-  - process-local YAML mutation lock;
-  - schema-version checks for `projects.yaml`, `studio.yaml`, and `recent.yaml`;
-  - browser-session authorization on read/write handlers;
-  - safer project forget/config-update semantics.
-- `94d7af51` — backend project-open session binding and tenant seam:
-  - `UserSpaceResolver`, `LocalUserSpaceResolver`, and `LOCAL_PRINCIPAL_ID`;
-  - `BrowserSessionStore::set_project_root`;
-  - `ui.studio.projects.open` service/route;
-  - project open canonicalizes the stored root, rebinds the browser session, and touches recents.
-- `697c8c53` — Studio client project-open wiring:
-  - Projects view list/open flow;
-  - `POST /ui/api/studio/projects/open` browser effect;
-  - stale project-bound pending effect invalidation after session rebinding;
-  - Projects launcher/route/focused-row activation.
-- `be6aab0f` — Studio client current-project registration:
-  - Projects view shows `Register current project` when the current session project is not registered;
-  - existing `ui.studio.projects.add` is used directly; no button-specific backend service was added;
-  - successful registration refetches the project list.
-
-Current state:
-
-- local project registry is backend-complete for list/add/open/forget/resolve/config/recent basics;
-- Studio can register the current project, list known projects, and open a project through session rebinding;
-- local persistence uses `<user_root>/.ai/config/projects.yaml`, `<user_root>/.ai/config/studio.yaml`, and `<user_root>/.ai/state/studio/recent.yaml`;
-- the tenancy seam exists, but handlers still resolve the synthetic local principal.
-
-Not yet implemented:
-
-- real principal extraction from UI/API requests;
-- principal-scoped local user-space layout;
-- hosted tenant storage;
-- account/org/workspace membership or authorization policy;
-- project-local identity.
-
-Use this note now as both the record of what landed and the checklist for the remaining principal/multi-tenant work.
+# Future Principal Spaces, Project/World Registries, and Hosted Boundaries
 
 ## Purpose
 
-This note records the agreed direction for adding local project discovery and user-facing Studio state to RyeOS without over-splitting the regular install or prematurely implementing hosted multi-tenancy.
+This note describes the future boundary model beyond the current local/hosted-principal Studio substrate.
 
-The regular RyeOS install should feel like a complete local OS:
+The goal is to grow from local project registration into Cockpit-managed principal spaces, hosted project/world registries, portal discovery, and eventually multi-principal hosted operation without turning hosted providers or app-local auth into RyeOS identity authorities.
 
-- node identity and daemon operation;
-- user/principal signing key and user-space config;
-- Studio UI;
-- known local projects;
-- recent/open project state;
-- project-scoped files/items/threads/remotes views.
+## Baseline assumed
 
-The multi-tenant/cloud layer remains a future extension. Do not make local project discovery a separate product/bundle layer just to preserve future hosting optionality.
+This future work assumes the current substrate already provides:
 
-## Decision summary
+- local principal/user-space state;
+- principal-aware hosted user-space seams;
+- Studio/Cockpit project registration and launch flows;
+- hosted-node as the bundle for always-on hosted RyeOS behavior;
+- central-auth as optional app-local realm auth.
 
-Regular local RyeOS should include Studio and local project support by default. The only major optional future layer is hosted/multi-tenant/cloud behavior.
-
-Do not introduce a new `.ai/user/` directory for this work. Extend the existing user-space `.ai/config` and `.ai/state` split:
-
-```text
-<user_root>/.ai/config/  durable user/principal-local facts
-<user_root>/.ai/state/   RyeOS/Studio runtime, projection, recent, and cache state
-```
-
-Keep `.ai/node/` strictly node/daemon-owned:
-
-```text
-<system_space>/.ai/node/ daemon identity, auth, bundle registrations, routes, verbs, aliases, node policies
-```
-
-Defer project-local identity until there is a clear trigger. Start with a user-space known-project registry only.
-
-If project-local identity is later needed, prefer:
-
-```text
-<project_root>/.ai/config/project.yaml
-```
-
-not:
-
-```text
-<project_root>/.ai/project.yaml
-```
+Those are not restated here as implementation history. This doc is about what remains ahead.
 
 ## Ownership model
 
-Use this as the implementation invariant:
+Keep these boundaries stable:
 
 ```text
-system/node space
+node space
   answers: what is this daemon/node, what does it serve, who can call it?
 
-user/principal space
-  answers: what does this local RyeOS principal know, prefer, and carry between installs?
+principal space
+  answers: what does this RyeOS principal know, prefer, own, pin, and carry?
 
 project space
-  answers: what AI items/config belong to this project checkout?
+  answers: what AI items/config belong to this project checkout or project object?
+
+world space
+  answers: what signed state, frame policy, portals, dimensions, and heads define this world?
 
 runtime state
-  answers: what did RyeOS recently observe, cache, index, or run?
+  answers: what did RyeOS recently observe, cache, index, run, or project?
 ```
 
-This keeps local UX state out of node authority and avoids turning node internals into user preferences.
+Do not put user preferences, project registries, recent portals, or personal profile state under node authority. Do not put node identity, auth grants, route registrations, or hosted admission policy under principal preferences.
 
-## Concrete layout
+## Future project/world registry
 
-### System/node space
+The current local project registry answers a local question:
 
-`<system_space>/.ai/node/` remains node-owned.
+> Which projects does this local principal know about, and where are they on this machine?
 
-Current and near-term layout:
+The future registry should answer richer questions:
 
-```text
-<system_space>/.ai/node/
-  config.yaml
-  identity/
-    private_key.pem
-    public_identity.json
-  auth/
-    authorized_keys/
-      <fingerprint>.toml
-  bundles/
-  routes/
-  verbs/
-  aliases/
-```
+- Which projects/worlds does this principal own?
+- Which projects/worlds are pinned, followed, hosted, mirrored, or recently opened?
+- Which portals point into those worlds?
+- Which hosted nodes make them reachable?
+- Which project/world policies govern collaboration?
+- Which local paths correspond to portable project/world identities on this machine?
 
-Future node-owned additions may include:
+Future registry entries should distinguish:
 
-```text
-<system_space>/.ai/node/
-  peers/
-  policies/
-```
-
-Do not put the local Studio project registry, recent projects, Studio preferences, or profile data under `.ai/node/`.
-
-### User/principal config
-
-Durable user/principal-local facts live under:
-
-```text
-<user_root>/.ai/config/
-```
-
-Target layout:
-
-```text
-<user_root>/.ai/config/
-  keys/
-    signing/
-      private_key.pem
-  projects.yaml
-  studio.yaml
-  profile.yaml        # optional/later
-  remotes/
-    remotes.yaml
-```
-
-`config` is for user-intent and durable local facts. It may be edited, backed up, or carried to another local install.
-
-### User/principal state
-
-RyeOS/Studio-maintained runtime and projection data lives under:
-
-```text
-<user_root>/.ai/state/
-```
-
-Target layout:
-
-```text
-<user_root>/.ai/state/
-  studio/
-    recent.yaml
-    sessions/         # only if safe, expiring, and non-secret
-  projects/
-    index.yaml        # optional derived cache/index
-```
-
-`state` is disposable and rebuildable. Deleting it should lose only recents, caches, projections, or recoverable runtime/session metadata — not user intent.
-
-### Project space
-
-Existing project-local AI content remains under the project `.ai` directory:
-
-```text
-<project_root>/.ai/
-  config/
-  directives/
-  tools/
-  knowledge/
-```
-
-No project-local identity file is required for the first local Studio project registry implementation.
-
-If a project-local identity document is later needed, use:
-
-```text
-<project_root>/.ai/config/project.yaml
-```
-
-Keep absolute local paths out of any signed project identity payload. Paths are locators and belong in the user-space project registry.
-
-## `projects.yaml` contract
-
-`<user_root>/.ai/config/projects.yaml` is the durable known-project registry for the local principal/user space.
-
-It should represent user intent:
-
-- projects the user explicitly added;
-- projects Studio auto-added because the user explicitly opened them;
-- durable display metadata such as name/tags;
-- local root locator for the current machine.
-
-It should not become a passive scan cache.
-
-Initial shape:
-
-```yaml
-version: 1
-projects:
-  - local_id: "prj_01h..."
-    name: "ryeos-next"
-    root: "/home/leo/projects/ryeos-next"
-    added_at: "2026-05-30T00:00:00Z"
-    tags: []
-```
-
-Field guidance:
-
-| Field | Meaning |
+| Field type | Meaning |
 |---|---|
-| `version` | Schema version. Start at `1`. |
-| `local_id` | Opaque local registry ID. Not a global/signed project identity. |
-| `name` | User-facing project label. |
-| `root` | Local project root path for this machine/user space. |
-| `added_at` | When this local registry entry was created. |
-| `tags` | Optional durable user labels. |
+| Local locator | machine-specific path or launch URL |
+| Portable identity | signed project/world object, ref, or policy hash |
+| Display metadata | local label, tags, ordering, pinned state |
+| Hosted presence | node descriptors/portals that keep it reachable |
+| Derived state | caches, recents, health, indexes, sync status |
 
-Keep transient or derived data out of this file:
+Absolute local paths must stay local. They are locators, not portable identity.
 
-- last opened timestamps;
-- recent files;
-- scan status;
-- health/check status;
-- file counts;
-- detected languages;
-- indexed item summaries.
+## Project and world identity
 
-Put that under user state instead, for example:
+Future portable identity should come from signed objects, not local paths.
+
+Possible objects:
 
 ```text
-<user_root>/.ai/state/projects/index.yaml
-<user_root>/.ai/state/studio/recent.yaml
+project-policy/v1
+world-policy/v1
+portal/v1
+frame-policy/v1
+signed-ref-update/v1
+node-descriptor/v1
 ```
 
-## `studio.yaml` contract
+Use local registry entries to map those portable identities to local roots, checked-out workspaces, cached closures, or hosted portals.
 
-`<user_root>/.ai/config/studio.yaml` stores durable Studio preferences.
+Do not make a project's absolute path part of signed project identity. A project can move machines. A world can be hosted by many nodes. A portal can be mirrored.
 
-Initial possible shape:
+## Principal spaces
 
-```yaml
-version: 1
-theme: system
-landing_view: projects
-default_open_mode: normal
-```
+A principal space is the durable local/hosted state associated with a RyeOS principal.
 
-Use this file for stable preferences such as:
+It may eventually contain:
 
-- theme;
-- preferred landing view;
-- default open/read-only behavior;
-- durable layout preferences;
-- user-visible feature toggles.
+- known projects;
+- known worlds;
+- pinned portals;
+- trusted node descriptors;
+- profile/display metadata;
+- local preferences;
+- remotes/reachability;
+- object pins;
+- hosted leases;
+- recent activity;
+- app-local realm linkages where useful.
 
-Do not store recent projects, transient tabs, daemon session tokens, or scan results in `studio.yaml`.
+Principal space should remain portable and inspectable. If a provider hosts it, the provider stores/syncs signed state; it does not become the source of identity.
 
-## Studio state contract
+## Hosted boundaries
 
-Use:
+A hosted node can make a principal's portals and worlds reachable while their local machine is offline.
+
+Hosted node responsibilities may include:
+
+- serving object closures;
+- hosting portal entrypoints;
+- publishing accepted heads;
+- running subscriptions;
+- running admitted jobs;
+- maintaining indexes/search;
+- mirroring pinned worlds;
+- storing hosted principal-space state.
+
+Hosted node responsibilities should not include:
+
+- global RyeOS identity;
+- central execution authority;
+- hidden ownership of world truth;
+- uninspectable provider-only project state.
+
+A hosted node is reachability and presence. Authority remains in signed objects, pinned descriptors, node-local grants, and policy.
+
+## central-auth boundary
+
+`central-auth` is app-local realm auth.
+
+It may be used by a portal app to decide whether a human browser session can enter or interact with that app realm.
+
+It must not be treated as:
+
+- RyeOS global login;
+- RyeOS principal identity;
+- protocol execution authority;
+- hosted-node trust root;
+- world ownership source.
+
+Useful distinction:
 
 ```text
-<user_root>/.ai/state/studio/recent.yaml
+central-auth: can this browser visitor enter this app realm?
+RyeOS principal: who signed this world/policy/execution object?
+node-local grant: will this node admit or execute this request?
+world policy: is this change accepted into this world?
 ```
 
-for recent, rebuildable Studio state, such as:
+## Multi-tenancy path
 
-```yaml
-version: 1
-recent_projects:
-  - local_id: "prj_01h..."
-    opened_at: "2026-05-30T00:00:00Z"
-```
+True hosted multi-tenancy should be treated as advanced work.
 
-Use:
+Prefer this near-term shape:
 
 ```text
-<user_root>/.ai/state/studio/sessions/
+one hosted node / isolated hosted space per operator or small trust boundary
 ```
 
-only if persistent Studio sessions become necessary.
-
-Guardrail: do not persist powerful browser auth tokens or long-lived launch/session secrets without an explicit auth lifecycle design:
-
-- TTL;
-- revocation;
-- logout semantics;
-- file permissions;
-- recovery behavior after daemon restart.
-
-The current in-memory browser session model is safer until session restore is a real requirement.
-
-## Project-local identity: deferred
-
-Do not require project-local identity for the first Studio project registry implementation.
-
-The local registry can answer the immediate UI question:
-
-> Which projects does this local RyeOS user space know about, and where are they on disk?
-
-Introduce project-local identity only when one of these triggers appears:
-
-- stable identity across machines is needed;
-- cloud sync must distinguish “same project at moved path” from “different project with same name”;
-- project-specific signed remotes or policies are needed;
-- collaboration requires project-level ownership/attestation;
-- admission/federation needs project identity independent of local path.
-
-When introduced, prefer:
+before this shape:
 
 ```text
-<project_root>/.ai/config/project.yaml
+many unrelated principals sharing one daemon with strong isolation
 ```
 
-Possible future shape:
+Shared-daemon hosting requires:
 
-```yaml
-version: 1
-project_id: "proj_01h..."
-name: "ryeos-next"
-created_at: "2026-05-30T00:00:00Z"
-owner_principal: "fp:<fingerprint>"
-```
+- principal-scoped storage;
+- principal-scoped vault reads;
+- quotas and accounting;
+- durable audit logs;
+- strict auth scope enforcement;
+- replay protection persistence;
+- per-principal object ownership/GC;
+- policy-aware admission/execution;
+- safe browser/session lifecycle;
+- clear tenant data export/deletion semantics.
 
-If signed later, do not include absolute local paths in the signed payload.
+Do not accidentally ship shared-daemon multi-tenancy because it was convenient for the UI.
 
-## API/service direction
+## Vault and secrets
 
-Expose the local registry through Studio/UI-oriented daemon services rather than making the browser read files directly.
+Multi-principal hosted operation eventually needs principal-scoped vault behavior.
 
-Implemented service surface includes operations equivalent to:
+Future vault reads should answer:
 
 ```text
-ui.studio.projects.list
-ui.studio.projects.add
-ui.studio.projects.forget
-ui.studio.projects.resolve
-ui.studio.projects.open
-ui.studio.recent.touch
-ui.studio.recent.list
-ui.studio.config.get
-ui.studio.config.update
+which principal is executing?
+which declared secret does this item request?
+which vault entry grants that principal access?
+which node is decrypting it?
+which policy allowed this execution?
 ```
 
-Do not add one endpoint per UI button. Prefer resource-style services (`projects.add`, `projects.open`, `projects.forget`) and let client actions compose those services. For example, Studio's `Register current project` UI action calls the existing `ui.studio.projects.add` service with the current session root; it does not introduce `projects.add_current`.
+Until that exists, public or unrelated-tenant hosted execution should avoid sharing one secret store across principals.
 
-Use a tool instead of a service only when the operation is an executable workflow rather than daemon/UI state management. Good future tool candidates include project scanning, metadata import, health checks, migrations, or AI-generated summaries. The project registry itself is daemon-mediated user-space state, so it remains a service surface.
+## Remote execution and jobs
 
-Naming guidance:
+Future hosted project/world registries will need durable jobs:
 
-- Use `studio` or `ui` for new names.
-- Do not introduce new `cockpit` names.
-- Existing compatibility names may remain temporarily if needed, but should not be the source of truth for new contracts.
+- validation jobs;
+- portal launch jobs;
+- simulation ticks;
+- directive/entity runs;
+- object closure sync;
+- hosted build/render jobs;
+- admission/moderation workflows.
 
-Behavioral requirements:
+These should become signed/durable job and result objects with visible provenance, not hidden provider tasks.
 
-- canonicalize project roots when registering;
-- reject non-absolute roots unless a CLI/front-end resolver canonicalizes first;
-- handle missing/moved projects gracefully;
-- write YAML atomically;
-- avoid passive home-directory scanning by default;
-- keep file APIs scoped to a selected/registered project root.
+Cockpit should eventually show:
 
-Current implementation notes:
+- initiating principal;
+- target node;
+- input object hashes;
+- policy/grant used;
+- job status;
+- output object hashes;
+- result signature;
+- event stream/replay.
 
-- `projects.add` canonicalizes accessible absolute roots and updates an existing entry by canonical root;
-- `projects.open` canonicalizes the stored root, requires a writable browser session, rebinds that session, and touches recents;
-- read handlers require a valid browser session;
-- write handlers reject read-only sessions;
-- `local_id` wins for forget semantics, so missing/moved roots can still be removed.
+## Registry and discovery stance
 
-## User-space path helper seam
+Registries are indexes, not roots of truth.
 
-Preserve future hosted compatibility by centralizing user-space path construction now.
+They can provide:
 
-Do not let Studio handlers hardcode `~/.ryeos` or manually concatenate user paths everywhere.
+- search;
+- human-friendly names;
+- featured portals;
+- world indexes;
+- hosted availability;
+- namespace convenience;
+- cached metadata.
 
-Implemented helper shape:
+But verification remains local:
 
-```rust
-pub struct UserSpacePaths {
-    pub root: PathBuf,
-}
+- object hashes;
+- signatures;
+- signed policies;
+- signed node descriptors;
+- pinned trust decisions.
 
-impl UserSpacePaths {
-    pub fn config(&self, rel: impl AsRef<Path>) -> PathBuf { ... }
-    pub fn state(&self, rel: impl AsRef<Path>) -> PathBuf { ... }
-}
-```
+Human-friendly names are social/convenience objects. Self-certifying identifiers remain the cryptographic base.
 
-The app layer now also exposes a resolver seam:
+## Cockpit UX future
 
-```rust
-pub trait UserSpaceResolver {
-    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths>;
-}
+The Cockpit should eventually show principal space as a living map:
 
-pub struct LocalUserSpaceResolver;
-pub const LOCAL_PRINCIPAL_ID: &str = "local";
-```
+- local projects;
+- portable projects/worlds;
+- pinned portals;
+- hosted nodes;
+- trust pins;
+- app realms;
+- recent worlds;
+- sync status;
+- running jobs;
+- object availability;
+- unresolved policy/trust decisions.
 
-Studio handlers currently call this seam through `resolve_user_space_paths(...)` and still pass the synthetic local principal. That is the intended local-mode transitional state.
+The user should understand the difference between:
 
-Use stable logical relative paths:
+- local-only project;
+- portable signed project/world;
+- hosted portal;
+- app-local realm;
+- trusted hosted node;
+- mirrored object closure;
+- admitted world head.
 
-```text
-config/projects.yaml
-config/studio.yaml
-state/studio/recent.yaml
-state/projects/index.yaml
-```
+## Trigger list
 
-Next, this should become a principal-aware resolver without changing every Studio handler:
+Implement the advanced pieces when these pressures appear:
 
-```rust
-pub trait UserSpaceResolver {
-    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths>;
-}
-```
-
-Do not implement hosted tenant storage now.
-
-Remaining Level-1 principal work:
-
-1. Decide the local principal-scoped physical layout.
-2. Add a principal extraction function for Studio/UI handler contexts.
-3. Replace `LOCAL_PRINCIPAL_ID` at the handler boundary with the extracted local principal.
-4. Preserve backwards compatibility for the current singleton local files, either by treating the local operator as the singleton principal or by adding a one-time migration/copy strategy.
-5. Add tests proving two distinct principals get separate `projects.yaml`, `studio.yaml`, and `recent.yaml` data through the same service handlers.
-
-## Normal install scope
-
-Regular RyeOS local install should include:
-
-- core/standard execution substrate;
-- node identity and user signing key support;
-- Studio UI;
-- local project registry support;
-- Studio config/recent state support.
-
-Do not split local project registry into a separate user-visible “workspace” product layer.
-
-Transitional implementation may keep physically separate internal bundle directories if that reduces churn, but normal install should always include/register Studio and its local project support.
-
-The only major optional future layer is hosted-node/provider behavior and, much later, true shared-daemon multi-tenancy.
-
-## Deferred hosted-node and multi-tenant layers
-
-Hosted-node/provider work should be separate from standard/local. RyeOS Cloud, if offered, should mean provisioning and operating RyeOS nodes, not centralizing RyeOS identity.
-
-True shared-daemon multi-tenancy should be deferred until a real product requirement appears, such as:
-
-- multiple unrelated principals share one daemon/node concurrently;
-- browser access must work directly against a hosted node without a trusted local launcher;
-- user spaces need non-filesystem or tenant-backed storage;
-- per-principal vault partitioning is required;
-- quotas/billing/audit require tenant isolation;
-- cloud sync needs durable project identity and principal-scoped policy;
-- browser sessions need server-side persistence across daemon restarts.
-
-When triggered, shared hosted mode should virtualize the same logical user-space files behind a resolver, not invent a different local contract:
-
-```text
-tenant:<principal>/config/projects.yaml
-tenant:<principal>/config/studio.yaml
-tenant:<principal>/state/studio/recent.yaml
-```
-
-Physical hosted layout is intentionally deferred. A possible future shape:
-
-```text
-<system_space>/.ai/tenants/
-  <principal-id>/
-    .ai/
-      config/
-        projects.yaml
-        studio.yaml
-      state/
-        studio/
-          recent.yaml
-```
-
-or:
-
-```text
-<system_space>/.ai/node/tenants/
-  <principal-id>/
-    user-space/
-      .ai/
-        config/
-        state/
-```
-
-Do not choose this physical layout now. The important near-term constraint is that code uses logical user-space paths through a helper/resolver seam.
-
-## Future hosted auth direction
-
-Future hosted RyeOS should use key-based, node-local admission/session flows rather than making email/password or a central cloud account the primary identity root.
-
-RyeOS Cloud may offer a provider UI for provisioning, billing, and descriptor delivery, but that provider UI must not become the authority for RyeOS execution requests. A hosted node must still verify signed requests against its own node-local grants.
-
-Reserve this contract direction:
-
-```text
-POST /admission/challenge
-POST /admission/claim
-```
-
-The client signs a nonce/audience challenge with an appropriate RyeOS key. The target node verifies the claim and materializes a node-local grant or a node-local UI/API session bound to explicit scopes.
-
-This belongs to hosted-node/remote admission work, not the immediate local Studio registry implementation. It should be node-local and decentralized, not a central cloud login service.
-
-## Guardrails
-
-### Do not pollute `.ai/node`
-
-`.ai/node` is for node/daemon authority. Do not place local Studio preferences, known projects, recent projects, or user profile data there.
-
-### Keep config from becoming a cache
-
-If deleting a file loses user intent, it belongs in `config`. If deleting it only causes rebuild/recent-history/cache loss, it belongs in `state`.
-
-### Keep paths local
-
-Absolute local paths may appear in local `config/projects.yaml`. Do not put absolute paths in signed project identity, distributed refs, or admission objects.
-
-### Keep Studio file access scoped
-
-Studio file APIs should operate on canonical selected/registered project roots, not arbitrary browser-provided absolute paths.
-
-### Keep session persistence conservative
-
-Prefer in-memory browser sessions until persistent sessions have a complete security lifecycle.
-
-### Avoid new `cockpit` naming
-
-Use `studio` / `ui` for new services, schemas, routes, docs, and user-facing labels.
-
-### Avoid premature tenant design
-
-Use a path helper/resolver seam. Do not implement tenant directories, per-principal vaults, orgs, quotas, or billing until hosted mode requires them.
-
-### Avoid central auth assumptions
-
-Do not design RyeOS Cloud as a central identity provider for execution. Hosted providers can provision nodes and deliver descriptors/admission material, but every remote execution request must still be authorized by the target RyeOS node's local grant/capability policy.
-
-### Treat remote descriptors as trust pins, not credentials
-
-Remote descriptors may include URLs, public keys, fingerprints, capabilities, and provider signatures. They must not include long-lived bearer secrets, private keys, or authority by themselves. Access comes from signed requests checked against target-node grants.
-
-## Completed local implementation boundary
-
-The first implementation pass focused on and completed:
-
-1. Define `UserSpacePaths` and a resolver seam for user config/state paths.
-2. Add atomic read/write helpers for:
-   - `config/projects.yaml`;
-   - `config/studio.yaml`;
-   - `state/studio/recent.yaml`.
-3. Add Studio/UI services for project list/add/forget/resolve/open and config/recent reads/writes.
-4. Wire Studio startup/project picker/register-current/open flow to those services.
-5. Keep browser file access rooted in a canonical selected project.
-6. Do not add project-local identity yet.
-7. Do not implement hosted multi-tenancy yet.
-
-## Remaining roadmap to decentralized hosted/principal support
-
-### Level 1: principal-aware local user space
-
-Goal: prove local user-space isolation without implementing hosted accounts or tenant storage.
-
-Work items:
-
-1. Choose the local principal ID source.
-   - Candidate: the verified browser/CLI key fingerprint already available through signed launch/session creation.
-   - Local compatibility option: keep the current singleton local root for the default local operator, and only use scoped roots when a non-default principal is present.
-2. Add principal information to browser session state.
-   - Store a `principal_id` or equivalent verified caller identity on `BrowserSession`.
-   - Ensure session minting has enough signed-request context to set it.
-3. Add typed principal extraction for handlers.
-   - Avoid loose JSON `_caller_fingerprint`-style fields.
-   - Prefer a typed context/session accessor used by all Studio user-space handlers.
-4. Route `resolve_user_space_paths(ctx)` through that principal.
-   - Remove direct `LOCAL_PRINCIPAL_ID` usage from the handler boundary.
-   - Keep `LocalUserSpaceResolver` as the local filesystem resolver.
-5. Add isolation tests.
-   - Same daemon, two principals, separate project registries.
-   - Separate `studio.yaml` preferences.
-   - Separate `recent.yaml` recents.
-   - Existing singleton local behavior still works.
-
-This level should not add orgs, quotas, billing, per-principal vault partitions, or hosted storage.
-
-### Level 2: decentralized remote-node identity and admission
-
-Goal: let local RyeOS connect to self-hosted or provider-hosted RyeOS nodes without introducing a central identity provider.
-
-RyeOS Cloud, if offered, is a hosted node/provisioning provider. It is not the root authority for RyeOS protocol calls. Runtime authority remains with the target RyeOS node: node identity, pinned descriptors, signed requests, authorized-key grants, and explicit scopes.
-
-Core invariant:
-
-> A remote request is allowed because the target RyeOS node has a local grant for the caller key, not because a central cloud service says the caller is logged in.
-
-Use these identity roles distinctly:
-
-| Role | Meaning |
+| Trigger | Future work |
 |---|---|
-| local node key | Signs remote execution/setup requests from the local RyeOS node. |
-| user/principal key | May sign local UI/session/admission flows later, but is not a central account login. |
-| hosted/remote node key | Identifies the target node and is pinned in the local remote descriptor. |
-| node-local grant | Target-node authorization record mapping caller key to explicit scopes. |
+| Same project/world moves across machines | signed project/world identity and local locator mapping |
+| Portals need always-on reachability | hosted node descriptors and hosted portal objects |
+| Visitors enter a portal without RyeOS keys | app-local realm auth boundary |
+| Builders sign world changes | project/world policy as signed CAS |
+| Multiple unrelated users share a daemon | true multi-tenancy isolation |
+| Secrets are used in hosted jobs | principal-scoped vault reads |
+| Long jobs outlive requests | durable signed job/result objects |
+| Worlds need mirrors/discovery | registries as indexes and peer sync |
+| Hosted fleets become operationally complex | fleet enrollment/hardware attestation as advanced path |
 
-Standard/local RyeOS should support generic remote-node UX:
+## Guiding rule
 
-1. import or discover a remote descriptor;
-2. pin the remote node fingerprint;
-3. run node-local admission if required;
-4. store the resulting remote config as user/principal intent;
-5. execute against that remote using signed requests and target-node grants.
-
-The provider/provisioning layer may create nodes, return descriptors, manage DNS/TLS, and issue short-lived admission material. It must not become a hot-path identity provider for remote execution.
-
-Work items:
-
-1. Define a `RemoteDescriptor` contract.
-   - URL;
-   - target node public key/fingerprint;
-   - supported capabilities;
-   - optional admission methods;
-   - optional provider signature proving descriptor provenance.
-2. Make descriptor import/configuration explicit in CLI and Studio.
-   - Descriptor is not a credential;
-   - key changes require explicit re-pin;
-   - TOFU discovery must display fingerprints clearly.
-3. Add or standardize node-local admission flow.
-   - one-time/short-lived admission code or challenge;
-   - claim signed by local node key;
-   - target node materializes a normal authorized-key grant;
-   - future requests go directly local-node → target-node.
-4. Add `remote doctor`/Studio status that explains:
-   - local caller node fingerprint;
-   - pinned remote node fingerprint;
-   - whether caller is authorized;
-   - missing scopes;
-   - suggested authorize/admit command.
-5. Keep Cloud-specific UX as provisioning/descriptor/admission convenience, not central login.
-
-Example remote descriptor shape:
-
-```yaml
-version: 1
-name: hosted-prod
-url: https://node-abc.ryeos.example
-node:
-  public_key: ed25519:...
-  fingerprint: sha256:...
-capabilities:
-  remote_execute: true
-  bundle_install: true
-  vault: true
-admission:
-  methods:
-    - one_time_code
-provider:
-  name: RyeOS Cloud
-  node_id: cloud-node-abc
-  descriptor_signature: optional-provider-signature
-```
-
-Example decentralized hosted-node bootstrap:
-
-```text
-provider/provisioner creates hosted node
-  -> returns remote descriptor + one-time admission material
-local RyeOS imports descriptor and pins node identity
-  -> local node signs admission claim
-hosted node validates claim locally
-  -> hosted node writes authorized-key grant for local node key
-future remote execution
-  -> direct signed local-node request checked against hosted-node grants
-```
-
-### Level 3: local/browser principal sessions
-
-Goal: make browser/API sessions explicitly bound to a verified principal where needed, while keeping auth node-local/decentralized.
-
-Work items:
-
-1. Define the local UI session principal contract.
-   - Which key signs launch/mint requests?
-   - Which principal does that key represent?
-   - How does read-only mode interact with principal identity?
-2. Extend `BrowserSession` and `BrowserSessionStore` with principal metadata.
-3. Thread principal metadata into `HandlerContext` or an adjacent typed accessor.
-4. Audit all UI handlers that mutate user/node/project state and decide which identity they require.
-5. Add tests for expired/invalid/read-only sessions and principal mismatch behavior.
-
-This may be implemented for local standard sessions and hosted-node browser sessions, but it should still verify against a node-local challenge/session model. Do not introduce a central cloud auth root.
-
-### Level 4: hosted-node bundle/provider layer
-
-Goal: package a RyeOS node as a hosted remote target and provide infrastructure/provisioning around it.
-
-This is outside standard/local. Standard may be a client of hosted nodes, but it should not contain provider control-plane logic.
-
-Hosted-node bundle/layer should include:
-
-- public HTTPS deployment assumptions;
-- node discovery and descriptor generation;
-- node-local admission endpoints/services;
-- stricter default remote policies;
-- audit logs for admission and grant changes;
-- operational telemetry;
-- setup/run affordances through existing remote services.
-
-Provider/provisioning surface may include:
-
-- node provisioning;
-- DNS/TLS/gateway setup;
-- descriptor delivery;
-- one-time admission material delivery;
-- billing/ops outside the RyeOS execution auth path.
-
-Provider/provisioning surface must not include:
-
-- central bearer tokens accepted by hosted nodes as execution authority;
-- account membership as the primary remote authorization check;
-- implicit cross-node authority;
-- shared-daemon tenant isolation unless the daemon itself is tenant-aware.
-
-### Level 5: true hosted multi-tenancy
-
-Goal: support multiple unrelated principals sharing one hosted daemon or hard-partitioned hosted substrate.
-
-Do not put this in standard/local. Prefer isolated hosted nodes/containers per user/org/project boundary until the operational cost forces shared-daemon tenancy.
-
-Work items:
-
-1. Tenant-backed logical user-space storage behind `UserSpaceResolver`.
-2. Tenant-aware CAS namespace/policy.
-3. Tenant-aware vault namespace/policy.
-4. Tenant-aware thread/run storage.
-5. Tenant-aware capability policy on every route/service.
-6. Per-tenant quotas, audit, revocation, backup/restore, and recovery flows.
-7. Optional org/workspace membership if it is enforced by the hosted node/substrate rather than a central bypass.
-8. Project identity only if sync/federation/attestation needs path-independent identity.
-
-Do not begin Level 5 until there is a concrete hosted requirement that isolated hosted nodes cannot satisfy.
+Keep local paths local, app auth app-local, hosted nodes non-authoritative, and RyeOS authority signed.
