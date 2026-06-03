@@ -1,0 +1,52 @@
+# ryeos:signed:2026-06-02T03:52:09Z:ddbb5fbe291bbed3c66413eeaa95f641999a6836038611df7ef5789d90db5ebd:o7yWfccB29xrIM5FxOIeF+/lIqcE6tasTuhr3xJAesQr9VxhEbKN4bR4MsrHVdZnSACrz040yE7Q7pkMczIGBw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+version: "0.1.0"
+category: "ryeos/central-auth"
+name: "create-principal"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.ryeos.central-auth.create-principal"]
+description: "Create a central-auth principal with roles, capabilities, and optional passphrase."
+
+config:
+  command: "python3"
+  args:
+    - "{tool_dir}/../../../bin/central_auth.py"
+    - "create-principal"
+  input_data: "{params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root used for .ai/state/central-auth storage."
+    state_root:
+      type: string
+      description: "Optional absolute central-auth state root override."
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. tv-tracker."
+    principal_id:
+      type: string
+    display_name:
+      type: string
+    roles:
+      type: array
+      items: { type: string }
+      default: []
+    capabilities:
+      type: array
+      items: { type: string }
+      default: []
+    passphrase:
+      type: string
+    bootstrap:
+      type: boolean
+      default: false
+    replace:
+      type: boolean
+      default: false
+    disabled:
+      type: boolean
+      default: false
+  required: [realm_id, principal_id, display_name]

@@ -1,0 +1,33 @@
+# ryeos:signed:2026-06-02T03:52:12Z:2bd44cb9936f938bbd80fe6e551ebfa9b9410dcd32a6467cbf06d74f74bcf310:XepLjLYRET3z+fg9VDJXADV1vRAddlzCBFrGD254nDJYPJ15CFUcotyqbc+KrROeFr+B+Ud+wrOrLQISOTnHBw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+version: "0.1.0"
+category: "ryeos/central-auth"
+name: "verify-session"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.ryeos.central-auth.verify-session"]
+description: "Verify a session token and optionally check one required capability."
+
+config:
+  command: "python3"
+  args:
+    - "{tool_dir}/../../../bin/central_auth.py"
+    - "verify-session"
+  input_data: "{params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root used for .ai/state/central-auth storage."
+    state_root:
+      type: string
+      description: "Optional absolute central-auth state root override."
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. tv-tracker."
+    session_token:
+      type: string
+    required_capability:
+      type: string
+  required: [realm_id, session_token]

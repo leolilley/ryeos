@@ -1,0 +1,31 @@
+# ryeos:signed:2026-06-02T03:52:15Z:7db760b6882d534f5c350379568f2abae4f1ef7d77a6d2f8189746fb4d85795a:Rc48iAWhUI1FLD7e6E99BVuCEUKmm5le65AzDXPRJSObKg0y1VfOgGsbsq3qsle6t98JPbDcYt7AF/pkKOa7Aw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+version: "0.1.0"
+category: "ryeos/central-auth"
+name: "revoke-session"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.ryeos.central-auth.revoke-session"]
+description: "Revoke one session token."
+
+config:
+  command: "python3"
+  args:
+    - "{tool_dir}/../../../bin/central_auth.py"
+    - "revoke-session"
+  input_data: "{params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root used for .ai/state/central-auth storage."
+    state_root:
+      type: string
+      description: "Optional absolute central-auth state root override."
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. tv-tracker."
+    session_token:
+      type: string
+  required: [realm_id, session_token]
