@@ -14,12 +14,19 @@ use super::types::{FireRecord, ScheduleSpecRecord};
 use crate::SchedulerContext;
 
 /// A fire to dispatch after listeners are bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeIntentKind {
+    ReclaimExisting,
+    DispatchNew,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResumeIntent {
     pub fire_id: String,
     pub spec: ScheduleSpecRecord,
     pub scheduled_at: i64,
     pub trigger_reason: &'static str,
+    pub kind: ResumeIntentKind,
 }
 
 /// Full reconciliation sequence. Run after `SchedulerDb` is open, before timer starts.
@@ -68,32 +75,15 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     let now = lillux::time::timestamp_millis();
 
     for spec in &specs {
-        let last_fire_at = match db.get_last_fire(&spec.schedule_id) {
-            Ok(Some(f)) => Some(f.scheduled_at),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::error!(
-                    schedule_id = %spec.schedule_id,
-                    error = %e,
-                    "reconcile: failed to query last fire — skipping misfire evaluation"
-                );
-                continue;
-            }
-        };
-
-        // evaluate_misfires internally calls detect_misfires and handles
-        // the gap detection + policy evaluation. Only call it if we have
-        // a previous fire (otherwise there's no gap to evaluate).
-        if last_fire_at.is_some() {
-            let pending = misfire::evaluate_misfires(spec, ctx, now).await;
-            for p in pending {
-                intents.push(ResumeIntent {
-                    fire_id: p.fire_id,
-                    spec: spec.clone(),
-                    scheduled_at: p.scheduled_at,
-                    trigger_reason: p.reason,
-                });
-            }
+        let pending = misfire::evaluate_misfires_before(spec, ctx, now, now).await;
+        for p in pending {
+            intents.push(ResumeIntent {
+                fire_id: p.fire_id,
+                spec: spec.clone(),
+                scheduled_at: p.scheduled_at,
+                trigger_reason: p.reason,
+                kind: ResumeIntentKind::DispatchNew,
+            });
         }
     }
 
@@ -170,6 +160,7 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                                     spec,
                                     scheduled_at: fire.scheduled_at,
                                     trigger_reason: "recovery_thread_lost",
+                                    kind: ResumeIntentKind::ReclaimExisting,
                                 });
                             }
                             _ => {
@@ -211,6 +202,7 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                             spec,
                             scheduled_at: fire.scheduled_at,
                             trigger_reason: "recovery",
+                            kind: ResumeIntentKind::ReclaimExisting,
                         });
                     }
                     _ => {

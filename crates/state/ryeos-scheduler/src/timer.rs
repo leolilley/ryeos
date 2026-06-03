@@ -397,10 +397,10 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
     let fid = types::fire_id(&spec.schedule_id, scheduled_at);
 
     // ── Misfire evaluation ───────────────────────────────────
-    let mut misfire_fires = misfire::evaluate_misfires(spec, ctx, now).await;
-
-    // Gap 4.3: Exclude the current fire from misfires if it's there
-    misfire_fires.retain(|p| p.scheduled_at != scheduled_at);
+    // Only evaluate fires before the current due boundary. The current fire
+    // is dispatched normally below, even when the timer wakes a few millis
+    // after the boundary.
+    let misfire_fires = misfire::evaluate_misfires_before(spec, ctx, scheduled_at, now).await;
 
     // ── Build one ordered fire list (chronological) ──────────
     // Each fire gets its own overlap check before dispatch.
@@ -667,6 +667,19 @@ pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(
     ctx: Arc<Ctx>,
     intent: super::reconcile::ResumeIntent,
 ) {
+    if matches!(intent.kind, super::reconcile::ResumeIntentKind::DispatchNew) {
+        dispatch_fire(
+            &ctx,
+            &intent.fire_id,
+            &intent.spec,
+            intent.scheduled_at,
+            intent.trigger_reason,
+            false,
+        )
+        .await;
+        return;
+    }
+
     // Attempt to reclaim the fire for redispatch.
     // This handles the case where fire was persisted but thread was never created.
     let fire_id = intent.fire_id.clone();

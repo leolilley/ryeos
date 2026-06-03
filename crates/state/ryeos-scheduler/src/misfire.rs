@@ -49,16 +49,25 @@ fn parse_misfire_policy(raw: &str) -> MisfirePolicy {
     }
 }
 
-/// Detect missed fires between `last_fire_at` and `now`.
-/// Returns the list of `scheduled_at` timestamps that have no fire record.
-pub fn detect_misfires(
+/// Detect missed fires after `anchor` and before `horizon_exclusive`.
+///
+/// The upper bound is intentionally exclusive. The live timer evaluates
+/// misfires immediately before dispatching the current due fire, and small
+/// post-boundary timer latency must not convert that current fire into a
+/// misfire. Startup reconciliation can pass `now` as the horizon to evaluate
+/// genuinely missed fires from daemon downtime.
+pub fn detect_misfires_before(
     spec: &ScheduleSpecRecord,
-    last_fire_at: i64,
-    now: i64,
+    anchor: i64,
+    horizon_exclusive: i64,
     db: &SchedulerDb,
 ) -> Result<Vec<i64>> {
     let mut missed = Vec::new();
-    let mut cursor = last_fire_at;
+    let mut cursor = anchor;
+
+    if cursor >= horizon_exclusive {
+        return Ok(missed);
+    }
 
     // Batch-load all existing fire IDs for this schedule upfront to avoid
     // N+1 individual get_fire() queries inside the loop.
@@ -74,7 +83,7 @@ pub fn detect_misfires(
         )?;
 
         match next {
-            Some(scheduled_at) if scheduled_at <= now => {
+            Some(scheduled_at) if scheduled_at < horizon_exclusive => {
                 let fid = super::types::fire_id(&spec.schedule_id, scheduled_at);
                 if !existing_ids.contains(&fid) {
                     missed.push(scheduled_at);
@@ -101,26 +110,31 @@ pub fn detect_misfires(
     Ok(missed)
 }
 
-/// Evaluate the misfire policy for a schedule given detected missed fires.
+/// Evaluate the misfire policy for fires before `horizon_exclusive`.
 /// Returns pending fires to dispatch (in chronological order).
 /// Skipped fires are recorded to DB inside this function.
-pub async fn evaluate_misfires<Ctx: SchedulerContext>(
+pub async fn evaluate_misfires_before<Ctx: SchedulerContext>(
     spec: &ScheduleSpecRecord,
     ctx: &Ctx,
-    now: i64,
+    horizon_exclusive: i64,
+    evaluation_now: i64,
 ) -> Vec<PendingFire> {
     let db = ctx.scheduler_db();
 
-    let last_fire_at = match db.get_last_fire(&spec.schedule_id) {
-        Ok(Some(f)) => f.scheduled_at,
-        Ok(None) => now, // never fired — no gap
+    let anchor = match db.get_last_fire(&spec.schedule_id) {
+        Ok(Some(f)) => f.scheduled_at.max(spec.registered_at),
+        Ok(None) => spec.registered_at,
         Err(e) => {
             tracing::error!(schedule_id = %spec.schedule_id, error = %e, "failed to get last fire for misfire detection");
             return Vec::new();
         }
     };
 
-    let missed = match detect_misfires(spec, last_fire_at, now, &db) {
+    if anchor >= horizon_exclusive {
+        return Vec::new();
+    }
+
+    let missed = match detect_misfires_before(spec, anchor, horizon_exclusive, &db) {
         Ok(m) => m,
         Err(e) => {
             tracing::error!(schedule_id = %spec.schedule_id, error = %e, "misfire detection failed");
@@ -197,7 +211,7 @@ pub async fn evaluate_misfires<Ctx: SchedulerContext>(
 
         MisfirePolicy::CatchUpWithinSecs(window_secs) => {
             let window_ms = window_secs as i64 * 1000;
-            let cutoff = now - window_ms;
+            let cutoff = evaluation_now - window_ms;
             let to_fire: Vec<i64> = missed.iter().filter(|&&at| at >= cutoff).copied().collect();
             let skipped_count = missed.len() - to_fire.len();
             tracing::warn!(
@@ -310,6 +324,29 @@ mod tests {
         }
     }
 
+    fn make_cron_spec(registered_at: i64) -> ScheduleSpecRecord {
+        ScheduleSpecRecord {
+            expression: "0 */15 * * * *".to_string(),
+            registered_at,
+            ..make_spec("skip", "cron")
+        }
+    }
+
+    fn make_fire(schedule_id: &str, scheduled_at: i64) -> FireRecord {
+        FireRecord {
+            fire_id: super::super::types::fire_id(schedule_id, scheduled_at),
+            schedule_id: schedule_id.to_string(),
+            scheduled_at,
+            fired_at: Some(scheduled_at),
+            completed_at: Some(scheduled_at + 1),
+            thread_id: None,
+            status: "completed".to_string(),
+            trigger_reason: "normal".to_string(),
+            outcome: Some("success".to_string()),
+            signer_fingerprint: Some("fp:test".to_string()),
+        }
+    }
+
     #[test]
     fn resolve_skip() {
         let spec = make_spec("skip", "cron");
@@ -368,5 +405,76 @@ mod tests {
     fn resolve_catch_up_bounded_invalid_number_defaults_to_skip() {
         let spec = make_spec("catch_up_bounded:not_a_number", "cron");
         assert_eq!(resolve_misfire_policy(&spec), MisfirePolicy::Skip);
+    }
+
+    #[test]
+    fn detect_misfires_excludes_current_due_boundary() {
+        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let spec = make_cron_spec(1780455600000); // 2026-06-03T03:00:00Z
+        db.upsert_fire(&make_fire(&spec.schedule_id, 1780457400000))
+            .unwrap(); // 03:30
+
+        let missed = detect_misfires_before(
+            &spec,
+            1780457400000, // 03:30
+            1780458300000, // 03:45, current due fire; exclusive
+            &db,
+        )
+        .unwrap();
+
+        assert!(
+            missed.is_empty(),
+            "current due fire must be dispatched normally, not treated as a misfire"
+        );
+    }
+
+    #[test]
+    fn detect_misfires_includes_older_missing_boundary_before_current() {
+        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let spec = make_cron_spec(1780455600000); // 2026-06-03T03:00:00Z
+        db.upsert_fire(&make_fire(&spec.schedule_id, 1780456500000))
+            .unwrap(); // 03:15
+
+        let missed = detect_misfires_before(
+            &spec,
+            1780456500000, // 03:15
+            1780458300000, // 03:45, current due fire; exclusive
+            &db,
+        )
+        .unwrap();
+
+        assert_eq!(missed, vec![1780457400000]); // 03:30
+    }
+
+    #[test]
+    fn detect_misfires_startup_after_missed_first_fire() {
+        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
+
+        let missed = detect_misfires_before(
+            &spec,
+            spec.registered_at,
+            1780458720000, // 03:52; startup reconcile horizon
+            &db,
+        )
+        .unwrap();
+
+        assert_eq!(missed, vec![1780458300000]); // 03:45
+    }
+
+    #[test]
+    fn detect_misfires_startup_before_first_fire_is_empty() {
+        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
+
+        let missed = detect_misfires_before(
+            &spec,
+            spec.registered_at,
+            1780458000000, // 03:40; before first 03:45 fire
+            &db,
+        )
+        .unwrap();
+
+        assert!(missed.is_empty());
     }
 }
