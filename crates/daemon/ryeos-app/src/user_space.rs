@@ -5,9 +5,11 @@
 //! instead of constructing `<user_root>/.ai/...` ad hoc.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::{Mutex, MutexGuard};
 
 /// Synthetic principal for the current local single-user install.
 ///
@@ -15,6 +17,8 @@ use serde::{de::DeserializeOwned, Serialize};
 /// authenticated caller and resolve through [`UserSpaceResolver`] without
 /// changing callers that operate on [`UserSpacePaths`].
 pub const LOCAL_PRINCIPAL_ID: &str = "local";
+
+static USER_SPACE_YAML_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSpacePaths {
@@ -75,6 +79,79 @@ impl UserSpaceResolver for LocalUserSpaceResolver {
         }
         UserSpacePaths::resolve_local()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserSpaceStore {
+    paths: UserSpacePaths,
+}
+
+pub struct LockedUserSpaceStore {
+    store: UserSpaceStore,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl UserSpaceStore {
+    pub fn resolve_principal(principal_id: &str) -> Result<Self> {
+        Self::resolve_with(&LocalUserSpaceResolver, principal_id)
+    }
+
+    pub fn resolve_with<R>(resolver: &R, principal_id: &str) -> Result<Self>
+    where
+        R: UserSpaceResolver,
+    {
+        Ok(Self {
+            paths: resolver.resolve(principal_id)?,
+        })
+    }
+
+    pub async fn locked_principal(principal_id: &str) -> Result<LockedUserSpaceStore> {
+        Self::locked_with(&LocalUserSpaceResolver, principal_id).await
+    }
+
+    pub async fn locked_with<R>(resolver: &R, principal_id: &str) -> Result<LockedUserSpaceStore>
+    where
+        R: UserSpaceResolver,
+    {
+        let store = Self::resolve_with(resolver, principal_id)?;
+        let guard = user_space_yaml_lock().lock().await;
+        Ok(LockedUserSpaceStore {
+            store,
+            _guard: guard,
+        })
+    }
+
+    pub fn paths(&self) -> &UserSpacePaths {
+        &self.paths
+    }
+
+    pub fn load_yaml<T>(&self, path: &Path) -> Result<T>
+    where
+        T: DeserializeOwned + Default,
+    {
+        read_yaml_or_default(path)
+    }
+}
+
+impl LockedUserSpaceStore {
+    pub fn write_yaml<T>(&self, path: &Path, value: &T) -> Result<()>
+    where
+        T: Serialize,
+    {
+        write_yaml_atomic(path, value)
+    }
+}
+
+impl std::ops::Deref for LockedUserSpaceStore {
+    type Target = UserSpaceStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+fn user_space_yaml_lock() -> &'static Mutex<()> {
+    USER_SPACE_YAML_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub fn read_yaml_or_default<T>(path: &Path) -> Result<T>
@@ -165,6 +242,19 @@ mod tests {
         value: String,
     }
 
+    struct FixedResolver {
+        root: PathBuf,
+    }
+
+    impl UserSpaceResolver for FixedResolver {
+        fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+            if principal_id != "fp:test" {
+                anyhow::bail!("unexpected principal {principal_id}");
+            }
+            Ok(UserSpacePaths::new(self.root.clone()))
+        }
+    }
+
     #[test]
     fn logical_paths_live_under_user_ai_config_and_state() {
         let paths = UserSpacePaths::new(PathBuf::from("/tmp/user"));
@@ -202,6 +292,28 @@ mod tests {
         let loaded: Demo = read_yaml_or_default(&path).unwrap();
         assert_eq!(loaded.value, "ok");
         assert!(!path.with_extension("tmp~").exists());
+    }
+
+    #[tokio::test]
+    async fn user_space_store_resolves_principal_and_serializes_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolver = FixedResolver {
+            root: tmp.path().to_path_buf(),
+        };
+        let store = UserSpaceStore::resolve_with(&resolver, "fp:test").unwrap();
+        let path = store.paths().studio_config();
+
+        let missing: Demo = store.load_yaml(&path).unwrap();
+        assert_eq!(missing, Demo::default());
+
+        let locked = UserSpaceStore::locked_with(&resolver, "fp:test")
+            .await
+            .expect("locked store should resolve through supplied resolver");
+        locked
+            .write_yaml(&path, &Demo { value: "ok".into() })
+            .unwrap();
+        let loaded: Demo = store.load_yaml(&path).unwrap();
+        assert_eq!(loaded.value, "ok");
     }
 
     #[cfg(unix)]
