@@ -49,9 +49,9 @@ enum Cmd {
     /// Build (re-publish) a bundle from source using the user signing key.
     ///
     /// Runs the full publish pipeline: clean derived artifacts, bootstrap-sign
-    /// kind schemas and parsers, rebuild the CAS manifest (binary hashes),
-    /// sign all items, and generate the bundle manifest. The signing key is
-    /// auto-resolved from the user root — no `--key` flag needed.
+    /// kind schemas and parsers, rebuild the CAS manifest when `.ai/bin`
+    /// exists, sign all items, and generate the bundle manifest. The signing
+    /// key is auto-resolved from the user root — no `--key` flag needed.
     Build {
         /// Bundle source root (directory containing `.ai/`).
         bundle_source: Option<PathBuf>,

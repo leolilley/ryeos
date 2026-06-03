@@ -159,6 +159,14 @@ fn publish_twice_produces_zero_diff() {
         !report2.manifest_changed,
         "manifest_changed should be false on second run"
     );
+    assert!(
+        report2.rebuild_report.is_some(),
+        "binary-owning bundle should rebuild the binary CAS manifest"
+    );
+    assert!(
+        !report2.binary_rebuild_skipped,
+        "binary-owning bundle should not report skipped binary rebuild"
+    );
 
     assert!(
         report2.sign_report.failed.is_empty(),

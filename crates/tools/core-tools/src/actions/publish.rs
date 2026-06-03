@@ -5,7 +5,8 @@
 //!   Phase 0:  Clean derived CAS artifacts (objects, refs, sidecars).
 //!   Phase 1:  Bootstrap-sign kind schemas + parser/handler descriptors.
 //!             Idempotent: skips files already validly signed.
-//!   Phase 2:  Rebuild CAS manifest (objects, refs, item_source sidecars).
+//!   Phase 2:  Rebuild CAS manifest (objects, refs, item_source sidecars)
+//!             when the bundle owns `.ai/bin` binaries.
 //!   Phase 3:  Sign every other signable item (full engine validation).
 //!             Idempotent: validates existing signatures, re-signs only when needed.
 //!   Phase 4:  Generate + sign bundle manifest (.ai/manifest.yaml).
@@ -58,7 +59,11 @@ pub struct PublishReport {
     pub bootstrap_validated: usize,
     pub bootstrap_signed: usize,
     pub sign_report: SignBundleReport,
-    pub rebuild_report: RebuildReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuild_report: Option<RebuildReport>,
+    pub binary_rebuild_skipped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_rebuild_skip_reason: Option<String>,
     /// Path to the generated + signed `.ai/manifest.yaml`.
     pub manifest_generated: Option<PathBuf>,
     /// Whether the manifest was actually rewritten.
@@ -93,9 +98,31 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         bootstrap_sign_kinds_and_parsers(&opts.bundle_source, &opts.signing_key)?;
 
     // ── Phase 2: rebuild CAS manifest ──
-    let rebuild_report =
-        build_bundle::rebuild_bundle_manifest(&opts.bundle_source, &opts.signing_key)
-            .context("rebuild-manifest phase failed")?;
+    let bin_root = ai_dir.join("bin");
+    let (rebuild_report, binary_rebuild_skipped, binary_rebuild_skip_reason) = if bin_root.is_dir()
+    {
+        (
+            Some(
+                build_bundle::rebuild_bundle_manifest(&opts.bundle_source, &opts.signing_key)
+                    .context("rebuild-manifest phase failed")?,
+            ),
+            false,
+            None,
+        )
+    } else {
+        tracing::info!(
+            path = %bin_root.display(),
+            "no .ai/bin directory; skipping binary CAS manifest rebuild for declarative bundle"
+        );
+        (
+            None,
+            true,
+            Some(format!(
+                "no .ai/bin directory at {} — declarative bundle has no binary CAS manifest",
+                bin_root.display()
+            )),
+        )
+    };
 
     // ── Phase 3: sign every other signable item ──
     let sign_report = sign_bundle::sign_bundle_items(
@@ -137,13 +164,18 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         (None, false)
     };
 
+    let author_fingerprint =
+        lillux::signature::compute_fingerprint(&opts.signing_key.verifying_key());
+
     Ok(PublishReport {
         bundle_source: opts.bundle_source.clone(),
-        author_fingerprint: rebuild_report.signer_fingerprint.clone(),
+        author_fingerprint,
         bootstrap_validated,
         bootstrap_signed,
         sign_report,
         rebuild_report,
+        binary_rebuild_skipped,
+        binary_rebuild_skip_reason,
         manifest_generated,
         manifest_changed,
         publisher_trust_doc,
