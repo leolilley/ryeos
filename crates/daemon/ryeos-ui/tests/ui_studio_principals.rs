@@ -97,3 +97,25 @@ async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
     let handler_error = extract_handler_error(&err).expect("should preserve typed handler error");
     assert!(matches!(handler_error, HandlerError::BadRequest(_)));
 }
+
+#[tokio::test]
+async fn launch_mint_rejects_mismatched_user_principal() {
+    let (_tmp, state) = build_test_state();
+    let req = ryeos_ui::handlers::ui_launch_mint::Request {
+        surface_ref: "surface:ryeos/studio/base".into(),
+        project_path: None,
+        read_only: false,
+        user_principal_id: Some(format!("fp:{}", "aa".repeat(32))),
+    };
+
+    let err = ryeos_ui::handlers::ui_launch_mint::handle(
+        req,
+        HandlerContext::new(format!("fp:{}", "bb".repeat(32)), vec!["*".into()], true),
+        Arc::new(state),
+    )
+    .await
+    .expect_err("caller must not bind launch to another durable principal");
+
+    let handler_error = extract_handler_error(&err).expect("should preserve typed handler error");
+    assert!(matches!(handler_error, HandlerError::Forbidden(_)));
+}

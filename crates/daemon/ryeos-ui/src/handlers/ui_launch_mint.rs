@@ -58,6 +58,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .map(|principal| {
             ryeos_app::user_space::principal_storage_key(&principal)
                 .map_err(|err| HandlerError::BadRequest(err.to_string()))?;
+            if principal != ctx.fingerprint {
+                return Err(HandlerError::Forbidden(
+                    "user_principal_id must match verified caller".into(),
+                ));
+            }
             Ok::<_, HandlerError>(principal)
         })
         .transpose()?;
