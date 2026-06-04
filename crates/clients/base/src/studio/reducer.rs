@@ -9,7 +9,7 @@ use super::event::{
 };
 use super::model::{StudioCore, StudioInspectorState};
 use super::view_model::{
-    action_for_focused_row, launcher_items, StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
+    action_for_focused_row, launcher_items_for, StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
 };
 use crate::ids::TileId;
 use crate::layout::SplitAxis;
@@ -140,6 +140,9 @@ impl StudioCore {
                 let items = filtered_launcher_items(self);
                 let selected = self.ui.launcher.selected.min(items.len().saturating_sub(1));
                 let action = items.get(selected).and_then(|item| {
+                    if !item.enabled {
+                        return None;
+                    }
                     if secondary {
                         item.secondary_action
                             .clone()
@@ -1044,7 +1047,7 @@ fn is_home_view(view: &ViewSpec) -> bool {
 
 fn filtered_launcher_items(core: &StudioCore) -> Vec<super::view_model::StudioLauncherItemVm> {
     let query = core.ui.launcher.query.trim().to_lowercase();
-    launcher_items()
+    launcher_items_for(core)
         .into_iter()
         .filter(|item| {
             let haystack = format!("{} {}", item.label, item.hint).to_lowercase();
@@ -1306,10 +1309,13 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::studio::dto::{StudioItemDto, StudioItemsDto, StudioThreadsDto};
     use crate::studio::effect::StudioEffectResultKind;
     use crate::studio::event::{StudioEvent, StudioFilterField, StudioUiEvent};
     use crate::studio::model::{BrowserSession, BrowserViewport, StudioCore};
-    use crate::studio::view_model::{StudioLayoutNodeVm, StudioViewVm};
+    use crate::studio::view_model::{
+        build_view_model, launcher_items, StudioLayoutNodeVm, StudioViewVm,
+    };
     use crate::workspace::FocusDirection;
 
     fn session() -> BrowserSession {
@@ -1351,6 +1357,17 @@ mod tests {
             },
         });
         item_tile_id(core)
+    }
+
+    fn executable_item(executable: bool) -> StudioItemDto {
+        StudioItemDto {
+            canonical_ref: "tool:demo/run".to_string(),
+            item_kind: "tool".to_string(),
+            bare_id: "run".to_string(),
+            label: "run".to_string(),
+            executable,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1463,6 +1480,143 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn launcher_offers_run_for_selected_executable_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+
+        let vm = build_view_model(&core);
+        let run = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Run run")
+            .expect("selected executable item should expose a run command");
+
+        assert!(run.enabled);
+        assert!(matches!(
+            &run.action,
+            StudioAction::ExecuteItem { item_ref, .. } if item_ref == "tool:demo/run"
+        ));
+    }
+
+    #[test]
+    fn launcher_does_not_offer_run_for_selected_non_executable_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(false)],
+                ..Default::default()
+            },
+        );
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label.starts_with("Run ")));
+    }
+
+    #[test]
+    fn launcher_does_not_choose_disabled_run_command() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::OpenLauncher,
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetLauncherQuery {
+                query: "run".to_string(),
+            },
+        });
+
+        let vm = build_view_model(&core);
+        assert_eq!(vm.launcher.items[0].label, "Run run");
+        assert!(!vm.launcher.items[0].enabled);
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::ChooseLauncher { secondary: false },
+        });
+
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn launcher_offers_cancel_for_selected_running_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+        let cancel = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Cancel T-running")
+            .expect("selected running thread should expose a cancel command");
+
+        assert!(cancel.enabled);
+        assert!(matches!(
+            &cancel.action,
+            StudioAction::CancelThread { thread_id } if thread_id == "T-running"
+        ));
+    }
+
+    #[test]
+    fn launcher_does_not_offer_cancel_for_completed_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-done",
+                "status": "completed"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label.starts_with("Cancel ")));
     }
 
     #[test]

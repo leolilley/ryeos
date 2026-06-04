@@ -2004,6 +2004,16 @@ body,
   box-shadow: inset 2px 0 0 rgba(var(--studio-accent-rgb), 0.76);
 }
 
+.studio-command-choice:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.studio-command-choice:disabled:hover {
+  background: transparent;
+  box-shadow: none;
+}
+
 .studio-command-choice.selected {
   background: var(--studio-accent);
   color: var(--studio-bg);

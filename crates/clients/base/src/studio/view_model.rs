@@ -862,6 +862,104 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
         .collect()
 }
 
+pub(crate) fn launcher_items_for(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    let mut items = context_launcher_items(core);
+    items.extend(launcher_items());
+    items
+}
+
+fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    let mut items = Vec::new();
+
+    if let Some((canonical_ref, label)) = focused_executable_item(core) {
+        items.push(StudioLauncherItemVm {
+            label: format!("Run {label}"),
+            hint: canonical_ref.clone(),
+            action: StudioAction::ExecuteItem {
+                item_ref: canonical_ref,
+                parameters: serde_json::json!({}),
+            },
+            secondary_action: None,
+            enabled: !session_vm(core).read_only,
+        });
+    }
+
+    if let Some((thread_id, status)) = focused_cancellable_thread(core) {
+        items.push(StudioLauncherItemVm {
+            label: format!("Cancel {thread_id}"),
+            hint: format!("thread status: {status}"),
+            action: StudioAction::CancelThread { thread_id },
+            secondary_action: None,
+            enabled: !session_vm(core).read_only,
+        });
+    }
+
+    if let Some(action) = action_for_focused_row(core) {
+        items.push(StudioLauncherItemVm {
+            label: "Inspect selection".to_string(),
+            hint: focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string()),
+            action,
+            secondary_action: None,
+            enabled: true,
+        });
+    }
+
+    items
+}
+
+fn focused_executable_item(core: &StudioCore) -> Option<(String, String)> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    if !matches!(view, ViewSpec::SpaceBrowser { .. }) {
+        return None;
+    }
+    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+    let row_ref = rows_for(core, view, Some(tile_id)).get(cursor)?.id.clone();
+    let item = focused_item_set(core, tile_id)
+        .into_iter()
+        .find(|item| item.canonical_ref == row_ref && item.executable)?;
+    let label = item_leaf_label(&item.label, &item.bare_id, &item.bare_id);
+    Some((item.canonical_ref, label))
+}
+
+fn focused_item_set(core: &StudioCore, tile_id: TileId) -> Vec<super::dto::StudioItemDto> {
+    let tile_id_text = tile_id_text(tile_id);
+    core.data
+        .tile_items
+        .get(&tile_id_text)
+        .or(core.data.items.as_ref())
+        .map(|items| items.items.clone())
+        .unwrap_or_default()
+}
+
+fn focused_cancellable_thread(core: &StudioCore) -> Option<(String, String)> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    if !matches!(view, ViewSpec::ThreadList) {
+        return None;
+    }
+    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+    let thread = core.data.threads.as_ref()?.threads.get(cursor)?;
+    let thread_id = field_text(thread, &["thread_id", "id"])?;
+    let status = field_text(thread, &["status", "state"]).unwrap_or_else(|| "unknown".to_string());
+    is_cancellable_thread_status(&status).then_some((thread_id, status))
+}
+
+fn is_cancellable_thread_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "queued" | "pending" | "starting" | "started" | "running" | "in_progress" | "active"
+    )
+}
+
+fn focused_selection_hint(core: &StudioCore) -> Option<String> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+    let row = rows_for(core, view, Some(tile_id)).get(cursor)?.clone();
+    Some(row.secondary.or(row.meta).unwrap_or(row.primary))
+}
+
 fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 11] {
     [
         (
@@ -918,7 +1016,7 @@ fn truncate_middle(value: &str, max_chars: usize) -> String {
 
 fn launcher(core: &StudioCore) -> StudioLauncherVm {
     let query = core.ui.launcher.query.trim().to_lowercase();
-    let items: Vec<_> = launcher_items()
+    let items: Vec<_> = launcher_items_for(core)
         .into_iter()
         .filter(|item| {
             let haystack = format!("{} {}", item.label, item.hint).to_lowercase();
