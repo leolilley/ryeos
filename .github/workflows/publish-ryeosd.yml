@@ -1,17 +1,16 @@
-name: Publish ryeosd to GHCR
+name: Publish RyeOS image to GHCR
 
-# Triggered ONLY by tags prefixed `ryeosd-v*` so it never collides with the
-# Python `publish.yml` flow (which fires on `v*`). The two pipelines are
-# fully isolated.
+# Triggered by project release tags. The old Python PyPI publishing flow has
+# been removed; the release artifact is the signed GHCR image.
 
 on:
   push:
     tags:
-      - "ryeosd-v*"
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (without `ryeosd-v` prefix), e.g. 0.2.0"
+        description: "Version (without `v` prefix), e.g. 0.5.0"
         required: true
         type: string
 
@@ -30,7 +29,7 @@ jobs:
         id: ver
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            VERSION="${GITHUB_REF_NAME#ryeosd-v}"
+            VERSION="${GITHUB_REF_NAME#v}"
           else
             VERSION="${{ inputs.version }}"
           fi

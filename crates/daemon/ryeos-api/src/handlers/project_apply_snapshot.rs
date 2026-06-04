@@ -10,11 +10,12 @@ use lillux::cas::CasStore;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
+use crate::project_deploy::{self, ProjectDeployContext};
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::objects::{ItemSource, ProjectSnapshot, SourceManifest};
-use ryeos_state::project_sync::{ProjectSyncScope, PROJECT_AI_SYNC_DIRS};
+use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +30,7 @@ pub struct Request {
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified().map_err(|e| anyhow!(e))?;
+    let _scheduler_guard = state.scheduler_runtime_gate.clone().write_owned().await;
 
     let project_path = canonical_existing_project_path(&req.project_path)?;
     let canonical_project_path = project_path.to_string_lossy().to_string();
@@ -122,31 +124,60 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let apply_result = (|| -> Result<ApplyReport> {
         materialize_manifest_to_staging(&cas, &manifest, &staging_root)?;
-        replace_managed_roots(&project_path, &staging_root)
+        let deploy_ctx = ProjectDeployContext {
+            project_path: &project_path,
+            staging_root: &staging_root,
+            manifest: &manifest,
+            snapshot_hash: &req.snapshot_hash,
+            project_key: &project_hash,
+            caller: &ctx,
+            state: &state,
+        };
+        let deploy_plan = project_deploy::plan(&deploy_ctx)?;
+        let mut root_swap = replace_managed_roots(&project_path, &staging_root)?;
+        let mut deploy_tx = match project_deploy::prepare_commit(&deploy_plan, &deploy_ctx) {
+            Ok(tx) => tx,
+            Err(err) => {
+                root_swap.rollback();
+                return Err(err);
+            }
+        };
+
+        let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+        let ref_result = if let Some(ref current) = previous_deployed_hash {
+            ryeos_state::refs::advance_deployed_project_ref(
+                &refs_root,
+                &project_hash,
+                &req.snapshot_hash,
+                current,
+                &signer,
+            )
+        } else {
+            ryeos_state::refs::write_deployed_project_ref(
+                &refs_root,
+                &project_hash,
+                &req.snapshot_hash,
+                &signer,
+            )
+        };
+        if let Err(err) = ref_result {
+            deploy_tx.rollback(&deploy_ctx);
+            root_swap.rollback();
+            return Err(err);
+        }
+
+        let deploy_report = deploy_tx.report.clone();
+        deploy_tx.finalize(&deploy_ctx);
+        root_swap.finalize();
+        let mut report = root_swap.report.clone();
+        report.deploy = deploy_report;
+        Ok(report)
     })();
     let cleanup = fs::remove_dir_all(&staging_root);
     if let Err(err) = cleanup {
         tracing::warn!(path = %staging_root.display(), error = %err, "failed to remove project apply staging dir");
     }
     let report = apply_result?;
-
-    let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    if let Some(ref current) = previous_deployed_hash {
-        ryeos_state::refs::advance_deployed_project_ref(
-            &refs_root,
-            &project_hash,
-            &req.snapshot_hash,
-            current,
-            &signer,
-        )?;
-    } else {
-        ryeos_state::refs::write_deployed_project_ref(
-            &refs_root,
-            &project_hash,
-            &req.snapshot_hash,
-            &signer,
-        )?;
-    }
 
     Ok(serde_json::json!({
         "project_path": canonical_project_path,
@@ -158,6 +189,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "files_materialized": report.files_materialized,
         "roots_replaced": report.roots_replaced,
         "roots_deleted": report.roots_deleted,
+        "schedules": {
+            "declared": report.deploy.schedules.declared,
+            "created": report.deploy.schedules.created,
+            "updated": report.deploy.schedules.updated,
+            "deleted": report.deploy.schedules.deleted,
+        },
     }))
 }
 
@@ -248,11 +285,12 @@ fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct ApplyReport {
     files_materialized: usize,
     roots_replaced: usize,
     roots_deleted: usize,
+    deploy: project_deploy::ProjectDeployReport,
 }
 
 #[derive(Debug)]
@@ -262,13 +300,44 @@ struct RootSwap {
     installed: bool,
 }
 
-fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<ApplyReport> {
+#[derive(Debug)]
+struct PreparedRootSwap {
+    swaps: Vec<RootSwap>,
+    report: ApplyReport,
+    finalized: bool,
+}
+
+impl PreparedRootSwap {
+    fn rollback(&mut self) {
+        rollback_swaps(&self.swaps);
+        self.finalized = true;
+    }
+
+    fn finalize(&mut self) {
+        for swap in &self.swaps {
+            if let Some(backup) = &swap.backup {
+                let _ = remove_path_any(backup);
+            }
+        }
+        self.finalized = true;
+    }
+}
+
+impl Drop for PreparedRootSwap {
+    fn drop(&mut self) {
+        if !self.finalized {
+            rollback_swaps(&self.swaps);
+        }
+    }
+}
+
+fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<PreparedRootSwap> {
     let mut swaps: Vec<RootSwap> = Vec::new();
     let mut report = ApplyReport::default();
     report.files_materialized = count_files(staging_root)?;
 
     let result = (|| -> Result<()> {
-        for rel_root in PROJECT_AI_SYNC_DIRS {
+        for rel_root in ryeos_state::project_sync::materialized_project_ai_surface_roots() {
             reject_symlinked_existing_path(project_path, rel_root)?;
             let dest = project_path.join(rel_root);
             let staged = staging_root.join(rel_root);
@@ -285,6 +354,12 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
             } else {
                 None
             };
+            let swap_idx = swaps.len();
+            swaps.push(RootSwap {
+                dest: dest.clone(),
+                backup,
+                installed: false,
+            });
 
             if staged_exists {
                 if let Some(parent) = dest.parent() {
@@ -293,18 +368,9 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
                 fs::rename(&staged, &dest)
                     .with_context(|| format!("install managed root {}", dest.display()))?;
                 report.roots_replaced += 1;
-                swaps.push(RootSwap {
-                    dest,
-                    backup,
-                    installed: true,
-                });
+                swaps[swap_idx].installed = true;
             } else {
-                report.roots_deleted += usize::from(backup.is_some());
-                swaps.push(RootSwap {
-                    dest,
-                    backup,
-                    installed: false,
-                });
+                report.roots_deleted += usize::from(swaps[swap_idx].backup.is_some());
             }
         }
         Ok(())
@@ -315,12 +381,11 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
         return Err(err);
     }
 
-    for swap in swaps {
-        if let Some(backup) = swap.backup {
-            let _ = remove_path_any(&backup);
-        }
-    }
-    Ok(report)
+    Ok(PreparedRootSwap {
+        swaps,
+        report,
+        finalized: false,
+    })
 }
 
 fn rollback_swaps(swaps: &[RootSwap]) {
@@ -406,21 +471,46 @@ mod tests {
         let project = TempDir::new().unwrap();
         std::fs::create_dir_all(project.path().join(".ai/directives")).unwrap();
         std::fs::create_dir_all(project.path().join(".ai/tools")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/config/schedules")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/node/schedules")).unwrap();
         std::fs::create_dir_all(project.path().join("src")).unwrap();
         std::fs::write(project.path().join(".ai/directives/old.md"), "old").unwrap();
         std::fs::write(project.path().join(".ai/tools/old.sh"), "old").unwrap();
+        std::fs::write(project.path().join(".ai/config/schedules/old.yaml"), "old").unwrap();
+        std::fs::write(
+            project.path().join(".ai/node/schedules/runtime.yaml"),
+            "runtime",
+        )
+        .unwrap();
         std::fs::write(project.path().join("src/index.ts"), "app").unwrap();
 
         let staging = TempDir::new().unwrap();
         std::fs::create_dir_all(staging.path().join(".ai/directives")).unwrap();
+        std::fs::create_dir_all(staging.path().join(".ai/config/schedules")).unwrap();
         std::fs::write(staging.path().join(".ai/directives/new.md"), "new").unwrap();
+        std::fs::write(staging.path().join(".ai/config/schedules/new.yaml"), "new").unwrap();
 
-        let report = replace_managed_roots(project.path(), staging.path()).unwrap();
+        let mut prepared = replace_managed_roots(project.path(), staging.path()).unwrap();
+        prepared.finalize();
+        let report = prepared.report.clone();
         assert!(report.roots_replaced >= 1);
         assert!(report.roots_deleted >= 1);
         assert!(project.path().join(".ai/directives/new.md").exists());
         assert!(!project.path().join(".ai/directives/old.md").exists());
         assert!(!project.path().join(".ai/tools").exists());
+        assert!(project
+            .path()
+            .join(".ai/config/schedules/new.yaml")
+            .exists());
+        assert!(!project
+            .path()
+            .join(".ai/config/schedules/old.yaml")
+            .exists());
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".ai/node/schedules/runtime.yaml"))
+                .unwrap(),
+            "runtime"
+        );
         assert_eq!(
             std::fs::read_to_string(project.path().join("src/index.ts")).unwrap(),
             "app"
@@ -501,5 +591,136 @@ mod tests {
         apply_mode(&path, Some(0o4755)).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_accepts_valid_project_intent() {
+        let project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        std::fs::write(
+            schedules.join("snap-track.yaml"),
+            format!(
+                r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: snap-track-discover-feed-scrape
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+    timezone: UTC
+    misfire_policy: skip
+    overlap_policy: skip
+    enabled: true
+    project_root: {}
+    params:
+      country: US
+"#,
+                project.path().display()
+            ),
+        )
+        .unwrap();
+
+        let count = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_rejects_duplicate_ids() {
+        let project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        for file in ["a.yaml", "b.yaml"] {
+            std::fs::write(
+                schedules.join(file),
+                r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: duplicate-schedule
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+"#,
+            )
+            .unwrap();
+        }
+
+        let err = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .expect_err("duplicate schedule ids must fail preflight");
+        assert!(format!("{err:#}").contains("duplicate schedule_id"));
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_rejects_node_owned_fields() {
+        let project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        std::fs::write(
+            schedules.join("bad.yaml"),
+            r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: bad-schedule
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+    execution:
+      requester_fingerprint: fp:test
+"#,
+        )
+        .unwrap();
+
+        let err = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .expect_err("node-owned execution field must fail preflight");
+        assert!(format!("{err:#}").contains("unknown field `execution`"));
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_rejects_other_project_root() {
+        let project = TempDir::new().unwrap();
+        let other_project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        std::fs::write(
+            schedules.join("bad-root.yaml"),
+            format!(
+                r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: wrong-root
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+    project_root: {}
+"#,
+                other_project.path().display()
+            ),
+        )
+        .unwrap();
+
+        let err = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .expect_err("foreign project root must fail preflight");
+        assert!(format!("{err:#}").contains("cannot target another project"));
     }
 }

@@ -428,6 +428,7 @@ async fn main() -> Result<()> {
         alias_registry,
         authorizer,
         scheduler_db,
+        scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(
             ryeos_app::ignore::load_from_system_space(&config.system_space_dir)
@@ -599,7 +600,11 @@ async fn main() -> Result<()> {
     let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(Arc::new(
         app_state.clone(),
     )));
-    let scheduler_intents = scheduler::reconcile::reconcile(&scheduler_ctx).await?;
+    let scheduler_intents = {
+        let _scheduler_reconcile_guard =
+            app_state.scheduler_runtime_gate.clone().write_owned().await;
+        scheduler::reconcile::reconcile(&scheduler_ctx).await?
+    };
     for intent in scheduler_intents {
         let st = scheduler_ctx.clone();
         tokio::spawn(async move {
@@ -900,6 +905,7 @@ async fn run_service_standalone(
         alias_registry: standalone_ar,
         authorizer: standalone_auth,
         scheduler_db: Arc::new(SchedulerDb::new_in_memory().context("scheduler in-memory db")?),
+        scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
         vault_fingerprint: None,

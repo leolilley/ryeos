@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use ryeos_engine::engine::Engine;
 use ryeos_runtime::alias_registry::AliasRegistry;
@@ -91,6 +91,10 @@ pub struct AppState {
     pub authorizer: Arc<Authorizer>,
     /// Scheduler projection DB (SQLite, in-memory for tests, file-backed in prod).
     pub scheduler_db: Arc<SchedulerDb>,
+    /// Runtime gate shared by scheduler mutation paths and the timer.
+    /// Writers hold it across project/schedule mutations; the timer only
+    /// dispatches while it can acquire a read guard.
+    pub scheduler_runtime_gate: Arc<RwLock<()>>,
     /// Channel to request scheduler reload after register/deregister/pause/resume.
     /// `None` when the scheduler is not running (e.g. in unit tests).
     pub scheduler_reload_tx: Option<mpsc::Sender<ReloadSignal>>,
