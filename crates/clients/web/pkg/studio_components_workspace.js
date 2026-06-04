@@ -463,10 +463,9 @@ function sectionBlock(block, dispatchUi) {
   for (const [key, value] of block.rows || []) dl.append(textEl("dt", key), textEl("dd", value));
   section.append(dl);
   if (block.action && dispatchUi) {
-    const actionLabel = (block.rows || []).find(([key]) => key === "Action")?.[1] || "Run";
     const button = el("button", "studio-section-action");
     button.type = "button";
-    button.textContent = actionLabel;
+    button.textContent = sectionActionLabel(block);
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       dispatchUi({ type: "activate", action: block.action });
@@ -474,6 +473,23 @@ function sectionBlock(block, dispatchUi) {
     section.append(button);
   }
   return section;
+}
+
+function sectionActionLabel(block) {
+  const explicit = (block.rows || []).find(([key]) => key === "Action")?.[1];
+  if (explicit) return explicit;
+  switch (block.action?.type) {
+    case "execute_item":
+      return "Run";
+    case "cancel_thread":
+      return "Cancel";
+    case "select_dimension":
+      return "Inspect";
+    case "open_view":
+      return "Open";
+    default:
+      return "Open";
+  }
 }
 
 function rows(items, tileId, kind, dispatchUi) {

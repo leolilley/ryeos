@@ -1800,6 +1800,64 @@ mod tests {
     }
 
     #[test]
+    fn thread_inspector_exposes_cancel_for_created_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-created".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-created",
+                "status": "created"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+
+        assert!(inspector
+            .sections
+            .iter()
+            .any(|section| section.title == "Cancel thread"));
+    }
+
+    #[test]
+    fn thread_inspector_hides_cancel_for_pending_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-pending".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-pending",
+                "status": "pending"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+
+        assert!(!inspector
+            .sections
+            .iter()
+            .any(|section| section.title == "Cancel thread"));
+    }
+
+    #[test]
     fn thread_inspector_hides_cancel_for_completed_thread() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.dispatch(StudioEvent::Ui {
@@ -1858,6 +1916,58 @@ mod tests {
             &cancel.action,
             StudioAction::CancelThread { thread_id } if thread_id == "T-running"
         ));
+    }
+
+    #[test]
+    fn launcher_offers_cancel_for_selected_created_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-created",
+                "status": "created"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label == "Cancel T-created"));
+    }
+
+    #[test]
+    fn launcher_hides_cancel_for_selected_pending_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-pending",
+                "status": "pending"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label.starts_with("Cancel ")));
     }
 
     #[test]

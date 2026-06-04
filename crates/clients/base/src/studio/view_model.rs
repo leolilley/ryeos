@@ -956,10 +956,7 @@ fn focused_cancellable_thread(core: &StudioCore) -> Option<(String, String)> {
 }
 
 fn is_cancellable_thread_status(status: &str) -> bool {
-    matches!(
-        status.to_ascii_lowercase().as_str(),
-        "queued" | "pending" | "starting" | "started" | "running" | "in_progress" | "active"
-    )
+    matches!(status.to_ascii_lowercase().as_str(), "created" | "running")
 }
 
 fn focused_selection_hint(core: &StudioCore) -> Option<String> {
