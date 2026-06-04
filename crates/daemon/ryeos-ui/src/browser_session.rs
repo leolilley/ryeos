@@ -189,7 +189,7 @@ mod tests {
 
     fn test_context() -> LaunchContext {
         LaunchContext {
-            surface_ref: "surface:ryeos/cockpit/base".into(),
+            surface_ref: "surface:ryeos/studio/base".into(),
             project_path: Some("/tmp/project".into()),
             read_only: false,
             granted_caps: vec!["ui.read".into()],
@@ -212,7 +212,7 @@ mod tests {
         let session = store.get_session(&session_id).unwrap();
         assert_eq!(session.granted_caps, vec!["ui.read"]);
         assert_eq!(session.project_root, Some("/tmp/project".into()));
-        assert_eq!(session.surface_ref, "surface:ryeos/cockpit/base");
+        assert_eq!(session.surface_ref, "surface:ryeos/studio/base");
         assert!(!session.read_only);
         assert_eq!(session.user_principal_id, None);
     }

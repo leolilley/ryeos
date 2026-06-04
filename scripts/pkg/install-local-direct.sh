@@ -4,7 +4,7 @@
 # This intentionally skips yay/makepkg but installs the same runtime layout
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
-#   - bundle sources -> /usr/share/ryeos/{core,standard,cockpit,web,hosted-node}
+#   - bundle sources -> /usr/share/ryeos/{core,standard,studio,web,hosted-node}
 #     or, with --bundle-set hosted-node, /usr/share/ryeos/{core,hosted-node}
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
@@ -19,8 +19,8 @@ Usage: scripts/pkg/install-local-direct.sh [options]
 
 Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
-  /usr/share/ryeos/{core,standard,cockpit,web,hosted-node}/.ai
-  ~/.local/share/ryeos/.ai/bundles/{core,standard,cockpit,web,hosted-node}  (after init)
+  /usr/share/ryeos/{core,standard,studio,web,hosted-node}/.ai
+  ~/.local/share/ryeos/.ai/bundles/{core,standard,studio,web,hosted-node}  (after init)
 
 Options:
   --skip-populate       Do not run scripts/populate-bundles.sh first
@@ -155,7 +155,7 @@ cd "$repo_root"
 
 case "$bundle_set" in
     full)
-        bundle_names=(core standard cockpit web hosted-node)
+        bundle_names=(core standard studio web hosted-node)
         ;;
     hosted-node)
         bundle_names=(core hosted-node)
@@ -349,7 +349,7 @@ if [[ $run_init -eq 1 ]]; then
             die "initialized $name bundle missing from $state_root"
     done
     if [[ "$bundle_set" == "hosted-node" ]]; then
-        for name in standard cockpit web; do
+        for name in standard studio web; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized hosted-node state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -358,7 +358,7 @@ if [[ $run_init -eq 1 ]]; then
     fi
     if [[ "$bundle_set" == "full" ]]; then
         grep -q '^  execute: client:ryeos/tui$' \
-            "$state_root/.ai/bundles/cockpit/.ai/node/commands/tui.yaml" || \
+            "$state_root/.ai/bundles/studio/.ai/node/commands/tui.yaml" || \
             die "initialized tui command is stale or not client-backed"
     fi
 fi

@@ -4,8 +4,8 @@
  * @param {any} file_json
  * @returns {any}
  */
-export function dispatch_cockpit_file_read(file_json) {
-    const ret = wasm.dispatch_cockpit_file_read(file_json);
+export function dispatch_studio_file_read(file_json) {
+    const ret = wasm.dispatch_studio_file_read(file_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -16,8 +16,8 @@ export function dispatch_cockpit_file_read(file_json) {
  * @param {any} files_json
  * @returns {any}
  */
-export function dispatch_cockpit_files(files_json) {
-    const ret = wasm.dispatch_cockpit_files(files_json);
+export function dispatch_studio_files(files_json) {
+    const ret = wasm.dispatch_studio_files(files_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -28,8 +28,8 @@ export function dispatch_cockpit_files(files_json) {
  * @param {any} gc_json
  * @returns {any}
  */
-export function dispatch_cockpit_gc_status(gc_json) {
-    const ret = wasm.dispatch_cockpit_gc_status(gc_json);
+export function dispatch_studio_gc_status(gc_json) {
+    const ret = wasm.dispatch_studio_gc_status(gc_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -41,8 +41,8 @@ export function dispatch_cockpit_gc_status(gc_json) {
  * @param {any} inspection_json
  * @returns {any}
  */
-export function dispatch_cockpit_item_inspection(inspection_json) {
-    const ret = wasm.dispatch_cockpit_item_inspection(inspection_json);
+export function dispatch_studio_item_inspection(inspection_json) {
+    const ret = wasm.dispatch_studio_item_inspection(inspection_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -54,8 +54,8 @@ export function dispatch_cockpit_item_inspection(inspection_json) {
  * @param {any} items_json
  * @returns {any}
  */
-export function dispatch_cockpit_items(items_json) {
-    const ret = wasm.dispatch_cockpit_items(items_json);
+export function dispatch_studio_items(items_json) {
+    const ret = wasm.dispatch_studio_items(items_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -66,8 +66,8 @@ export function dispatch_cockpit_items(items_json) {
  * @param {any} schedules_json
  * @returns {any}
  */
-export function dispatch_cockpit_schedules(schedules_json) {
-    const ret = wasm.dispatch_cockpit_schedules(schedules_json);
+export function dispatch_studio_schedules(schedules_json) {
+    const ret = wasm.dispatch_studio_schedules(schedules_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -75,12 +75,12 @@ export function dispatch_cockpit_schedules(schedules_json) {
 }
 
 /**
- * Apply the daemon's renderer-neutral operational cockpit snapshot.
- * @param {any} snapshot_json
+ * Apply the daemon's renderer-neutral operational studio dimension.
+ * @param {any} dimension_json
  * @returns {any}
  */
-export function dispatch_cockpit_snapshot(snapshot_json) {
-    const ret = wasm.dispatch_cockpit_snapshot(snapshot_json);
+export function dispatch_studio_dimension(dimension_json) {
+    const ret = wasm.dispatch_studio_dimension(dimension_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -91,8 +91,8 @@ export function dispatch_cockpit_snapshot(snapshot_json) {
  * @param {any} inspection_json
  * @returns {any}
  */
-export function dispatch_cockpit_thread_inspection(inspection_json) {
-    const ret = wasm.dispatch_cockpit_thread_inspection(inspection_json);
+export function dispatch_studio_thread_inspection(inspection_json) {
+    const ret = wasm.dispatch_studio_thread_inspection(inspection_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

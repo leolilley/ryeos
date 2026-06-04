@@ -13,7 +13,7 @@ use std::time::Duration;
 
 fn test_context() -> LaunchContext {
     LaunchContext {
-        surface_ref: "surface:ryeos/cockpit/base".into(),
+        surface_ref: "surface:ryeos/studio/base".into(),
         project_path: None,
         read_only: false,
         granted_caps: vec!["ui.read".into()],

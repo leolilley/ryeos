@@ -1,7 +1,7 @@
 use super::dto::{
-    StudioAddProjectDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
+    StudioAddProjectDto, StudioDimensionDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
     StudioItemInspectionDto, StudioItemsDto, StudioOpenProjectDto, StudioSchedulesDto,
-    StudioSnapshotDto, StudioThreadInspectionDto, StudioThreadsDto,
+    StudioThreadInspectionDto, StudioThreadsDto, StudioTopologyDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::event::{
@@ -9,7 +9,7 @@ use super::event::{
 };
 use super::model::{StudioCore, StudioInspectorState};
 use super::view_model::{
-    action_for_focused_row, launcher_items, StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
+    action_for_focused_row, launcher_items_for, StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
 };
 use crate::ids::TileId;
 use crate::layout::SplitAxis;
@@ -139,6 +139,11 @@ impl StudioCore {
             StudioUiEvent::ChooseLauncher { secondary } => {
                 let items = filtered_launcher_items(self);
                 let selected = self.ui.launcher.selected.min(items.len().saturating_sub(1));
+                if items.get(selected).is_some_and(|item| !item.enabled) {
+                    self.notice("Command is unavailable in this session.", StudioTone::Warn);
+                    self.bump_generation();
+                    return Vec::new();
+                }
                 let action = items.get(selected).and_then(|item| {
                     if secondary {
                         item.secondary_action
@@ -268,8 +273,8 @@ impl StudioCore {
                 }
                 Vec::new()
             }
-            StudioAction::SelectSnapshot => {
-                self.ui.inspector = StudioInspectorState::Snapshot;
+            StudioAction::SelectDimension => {
+                self.ui.inspector = StudioInspectorState::Dimension;
                 self.bump_generation();
                 Vec::new()
             }
@@ -278,7 +283,7 @@ impl StudioCore {
                 self.ui.inspector = StudioInspectorState::Item {
                     canonical_ref: canonical_ref.clone(),
                 };
-                self.ensure_item_inspector_tile();
+                self.ensure_inspector_tile();
                 self.bump_generation();
                 vec![self.emit(StudioEffectKind::InspectItem {
                     canonical_ref,
@@ -295,6 +300,7 @@ impl StudioCore {
                 self.ui.inspector = StudioInspectorState::Thread {
                     thread_id: thread_id.clone(),
                 };
+                self.ensure_inspector_tile();
                 self.bump_generation();
                 vec![self.emit(StudioEffectKind::InspectThread {
                     thread_id,
@@ -303,6 +309,7 @@ impl StudioCore {
             }
             StudioAction::InspectSummary { title, detail } => {
                 self.ui.inspector = StudioInspectorState::Summary { title, detail };
+                self.ensure_inspector_tile();
                 self.bump_generation();
                 Vec::new()
             }
@@ -356,23 +363,57 @@ impl StudioCore {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
-                } else {
-                    let _ = (item_ref, parameters);
-                    self.notice("Execution from RyeOS is not wired yet.", StudioTone::Warn);
+                } else if self.has_pending_invoke(&item_ref, &parameters) {
+                    self.notice(
+                        format!("Run {item_ref} is already pending."),
+                        StudioTone::Warn,
+                    );
                     Vec::new()
+                } else {
+                    vec![self.emit(StudioEffectKind::InvokeAction {
+                        command_id: item_ref,
+                        args: parameters,
+                    })]
                 }
             }
             StudioAction::CancelThread { thread_id } => {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
-                } else {
-                    let _ = thread_id;
-                    self.notice("Thread commands are not wired yet.", StudioTone::Warn);
+                } else if self.has_pending_cancel(&thread_id) {
+                    self.notice(
+                        format!("Cancel {thread_id} is already pending."),
+                        StudioTone::Warn,
+                    );
                     Vec::new()
+                } else {
+                    vec![self.emit(StudioEffectKind::CancelThread { thread_id })]
                 }
             }
         }
+    }
+
+    pub(crate) fn has_pending_invoke(
+        &self,
+        item_ref: &str,
+        parameters: &serde_json::Value,
+    ) -> bool {
+        self.pending_effects.values().any(|kind| {
+            matches!(
+                kind,
+                StudioEffectKind::InvokeAction { command_id, args }
+                    if command_id == item_ref && args == parameters
+            )
+        })
+    }
+
+    pub(crate) fn has_pending_cancel(&self, thread_id: &str) -> bool {
+        self.pending_effects.values().any(|kind| {
+            matches!(
+                kind,
+                StudioEffectKind::CancelThread { thread_id: pending } if pending == thread_id
+            )
+        })
     }
 
     fn emit_fetch_items(&mut self, tile_id: TileId) -> StudioEffect {
@@ -457,7 +498,7 @@ impl StudioCore {
         self.data.tile_items.clear();
         self.data.tile_files.clear();
         self.data.file_read = None;
-        self.ui.inspector = StudioInspectorState::Snapshot;
+        self.ui.inspector = StudioInspectorState::Dimension;
         self.push_motion(StudioMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
         });
@@ -468,7 +509,7 @@ impl StudioCore {
         self.initial_effects()
     }
 
-    fn ensure_item_inspector_tile(&mut self) {
+    fn ensure_inspector_tile(&mut self) {
         if let Some(tile_id) = self
             .workspace
             .layout
@@ -730,7 +771,8 @@ impl StudioCore {
                 vec![self.emit(StudioEffectKind::FetchProjects)]
             }
             ViewSpec::Atlas => vec![
-                self.emit(StudioEffectKind::FetchSnapshot),
+                self.emit(StudioEffectKind::FetchDimension),
+                self.emit(StudioEffectKind::FetchTopology),
                 self.emit(StudioEffectKind::FetchItems {
                     tile_id: None,
                     query: None,
@@ -738,13 +780,16 @@ impl StudioCore {
                     limit: 1000,
                 }),
             ],
+            ViewSpec::Graph { .. } => vec![
+                self.emit(StudioEffectKind::FetchDimension),
+                self.emit(StudioEffectKind::FetchTopology),
+            ],
             ViewSpec::Overview
             | ViewSpec::Remotes
             | ViewSpec::Services
             | ViewSpec::ItemInspector
             | ViewSpec::Trust
-            | ViewSpec::Graph { .. }
-            | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchSnapshot)],
+            | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchDimension)],
         }
     }
 
@@ -763,12 +808,51 @@ impl StudioCore {
 
         if !result.ok {
             self.notice(
-                result
-                    .error
-                    .unwrap_or_else(|| "RyeOS platform effect failed".to_string()),
+                effect_failure_notice(&expected, result.error.as_deref()),
                 StudioTone::Danger,
             );
             return Vec::new();
+        }
+
+        if matches!(
+            result.kind,
+            StudioEffectResultKind::ActionInvocation | StudioEffectResultKind::ThreadCancelled
+        ) {
+            let data = result
+                .data
+                .as_ref()
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            match result.kind {
+                StudioEffectResultKind::ActionInvocation => {
+                    self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
+                    return vec![
+                        self.emit(StudioEffectKind::FetchDimension),
+                        self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
+                    ];
+                }
+                StudioEffectResultKind::ThreadCancelled => {
+                    self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
+                    let mut effects = vec![
+                        self.emit(StudioEffectKind::FetchDimension),
+                        self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
+                    ];
+                    if let StudioEffectKind::CancelThread { thread_id } = &expected {
+                        if matches!(
+                            &self.ui.inspector,
+                            StudioInspectorState::Thread { thread_id: current } if current == thread_id
+                        ) {
+                            self.data.thread_inspection = None;
+                            effects.push(self.emit(StudioEffectKind::InspectThread {
+                                thread_id: thread_id.clone(),
+                                event_limit: 100,
+                            }));
+                        }
+                    }
+                    return effects;
+                }
+                _ => unreachable!(),
+            }
         }
 
         let Some(data) = result.data else {
@@ -777,9 +861,9 @@ impl StudioCore {
         };
 
         match result.kind {
-            StudioEffectResultKind::Snapshot => {
-                self.apply_parsed::<StudioSnapshotDto>(data, "snapshot", |core, snapshot| {
-                    core.data.snapshot = Some(snapshot);
+            StudioEffectResultKind::Dimension => {
+                self.apply_parsed::<StudioDimensionDto>(data, "dimension", |core, dimension| {
+                    core.data.dimension = Some(dimension);
                 });
             }
             StudioEffectResultKind::Projects => {
@@ -790,6 +874,14 @@ impl StudioCore {
                         core.data.projects = Some(projects);
                     },
                 );
+            }
+            StudioEffectResultKind::Topology => {
+                self.apply_parsed::<StudioTopologyDto>(data, "topology", |core, topology| {
+                    core.data.topology = Some(topology);
+                });
+            }
+            StudioEffectResultKind::ActionInvocation | StudioEffectResultKind::ThreadCancelled => {
+                unreachable!("command results are handled before optional data extraction")
             }
             StudioEffectResultKind::ProjectAdded => {
                 let added = match serde_json::from_value::<StudioAddProjectDto>(data) {
@@ -841,14 +933,15 @@ impl StudioCore {
                         }
                     }
                 }
-                self.data.snapshot = None;
+                self.data.dimension = None;
+                self.data.topology = None;
                 self.data.items = None;
                 self.data.tile_items.clear();
                 self.data.files = None;
                 self.data.tile_files.clear();
                 self.data.file_read = None;
                 self.data.item_inspection = None;
-                self.ui.inspector = StudioInspectorState::Snapshot;
+                self.ui.inspector = StudioInspectorState::Dimension;
                 self.pending_effects
                     .retain(|_, kind| !effect_depends_on_project_binding(kind));
                 self.notice(
@@ -987,9 +1080,9 @@ impl StudioCore {
             .map(|session| session.read_only)
             .or_else(|| {
                 self.data
-                    .snapshot
+                    .dimension
                     .as_ref()
-                    .map(|snapshot| snapshot.session.read_only)
+                    .map(|dimension| dimension.session.read_only)
             })
             .unwrap_or(true)
     }
@@ -1020,7 +1113,7 @@ fn is_home_view(view: &ViewSpec) -> bool {
 
 fn filtered_launcher_items(core: &StudioCore) -> Vec<super::view_model::StudioLauncherItemVm> {
     let query = core.ui.launcher.query.trim().to_lowercase();
-    launcher_items()
+    launcher_items_for(core)
         .into_iter()
         .filter(|item| {
             let haystack = format!("{} {}", item.label, item.hint).to_lowercase();
@@ -1049,6 +1142,65 @@ fn tile_file_state(core: &StudioCore, tile_id: TileId) -> Option<(String, String
     Some((root.clone(), path.clone()))
 }
 
+fn effect_success_notice(expected: &StudioEffectKind, data: &serde_json::Value) -> String {
+    match expected {
+        StudioEffectKind::InvokeAction { command_id, .. } => {
+            let item_ref =
+                json_field_text(data, &["command_id"]).unwrap_or_else(|| command_id.clone());
+            format!("Ran {item_ref}.")
+        }
+        StudioEffectKind::CancelThread { thread_id } => {
+            let thread =
+                json_field_text(data, &["thread_id", "id"]).unwrap_or_else(|| thread_id.clone());
+            format!("Cancelled {thread}.")
+        }
+        _ => "RyeOS command completed.".to_string(),
+    }
+}
+
+fn effect_failure_notice(expected: &StudioEffectKind, error: Option<&str>) -> String {
+    let reason = error
+        .and_then(effect_error_summary)
+        .unwrap_or_else(|| "RyeOS platform effect failed".to_string());
+    match expected {
+        StudioEffectKind::InvokeAction { command_id, .. } => {
+            format!("Run {command_id} failed: {reason}")
+        }
+        StudioEffectKind::CancelThread { thread_id } => {
+            format!("Cancel {thread_id} failed: {reason}")
+        }
+        _ => reason,
+    }
+}
+
+fn effect_error_summary(raw: &str) -> Option<String> {
+    structured_error_message(raw).or_else(|| {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn structured_error_message(raw: &str) -> Option<String> {
+    raw.char_indices()
+        .filter_map(|(index, ch)| (ch == '{').then_some(index))
+        .find_map(|index| serde_json::from_str::<serde_json::Value>(&raw[index..]).ok())
+        .and_then(|value| {
+            json_field_text(&value, &["message", "error", "detail", "code"]).or_else(|| {
+                value
+                    .get("body")
+                    .and_then(|body| json_field_text(body, &["message", "error", "detail", "code"]))
+            })
+        })
+}
+
+fn json_field_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| value.get(*key)).map(|v| {
+        v.as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| v.to_string())
+    })
+}
+
 fn effect_result_kind_matches(
     expected: &StudioEffectKind,
     actual: &StudioEffectResultKind,
@@ -1056,11 +1208,14 @@ fn effect_result_kind_matches(
     matches!(
         (expected, actual),
         (
-            StudioEffectKind::FetchSnapshot,
-            StudioEffectResultKind::Snapshot
+            StudioEffectKind::FetchDimension,
+            StudioEffectResultKind::Dimension
         ) | (
             StudioEffectKind::FetchProjects,
             StudioEffectResultKind::Projects
+        ) | (
+            StudioEffectKind::FetchTopology,
+            StudioEffectResultKind::Topology
         ) | (
             StudioEffectKind::AddProject { .. },
             StudioEffectResultKind::ProjectAdded
@@ -1092,6 +1247,12 @@ fn effect_result_kind_matches(
             StudioEffectKind::InspectThread { .. },
             StudioEffectResultKind::ThreadInspection
         ) | (
+            StudioEffectKind::InvokeAction { .. },
+            StudioEffectResultKind::ActionInvocation
+        ) | (
+            StudioEffectKind::CancelThread { .. },
+            StudioEffectResultKind::ThreadCancelled
+        ) | (
             StudioEffectKind::SetLocationHash { .. },
             StudioEffectResultKind::BrowserOnly
         ) | (
@@ -1107,11 +1268,13 @@ fn effect_result_kind_matches(
 fn effect_depends_on_project_binding(kind: &StudioEffectKind) -> bool {
     matches!(
         kind,
-        StudioEffectKind::FetchSnapshot
+        StudioEffectKind::FetchDimension
+            | StudioEffectKind::FetchTopology
             | StudioEffectKind::FetchItems { .. }
             | StudioEffectKind::ListFiles { .. }
             | StudioEffectKind::ReadFile { .. }
             | StudioEffectKind::InspectItem { .. }
+            | StudioEffectKind::InvokeAction { .. }
     )
 }
 
@@ -1121,8 +1284,8 @@ fn current_project_path(core: &StudioCore) -> Option<String> {
         .as_ref()
         .and_then(|session| session.project_path.clone())
         .or_else(|| {
-            core.data.snapshot.as_ref().and_then(|snapshot| {
-                snapshot
+            core.data.dimension.as_ref().and_then(|dimension| {
+                dimension
                     .project
                     .as_ref()
                     .map(|project| project.path.clone())
@@ -1147,6 +1310,7 @@ fn view_from_route(route: &str) -> Option<ViewSpec> {
         "gc" => Some(ViewSpec::GcStatus),
         "remotes" => Some(ViewSpec::Remotes),
         "services" => Some(ViewSpec::Services),
+        "trust" => Some(ViewSpec::Trust),
         _ => None,
     }
 }
@@ -1164,10 +1328,10 @@ fn route_for_view(view: &ViewSpec) -> Option<&'static str> {
         ViewSpec::GcStatus => Some("gc"),
         ViewSpec::Remotes => Some("remotes"),
         ViewSpec::Services => Some("services"),
+        ViewSpec::Trust => Some("trust"),
         ViewSpec::Thread { .. }
         | ViewSpec::ItemInspector
         | ViewSpec::SpaceBrowser { project: Some(_) }
-        | ViewSpec::Trust
         | ViewSpec::Graph { graph_id: Some(_) }
         | ViewSpec::EventInspector => None,
     }
@@ -1270,15 +1434,23 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::studio::dto::{
+        StudioInspectedItemDto, StudioItemDto, StudioItemInspectionDto, StudioItemsDto,
+        StudioKnownProjectDto, StudioProjectsDto, StudioThreadInspectionDto, StudioThreadsDto,
+    };
     use crate::studio::effect::StudioEffectResultKind;
     use crate::studio::event::{StudioEvent, StudioFilterField, StudioUiEvent};
     use crate::studio::model::{BrowserSession, BrowserViewport, StudioCore};
+    use crate::studio::view_model::{
+        build_view_model, launcher_items, StudioLayoutNodeVm, StudioViewVm,
+    };
     use crate::workspace::FocusDirection;
 
     fn session() -> BrowserSession {
         BrowserSession {
             session_id: "session-1".to_string(),
             surface_ref: "surface:ryeos/studio/base".to_string(),
+            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             effective_surface: None,
             project_path: Some("/tmp/project".to_string()),
             read_only: true,
@@ -1315,6 +1487,31 @@ mod tests {
         item_tile_id(core)
     }
 
+    fn executable_item(executable: bool) -> StudioItemDto {
+        StudioItemDto {
+            canonical_ref: "tool:demo/run".to_string(),
+            item_kind: "tool".to_string(),
+            bare_id: "run".to_string(),
+            label: "run".to_string(),
+            executable,
+            ..Default::default()
+        }
+    }
+
+    fn inspector_view(vm: &crate::studio::view_model::StudioViewModel) -> &StudioViewVm {
+        fn find(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
+            match node {
+                StudioLayoutNodeVm::Split { first, second, .. } => {
+                    find(first).or_else(|| find(second))
+                }
+                StudioLayoutNodeVm::Tile { view, .. } => {
+                    matches!(view, StudioViewVm::Inspector(_)).then_some(view)
+                }
+            }
+        }
+        find(&vm.workspace.root).expect("workspace should include inspector tile")
+    }
+
     #[test]
     fn start_emits_initial_effects() {
         let mut core = StudioCore::default();
@@ -1327,14 +1524,775 @@ mod tests {
         assert_eq!(effects.len(), 3);
         assert!(effects
             .iter()
-            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot)));
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
-        assert!(effects.iter().any(|effect| matches!(
-            effect.kind,
-            StudioEffectKind::FetchItems { tile_id: None, .. }
-        )));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology)));
+    }
+
+    #[test]
+    fn graph_view_effects_fetch_topology() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Graph { graph_id: None },
+                },
+            },
+        });
+
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology)));
+    }
+
+    #[test]
+    fn topology_effect_result_updates_state() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.initial_effects();
+        let topology_id = effects
+            .iter()
+            .find(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology))
+            .map(|effect| effect.id)
+            .expect("graph startup should fetch topology");
+
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: topology_id,
+                ok: true,
+                kind: StudioEffectResultKind::Topology,
+                data: Some(serde_json::json!({
+                    "version": "1",
+                    "kind": "topology",
+                    "metadata": {},
+                    "nodes": [{
+                        "id": "tool:demo/run",
+                        "kind": "tool",
+                        "label": "run",
+                        "ref": "tool:demo/run"
+                    }],
+                    "edges": []
+                })),
+                error: None,
+            },
+        });
+
+        let topology = core.data.topology.as_ref().expect("topology state");
+        assert_eq!(topology.nodes.len(), 1);
+        assert_eq!(topology.nodes[0].ref_, "tool:demo/run");
+    }
+
+    #[test]
+    fn launcher_includes_graph_view() {
+        assert!(launcher_items().iter().any(|item| {
+            item.label == "Graph"
+                && matches!(
+                    item.action,
+                    StudioAction::OpenView {
+                        view: ViewSpec::Graph { graph_id: None }
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn launcher_includes_remotes_view() {
+        assert!(launcher_items().iter().any(|item| {
+            item.label == "Remotes"
+                && matches!(
+                    item.action,
+                    StudioAction::OpenView {
+                        view: ViewSpec::Remotes
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn launcher_includes_trust_view() {
+        assert!(launcher_items().iter().any(|item| {
+            item.label == "Trust"
+                && matches!(
+                    item.action,
+                    StudioAction::OpenView {
+                        view: ViewSpec::Trust
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn launcher_offers_run_for_selected_executable_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+
+        let vm = build_view_model(&core);
+        let run = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Run run")
+            .expect("selected executable item should expose a run command");
+
+        assert!(run.enabled);
+        assert!(matches!(
+            &run.action,
+            StudioAction::ExecuteItem { item_ref, .. } if item_ref == "tool:demo/run"
+        ));
+    }
+
+    #[test]
+    fn launcher_disables_run_for_selected_pending_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let vm = build_view_model(&core);
+        let run = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Running run…")
+            .expect("pending executable item should expose disabled running command");
+
+        assert!(!run.enabled);
+    }
+
+    #[test]
+    fn launcher_offers_inspect_for_selected_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+
+        let vm = build_view_model(&core);
+        let inspect = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Inspect selection")
+            .expect("selected item should expose inspect command");
+
+        assert!(matches!(
+            &inspect.action,
+            StudioAction::InspectItem { canonical_ref } if canonical_ref == "tool:demo/run"
+        ));
+    }
+
+    #[test]
+    fn launcher_does_not_offer_run_for_selected_non_executable_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(false)],
+                ..Default::default()
+            },
+        );
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label.starts_with("Run ")));
+    }
+
+    #[test]
+    fn launcher_does_not_choose_disabled_run_command() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::OpenLauncher,
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetLauncherQuery {
+                query: "Run run".to_string(),
+            },
+        });
+
+        let vm = build_view_model(&core);
+        assert_eq!(vm.launcher.items[0].label, "Run run");
+        assert!(!vm.launcher.items[0].enabled);
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::ChooseLauncher { secondary: false },
+        });
+
+        assert!(effects.is_empty());
+        assert!(core.ui.launcher.open);
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Command is unavailable in this session."));
+    }
+
+    #[test]
+    fn launcher_does_not_label_project_activation_as_inspect() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Projects,
+                },
+            },
+        });
+        core.data.projects = Some(StudioProjectsDto {
+            projects: vec![StudioKnownProjectDto {
+                local_id: "project-1".to_string(),
+                name: "Project 1".to_string(),
+                root: "/tmp/project-1".to_string(),
+                exists: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label == "Inspect selection"));
+    }
+
+    #[test]
+    fn item_inspector_exposes_run_for_executable_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectItem {
+                    canonical_ref: "tool:demo/run".to_string(),
+                },
+            },
+        });
+        core.data.item_inspection = Some(StudioItemInspectionDto {
+            item: StudioInspectedItemDto {
+                canonical_ref: "tool:demo/run".to_string(),
+                executable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let run = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Run item")
+            .expect("executable item should expose run action");
+
+        assert!(matches!(
+            &run.action,
+            Some(StudioAction::ExecuteItem { item_ref, .. }) if item_ref == "tool:demo/run"
+        ));
+    }
+
+    #[test]
+    fn thread_inspector_exposes_cancel_for_running_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let cancel = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Cancel thread")
+            .expect("running thread should expose cancel action");
+
+        assert!(matches!(
+            &cancel.action,
+            Some(StudioAction::CancelThread { thread_id }) if thread_id == "T-running"
+        ));
+    }
+
+    #[test]
+    fn item_inspector_marks_run_pending_without_action() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectItem {
+                    canonical_ref: "tool:demo/run".to_string(),
+                },
+            },
+        });
+        core.data.item_inspection = Some(StudioItemInspectionDto {
+            item: StudioInspectedItemDto {
+                canonical_ref: "tool:demo/run".to_string(),
+                executable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let run = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Run item")
+            .expect("executable item should expose run section");
+
+        assert_eq!(run.rows[0].1, "Running");
+        assert!(run.action.is_none());
+    }
+
+    #[test]
+    fn thread_inspector_marks_cancel_pending_without_action() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            }),
+            ..Default::default()
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let cancel = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Cancel thread")
+            .expect("running thread should expose cancel section");
+
+        assert_eq!(cancel.rows[0].1, "Cancelling");
+        assert!(cancel.action.is_none());
+    }
+
+    #[test]
+    fn thread_inspector_exposes_cancel_for_created_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-created".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-created",
+                "status": "created"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+
+        assert!(inspector
+            .sections
+            .iter()
+            .any(|section| section.title == "Cancel thread"));
+    }
+
+    #[test]
+    fn thread_inspector_hides_cancel_for_pending_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-pending".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-pending",
+                "status": "pending"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+
+        assert!(!inspector
+            .sections
+            .iter()
+            .any(|section| section.title == "Cancel thread"));
+    }
+
+    #[test]
+    fn thread_inspector_hides_cancel_for_completed_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-done".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-done",
+                "status": "completed"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+
+        assert!(!inspector
+            .sections
+            .iter()
+            .any(|section| section.title == "Cancel thread"));
+    }
+
+    #[test]
+    fn launcher_offers_cancel_for_selected_running_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+        let cancel = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Cancel T-running")
+            .expect("selected running thread should expose a cancel command");
+
+        assert!(cancel.enabled);
+        assert!(matches!(
+            &cancel.action,
+            StudioAction::CancelThread { thread_id } if thread_id == "T-running"
+        ));
+    }
+
+    #[test]
+    fn launcher_disables_cancel_for_selected_pending_cancel() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            })],
+        });
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let vm = build_view_model(&core);
+        let cancel = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Cancelling T-running…")
+            .expect("pending cancel should expose disabled cancelling command");
+
+        assert!(!cancel.enabled);
+    }
+
+    #[test]
+    fn launcher_offers_cancel_for_selected_created_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-created",
+                "status": "created"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label == "Cancel T-created"));
+    }
+
+    #[test]
+    fn launcher_hides_cancel_for_selected_pending_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-pending",
+                "status": "pending"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label.starts_with("Cancel ")));
+    }
+
+    #[test]
+    fn launcher_does_not_offer_cancel_for_completed_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-done",
+                "status": "completed"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label.starts_with("Cancel ")));
+    }
+
+    #[test]
+    fn status_bar_exposes_principal_and_surface() {
+        let core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let envelope = core.envelope(Vec::new());
+        let segments = &envelope.view_model.presentation.chrome.status_bar.segments;
+        let value = |id: &str| {
+            segments
+                .iter()
+                .find(|segment| segment.id == id)
+                .map(|segment| segment.value.as_str())
+        };
+
+        assert_eq!(value("principal"), Some("fp:abababab…"));
+        assert_eq!(value("surface"), Some("ryeos/studio/base"));
+    }
+
+    #[test]
+    fn trust_view_exposes_principals_and_capabilities() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        core.data.dimension = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": "studio.test",
+                "session": {
+                    "session_id": "session-1",
+                    "surface_ref": "surface:ryeos/studio/base",
+                    "user_principal_id": "fp:session",
+                    "read_only": false,
+                    "granted_caps": ["rye.execute.service.ui.*"]
+                },
+                "local_node": {
+                    "identity": {
+                        "principal_id": "fp:node",
+                        "fingerprint": "node-fingerprint"
+                    },
+                    "services": [
+                        {
+                            "endpoint": "ui.session.current",
+                            "service_ref": "service:ui/session/current",
+                            "availability": "daemon",
+                            "required_caps": ["rye.execute.service.ui.session.current"]
+                        }
+                    ]
+                }
+            }))
+            .expect("dimension dto should parse"),
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Trust,
+                },
+            },
+        });
+
+        let envelope = core.envelope(Vec::new());
+        let tile = match envelope.view_model.workspace.root {
+            StudioLayoutNodeVm::Tile { view, .. } => view,
+            _ => panic!("expected single trust tile"),
+        };
+        let rows = match tile {
+            StudioViewVm::Rows { title, rows, .. } => {
+                assert_eq!(title, "Trust");
+                rows
+            }
+            other => panic!("expected trust rows, got {other:?}"),
+        };
+
+        assert!(rows.iter().any(|row| {
+            row.primary == "Session principal"
+                && row.secondary.as_deref()
+                    == Some("fp:abababababababababababababababababababababababababababababababab")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.primary == "Local node principal" && row.secondary.as_deref() == Some("fp:node")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.primary == "Granted capability"
+                && row.secondary.as_deref() == Some("rye.execute.service.ui.*")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.primary == "Required capability"
+                && row.secondary.as_deref() == Some("rye.execute.service.ui.session.current")
+                && row.meta.as_deref() == Some("ui.session.current")
+        }));
+    }
+
+    #[test]
+    fn inspect_summary_opens_inspector_tile() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        assert!(core
+            .workspace
+            .tiles
+            .values()
+            .all(|tile| !matches!(tile.view, ViewSpec::ItemInspector)));
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectSummary {
+                    title: "Topology: run".to_string(),
+                    detail: serde_json::json!({ "ref": "tool:demo/run" }),
+                },
+            },
+        });
+
+        let focused = core
+            .workspace
+            .tiles
+            .get(&core.workspace.focused_tile)
+            .expect("focused tile");
+        assert!(matches!(focused.view, ViewSpec::ItemInspector));
+        assert!(matches!(
+            core.ui.inspector,
+            StudioInspectorState::Summary { .. }
+        ));
     }
 
     #[test]
@@ -1399,7 +2357,7 @@ mod tests {
         );
         assert!(reloads
             .iter()
-            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot)));
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
         assert!(reloads
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
@@ -1482,6 +2440,43 @@ mod tests {
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::FetchItems { limit: 1000, .. })
         ));
+    }
+
+    #[test]
+    fn trust_route_focuses_trust_view() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::RouteChanged {
+            route: "trust".to_string(),
+        });
+
+        assert_eq!(core.workspace.focused_view(), Some(&ViewSpec::Trust));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect.kind,
+            StudioEffectKind::FetchTopology
+                | StudioEffectKind::FetchThreads { .. }
+                | StudioEffectKind::FetchGcStatus
+                | StudioEffectKind::FetchItems { .. }
+        )));
+    }
+
+    #[test]
+    fn opening_trust_view_sets_location_hash() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Trust,
+                },
+            },
+        });
+
+        assert!(effects.iter().any(|effect| matches!(
+            &effect.kind,
+            StudioEffectKind::SetLocationHash { hash } if hash == "trust"
+        )));
     }
 
     #[test]
@@ -1651,19 +2646,355 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_effect_result_updates_view_model() {
+    fn writable_execute_invokes_action_endpoint() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({ "target": "demo" }),
+                },
+            },
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::InvokeAction { command_id, args })
+                if command_id == "tool:demo/run" && args["target"] == "demo"
+        ));
+    }
+
+    #[test]
+    fn duplicate_execute_is_rejected_while_pending() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({ "target": "demo" }),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let duplicate = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({ "target": "demo" }),
+                },
+            },
+        });
+
+        assert!(duplicate.is_empty());
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Run tool:demo/run is already pending."));
+    }
+
+    #[test]
+    fn action_invocation_result_notices_and_refreshes() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let invoke = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        let invoke_id = invoke
+            .first()
+            .map(|effect| effect.id)
+            .expect("execute should emit invoke effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: invoke_id,
+                ok: true,
+                kind: StudioEffectResultKind::ActionInvocation,
+                data: Some(serde_json::json!({
+                    "status": "executed",
+                    "command_id": "tool:demo/run",
+                    "invocation_id": "inv-1"
+                })),
+                error: None,
+            },
+        });
+
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Ran tool:demo/run."));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 100 })));
+    }
+
+    #[test]
+    fn action_invocation_failure_names_item_and_structured_error() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let invoke = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        let invoke_id = invoke
+            .first()
+            .map(|effect| effect.id)
+            .expect("execute should emit invoke effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: invoke_id,
+                ok: false,
+                kind: StudioEffectResultKind::ActionInvocation,
+                data: None,
+                error: Some(
+                    "/ui/api/actions/invoke: 500 {\"message\":\"capability denied\"}".to_string(),
+                ),
+            },
+        });
+
+        assert!(effects.is_empty());
+        assert!(core.ui.notices.iter().any(|notice| {
+            notice.message == "Run tool:demo/run failed: capability denied"
+                && notice.tone == StudioTone::Danger
+        }));
+    }
+
+    #[test]
+    fn action_invocation_success_without_body_still_notices_and_refreshes() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let invoke = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        let invoke_id = invoke
+            .first()
+            .map(|effect| effect.id)
+            .expect("execute should emit invoke effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: invoke_id,
+                ok: true,
+                kind: StudioEffectResultKind::ActionInvocation,
+                data: None,
+                error: None,
+            },
+        });
+
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Ran tool:demo/run."));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 100 })));
+    }
+
+    #[test]
+    fn writable_cancel_thread_emits_cancel_effect() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::CancelThread { thread_id }) if thread_id == "T-demo"
+        ));
+    }
+
+    #[test]
+    fn duplicate_cancel_is_rejected_while_pending() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let duplicate = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+
+        assert!(duplicate.is_empty());
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Cancel T-demo is already pending."));
+    }
+
+    #[test]
+    fn thread_cancelled_result_notices_and_refreshes() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let cancel = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        let cancel_id = cancel
+            .first()
+            .map(|effect| effect.id)
+            .expect("cancel should emit effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: cancel_id,
+                ok: true,
+                kind: StudioEffectResultKind::ThreadCancelled,
+                data: Some(serde_json::json!({
+                    "thread_id": "T-demo",
+                    "status": "cancelled"
+                })),
+                error: None,
+            },
+        });
+
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Cancelled T-demo."));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 200 })));
+    }
+
+    #[test]
+    fn thread_cancel_failure_names_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let cancel = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        let cancel_id = cancel
+            .first()
+            .map(|effect| effect.id)
+            .expect("cancel should emit effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: cancel_id,
+                ok: false,
+                kind: StudioEffectResultKind::ThreadCancelled,
+                data: None,
+                error: Some("thread already finished".to_string()),
+            },
+        });
+
+        assert!(effects.is_empty());
+        assert!(core.ui.notices.iter().any(|notice| {
+            notice.message == "Cancel T-demo failed: thread already finished"
+                && notice.tone == StudioTone::Danger
+        }));
+    }
+
+    #[test]
+    fn thread_cancelled_from_inspector_clears_stale_detail_and_reinspects() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-demo",
+                "status": "running"
+            }),
+            ..Default::default()
+        });
+        let cancel = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        let cancel_id = cancel
+            .first()
+            .map(|effect| effect.id)
+            .expect("cancel should emit effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: cancel_id,
+                ok: true,
+                kind: StudioEffectResultKind::ThreadCancelled,
+                data: None,
+                error: None,
+            },
+        });
+
+        assert!(core.data.thread_inspection.is_none());
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 200 })));
+        assert!(effects.iter().any(|effect| matches!(
+            &effect.kind,
+            StudioEffectKind::InspectThread { thread_id, event_limit: 100 } if thread_id == "T-demo"
+        )));
+    }
+
+    #[test]
+    fn dimension_effect_result_updates_view_model() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
         let effects = core.initial_effects();
-        let snapshot_id = effects
+        let dimension_id = effects
             .iter()
-            .find(|effect| matches!(effect.kind, StudioEffectKind::FetchSnapshot))
+            .find(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension))
             .map(|effect| effect.id)
-            .expect("initial load should fetch snapshot");
+            .expect("initial load should fetch dimension");
         core.dispatch(StudioEvent::EffectResult {
             result: StudioEffectResult {
-                id: snapshot_id,
+                id: dimension_id,
                 ok: true,
-                kind: StudioEffectResultKind::Snapshot,
+                kind: StudioEffectResultKind::Dimension,
                 data: Some(serde_json::json!({
                     "schema_version": "studio.test",
                     "session": {
@@ -1842,7 +3173,7 @@ mod tests {
         )));
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
-            Some(StudioEffectKind::FetchSnapshot)
+            Some(StudioEffectKind::FetchDimension)
         ));
     }
 
@@ -2156,7 +3487,7 @@ mod tests {
             result: StudioEffectResult {
                 id: fetch_items.id,
                 ok: true,
-                kind: StudioEffectResultKind::Snapshot,
+                kind: StudioEffectResultKind::Dimension,
                 data: Some(serde_json::json!({
                     "schema_version": "studio.test",
                     "session": { "session_id": "session-1", "surface_ref": "surface:ryeos/studio/base", "read_only": true },
@@ -2166,7 +3497,7 @@ mod tests {
             },
         });
 
-        assert!(core.data.snapshot.is_none());
+        assert!(core.data.dimension.is_none());
         assert!(core.data.items.is_none());
         assert_eq!(core.ui.notices.len(), 1);
     }

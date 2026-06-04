@@ -152,7 +152,7 @@ export function statusLine(vm, shell) {
     const mode = vm.session?.read_only ? "ro" : "rw";
     const health = vm.chrome?.health_label || "connecting";
     const version = ryeosVersion(shell);
-    const project = vm.session?.project_path || shell?.snapshot?.project?.path || "home";
+    const project = vm.session?.project_path || shell?.dimension?.project?.path || "home";
     line.append(
       textEl("strong", "rye os"),
       textEl("span", `v${version}`),
@@ -190,7 +190,7 @@ function appendCompatMetrics(line, vm, segments) {
 }
 
 function ryeosVersion(shell) {
-  return (shell?.snapshot?.local_node?.status?.version || "0.1.0").replace(/^ryeosd-/, "");
+  return (shell?.dimension?.local_node?.status?.version || "0.1.0").replace(/^ryeosd-/, "");
 }
 
 function ambientLayer(scene) {

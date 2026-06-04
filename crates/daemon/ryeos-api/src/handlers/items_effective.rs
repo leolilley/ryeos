@@ -59,7 +59,7 @@ use ryeos_executor::executor::ServiceAvailability;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    /// Canonical item ref to resolve, e.g. "surface:ryeos/cockpit/base".
+    /// Canonical item ref to resolve, e.g. "surface:ryeos/studio/base".
     pub canonical_ref: String,
 
     /// Optional project path for project-space resolution.
@@ -224,7 +224,7 @@ mod tests {
         };
 
         let err = EngineError::ComposedValueContractViolation {
-            canonical_ref: "surface:ryeos/cockpit/base".into(),
+            canonical_ref: "surface:ryeos/studio/base".into(),
             report,
         };
 
@@ -237,7 +237,7 @@ mod tests {
                 assert!(body["error"]
                     .as_str()
                     .unwrap()
-                    .contains("surface:ryeos/cockpit/base"));
+                    .contains("surface:ryeos/studio/base"));
                 assert!(body["error"].as_str().unwrap().contains("2 errors"));
                 assert!(body["error"].as_str().unwrap().contains("1 warning"));
 

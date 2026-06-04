@@ -860,10 +860,10 @@ mod tests {
 
     #[test]
     fn label_and_namespace_split_bare_ids() {
-        assert_eq!(label_for_bare_id("ryeos/cockpit/graph"), "graph");
+        assert_eq!(label_for_bare_id("ryeos/studio/graph"), "graph");
         assert_eq!(
-            namespace_for_bare_id("ryeos/cockpit/graph"),
-            Some("ryeos/cockpit".into())
+            namespace_for_bare_id("ryeos/studio/graph"),
+            Some("ryeos/studio".into())
         );
     }
 
@@ -873,7 +873,7 @@ mod tests {
         let surface_path = tmp.path().join("graph.yaml");
         std::fs::write(
             &surface_path,
-            "extends: surface:ryeos/cockpit/base\nname: graph\n",
+            "extends: surface:ryeos/studio/base\nname: graph\n",
         )
         .unwrap();
         let client_path = tmp.path().join("web.yaml");
@@ -884,15 +884,15 @@ mod tests {
         .unwrap();
 
         let mut builder = GraphBuilder::new();
-        builder.add_ref_node("surface:ryeos/cockpit/graph", "surface");
+        builder.add_ref_node("surface:ryeos/studio/graph", "surface");
         builder.add_ref_node("client:ryeos/web", "client");
 
-        add_item_edges(&mut builder, "surface:ryeos/cockpit/graph", &surface_path);
+        add_item_edges(&mut builder, "surface:ryeos/studio/graph", &surface_path);
         add_item_edges(&mut builder, "client:ryeos/web", &client_path);
 
         assert!(builder
             .edges
-            .contains_key("surface:ryeos/cockpit/graph--extends--surface:ryeos/cockpit/base"));
+            .contains_key("surface:ryeos/studio/graph--extends--surface:ryeos/studio/base"));
         assert!(builder
             .edges
             .contains_key("client:ryeos/web--serves_kind--kind:surface"));

@@ -87,14 +87,14 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
         StudioTone::Neutral,
     ));
 
-    if let Some(snapshot) = &core.data.snapshot {
+    if let Some(dimension) = &core.data.dimension {
         scene.objects.push(scene_object(
             "project:core",
             StudioSceneObjectKind::ProjectCore,
             [0.0, -0.2, 0.0],
-            [scale_for_count(snapshot.project.iter().count()), 1.0, 1.0],
+            [scale_for_count(dimension.project.iter().count()), 1.0, 1.0],
             "#fe8019",
-            snapshot
+            dimension
                 .project
                 .as_ref()
                 .map(|project| project.path.clone()),
@@ -105,9 +105,9 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             "spaces:ring",
             StudioSceneObjectKind::SpaceRing,
             [0.0, -0.4, 0.0],
-            [scale_for_count(snapshot.local_node.spaces.len()), 1.0, 1.0],
+            [scale_for_count(dimension.local_node.spaces.len()), 1.0, 1.0],
             "#fabd2f",
-            Some(format!("{} spaces", snapshot.local_node.spaces.len())),
+            Some(format!("{} spaces", dimension.local_node.spaces.len())),
             StudioTone::Neutral,
         ));
 
@@ -116,12 +116,12 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             StudioSceneObjectKind::ServiceBeacon,
             [-2.6, 0.0, -2.8],
             [
-                scale_for_count(snapshot.local_node.services.len()),
+                scale_for_count(dimension.local_node.services.len()),
                 1.0,
                 1.0,
             ],
             "#83a598",
-            Some(format!("{} services", snapshot.local_node.services.len())),
+            Some(format!("{} services", dimension.local_node.services.len())),
             StudioTone::Neutral,
         ));
 
@@ -130,16 +130,16 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             StudioSceneObjectKind::ThreadFlow,
             [2.4, 0.0, -2.0],
             [
-                scale_for_count(snapshot.threads.active_count.max(0) as usize),
+                scale_for_count(dimension.threads.active_count.max(0) as usize),
                 1.0,
                 1.0,
             ],
             "#d3869b",
             Some(format!(
                 "{} active threads",
-                snapshot.threads.active_count.max(0)
+                dimension.threads.active_count.max(0)
             )),
-            if snapshot.threads.active_count > 0 {
+            if dimension.threads.active_count > 0 {
                 StudioTone::Accent
             } else {
                 StudioTone::Neutral
@@ -150,20 +150,20 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             "schedules:pulse",
             StudioSceneObjectKind::SchedulePulse,
             [3.2, 0.0, 2.4],
-            [scale_for_count(snapshot.schedules.enabled), 1.0, 1.0],
+            [scale_for_count(dimension.schedules.enabled), 1.0, 1.0],
             "#b8bb26",
             Some(format!(
                 "{} enabled / {} schedules",
-                snapshot.schedules.enabled, snapshot.schedules.total
+                dimension.schedules.enabled, dimension.schedules.total
             )),
-            if snapshot.schedules.enabled > 0 {
+            if dimension.schedules.enabled > 0 {
                 StudioTone::Good
             } else {
                 StudioTone::Neutral
             },
         ));
 
-        for (index, remote) in snapshot.remotes.iter().enumerate() {
+        for (index, remote) in dimension.remotes.iter().enumerate() {
             scene.objects.push(scene_object(
                 &format!("remote:{}", remote.name),
                 StudioSceneObjectKind::RemoteNode,
@@ -172,6 +172,109 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
                 "#8ec07c",
                 Some(remote.name.clone()),
                 StudioTone::Good,
+            ));
+        }
+    }
+
+    if let Some(topology) = &core.data.topology {
+        let limit = topology.nodes.len().min(48);
+        let mut projected_nodes = Vec::new();
+        for (index, node) in topology.nodes.iter().take(limit).enumerate() {
+            let angle = index as f32 * 0.72;
+            let radius = 4.2 + ((index % 4) as f32 * 0.45);
+            let y = ((index % 5) as f32 - 2.0) * 0.22;
+            let position = [angle.cos() * radius, y, angle.sin() * radius];
+            let id = if node.id.is_empty() {
+                format!("topology:node:{index}")
+            } else {
+                format!("topology:node:{}", node.id)
+            };
+            projected_nodes.push((node.id.clone(), position));
+            let label = if node.label.is_empty() {
+                node.ref_.clone()
+            } else {
+                node.label.clone()
+            };
+            let detail = serde_json::json!({
+                "id": node.id,
+                "kind": node.kind,
+                "ref": node.ref_,
+                "space": node.space,
+                "path": node.path,
+                "namespace": node.namespace,
+                "virtual": node.virtual_,
+                "missing": node.missing,
+                "status": node.status,
+                "trust": node.trust,
+            });
+            let mut object = scene_object(
+                &id,
+                scene_kind_for_topology(&node.kind),
+                position,
+                [0.42, 0.42, 0.42],
+                color_for_topology(&node.kind, node.missing),
+                Some(label.clone()),
+                tone_for_topology(&node.kind, node.missing, node.trust.as_ref()),
+            );
+            object.opacity = if node.missing { 0.45 } else { 0.86 };
+            object.action = Some(StudioAction::InspectSummary {
+                title: format!("Topology: {label}"),
+                detail,
+            });
+            scene.objects.push(object);
+        }
+
+        for (index, edge) in topology.edges.iter().take(64).enumerate() {
+            let Some(from) = topology_node_position(&projected_nodes, &edge.from) else {
+                continue;
+            };
+            let Some(to) = topology_node_position(&projected_nodes, &edge.to) else {
+                continue;
+            };
+            let position = midpoint(from, to);
+            let length = distance(from, to).max(0.2);
+            let label = if edge.label.is_empty() {
+                edge.type_.clone()
+            } else {
+                edge.label.clone()
+            };
+            let mut object = scene_object(
+                &format!("topology:edge:{}", edge_id(edge, index)),
+                StudioSceneObjectKind::Link,
+                position,
+                [length, 0.05, 0.05],
+                "#928374",
+                Some(label.clone()),
+                StudioTone::Neutral,
+            );
+            object.opacity = 0.34;
+            object.action = Some(StudioAction::InspectSummary {
+                title: format!("Topology edge: {label}"),
+                detail: serde_json::json!({
+                    "id": edge.id,
+                    "from": edge.from,
+                    "to": edge.to,
+                    "type": edge.type_,
+                    "label": edge.label,
+                    "source": edge.source,
+                    "confidence": edge.confidence,
+                }),
+            });
+            scene.objects.push(object);
+        }
+
+        if topology.nodes.len() > limit {
+            scene.objects.push(scene_object(
+                "topology:truncated",
+                StudioSceneObjectKind::LabelAnchor,
+                [0.0, 1.2, -4.8],
+                [0.55, 0.55, 0.55],
+                "#928374",
+                Some(format!(
+                    "{} more topology nodes",
+                    topology.nodes.len() - limit
+                )),
+                StudioTone::Neutral,
             ));
         }
     }
@@ -196,9 +299,9 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             .as_ref()
             .map(|session| session.granted_caps.clone())
             .unwrap_or_default();
-        if let Some(snapshot) = &core.data.snapshot {
-            capabilities.extend(snapshot.session.granted_caps.clone());
-            for service in &snapshot.local_node.services {
+        if let Some(dimension) = &core.data.dimension {
+            capabilities.extend(dimension.session.granted_caps.clone());
+            for service in &dimension.local_node.services {
                 capabilities.extend(service.required_caps.clone());
             }
         }
@@ -283,6 +386,81 @@ fn scale_for_count(count: usize) -> f32 {
     (0.65 + (count as f32).sqrt() * 0.12).min(2.2)
 }
 
+fn topology_node_position(nodes: &[(String, [f32; 3])], id: &str) -> Option<[f32; 3]> {
+    nodes
+        .iter()
+        .find_map(|(node_id, position)| (node_id == id).then_some(*position))
+}
+
+fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        (a[0] + b[0]) * 0.5,
+        (a[1] + b[1]) * 0.5,
+        (a[2] + b[2]) * 0.5,
+    ]
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn edge_id(edge: &super::dto::StudioTopologyEdgeDto, index: usize) -> String {
+    if edge.id.is_empty() {
+        format!("{index}:{}:{}", edge.from, edge.to)
+    } else {
+        edge.id.clone()
+    }
+}
+
+fn scene_kind_for_topology(kind: &str) -> StudioSceneObjectKind {
+    match kind {
+        "project" | "project_root" | "surface" => StudioSceneObjectKind::ProjectCore,
+        "space" => StudioSceneObjectKind::SpaceRing,
+        "service" | "route" | "handler" | "protocol" => StudioSceneObjectKind::ServiceBeacon,
+        "thread" => StudioSceneObjectKind::ThreadFlow,
+        "schedule" => StudioSceneObjectKind::SchedulePulse,
+        _ => StudioSceneObjectKind::ItemCluster,
+    }
+}
+
+fn color_for_topology(kind: &str, missing: bool) -> &'static str {
+    if missing {
+        return "#928374";
+    }
+    match kind {
+        "directive" => "#fabd2f",
+        "tool" => "#8ec07c",
+        "knowledge" => "#83a598",
+        "service" | "route" => "#b8bb26",
+        "surface" | "project" | "project_root" => "#fe8019",
+        _ => "#d5c4a1",
+    }
+}
+
+fn tone_for_topology(
+    kind: &str,
+    missing: bool,
+    trust: Option<&super::dto::StudioTopologyTrustSummaryDto>,
+) -> StudioTone {
+    if missing {
+        StudioTone::Warn
+    } else if matches!(trust.map(|trust| trust.class_.as_str()), Some("trusted")) {
+        StudioTone::Good
+    } else if matches!(
+        trust.map(|trust| trust.class_.as_str()),
+        Some("untrusted" | "unsigned")
+    ) {
+        StudioTone::Warn
+    } else if matches!(kind, "surface" | "project" | "project_root") {
+        StudioTone::Accent
+    } else {
+        StudioTone::Neutral
+    }
+}
+
 fn atlas_context_refs(core: &StudioCore) -> Vec<String> {
     let Some(inspection) = &core.data.item_inspection else {
         return Vec::new();
@@ -345,7 +523,11 @@ fn is_canonical_item_ref(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::studio::dto::{StudioItemDto, StudioItemsDto};
+    use crate::studio::dto::{
+        StudioItemDto, StudioItemsDto, StudioTopologyDto, StudioTopologyEdgeDto,
+        StudioTopologyEdgeSourceDto, StudioTopologyNodeDto, StudioTopologyNodeStatusDto,
+        StudioTopologyTrustSummaryDto,
+    };
 
     #[test]
     fn scene_model_includes_namespace_atlas_for_items() {
@@ -388,6 +570,98 @@ mod tests {
             .find(|node| node.namespace_key == "rye/core/create_tool")
             .expect("projected stack");
         assert_eq!(stack_node.stack.len(), 2);
+    }
+
+    #[test]
+    fn scene_model_projects_topology_nodes() {
+        let mut core = StudioCore::default();
+        core.data.topology = Some(StudioTopologyDto {
+            nodes: vec![StudioTopologyNodeDto {
+                id: "tool:demo/run".to_string(),
+                kind: "tool".to_string(),
+                label: "run".to_string(),
+                ref_: "tool:demo/run".to_string(),
+                status: Some(StudioTopologyNodeStatusDto {
+                    resolved: true,
+                    composed: Some(false),
+                    executable: true,
+                }),
+                trust: Some(StudioTopologyTrustSummaryDto {
+                    class_: "trusted".to_string(),
+                    signer: Some("signer-fp".to_string()),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let scene = build_scene_model(&core);
+        let node = scene
+            .objects
+            .iter()
+            .find(|object| object.id == "topology:node:tool:demo/run")
+            .expect("topology node object");
+        assert_eq!(node.kind, StudioSceneObjectKind::ItemCluster);
+        assert_eq!(node.label.as_deref(), Some("run"));
+        assert_eq!(node.tone, StudioTone::Good);
+        let Some(StudioAction::InspectSummary { detail, .. }) = &node.action else {
+            panic!("topology node should inspect summary")
+        };
+        assert_eq!(detail["status"]["executable"], true);
+        assert_eq!(detail["trust"]["class"], "trusted");
+        assert_eq!(detail["trust"]["signer"], "signer-fp");
+    }
+
+    #[test]
+    fn scene_model_projects_topology_edges() {
+        let mut core = StudioCore::default();
+        core.data.topology = Some(StudioTopologyDto {
+            nodes: vec![
+                StudioTopologyNodeDto {
+                    id: "tool:demo/run".to_string(),
+                    kind: "tool".to_string(),
+                    label: "run".to_string(),
+                    ref_: "tool:demo/run".to_string(),
+                    ..Default::default()
+                },
+                StudioTopologyNodeDto {
+                    id: "knowledge:demo/readme".to_string(),
+                    kind: "knowledge".to_string(),
+                    label: "readme".to_string(),
+                    ref_: "knowledge:demo/readme".to_string(),
+                    ..Default::default()
+                },
+            ],
+            edges: vec![StudioTopologyEdgeDto {
+                id: "edge-1".to_string(),
+                from: "tool:demo/run".to_string(),
+                to: "knowledge:demo/readme".to_string(),
+                type_: "context".to_string(),
+                label: "uses".to_string(),
+                source: Some(StudioTopologyEdgeSourceDto {
+                    field: Some("context".to_string()),
+                    path: Some("/tmp/tool.yaml".to_string()),
+                }),
+                confidence: "declared".to_string(),
+            }],
+            ..Default::default()
+        });
+
+        let scene = build_scene_model(&core);
+        let edge = scene
+            .objects
+            .iter()
+            .find(|object| object.id == "topology:edge:edge-1")
+            .expect("topology edge object");
+        assert_eq!(edge.kind, StudioSceneObjectKind::Link);
+        assert_eq!(edge.label.as_deref(), Some("uses"));
+        assert!(edge.scale[0] > 0.2);
+        let Some(StudioAction::InspectSummary { detail, .. }) = &edge.action else {
+            panic!("topology edge should inspect summary")
+        };
+        assert_eq!(detail["source"]["field"], "context");
+        assert_eq!(detail["source"]["path"], "/tmp/tool.yaml");
+        assert_eq!(detail["confidence"], "declared");
     }
 
     #[test]

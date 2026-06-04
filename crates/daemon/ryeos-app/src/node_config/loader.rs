@@ -5,8 +5,8 @@
 //!
 //! Section directories support recursive subfolders. For example:
 //!
-//!   .ai/node/routes/ui/cockpit/snapshot.yaml
-//!   .ai/node/routes/ui/cockpit/items/list.yaml
+//!   .ai/node/routes/ui/studio/dimension-get.yaml
+//!   .ai/node/routes/ui/studio/items/list.yaml
 //!   .ai/node/commands/web.yaml
 //!
 //! The section invariant requires:
@@ -788,15 +788,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let routes_dir = dir.path().join("routes");
         let ui_dir = routes_dir.join("ui");
-        let cockpit_dir = ui_dir.join("cockpit");
-        fs::create_dir_all(&cockpit_dir).unwrap();
+        let studio_dir = ui_dir.join("studio");
+        fs::create_dir_all(&studio_dir).unwrap();
 
         // Flat file
         fs::write(routes_dir.join("health.yaml"), "section: routes").unwrap();
         // Nested one level
         fs::write(ui_dir.join("index.yaml"), "section: routes").unwrap();
         // Nested two levels
-        fs::write(cockpit_dir.join("snapshot.yaml"), "section: routes").unwrap();
+        fs::write(studio_dir.join("dimension-get.yaml"), "section: routes").unwrap();
         // Non-yaml file (should be skipped)
         fs::write(routes_dir.join("README.md"), "not yaml").unwrap();
         // Hidden file (should be found — no hidden filtering)
@@ -808,20 +808,20 @@ mod tests {
             .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
             .collect();
 
-        // Sorted: .hidden.yaml, health.yaml, then ui/cockpit/snapshot.yaml, ui/index.yaml
+        // Sorted: .hidden.yaml, health.yaml, then ui/index.yaml, ui/studio/dimension-get.yaml
         assert_eq!(names.len(), 4, "expected 4 yaml files, got: {:?}", names);
         assert!(names.contains(&".hidden.yaml".to_string()));
         assert!(names.contains(&"health.yaml".to_string()));
-        assert!(names.contains(&"snapshot.yaml".to_string()));
+        assert!(names.contains(&"dimension-get.yaml".to_string()));
         assert!(names.contains(&"index.yaml".to_string()));
 
         // Verify deterministic order: depth-first, sorted at each level
         // Level 1: .hidden.yaml, health.yaml, ui/
-        //   Level 2: ui/cockpit/snapshot.yaml, ui/index.yaml
+        //   Level 2: ui/index.yaml, ui/studio/dimension-get.yaml
         assert_eq!(names[0], ".hidden.yaml");
         assert_eq!(names[1], "health.yaml");
-        assert_eq!(names[2], "snapshot.yaml");
-        assert_eq!(names[3], "index.yaml");
+        assert_eq!(names[2], "index.yaml");
+        assert_eq!(names[3], "dimension-get.yaml");
     }
 
     #[test]
@@ -903,16 +903,16 @@ mod tests {
         let routes_dir = dir.path().join("routes");
         let api_dir = routes_dir.join("api");
         let ui_dir = routes_dir.join("ui");
-        let cockpit_dir = ui_dir.join("cockpit");
-        fs::create_dir_all(&cockpit_dir).unwrap();
+        let studio_dir = ui_dir.join("studio");
+        fs::create_dir_all(&studio_dir).unwrap();
         fs::create_dir_all(&api_dir).unwrap();
 
         // api/a.yaml (alphabetically before ui/)
         fs::write(api_dir.join("a.yaml"), "").unwrap();
-        // ui/aaa.yaml (alphabetically before ui/cockpit/)
+        // ui/aaa.yaml (alphabetically before ui/studio/)
         fs::write(ui_dir.join("aaa.yaml"), "").unwrap();
-        // ui/cockpit/c.yaml (deeper under ui/)
-        fs::write(cockpit_dir.join("c.yaml"), "").unwrap();
+        // ui/studio/c.yaml (deeper under ui/)
+        fs::write(studio_dir.join("c.yaml"), "").unwrap();
 
         let files = scan_yaml_files_recursive(&routes_dir).unwrap();
         let relative: Vec<String> = files
@@ -926,14 +926,14 @@ mod tests {
             .collect();
 
         // api/ sorts before ui/
-        // Within ui/: aaa.yaml sorts before cockpit/ (a < c)
-        // So order is: api/a.yaml, ui/aaa.yaml, ui/cockpit/c.yaml
+        // Within ui/: aaa.yaml sorts before Studio/ (a < c)
+        // So order is: api/a.yaml, ui/aaa.yaml, ui/studio/c.yaml
         assert_eq!(
             relative,
             vec![
                 "api/a.yaml".to_string(),
                 "ui/aaa.yaml".to_string(),
-                "ui/cockpit/c.yaml".to_string(),
+                "ui/studio/c.yaml".to_string(),
             ]
         );
     }
@@ -944,10 +944,10 @@ mod tests {
     fn section_invariant_nested_file_under_correct_section() {
         let dir = tempfile::tempdir().unwrap();
         let routes_dir = dir.path().join("routes");
-        let cockpit_dir = routes_dir.join("ui").join("cockpit");
-        fs::create_dir_all(&cockpit_dir).unwrap();
+        let studio_dir = routes_dir.join("ui").join("studio");
+        fs::create_dir_all(&studio_dir).unwrap();
 
-        let file = cockpit_dir.join("snapshot.yaml");
+        let file = studio_dir.join("dimension-get.yaml");
         fs::write(&file, "section: routes").unwrap();
 
         let body: Value = serde_yaml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
@@ -980,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn load_full_loads_real_cockpit_bundle_nested_routes() {
+    fn load_full_loads_real_studio_bundle_nested_routes() {
         let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .find(|p| p.join("bundles").is_dir())
@@ -990,12 +990,12 @@ mod tests {
         let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
 
         let system = temp_system_with_command_registration_policy(&workspace);
-        let cockpit = temp_bundle_with_node_section(&workspace.join("bundles/cockpit"), "routes");
+        let studio = temp_bundle_with_node_section(&workspace.join("bundles/studio"), "routes");
         let bundles = vec![BundleRecord {
-            name: "cockpit".into(),
-            path: cockpit.path().to_path_buf(),
+            name: "studio".into(),
+            path: studio.path().to_path_buf(),
             command_registration_caps: Vec::new(),
-            source_file: workspace.join("bundles/core/.ai/node/bundles/cockpit.yaml"),
+            source_file: workspace.join("bundles/core/.ai/node/bundles/studio.yaml"),
         }];
 
         let loader = BootstrapLoader {
@@ -1004,23 +1004,23 @@ mod tests {
         };
         let snapshot = loader
             .load_full(&SectionTable::new(), &bundles)
-            .expect("load full node config with cockpit bundle");
+            .expect("load full node config with Studio bundle");
 
-        let cockpit_snapshot_route = snapshot
+        let studio_dimension_route = snapshot
             .routes
             .iter()
-            .find(|route| route.path == "/ui/api/cockpit/snapshot")
-            .expect("cockpit snapshot route should load from nested route directory");
+            .find(|route| route.path == "/ui/api/studio/dimension")
+            .expect("Studio dimension route should load from nested route directory");
         assert!(
-            cockpit_snapshot_route
+            studio_dimension_route
                 .source_file
-                .ends_with(".ai/node/routes/ui/cockpit/snapshot.yaml"),
+                .ends_with(".ai/node/routes/ui/studio/dimension-get.yaml"),
             "route source should preserve nested path, got {}",
-            cockpit_snapshot_route.source_file.display()
+            studio_dimension_route.source_file.display()
         );
         assert!(
             snapshot.routes.iter().any(|route| route.path == "/ui"),
-            "moved cockpit bundle should still provide base UI route"
+            "moved Studio bundle should still provide base UI route"
         );
         assert!(
             snapshot

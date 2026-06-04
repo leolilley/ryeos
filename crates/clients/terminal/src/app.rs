@@ -262,9 +262,9 @@ async fn run_effects(
             | Effect::InspectThread { .. }
             | Effect::ListFiles { .. }
             | Effect::ReadFile { .. } => {
-                // These cockpit effects are handled by the web shell. The
-                // terminal client may still render cockpit views, but it does
-                // not currently expose the HTTP cockpit endpoints directly.
+                // These Studio effects are handled by the web shell. The
+                // terminal client may still render Studio views, but it does
+                // not currently expose the HTTP Studio endpoints directly.
             }
             Effect::SendThreadCommand { thread_id, command } => match command {
                 ryeos_client_base::effects::ThreadCommand::Cancel => {

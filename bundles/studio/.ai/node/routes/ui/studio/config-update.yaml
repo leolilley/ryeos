@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-03T06:08:06Z:671e6ce929d651091911db3820c1bef008c1f4c742602436dff6ca38bc371edb:3rBWhN2Cs7SxVDwLcuaNhk5/wYrusV4nJrhiZhmRi5e4RD+YJTMoABS+fbzDJyPuG6Oy78cyx2xOthLMKN5eDw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/config/update
+path: /ui/api/studio/config/update
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/studio/config/update"

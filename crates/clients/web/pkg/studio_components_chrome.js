@@ -48,8 +48,10 @@ export function launcherDialog(state, shell) {
   choices.forEach((item, index) => {
     const row = el("button", `studio-command-choice${index === selected ? " selected" : ""}`);
     row.type = "button";
+    row.disabled = item.enabled === false;
     row.append(textEl("strong", item.label || "View"), textEl("span", item.hint || ""));
     row.addEventListener("click", () => {
+      if (item.enabled === false) return;
       if (item.action && shell.dispatchUi) {
         shell.dispatchUi({ type: "activate", action: item.action });
         shell.closeLauncher?.();

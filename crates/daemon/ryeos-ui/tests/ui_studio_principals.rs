@@ -77,6 +77,24 @@ async fn studio_config_is_isolated_by_durable_user_principal() {
 }
 
 #[tokio::test]
+async fn studio_dimension_exposes_session_user_principal() {
+    let (_tmp, state) = build_test_state();
+    let principal = format!("fp:{}", "cc".repeat(32));
+    let ctx = session_context(&state, &principal);
+
+    let dimension =
+        ryeos_ui::handlers::ui_studio_dimension::handle(json!(null), ctx, Arc::new(state.clone()))
+            .await
+            .expect("studio dimension should load");
+
+    assert_eq!(dimension["session"]["user_principal_id"], principal);
+    assert_eq!(
+        dimension["session"]["surface_ref"],
+        "surface:ryeos/studio/base"
+    );
+}
+
+#[tokio::test]
 async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
     let (_tmp, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {

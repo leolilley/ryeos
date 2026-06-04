@@ -26,6 +26,7 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_executor::executor::ServiceAvailability;
 
+use crate::browser_session::BrowserSession;
 use crate::state::get_ui_state;
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +42,14 @@ pub struct Request {
 /// Extract session_id from the handler context's fingerprint.
 fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
+}
+
+fn action_context_for_session(ctx: &HandlerContext, session: &BrowserSession) -> HandlerContext {
+    if let Some(user_principal_id) = session.user_principal_id.clone() {
+        HandlerContext::new(user_principal_id, session.granted_caps.clone(), true)
+    } else {
+        ctx.clone()
+    }
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -76,7 +85,8 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             .unwrap_or_else(|| {
                 ryeos_engine::roots::user_root().unwrap_or_else(|_| std::path::PathBuf::from("."))
             });
-        let result = execute_item_ref(&req, &ctx, &state, &project_path).await?;
+        let action_ctx = action_context_for_session(&ctx, &session);
+        let result = execute_item_ref(&req, &action_ctx, &state, &project_path).await?;
 
         ui.session_bus.publish(
             &session_id,
@@ -197,3 +207,55 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn session(user_principal_id: Option<String>) -> BrowserSession {
+        let now = Instant::now();
+        BrowserSession {
+            session_id: "session-1".to_string(),
+            created_at: now,
+            expires_at: now + Duration::from_secs(60),
+            granted_caps: vec!["ui.read".to_string()],
+            project_root: None,
+            surface_ref: "surface:ryeos/studio/base".to_string(),
+            read_only: false,
+            user_principal_id,
+        }
+    }
+
+    #[test]
+    fn action_context_uses_durable_session_principal_when_present() {
+        let browser_ctx = HandlerContext::new("session:session-1".to_string(), vec![], false);
+        let action_ctx = action_context_for_session(
+            &browser_ctx,
+            &session(Some(
+                "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            )),
+        );
+
+        assert_eq!(
+            action_ctx.fingerprint,
+            "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(action_ctx.verified);
+        assert_eq!(action_ctx.scopes, vec!["ui.read".to_string()]);
+    }
+
+    #[test]
+    fn action_context_falls_back_to_browser_context_without_principal() {
+        let browser_ctx = HandlerContext::new(
+            "session:session-1".to_string(),
+            vec!["ui.read".to_string()],
+            false,
+        );
+        let action_ctx = action_context_for_session(&browser_ctx, &session(None));
+
+        assert_eq!(action_ctx.fingerprint, "session:session-1");
+        assert!(!action_ctx.verified);
+        assert_eq!(action_ctx.scopes, vec!["ui.read".to_string()]);
+    }
+}

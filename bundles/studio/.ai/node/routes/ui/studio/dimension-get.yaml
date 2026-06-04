@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-03T06:02:12Z:4fcdfd8bb7a619e22861e914d0167c3ed02502c9aacbef4719a1b5262381d94f:7jhBgTz7EhAfh6UuXK+LVYFoevsaQW1SnBizg3DNv0g3lYjB/EpnKJoY2YHOyV46tydZT4m9x3F9dCn627WIBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/dimension
+path: /ui/api/studio/dimension
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 256
+response:
+  mode: json
+  source: "service:ui/studio/dimension/get"

@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-31T08:15:58Z:55e1e389d3d350b1d4ee37726ca69e1d7865122961a4f22e00a43cae30cf84c3:P3vaw/1B4NcKRC4eTN8DaUydBn5b80IeYlchi7jKpvS8OWrrWiTixXabpFlK2KRHphOvSWWS7y4LNL3vvvsYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-name: cockpit/remotes/list
-version: "1.0.0"
-description: List configured remotes with project-layer merging — no probes.
-endpoint: ui.cockpit.remotes.list
-availability: daemon_only

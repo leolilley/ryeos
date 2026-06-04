@@ -11,6 +11,7 @@
   --studio-warn: #fabd2f;
   --studio-warn-rgb: 250, 189, 47;
   --studio-good: #8ec07c;
+  --studio-good-rgb: 142, 192, 124;
   --studio-good-strong: #b8bb26;
   --studio-danger: #fb4934;
   --bg: var(--studio-bg);
@@ -313,6 +314,26 @@ body {
 .studio-scene-node span { color: var(--studio-muted); font-size: 0.72rem; text-transform: uppercase; }
 .studio-scene-node.local_node { border-radius: 999px; min-width: 148px; min-height: 74px; place-content: center; }
 .studio-scene-node.remote_node { border-radius: 10px; }
+.studio-scene-node.good { box-shadow: 0 0 24px rgba(var(--studio-good-rgb), 0.28), 0 0 28px color-mix(in srgb, var(--node-color), transparent 72%); }
+.studio-scene-node.warn { border-style: dashed; box-shadow: 0 0 24px rgba(var(--studio-warn-rgb), 0.26), 0 0 28px color-mix(in srgb, var(--node-color), transparent 72%); }
+.studio-scene-node.link {
+  min-width: 72px;
+  min-height: 0;
+  height: 8px;
+  padding: 0;
+  border-width: 1px;
+  opacity: 0.72;
+  overflow: visible;
+}
+.studio-scene-node.link strong {
+  position: absolute;
+  left: 50%;
+  top: -18px;
+  transform: translateX(-50%);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+.studio-scene-node.link span { display: none; }
 
 .studio-atlas-map {
   height: 100%;
@@ -730,6 +751,19 @@ body {
 .studio-section dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; margin: 0; }
 .studio-section dt { color: var(--studio-muted); text-transform: uppercase; font-size: 0.76rem; }
 .studio-section dd { margin: 0; overflow-wrap: anywhere; }
+.studio-section-action {
+  margin-top: 14px;
+  border: 1px solid rgba(var(--studio-accent-rgb), 0.55);
+  background: rgba(var(--studio-accent-rgb), 0.12);
+  color: var(--studio-accent);
+  padding: 8px 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.studio-section-action:hover {
+  background: var(--studio-accent);
+  color: var(--studio-bg);
+}
 
 .studio-list-header {
   display: grid;
@@ -1981,6 +2015,16 @@ body,
   background: rgba(var(--studio-accent-rgb), 0.16);
   color: var(--studio-fg);
   box-shadow: inset 2px 0 0 rgba(var(--studio-accent-rgb), 0.76);
+}
+
+.studio-command-choice:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.studio-command-choice:disabled:hover {
+  background: transparent;
+  box-shadow: none;
 }
 
 .studio-command-choice.selected {

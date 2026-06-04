@@ -95,7 +95,7 @@ function view(viewVm, tileId, dispatchUi) {
       body.append(textEl("h2", viewVm.running ? "GC running" : "GC idle"), code(JSON.stringify(viewVm.recent_events || [], null, 2)));
       break;
     case "inspector":
-      body.append(inspector(viewVm));
+      body.append(inspector(viewVm, dispatchUi));
       break;
     case "placeholder":
       body.append(textEl("h2", viewVm.title), textEl("p", viewVm.message));
@@ -209,6 +209,8 @@ function sceneMap(scene, dispatchUi) {
     node.style.left = `${50 + (object.position?.[0] || 0) * 12}%`;
     node.style.top = `${50 + (object.position?.[2] || 0) * 12}%`;
     node.style.setProperty("--node-color", object.color || "#fabd2f");
+    node.style.opacity = String(object.opacity ?? 1);
+    if (object.kind === "link") node.style.width = `${Math.max(72, (object.scale?.[0] || 1) * 24)}px`;
     node.disabled = !object.action;
     node.append(textEl("strong", object.label || object.id), textEl("span", object.kind || "object"));
     if (object.action) node.addEventListener("click", () => dispatchUi({ type: "activate", action: object.action }));
@@ -460,8 +462,34 @@ function sectionBlock(block, dispatchUi) {
   const dl = el("dl");
   for (const [key, value] of block.rows || []) dl.append(textEl("dt", key), textEl("dd", value));
   section.append(dl);
-  if (block.action && dispatchUi) section.addEventListener("click", () => dispatchUi({ type: "activate", action: block.action }));
+  if (block.action && dispatchUi) {
+    const button = el("button", "studio-section-action");
+    button.type = "button";
+    button.textContent = sectionActionLabel(block);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      dispatchUi({ type: "activate", action: block.action });
+    });
+    section.append(button);
+  }
   return section;
+}
+
+function sectionActionLabel(block) {
+  const explicit = (block.rows || []).find(([key]) => key === "Action")?.[1];
+  if (explicit) return explicit;
+  switch (block.action?.type) {
+    case "execute_item":
+      return "Run";
+    case "cancel_thread":
+      return "Cancel";
+    case "select_dimension":
+      return "Inspect";
+    case "open_view":
+      return "Open";
+    default:
+      return "Open";
+  }
 }
 
 function rows(items, tileId, kind, dispatchUi) {
@@ -499,12 +527,12 @@ function rowGlyph(item, kind) {
   return "•";
 }
 
-function inspector(vm) {
+function inspector(vm, dispatchUi) {
   const wrap = el("div", "studio-inspector-view");
   wrap.append(textEl("h2", vm.title));
   if (vm.subtitle) wrap.append(textEl("p", vm.subtitle));
   if (vm.empty) wrap.append(textEl("p", vm.empty_message || "Select an object to inspect it."));
-  for (const section of vm.sections || []) wrap.append(sectionBlock(section, null));
+  for (const section of vm.sections || []) wrap.append(sectionBlock(section, dispatchUi));
   for (const block of vm.code_blocks || []) wrap.append(textEl("h3", block.label), code(block.content));
   return wrap;
 }

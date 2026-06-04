@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-03T06:08:04Z:586e8313b462241e0277c0aa856838688e5c314e0dbf99089f03b7bd35b2a7a9:sOKnRQ+KB39glhGAZG3sDc7XvsW6Gz1Pr2Oac8HmJIlrtsDEjjfXNVwk642vLb+U7ngrYLe6t+cfXmrdn5/6Cw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/launch
+section: routes
+id: ui/launch
+path: /ui/launch/{token}
+methods:
+  - GET
+auth: none
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: browser_launch
+  source: "service:ui/launch"
+  source_config:
+    token: "${path.token}"
