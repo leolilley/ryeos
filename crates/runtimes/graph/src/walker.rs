@@ -1649,6 +1649,19 @@ mod tests {
         async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
         }
+        async fn domain_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn domain_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn domain_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
@@ -2226,6 +2239,19 @@ config:
             Ok(json!({}))
         }
         async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn domain_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn domain_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn domain_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
         }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {

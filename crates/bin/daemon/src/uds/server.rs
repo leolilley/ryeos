@@ -1121,7 +1121,7 @@ mod tests {
         assert!(
             rpc_err(&caller_bundle_id)
                 .message
-                .contains("unknown field `bundle_id`"),
+                .contains("invalid domain_events.append params"),
             "got: {}",
             rpc_err(&caller_bundle_id).message
         );

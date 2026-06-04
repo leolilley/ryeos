@@ -504,11 +504,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             if !required_caps.is_empty() {
                 let cap_refs = required_caps.iter().map(String::as_str).collect::<Vec<_>>();
                 let policy = AuthorizationPolicy::require_all(&cap_refs);
-                if state
-                    .authorizer
-                    .authorize(&caller_scopes, &policy)
-                    .is_err()
-                {
+                if state.authorizer.authorize(&caller_scopes, &policy).is_err() {
                     return Ok((
                         StatusCode::FORBIDDEN,
                         axum::Json(json!({
@@ -519,9 +515,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         .into_response());
                 }
             }
-            let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(
-                provenance.original_project_path(),
-            ));
+            let dotenv_dirs =
+                ryeos_app::vault::dotenv_search_dirs(Some(provenance.original_project_path()));
             if let Err(err) = ryeos_app::vault::read_required_secrets(
                 state.vault.as_ref(),
                 &caller_principal_id,

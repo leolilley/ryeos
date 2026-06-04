@@ -65,6 +65,7 @@ const fn surface(
 pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
     surface(".ai/directives", ProjectAiSurfaceKind::ProjectItems, true),
     surface(".ai/tools", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(".ai/graphs", ProjectAiSurfaceKind::ProjectItems, true),
     surface(".ai/knowledge", ProjectAiSurfaceKind::ProjectItems, true),
     surface(".ai/parsers", ProjectAiSurfaceKind::ProjectItems, true),
     surface(".ai/handlers", ProjectAiSurfaceKind::ProjectItems, true),
@@ -81,6 +82,16 @@ pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
     ),
     surface(
         ".ai/config/agent",
+        ProjectAiSurfaceKind::ProjectConfig,
+        true,
+    ),
+    surface(
+        ".ai/config/execution",
+        ProjectAiSurfaceKind::ProjectConfig,
+        true,
+    ),
+    surface(
+        ".ai/config/ryeos-runtime",
         ProjectAiSurfaceKind::ProjectConfig,
         true,
     ),
@@ -261,6 +272,9 @@ mod tests {
         let m = manifest(&[
             ".ai/directives/foo.md",
             ".ai/tools/app/tool.yaml",
+            ".ai/graphs/app/flow.yaml",
+            ".ai/config/execution/execution.yaml",
+            ".ai/config/ryeos-runtime/limits.yaml",
             ".ai/config/schedules/snap-track.yaml",
         ]);
         validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly).unwrap();
@@ -271,6 +285,9 @@ mod tests {
         for path in [
             ".ai/directives",
             ".ai/tools",
+            ".ai/graphs",
+            ".ai/config/execution",
+            ".ai/config/ryeos-runtime",
             ".ai/config/keys/trusted",
             ".ai/config/schedules",
         ] {
@@ -310,6 +327,20 @@ mod tests {
             classify_project_ai_path(".ai/config/schedules/snap-track.yaml"),
             ProjectAiPathClass::Deployable(ProjectAiSurface {
                 kind: ProjectAiSurfaceKind::ScheduleDeclarations,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_project_ai_path(".ai/graphs/snap-track/show_rescrape.yaml"),
+            ProjectAiPathClass::Deployable(ProjectAiSurface {
+                kind: ProjectAiSurfaceKind::ProjectItems,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_project_ai_path(".ai/config/execution/execution.yaml"),
+            ProjectAiPathClass::Deployable(ProjectAiSurface {
+                kind: ProjectAiSurfaceKind::ProjectConfig,
                 ..
             })
         ));

@@ -235,9 +235,10 @@ done
 
 for name in "${bundle_names[@]}"; do
     [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
-    [[ -f "$repo_root/bundles/$name/PUBLISHER_TRUST.toml" ]] || \
-        die "missing bundles/$name/PUBLISHER_TRUST.toml"
 done
+[[ -d "$repo_root/bundles/.ai" ]] || die "missing source-root seed data: bundles/.ai"
+[[ -f "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" ]] || \
+    die "missing source-root trust doc: bundles/.ai/PUBLISHER_TRUST.toml"
 
 echo "[install-local-direct] installing binaries -> $bin_dir"
 for b in "${required_bins[@]}"; do
@@ -253,19 +254,23 @@ done
 
 echo "[install-local-direct] installing bundle sources -> $share_dir"
 sudo mkdir -p "$share_dir"
-if [[ "$bundle_set" == "hosted-node" ]]; then
-    for path in "$share_dir"/*; do
-        [[ -d "$path/.ai" ]] || continue
-        name="$(basename "$path")"
-        case "$name" in
-            core|hosted-node) ;;
-            *)
-                echo "[install-local-direct] removing non-hosted bundle source: $path"
-                sudo rm -rf "$path"
-                ;;
-        esac
+sudo rm -rf "$share_dir/.ai"
+sudo cp -a "$repo_root/bundles/.ai" "$share_dir/.ai"
+for path in "$share_dir"/*; do
+    [[ -d "$path/.ai" ]] || continue
+    name="$(basename "$path")"
+    keep=0
+    for bundle_name in "${bundle_names[@]}"; do
+        if [[ "$name" == "$bundle_name" ]]; then
+            keep=1
+            break
+        fi
     done
-fi
+    if [[ $keep -eq 0 ]]; then
+        echo "[install-local-direct] removing stale bundle source: $path"
+        sudo rm -rf "$path"
+    fi
+done
 for name in "${bundle_names[@]}"; do
     bundle_dir="$repo_root/bundles/$name"
     [[ -d "$bundle_dir/.ai" ]] || continue
@@ -312,27 +317,39 @@ fi
 
 if [[ $run_init -eq 1 ]]; then
     echo "[install-local-direct] running ryeos init from PATH"
-    if [[ "$bundle_set" == "hosted-node" ]]; then
-        state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
-        for path in "$state_root/.ai/bundles"/*; do
-            [[ -d "$path/.ai" ]] || continue
-            name="$(basename "$path")"
-            case "$name" in
-                core|hosted-node) ;;
-                *) rm -rf "$path" ;;
-            esac
+    state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
+    for path in "$state_root/.ai/bundles"/*; do
+        [[ -d "$path/.ai" ]] || continue
+        name="$(basename "$path")"
+        keep=0
+        for bundle_name in "${bundle_names[@]}"; do
+            if [[ "$name" == "$bundle_name" ]]; then
+                keep=1
+                break
+            fi
         done
-        for path in "$state_root/.ai/node/bundles"/*.yaml; do
-            [[ -f "$path" ]] || continue
-            name="$(basename "$path" .yaml)"
-            case "$name" in
-                core|hosted-node) ;;
-                *) rm -f "$path" ;;
-            esac
+        if [[ $keep -eq 0 ]]; then
+            echo "[install-local-direct] removing stale initialized bundle: $path"
+            rm -rf "$path"
+        fi
+    done
+    for path in "$state_root/.ai/node/bundles"/*.yaml; do
+        [[ -f "$path" ]] || continue
+        name="$(basename "$path" .yaml)"
+        keep=0
+        for bundle_name in "${bundle_names[@]}"; do
+            if [[ "$name" == "$bundle_name" ]]; then
+                keep=1
+                break
+            fi
         done
-    fi
+        if [[ $keep -eq 0 ]]; then
+            echo "[install-local-direct] removing stale initialized bundle registration: $path"
+            rm -f "$path"
+        fi
+    done
     trust_args=()
-    for trust_file in "$share_dir"/*/PUBLISHER_TRUST.toml; do
+    for trust_file in "$share_dir/.ai/PUBLISHER_TRUST.toml" "$share_dir"/*/PUBLISHER_TRUST.toml; do
         [[ -f "$trust_file" ]] || continue
         trust_args+=(--trust-file "$trust_file")
     done

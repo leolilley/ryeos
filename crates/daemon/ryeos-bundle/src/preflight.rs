@@ -295,6 +295,9 @@ fn preflight_verify_bundle_in_context_inner(
             }
 
             let rel = file_path.strip_prefix(&ai_dir).unwrap_or(&file_path);
+            if is_runtime_support_file(kind_schema.directory.as_str(), rel) {
+                continue;
+            }
 
             let content = match fs::read_to_string(&file_path) {
                 Ok(c) => c,
@@ -537,6 +540,19 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_runtime_support_file(kind_directory: &str, rel: &Path) -> bool {
+    if kind_directory != "tools" {
+        return false;
+    }
+
+    rel.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name) if name == "lib" || name == "__pycache__"
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
