@@ -7,6 +7,7 @@ use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 
 const PRINCIPAL: &str = "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OTHER_PRINCIPAL: &str = "fp:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn launch_context(read_only: bool, user_principal_id: Option<String>) -> LaunchContext {
     LaunchContext {
@@ -106,6 +107,31 @@ async fn studio_thread_cancel_requires_writable_verified_session_principal() {
     let thread = state
         .state_store
         .get_thread("T-cancel-denied")
+        .expect("get thread")
+        .expect("thread exists");
+    assert_eq!(thread.status, "created");
+}
+
+#[tokio::test]
+async fn studio_thread_cancel_rejects_cross_owner_thread() {
+    let (_tmp, state) = test_state::build_test_state();
+    create_thread(&state, "T-cancel-cross-owner", OTHER_PRINCIPAL);
+    let (session_id, _token) = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .mint_token(launch_context(false, Some(PRINCIPAL.to_string())));
+
+    let result = (ryeos_ui::handlers::ui_studio_threads::CANCEL_DESCRIPTOR.handler)(
+        serde_json::json!({ "thread_id": "T-cancel-cross-owner" }),
+        browser_context(&session_id),
+        Arc::new(state.clone()),
+    )
+    .await;
+
+    assert!(result.is_err(), "cross-owner cancel should reject");
+    let thread = state
+        .state_store
+        .get_thread("T-cancel-cross-owner")
         .expect("get thread")
         .expect("thread exists");
     assert_eq!(thread.status, "created");

@@ -128,6 +128,10 @@ pub async fn handle_cancel(
 
     let req: ryeos_api::handlers::threads_cancel::Request = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    // Studio cancellation is authorized by the browser session boundary:
+    // writable session + server-stored launch principal.  The underlying
+    // `threads.cancel` handler still performs the critical owner check
+    // against `thread.requested_by` and executes the real cancellation path.
     let owner_ctx = HandlerContext::new(user_principal_id, session.granted_caps, true);
     ryeos_api::handlers::threads_cancel::handle(req, owner_ctx, state)
         .await

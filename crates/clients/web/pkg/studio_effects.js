@@ -123,6 +123,8 @@ function resultKindFor(effect) {
   if (type === "read_file") return "file_read";
   if (type === "inspect_item") return "item_inspection";
   if (type === "inspect_thread") return "thread_inspection";
+  if (type === "invoke_action") return "action_invocation";
+  if (type === "cancel_thread") return "thread_cancelled";
   return "browser_only";
 }
 
