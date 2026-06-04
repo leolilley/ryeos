@@ -204,6 +204,8 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
                 "namespace": node.namespace,
                 "virtual": node.virtual_,
                 "missing": node.missing,
+                "status": node.status,
+                "trust": node.trust,
             });
             let mut object = scene_object(
                 &id,
@@ -254,6 +256,8 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
                     "to": edge.to,
                     "type": edge.type_,
                     "label": edge.label,
+                    "source": edge.source,
+                    "confidence": edge.confidence,
                 }),
             });
             scene.objects.push(object);
@@ -510,7 +514,8 @@ mod tests {
     use super::*;
     use crate::studio::dto::{
         StudioItemDto, StudioItemsDto, StudioTopologyDto, StudioTopologyEdgeDto,
-        StudioTopologyNodeDto,
+        StudioTopologyEdgeSourceDto, StudioTopologyNodeDto, StudioTopologyNodeStatusDto,
+        StudioTopologyTrustSummaryDto,
     };
 
     #[test]
@@ -565,6 +570,15 @@ mod tests {
                 kind: "tool".to_string(),
                 label: "run".to_string(),
                 ref_: "tool:demo/run".to_string(),
+                status: Some(StudioTopologyNodeStatusDto {
+                    resolved: true,
+                    composed: Some(false),
+                    executable: true,
+                }),
+                trust: Some(StudioTopologyTrustSummaryDto {
+                    class_: "trusted".to_string(),
+                    signer: Some("signer-fp".to_string()),
+                }),
                 ..Default::default()
             }],
             ..Default::default()
@@ -578,10 +592,12 @@ mod tests {
             .expect("topology node object");
         assert_eq!(node.kind, StudioSceneObjectKind::ItemCluster);
         assert_eq!(node.label.as_deref(), Some("run"));
-        assert!(matches!(
-            node.action,
-            Some(StudioAction::InspectSummary { .. })
-        ));
+        let Some(StudioAction::InspectSummary { detail, .. }) = &node.action else {
+            panic!("topology node should inspect summary")
+        };
+        assert_eq!(detail["status"]["executable"], true);
+        assert_eq!(detail["trust"]["class"], "trusted");
+        assert_eq!(detail["trust"]["signer"], "signer-fp");
     }
 
     #[test]
@@ -610,6 +626,11 @@ mod tests {
                 to: "knowledge:demo/readme".to_string(),
                 type_: "context".to_string(),
                 label: "uses".to_string(),
+                source: Some(StudioTopologyEdgeSourceDto {
+                    field: Some("context".to_string()),
+                    path: Some("/tmp/tool.yaml".to_string()),
+                }),
+                confidence: "declared".to_string(),
             }],
             ..Default::default()
         });
@@ -623,10 +644,12 @@ mod tests {
         assert_eq!(edge.kind, StudioSceneObjectKind::Link);
         assert_eq!(edge.label.as_deref(), Some("uses"));
         assert!(edge.scale[0] > 0.2);
-        assert!(matches!(
-            edge.action,
-            Some(StudioAction::InspectSummary { .. })
-        ));
+        let Some(StudioAction::InspectSummary { detail, .. }) = &edge.action else {
+            panic!("topology edge should inspect summary")
+        };
+        assert_eq!(detail["source"]["field"], "context");
+        assert_eq!(detail["source"]["path"], "/tmp/tool.yaml");
+        assert_eq!(detail["confidence"], "declared");
     }
 
     #[test]

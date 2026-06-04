@@ -232,6 +232,28 @@ pub struct StudioTopologyNodeDto {
     pub virtual_: bool,
     #[serde(default)]
     pub missing: bool,
+    #[serde(default)]
+    pub status: Option<StudioTopologyNodeStatusDto>,
+    #[serde(default)]
+    pub trust: Option<StudioTopologyTrustSummaryDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioTopologyNodeStatusDto {
+    #[serde(default)]
+    pub resolved: bool,
+    #[serde(default)]
+    pub composed: Option<bool>,
+    #[serde(default)]
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioTopologyTrustSummaryDto {
+    #[serde(default, rename = "class")]
+    pub class_: String,
+    #[serde(default)]
+    pub signer: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -246,6 +268,18 @@ pub struct StudioTopologyEdgeDto {
     pub type_: String,
     #[serde(default)]
     pub label: String,
+    #[serde(default)]
+    pub source: Option<StudioTopologyEdgeSourceDto>,
+    #[serde(default)]
+    pub confidence: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioTopologyEdgeSourceDto {
+    #[serde(default)]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
