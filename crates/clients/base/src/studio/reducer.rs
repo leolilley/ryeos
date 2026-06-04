@@ -363,6 +363,12 @@ impl StudioCore {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
+                } else if self.has_pending_invoke(&item_ref, &parameters) {
+                    self.notice(
+                        format!("Run {item_ref} is already pending."),
+                        StudioTone::Warn,
+                    );
+                    Vec::new()
                 } else {
                     vec![self.emit(StudioEffectKind::InvokeAction {
                         command_id: item_ref,
@@ -374,11 +380,40 @@ impl StudioCore {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
+                } else if self.has_pending_cancel(&thread_id) {
+                    self.notice(
+                        format!("Cancel {thread_id} is already pending."),
+                        StudioTone::Warn,
+                    );
+                    Vec::new()
                 } else {
                     vec![self.emit(StudioEffectKind::CancelThread { thread_id })]
                 }
             }
         }
+    }
+
+    pub(crate) fn has_pending_invoke(
+        &self,
+        item_ref: &str,
+        parameters: &serde_json::Value,
+    ) -> bool {
+        self.pending_effects.values().any(|kind| {
+            matches!(
+                kind,
+                StudioEffectKind::InvokeAction { command_id, args }
+                    if command_id == item_ref && args == parameters
+            )
+        })
+    }
+
+    pub(crate) fn has_pending_cancel(&self, thread_id: &str) -> bool {
+        self.pending_effects.values().any(|kind| {
+            matches!(
+                kind,
+                StudioEffectKind::CancelThread { thread_id: pending } if pending == thread_id
+            )
+        })
     }
 
     fn emit_fetch_items(&mut self, tile_id: TileId) -> StudioEffect {
@@ -1617,6 +1652,38 @@ mod tests {
     }
 
     #[test]
+    fn launcher_disables_run_for_selected_pending_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let vm = build_view_model(&core);
+        let run = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Running run…")
+            .expect("pending executable item should expose disabled running command");
+
+        assert!(!run.enabled);
+    }
+
+    #[test]
     fn launcher_offers_inspect_for_selected_item() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         let tile_id = open_items_tile(&mut core);
@@ -1800,6 +1867,86 @@ mod tests {
     }
 
     #[test]
+    fn item_inspector_marks_run_pending_without_action() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectItem {
+                    canonical_ref: "tool:demo/run".to_string(),
+                },
+            },
+        });
+        core.data.item_inspection = Some(StudioItemInspectionDto {
+            item: StudioInspectedItemDto {
+                canonical_ref: "tool:demo/run".to_string(),
+                executable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let run = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Run item")
+            .expect("executable item should expose run section");
+
+        assert_eq!(run.rows[0].1, "Running");
+        assert!(run.action.is_none());
+    }
+
+    #[test]
+    fn thread_inspector_marks_cancel_pending_without_action() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            }),
+            ..Default::default()
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let cancel = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Cancel thread")
+            .expect("running thread should expose cancel section");
+
+        assert_eq!(cancel.rows[0].1, "Cancelling");
+        assert!(cancel.action.is_none());
+    }
+
+    #[test]
     fn thread_inspector_exposes_cancel_for_created_thread() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.dispatch(StudioEvent::Ui {
@@ -1916,6 +2063,42 @@ mod tests {
             &cancel.action,
             StudioAction::CancelThread { thread_id } if thread_id == "T-running"
         ));
+    }
+
+    #[test]
+    fn launcher_disables_cancel_for_selected_pending_cancel() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::ThreadList,
+                },
+            },
+        });
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            })],
+        });
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let vm = build_view_model(&core);
+        let cancel = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Cancelling T-running…")
+            .expect("pending cancel should expose disabled cancelling command");
+
+        assert!(!cancel.enabled);
     }
 
     #[test]
@@ -2482,6 +2665,36 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_execute_is_rejected_while_pending() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({ "target": "demo" }),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let duplicate = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({ "target": "demo" }),
+                },
+            },
+        });
+
+        assert!(duplicate.is_empty());
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Run tool:demo/run is already pending."));
+    }
+
+    #[test]
     fn action_invocation_result_notices_and_refreshes() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         let invoke = core.dispatch(StudioEvent::Ui {
@@ -2613,6 +2826,34 @@ mod tests {
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::CancelThread { thread_id }) if thread_id == "T-demo"
         ));
+    }
+
+    #[test]
+    fn duplicate_cancel_is_rejected_while_pending() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let first = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        assert_eq!(first.len(), 1);
+
+        let duplicate = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+
+        assert!(duplicate.is_empty());
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Cancel T-demo is already pending."));
     }
 
     #[test]

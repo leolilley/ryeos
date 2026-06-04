@@ -882,25 +882,44 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     }
 
     if let Some((canonical_ref, label)) = focused_executable_item(core) {
+        let parameters = serde_json::json!({});
+        let pending = core.has_pending_invoke(&canonical_ref, &parameters);
         items.push(StudioLauncherItemVm {
-            label: format!("Run {label}"),
-            hint: canonical_ref.clone(),
+            label: if pending {
+                format!("Running {label}…")
+            } else {
+                format!("Run {label}")
+            },
+            hint: if pending {
+                format!("pending · {canonical_ref}")
+            } else {
+                canonical_ref.clone()
+            },
             action: StudioAction::ExecuteItem {
                 item_ref: canonical_ref,
-                parameters: serde_json::json!({}),
+                parameters,
             },
             secondary_action: None,
-            enabled: !session_vm(core).read_only,
+            enabled: !session_vm(core).read_only && !pending,
         });
     }
 
     if let Some((thread_id, status)) = focused_cancellable_thread(core) {
+        let pending = core.has_pending_cancel(&thread_id);
         items.push(StudioLauncherItemVm {
-            label: format!("Cancel {thread_id}"),
-            hint: format!("thread status: {status}"),
+            label: if pending {
+                format!("Cancelling {thread_id}…")
+            } else {
+                format!("Cancel {thread_id}")
+            },
+            hint: if pending {
+                format!("pending · thread status: {status}")
+            } else {
+                format!("thread status: {status}")
+            },
             action: StudioAction::CancelThread { thread_id },
             secondary_action: None,
-            enabled: !session_vm(core).read_only,
+            enabled: !session_vm(core).read_only && !pending,
         });
     }
 
@@ -1744,7 +1763,9 @@ fn item_inspector(core: &StudioCore, canonical_ref: &str) -> StudioInspectorVm {
         inspection.and_then(|x| serde_json::to_string_pretty(x).ok()),
         Some("Loading item details…"),
     );
-    if inspection.is_some_and(|x| x.item.executable) && !session_vm(core).read_only {
+    let parameters = serde_json::json!({});
+    let pending = core.has_pending_invoke(canonical_ref, &parameters);
+    if inspection.is_some_and(|x| x.item.executable) && !session_vm(core).read_only && !pending {
         vm.sections.push(StudioSectionVm {
             title: "Run item".to_string(),
             rows: vec![
@@ -1753,8 +1774,17 @@ fn item_inspector(core: &StudioCore, canonical_ref: &str) -> StudioInspectorVm {
             ],
             action: Some(StudioAction::ExecuteItem {
                 item_ref: canonical_ref.to_string(),
-                parameters: serde_json::json!({}),
+                parameters,
             }),
+        });
+    } else if inspection.is_some_and(|x| x.item.executable) && pending {
+        vm.sections.push(StudioSectionVm {
+            title: "Run item".to_string(),
+            rows: vec![
+                ("Action".to_string(), "Running".to_string()),
+                ("Target".to_string(), canonical_ref.to_string()),
+            ],
+            action: None,
         });
     }
     vm
@@ -1773,13 +1803,17 @@ fn thread_inspector(core: &StudioCore, thread_id: &str) -> StudioInspectorVm {
         .is_some_and(|status| is_cancellable_thread_status(&status))
         && !session_vm(core).read_only
     {
+        let pending = core.has_pending_cancel(thread_id);
         vm.sections.push(StudioSectionVm {
             title: "Cancel thread".to_string(),
             rows: vec![
-                ("Action".to_string(), "Cancel".to_string()),
+                (
+                    "Action".to_string(),
+                    if pending { "Cancelling" } else { "Cancel" }.to_string(),
+                ),
                 ("Thread".to_string(), thread_id.to_string()),
             ],
-            action: Some(StudioAction::CancelThread {
+            action: (!pending).then_some(StudioAction::CancelThread {
                 thread_id: thread_id.to_string(),
             }),
         });
