@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-04T04:39:02Z:b8663e0654f45a79394e1d3aa617c6f2e3e16bc2d60f0ecdd49ad20184e73ecc:9gXMJWwe3XpSb/v3gAyRCyIRyXzz0OdmetuQu5vyF+M9qQUu5nK2IzFxpBa6dlMIws2SZHf9OUqbkutcB/XmDg==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-vault-delete
+tokens:
+- remote
+- vault-delete
+description: Delete a secret on a remote node's vault
+forms:
+- slots:
+  - field: remote
+  - field: name
+- slots:
+  - field: name
+dispatch:
+  kind: execute_ref
+  execute: service:remote/vault-delete

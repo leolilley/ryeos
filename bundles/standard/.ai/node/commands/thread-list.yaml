@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:b0b0a3a15d6511bbaabf77fd8f1ce33b2dbb0e16c4d63c473db91567953e7545:hUJ4449u+dMlXzJNccPAfD/UqftceDwQ4fUogoSWwPxQkNGetLmwYjbiW+mWUqJ/5TP0dAarDzTqT0ZmKYwvAw==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: thread-list
+tokens:
+- thread
+- list
+description: List threads (audit + runtime), optionally limited
+dispatch:
+  kind: execute_ref
+  execute: service:threads/list

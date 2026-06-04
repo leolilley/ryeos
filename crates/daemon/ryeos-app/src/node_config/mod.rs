@@ -4,11 +4,11 @@
 //! Each declares `section: <name>` which must match the section it was
 //! loaded under.
 //!
-//! Section directories (routes, verbs) support recursive subfolders:
+//! Section directories (routes, commands) support recursive subfolders:
 //!
 //!   .ai/node/routes/ui/cockpit/snapshot.yaml
 //!   .ai/node/routes/ui/cockpit/items/list.yaml
-//!   .ai/node/verbs/web.yaml
+//!   .ai/node/commands/web.yaml
 //!
 //! The `bundles` section remains flat (no subdirectories).
 //!
@@ -16,7 +16,7 @@
 //! - **Phase 1 (bootstrap):** load only the `bundles` section from
 //!   `system_space_dir` to determine effective bundle roots.
 //! - **Phase 2 (full pass):** build the engine with effective roots, then
-//!   scan all sections from all sources (recursive for routes/verbs).
+//!   scan all sections from all sources (recursive for routes/commands).
 //!
 //! Trust model: signed-required, fail-closed. Unsigned, tampered, or
 //! untrusted-signer items are startup errors.
@@ -30,9 +30,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::node_config::sections::alias::AliasRecord;
+use crate::node_config::sections::command::CommandRecord;
 use crate::node_config::sections::hosted_node::HostedNodePolicyRecord;
-use crate::node_config::sections::verb::VerbRecord;
 use crate::route_raw::RawRouteSpec;
 
 /// Which sources a section scans.
@@ -42,7 +41,7 @@ pub enum SectionSourcePolicy {
     /// Used by the `bundles` section so bundles can't self-register.
     SystemAndState,
     /// `system_space_dir` + all effective bundle roots.
-    /// Used by sections like `routes` and `verbs` that bundles can contribute to.
+    /// Used by sections like `routes` and `commands` that bundles can contribute to.
     EffectiveBundleRootsAndState,
 }
 
@@ -65,10 +64,8 @@ pub struct NodeConfigSnapshot {
     pub bundles: Vec<BundleRecord>,
     /// All loaded route specifications, in load order.
     pub routes: Vec<RawRouteSpec>,
-    /// All loaded verb definitions (security-canonical).
-    pub verbs: Vec<VerbRecord>,
-    /// Alias definitions synthesized from verb descriptors (routing sugar).
-    pub aliases: Vec<AliasRecord>,
+    /// All loaded command definitions.
+    pub commands: Vec<CommandRecord>,
     /// Hosted node operator policies loaded from installed bundle/state roots.
     pub hosted_node_policies: Vec<HostedNodePolicyRecord>,
 }
@@ -107,12 +104,12 @@ impl SectionTable {
     pub fn new() -> Self {
         let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
         sections.insert("bundles", Box::new(sections::bundle::BundleSection));
+        sections.insert("commands", Box::new(sections::command::CommandSection));
         sections.insert(
             "hosted",
             Box::new(sections::hosted_node::HostedNodePolicySection),
         );
         sections.insert("routes", Box::new(sections::route::RouteSection));
-        sections.insert("verbs", Box::new(sections::verb::VerbSection));
         Self { sections }
     }
 

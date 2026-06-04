@@ -15,7 +15,7 @@
 //! core/
 //!   .ai/
 //!     handlers/ parsers/ services/ tools/ config/ knowledge/
-//!     node/engine/kinds/ node/verbs/ node/routes/
+//!     node/engine/kinds/ node/commands/ node/routes/
 //!     bin/<triple>/
 //!     PUBLISHER_TRUST.toml
 //! standard/

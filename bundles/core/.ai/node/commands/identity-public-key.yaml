@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:fb518ae351252041830ef84d08d79118a2b9a3acd7ed97fcd4c4fc91c8bd124c:AD6beja59r3xfON1MXjQ/YQYsvpHaBdsv7ZPUIKTXc95pM+3QR8v/uwZ/hBLD1xU6PwLsvEBGNH2mOKUQfAqBw==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: identity-public-key
+tokens:
+- identity
+- public-key
+description: Print the daemon's node identity (fingerprint + public key)
+dispatch:
+  kind: execute_ref
+  execute: service:identity/public_key

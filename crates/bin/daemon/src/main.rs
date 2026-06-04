@@ -307,82 +307,12 @@ async fn main() -> Result<()> {
             .context("load sealed-envelope vault — did `ryeos init` (or daemon bootstrap) run?")?,
     );
 
-    let verb_registry = Arc::new(
-        ryeos_runtime::verb_registry::VerbRegistry::from_records(
-            &node_config_snapshot
-                .verbs
-                .iter()
-                .map(|r| ryeos_runtime::verb_registry::VerbDef {
-                    name: r.name.clone(),
-                    execute: r.execute.clone(),
-                })
-                .collect::<Vec<_>>(),
-        )
-        .context("failed to build verb registry from node-config records")?,
+    let command_registry = Arc::new(
+        ryeos_runtime::CommandRegistry::from_records(&node_config_snapshot.commands)
+            .context("failed to build command registry from node-config records")?,
     );
 
-    let alias_registry = Arc::new(
-        ryeos_runtime::alias_registry::AliasRegistry::from_records(
-            &node_config_snapshot
-                .aliases
-                .iter()
-                .map(|r| ryeos_runtime::alias_registry::AliasDef {
-                    tokens: r.tokens.clone(),
-                    verb: r.verb.clone(),
-                    deprecated: r.deprecated.unwrap_or(false),
-                    replacement_tokens: r.replacement_tokens.clone(),
-                    removed_in: r.removed_in.clone(),
-                        positional_forms: r
-                        .positional_forms
-                        .iter()
-                        .map(|f| ryeos_runtime::alias_registry::PositionalForm {
-                            slots: f
-                                .slots
-                                .iter()
-                                .map(|s| ryeos_runtime::alias_registry::PositionalSlot {
-                                    field: s.field.clone(),
-                                    matcher: match s.matcher {
-                                        ryeos_app::node_config::sections::alias::PositionalMatcher::Any => ryeos_runtime::alias_registry::PositionalMatcher::Any,
-                                        ryeos_app::node_config::sections::alias::PositionalMatcher::CanonicalRef => ryeos_runtime::alias_registry::PositionalMatcher::CanonicalRef,
-                                    },
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                    project_resolution: match r.project_resolution {
-                        ryeos_app::node_config::sections::alias::ProjectResolution::None => ryeos_runtime::alias_registry::ProjectResolution::None,
-                        ryeos_app::node_config::sections::alias::ProjectResolution::Required => ryeos_runtime::alias_registry::ProjectResolution::Required,
-                        ryeos_app::node_config::sections::alias::ProjectResolution::Optional => ryeos_runtime::alias_registry::ProjectResolution::Optional,
-                    },
-                })
-                .collect::<Vec<_>>(),
-        )
-        .context("failed to build alias registry from node-config records")?,
-    );
-
-    // Validate: all aliases reference known verbs
-    alias_registry
-        .validate_all_verbs_known(&verb_registry)
-        .context("alias registry validation failed")?;
-
-    // Validate: aliases must target verbs with execute refs
-    // (non-executable verbs can't be dispatched via tokens)
-    // Check ALL aliases, including deprecated ones.
-    for alias in alias_registry.all_aliases() {
-        if let Some(verb) = verb_registry.get_verb(&alias.verb) {
-            if verb.execute.is_none() {
-                anyhow::bail!(
-                    "alias {:?} → verb '{}' has no execute ref (abstract verbs cannot be dispatched via tokens)",
-                    alias.tokens,
-                    alias.verb,
-                );
-            }
-        }
-    }
-
-    let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new(
-        verb_registry.clone(),
-    ));
+    let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
     // Bind the TCP listener BEFORE constructing AppState so the
     // status endpoint reports the actual bound address (when the
@@ -424,8 +354,7 @@ async fn main() -> Result<()> {
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot,
         vault,
-        verb_registry,
-        alias_registry,
+        command_registry,
         authorizer,
         scheduler_db,
         scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
@@ -796,81 +725,12 @@ async fn run_service_standalone(
         events.clone(),
     ));
 
-    let standalone_vr = Arc::new(
-        ryeos_runtime::verb_registry::VerbRegistry::from_records(
-            &node_config_snapshot
-                .verbs
-                .iter()
-                .map(|r| ryeos_runtime::verb_registry::VerbDef {
-                    name: r.name.clone(),
-                    execute: r.execute.clone(),
-                })
-                .collect::<Vec<_>>(),
-        )
-        .context("failed to build verb registry from node-config records")?,
+    let standalone_command_registry = Arc::new(
+        ryeos_runtime::CommandRegistry::from_records(&node_config_snapshot.commands)
+            .context("failed to build command registry from node-config records")?,
     );
 
-    let standalone_ar = Arc::new(
-        ryeos_runtime::alias_registry::AliasRegistry::from_records(
-            &node_config_snapshot
-                .aliases
-                .iter()
-                .map(|r| ryeos_runtime::alias_registry::AliasDef {
-                    tokens: r.tokens.clone(),
-                    verb: r.verb.clone(),
-                    deprecated: r.deprecated.unwrap_or(false),
-                    replacement_tokens: r.replacement_tokens.clone(),
-                    removed_in: r.removed_in.clone(),
-                        positional_forms: r
-                        .positional_forms
-                        .iter()
-                        .map(|f| ryeos_runtime::alias_registry::PositionalForm {
-                            slots: f
-                                .slots
-                                .iter()
-                                .map(|s| ryeos_runtime::alias_registry::PositionalSlot {
-                                    field: s.field.clone(),
-                                    matcher: match s.matcher {
-                                        ryeos_app::node_config::sections::alias::PositionalMatcher::Any => ryeos_runtime::alias_registry::PositionalMatcher::Any,
-                                        ryeos_app::node_config::sections::alias::PositionalMatcher::CanonicalRef => ryeos_runtime::alias_registry::PositionalMatcher::CanonicalRef,
-                                    },
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                    project_resolution: match r.project_resolution {
-                        ryeos_app::node_config::sections::alias::ProjectResolution::None => ryeos_runtime::alias_registry::ProjectResolution::None,
-                        ryeos_app::node_config::sections::alias::ProjectResolution::Required => ryeos_runtime::alias_registry::ProjectResolution::Required,
-                        ryeos_app::node_config::sections::alias::ProjectResolution::Optional => ryeos_runtime::alias_registry::ProjectResolution::Optional,
-                    },
-                })
-                .collect::<Vec<_>>(),
-        )
-        .context("failed to build alias registry from node-config records")?,
-    );
-
-    // Validate: all aliases reference known verbs
-    standalone_ar
-        .validate_all_verbs_known(&standalone_vr)
-        .context("alias registry validation failed")?;
-
-    // Validate: aliases must target verbs with execute refs
-    // Check ALL aliases, including deprecated ones.
-    for alias in standalone_ar.all_aliases() {
-        if let Some(verb) = standalone_vr.get_verb(&alias.verb) {
-            if verb.execute.is_none() {
-                anyhow::bail!(
-                    "alias {:?} → verb '{}' has no execute ref (abstract verbs cannot be dispatched via tokens)",
-                    alias.tokens,
-                    alias.verb,
-                );
-            }
-        }
-    }
-
-    let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(
-        standalone_vr.clone(),
-    ));
+    let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
@@ -901,8 +761,7 @@ async fn run_service_standalone(
             ryeos_app::vault::SealedEnvelopeVault::load(&config.system_space_dir)
                 .context("load sealed-envelope vault — did `ryeos init` run?")?,
         ),
-        verb_registry: standalone_vr,
-        alias_registry: standalone_ar,
+        command_registry: standalone_command_registry,
         authorizer: standalone_auth,
         scheduler_db: Arc::new(SchedulerDb::new_in_memory().context("scheduler in-memory db")?),
         scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),

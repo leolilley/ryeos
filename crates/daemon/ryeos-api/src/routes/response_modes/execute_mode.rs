@@ -40,12 +40,8 @@ use ryeos_state::ignore::IgnoreMatcher;
 #[serde(deny_unknown_fields)]
 pub struct ExecuteRequest {
     /// Canonical item ref to execute (e.g. "directive:my/agent").
-    /// Mutually exclusive with `tokens`.
     #[serde(default)]
     pub item_ref: Option<String>,
-    /// CLI token sequence to resolve via alias registry.
-    #[serde(default)]
-    pub tokens: Option<Vec<String>>,
     /// Project root path for three-tier resolution.
     #[serde(default)]
     pub project_path: Option<String>,
@@ -171,94 +167,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
             request.launch_mode = "accepted".to_string();
         }
 
-        // API invariants: item_ref and tokens are mutually exclusive; one required.
-        match (&request.item_ref, &request.tokens) {
-            (Some(_), Some(_)) => {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "item_ref and tokens are mutually exclusive" })),
-                )
-                    .into_response());
-            }
-            (None, None) => {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "either item_ref or tokens is required" })),
-                )
-                    .into_response());
-            }
-            _ => {}
-        }
-
-        // Token mode: parameters must be empty.
-        if request.tokens.is_some()
-            && !request.parameters.is_null()
-            && !request
-                .parameters
-                .as_object()
-                .map_or(true, |m| m.is_empty())
-        {
+        if request.item_ref.is_none() {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                axum::Json(json!({
-                    "error": "in tokens mode, parameters are computed server-side; client must not supply them"
-                })),
+                axum::Json(json!({ "error": "item_ref is required" })),
             )
                 .into_response());
-        }
-
-        // Token resolution.
-        if let Some(ref tokens) = request.tokens {
-            if tokens.is_empty() {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "tokens array is empty" })),
-                )
-                    .into_response());
-            }
-            let resolved =
-                ryeos_runtime::resolve_command(tokens, &state.alias_registry, &state.verb_registry)
-                    .map_err(|e| match &e {
-                        ryeos_runtime::ResolveError::NoMatch { tokens } => {
-                            RouteDispatchError::BadRequest(
-                                json!({
-                                    "error": e.to_string(),
-                                    "tokens": tokens,
-                                })
-                                .to_string(),
-                            )
-                        }
-                        ryeos_runtime::ResolveError::VerbNotFound { .. } => {
-                            RouteDispatchError::Internal(e.to_string())
-                        }
-                        ryeos_runtime::ResolveError::VerbNotExecutable { .. } => {
-                            RouteDispatchError::BadRequest(e.to_string())
-                        }
-                        ryeos_runtime::ResolveError::Bind { .. } => {
-                            RouteDispatchError::BadRequest(e.to_string())
-                        }
-                    })?;
-
-            tracing::debug!(
-                tokens = ?tokens,
-                verb = %resolved.verb,
-                consumed = resolved.consumed,
-                item_ref = %resolved.execute_ref,
-                deprecated = resolved.deprecated,
-                "resolved tokens via shared resolver"
-            );
-
-            if resolved.deprecated {
-                tracing::warn!(
-                    verb = %resolved.verb,
-                    replacement = ?resolved.replacement_tokens,
-                    removed_in = ?resolved.removed_in,
-                    "deprecated alias used"
-                );
-            }
-
-            request.item_ref = Some(resolved.execute_ref);
-            request.parameters = resolved.parameters;
         }
 
         let item_ref = request.item_ref.as_ref().unwrap();
@@ -1032,7 +946,6 @@ mod tests {
     fn target_request(target_site_id: Option<&str>) -> ExecuteRequest {
         ExecuteRequest {
             item_ref: Some("tool:test/thing".into()),
-            tokens: None,
             project_path: Some("/tmp/project".into()),
             parameters: serde_json::Value::Null,
             launch_mode: "inline".into(),

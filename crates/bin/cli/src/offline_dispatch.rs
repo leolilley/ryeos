@@ -9,25 +9,20 @@
 //! The CLI reads dispatch fields generically from the composed value — no
 //! schema-specific structs needed.
 //!
-//! Alias and verb descriptors are node configuration (not engine kinds), so they
-//! are loaded from the verified node-config snapshot. Unsigned, tampered, or
-//! untrusted node config fails before any offline execution path is selected.
+//! Command descriptors are node configuration (not engine kinds), so they are
+//! loaded from the verified node-config snapshot. Unsigned, tampered, or untrusted
+//! node config fails before any offline execution path is selected.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItem;
-use ryeos_runtime::alias_registry::{AliasDef, ProjectResolution};
+use ryeos_runtime::{CommandDef, CommandDispatch, CommandProjectResolution, CommandRegistry};
 use serde_json::Value;
 
 use crate::error::CliError;
-use crate::node_descriptors::{LoadedAliasDescriptor, LoadedVerbDescriptor};
-
-// ---------------------------------------------------------------------------
-// Alias / verb types (node configuration, not engine kinds)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum OfflineDispatchOutcome {
@@ -62,24 +57,25 @@ pub fn try_offline_dispatch(
         return Ok(None);
     }
 
-    // 2. Load aliases + verbs from the verified snapshot.
-    let aliases = crate::node_descriptors::load_alias_descriptors_from_snapshot(&snapshot);
-    let Some((alias, consumed)) = match_alias(argv, &aliases).map_err(local_err)? else {
+    // 2. Resolve the command from the verified snapshot.
+    let registry =
+        CommandRegistry::from_records(&snapshot.commands).map_err(|error| CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        })?;
+    let Ok(matched) = registry.resolve(argv) else {
         return Ok(None);
     };
-    let Some(verb) =
-        crate::node_descriptors::load_verb_descriptor_from_snapshot(&snapshot, &alias.def.verb)
-    else {
+    let CommandDispatch::ExecuteRef { execute, .. } = &matched.command.dispatch else {
         return Ok(None);
     };
 
-    // 3. Parse the verb's execute ref for the engine. Kind semantics stay in
+    // 3. Parse the command's execute ref for the engine. Kind semantics stay in
     //    the engine; dispatch below is based on composed fields.
-    let execute_ref = &verb.execute;
+    let execute_ref = execute;
     let canonical = CanonicalRef::parse(execute_ref).map_err(|e| CliError::Local {
         detail: format!(
-            "verb '{}' has invalid execute ref '{}': {e}",
-            alias.def.verb, execute_ref
+            "command '{}' has invalid execute ref '{}': {e}",
+            matched.command.name, execute_ref
         ),
     })?;
 
@@ -88,7 +84,7 @@ pub fn try_offline_dispatch(
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
-    let tail = &argv[consumed..];
+    let tail = &argv[matched.consumed..];
 
     if has_launch_binary_ref(&item.composed_value) {
         return exec_client(&engine, item, tail, project_path).map(Some);
@@ -98,8 +94,7 @@ pub fn try_offline_dispatch(
         return dispatch_service(
             &engine,
             item,
-            &alias.def,
-            &verb,
+            &matched.command,
             tail,
             system_space_dir,
             project_path,
@@ -108,7 +103,7 @@ pub fn try_offline_dispatch(
     }
 
     if has_tool_command(&item.composed_value) {
-        let params = bind_params_minimal(tail, &alias.def, project_path)?;
+        let params = bind_params_minimal(tail, &matched.command, project_path)?;
         return exec_tool(
             &engine,
             &item,
@@ -497,8 +492,7 @@ fn exec_tool(
 fn dispatch_service(
     engine: &ryeos_engine::engine::Engine,
     item: EffectiveItem,
-    alias_def: &AliasDef,
-    verb: &LoadedVerbDescriptor,
+    command: &CommandDef,
     tail: &[String],
     system_space_dir: &Path,
     project_path: &str,
@@ -521,10 +515,11 @@ fn dispatch_service(
         .get("offline_execute")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .or_else(|| {
-            verb.execute
-                .starts_with("tool:")
-                .then(|| verb.execute.clone())
+        .or_else(|| match &command.dispatch {
+            CommandDispatch::ExecuteRef { execute, .. } if execute.starts_with("tool:") => {
+                Some(execute.clone())
+            }
+            _ => None,
         });
 
     let Some(tool_ref) = offline_execute else {
@@ -532,7 +527,7 @@ fn dispatch_service(
             detail: format!(
                 "service `{}` is declared offline-capable, but its descriptor \
                  does not declare a local tool implementation (`offline_execute: tool:<id>`)",
-                alias_def.verb
+                command.name
             ),
         });
     };
@@ -550,9 +545,9 @@ fn dispatch_service(
         .unwrap_or_default();
 
     // Bind params with service schema
-    let mut params = bind_params_with_schema(tail, alias_def, &service_schema, project_path)?;
+    let mut params = bind_params_with_schema(tail, command, &service_schema, project_path)?;
     if let Some(obj) = params.as_object_mut() {
-        obj.insert("_verb".to_string(), Value::String(alias_def.verb.clone()));
+        obj.insert("_verb".to_string(), Value::String(command.name.clone()));
     }
 
     // Strip internal routing fields before passing to the subprocess tool.
@@ -581,29 +576,30 @@ fn dispatch_service(
 
 fn bind_params_minimal(
     tail: &[String],
-    alias: &AliasDef,
+    command: &CommandDef,
     project_path: &str,
 ) -> Result<Value, CliError> {
     if let Some(input) = crate::arg_bind::parse_input_arg(tail)? {
         return Ok(input);
     }
 
-    let mut params = ryeos_runtime::arg_binder::bind_argv_with_alias(tail, Some(alias))
+    let mut params = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(command))
         .map_err(|e| CliError::Local { detail: e })?;
 
     // Project resolution
-    if alias.project_resolution != ProjectResolution::None {
+    let resolution = command_project_resolution(command);
+    if resolution != CommandProjectResolution::None {
         let mut canonical_tail = params_to_tail(&params);
         let default_project = (project_path != ".").then(|| Path::new(project_path));
-        match alias.project_resolution {
-            ProjectResolution::None => {}
-            ProjectResolution::Optional => {
+        match resolution {
+            CommandProjectResolution::None => {}
+            CommandProjectResolution::Optional => {
                 canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
                     &canonical_tail,
                     default_project,
                 )?;
             }
-            ProjectResolution::Required => {
+            CommandProjectResolution::Required => {
                 if canonical_tail.iter().any(|t| t == "--no-project") {
                     return Err(CliError::Local {
                         detail: "this command requires a project; do not pass --no-project".into(),
@@ -632,11 +628,11 @@ fn bind_params_minimal(
 
 fn bind_params_with_schema(
     tail: &[String],
-    alias: &AliasDef,
+    command: &CommandDef,
     service_schema: &HashMap<String, String>,
     project_path: &str,
 ) -> Result<Value, CliError> {
-    let mut params = bind_params_minimal(tail, alias, project_path)?;
+    let mut params = bind_params_minimal(tail, command, project_path)?;
 
     // Normalize project → project_path
     params = normalize_project_param(params, service_schema, project_path);
@@ -714,6 +710,14 @@ fn normalize_project_param(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution {
+    command
+        .project
+        .as_ref()
+        .map(|p| p.resolution)
+        .unwrap_or_default()
+}
 
 fn local_err(error: anyhow::Error) -> CliError {
     CliError::Local {
@@ -822,31 +826,6 @@ fn exec_inherited(
 }
 
 // ---------------------------------------------------------------------------
-// Alias / verb loading from bundle roots
-// ---------------------------------------------------------------------------
-
-fn match_alias<'a>(
-    argv: &[String],
-    aliases: &'a [LoadedAliasDescriptor],
-) -> anyhow::Result<Option<(&'a LoadedAliasDescriptor, usize)>> {
-    for len in (1..=argv.len()).rev() {
-        let prefix = &argv[..len];
-        let matches: Vec<&LoadedAliasDescriptor> = aliases
-            .iter()
-            .filter(|alias| alias.def.tokens == prefix)
-            .collect();
-        match matches.len() {
-            0 => {}
-            1 => return Ok(Some((matches[0], len))),
-            _ => {
-                bail!("duplicate alias descriptor matches for tokens {:?}", prefix)
-            }
-        }
-    }
-    Ok(None)
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -918,6 +897,7 @@ mod tests {
                 bundle,
                 key,
             };
+            this.resign_node_commands(&core_bundle);
             this.write_signed(
                 &core_bundle
                     .join(ryeos_engine::AI_DIR)
@@ -947,15 +927,39 @@ mod tests {
             this
         }
 
+        fn resign_node_commands(&self, bundle: &Path) {
+            let root = bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("commands");
+            if !root.is_dir() {
+                return;
+            }
+            let mut stack = vec![root];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("yaml") {
+                        let content = std::fs::read_to_string(&path).unwrap();
+                        let body = lillux::signature::strip_signature_lines(&content);
+                        self.write_signed(&path, &body);
+                    }
+                }
+            }
+        }
+
         fn write_standard_descriptors(&self, offline_execute_line: Option<&str>) {
             self.write_signed(
                 &self
                     .bundle
                     .join(ryeos_engine::AI_DIR)
                     .join("node")
-                    .join("verbs")
+                    .join("commands")
                     .join("custom.yaml"),
-                "category: verbs\nsection: verbs\nname: custom\ndescription: Custom offline command\nexecute: service:custom\naliases:\n  - tokens: [\"custom\"]\n    description: Custom offline command\n    positional_forms:\n      - slots:\n          - field: name\n",
+                "category: commands\nsection: commands\nname: custom\ntokens: [\"custom\"]\ndescription: Custom offline command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\n",
             );
             let offline_execute_line = offline_execute_line.unwrap_or("");
             self.write_signed(
@@ -1252,7 +1256,7 @@ else:
     }
 
     #[test]
-    fn duplicate_alias_matches_error_loudly() {
+    fn duplicate_command_tokens_error_loudly() {
         let fixture = Fixture::new();
         let second_bundle = fixture
             .system
@@ -1282,18 +1286,15 @@ else:
             &second_bundle
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
-                .join("verbs")
-                .join("custom.yaml"),
-            "category: verbs\nsection: verbs\nname: custom\ndescription: Other offline command\nexecute: service:other\naliases:\n  - tokens: [\"custom\"]\n    description: Other offline command\n",
+                .join("commands")
+                .join("other-custom.yaml"),
+            "category: commands\nsection: commands\nname: other-custom\ntokens: [\"custom\"]\ndescription: Other offline command\ndispatch:\n  kind: execute_ref\n  execute: service:other\n",
         );
 
         let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
         match err {
             CliError::Local { detail } => {
-                assert!(
-                    detail.contains("node config aliases have duplicate tokens"),
-                    "{detail}"
-                );
+                assert!(detail.contains("command token collision"), "{detail}");
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1361,9 +1362,9 @@ else:
                 .bundle
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
-                .join("verbs")
+                .join("commands")
                 .join("capture.yaml"),
-            "category: verbs\nsection: verbs\nname: capture\ndescription: Capture offline client command\nexecute: client:custom/capture\naliases:\n  - tokens: [\"capture\"]\n    description: Capture offline client command\n",
+            "category: commands\nsection: commands\nname: capture\ntokens: [\"capture\"]\ndescription: Capture offline client command\ndispatch:\n  kind: execute_ref\n  execute: client:custom/capture\n",
         );
         fixture.write_signed(
             &fixture

@@ -1,0 +1,25 @@
+# ryeos:signed:2026-06-04T04:39:02Z:16d3e70ba0aaca704fd2e69630430f864220cc060694ba5ca88f6d98b30d4dfa:ncMGvptIBqvmM5atYcRf/MJj59P1KQ7zovNwiBlnobrNxpVdNQrhUulBfbrFeCdTk1Ikb/9T/pGMTUP9SvXTCQ==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: execute
+tokens:
+- execute
+description: Execute an item (tool, directive, service, graph)
+forms:
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+dispatch:
+  kind: direct_execute_item_ref
+  item_ref_arg: item_ref
+  availability: both
+project:
+  resolution: optional
+  default: discover_upward_ai
+  no_project_flag: true
+  request_project_path: true
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore

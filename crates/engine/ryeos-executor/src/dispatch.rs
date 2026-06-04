@@ -2052,23 +2052,7 @@ metadata:
     }
 
     fn test_authorizer() -> ryeos_runtime::authorizer::Authorizer {
-        ryeos_runtime::authorizer::Authorizer::new(std::sync::Arc::new(
-            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "execute".into(),
-                    execute: None,
-                },
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "fetch".into(),
-                    execute: None,
-                },
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "sign".into(),
-                    execute: Some("tool:ryeos/core/sign".into()),
-                },
-            ])
-            .unwrap(),
-        ))
+        ryeos_runtime::authorizer::Authorizer::new()
     }
 
     /// **B1 unit test**: `enforce_runtime_caps` itself is unconditional

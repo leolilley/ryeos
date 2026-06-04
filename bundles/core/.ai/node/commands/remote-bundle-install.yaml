@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:ad8f7b5a71fa274e3e1e7a385a19d35edca2cf3fcfb1d1a2340b854747f165ed:kb8lYbICyTz9nuu01hoW7qWODNHDXPH6mlfJwAC1zsVNlYlGdtUImIsmueLw6VjjjQtB5ENxnqid3skiRdDtDw==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-bundle-install
+tokens:
+- remote
+- bundle-install
+description: Install a bundle from a remote node
+dispatch:
+  kind: execute_ref
+  execute: service:remote/bundle-install

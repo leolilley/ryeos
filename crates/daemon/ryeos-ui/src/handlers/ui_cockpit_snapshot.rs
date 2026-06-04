@@ -63,9 +63,9 @@ pub struct LocalNode {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub verbs: Vec<VerbAliasSummary>,
+    pub commands: Vec<CommandSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<VerbAliasSummary>,
+    pub command_aliases: Vec<CommandSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,7 +102,7 @@ pub struct ServiceSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct VerbAliasSummary {
+pub struct CommandSummary {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -230,33 +230,33 @@ fn build_snapshot(
         })
         .collect();
 
-    // ── Verbs ──
-    let verbs: Vec<VerbAliasSummary> = state
-        .verb_registry
-        .verb_names()
-        .map(|name| {
-            let target = state
-                .verb_registry
-                .get_verb(name)
-                .and_then(|v| v.execute.clone());
-            VerbAliasSummary {
-                name: name.to_string(),
+    // ── Commands ──
+    let commands: Vec<CommandSummary> = state
+        .command_registry
+        .all_commands()
+        .iter()
+        .map(|command| {
+            let target = match &command.dispatch {
+                ryeos_runtime::CommandDispatch::ExecuteRef { execute, .. } => Some(execute.clone()),
+                _ => None,
+            };
+            CommandSummary {
+                name: command.name.clone(),
                 target,
             }
         })
         .collect();
 
-    // ── Aliases ──
-    let aliases: Vec<VerbAliasSummary> = state
-        .alias_registry
-        .all_aliases()
+    // ── Command aliases ──
+    let command_aliases: Vec<CommandSummary> = state
+        .command_registry
+        .all_commands()
         .iter()
-        .map(|def| {
-            let name = def.tokens.join(" ");
-            VerbAliasSummary {
-                name,
-                target: Some(def.verb.clone()),
-            }
+        .flat_map(|command| {
+            command.aliases.iter().map(move |alias| CommandSummary {
+                name: alias.tokens.join(" "),
+                target: Some(command.name.clone()),
+            })
         })
         .collect();
 
@@ -294,8 +294,8 @@ fn build_snapshot(
             spaces,
             bundles,
             services,
-            verbs,
-            aliases,
+            commands,
+            command_aliases,
         },
         project,
         remotes,

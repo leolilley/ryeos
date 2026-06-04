@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-04T04:39:02Z:91ce60f90e07b24e6a4d198789378e090c2c9280221ceb2c498c3241f7ea16c2:tOY1RaHOFa7O2WAib91UMr7z4izg29zR1VWNv2lJRX6qPsxPUK1txo6k70hYRz/7CgBqxB2Od33NFn8zAYkCBQ==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: admission-token
+tokens:
+- admission-token
+description: Mint a one-time node-local admission token for remote bootstrap
+dispatch:
+  kind: execute_ref
+  execute: tool:ryeos/core/admission-token

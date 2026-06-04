@@ -1,4 +1,3 @@
-pub mod alias_registry;
 pub mod arg_binder;
 pub mod authorizer;
 pub mod callback;
@@ -6,6 +5,7 @@ pub mod callback_client;
 pub mod callback_contract;
 pub mod callback_uds;
 pub mod checkpoint;
+pub mod command;
 pub mod condition;
 pub mod daemon_rpc;
 pub mod envelope;
@@ -23,13 +23,8 @@ pub mod resolver;
 pub mod scalar_or_vec;
 pub mod template;
 pub mod transcript;
-pub mod verb_registry;
 pub mod verified_loader;
 
-pub use alias_registry::{
-    AliasDef, AliasRegistry, AliasRegistryError, PositionalForm, PositionalMatcher, PositionalSlot,
-    ProjectResolution,
-};
 pub use arg_binder::bind_argv;
 pub use authorizer::{
     canonical_cap, cap_matches, AuthorizationError, AuthorizationPolicy, Authorizer, Capability,
@@ -40,6 +35,13 @@ pub use callback::{
     ReplayedEventRecord, RuntimeCallbackAPI,
 };
 pub use checkpoint::CheckpointWriter;
+pub use command::{
+    CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
+    CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandDef, CommandDispatch,
+    CommandHelpDef, CommandParameterBinding, CommandParameterBindingMode, CommandProjectDefault,
+    CommandProjectPolicy, CommandProjectResolution, CommandRegistry, CommandRegistryError,
+    CommandSource, FlagKeyNormalization, MatchedCommand,
+};
 pub use condition::{apply_operator, matches, resolve_path};
 pub use daemon_rpc::{
     resolve_daemon_socket_path, DaemonRpcClient, RpcError, ThreadLifecycleClient,
@@ -57,4 +59,3 @@ pub use progress::{ProgressEvent, StatusEvent};
 pub use provider_snapshot::ResolvedProviderSnapshot;
 pub use resolver::{resolve_command, ResolveError, ResolvedCommand};
 pub use transcript::{KnowledgeRenderOptions, Transcript};
-pub use verb_registry::{UnknownVerbInCap, VerbDef, VerbRegistry, VerbRegistryError};

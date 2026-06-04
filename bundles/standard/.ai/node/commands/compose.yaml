@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-04T04:39:02Z:163334c96f268acf14da3b1cdc6e717d122af18215894b53feb546f70b2313d1:31Yfxf0en24KfiIvLELo6hZWRnsbRLKXZ2sozpqzXkndMK+smg66G7TvZjLEopVC4eqp8sUHsBHkxY5KgVKpCg==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: compose
+tokens:
+- compose
+description: Compose a knowledge graph context block within a token budget
+dispatch:
+  kind: execute_ref
+  execute: service:rye/dispatch

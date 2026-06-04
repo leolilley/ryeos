@@ -1,0 +1,18 @@
+# ryeos:signed:2026-06-04T04:39:02Z:8fd8dd36f00f55521ffc4bf4395cf44a76ae35370a7a0f445a3a8203fd06a297:jFSubY0imfSxPfiOo8BrT5D3/BCm29CscRVe7vkDvw8qT+DSVz0cCtTz7wjq5x25DK0tT5xiE/HYBtck2h5xCA==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: verify
+tokens:
+- verify
+description: Verify an item's signature chain
+forms:
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: tool:ryeos/core/verify

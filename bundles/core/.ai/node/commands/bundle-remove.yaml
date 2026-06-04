@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:3b111c03b71c01ff47d8086bf1b5527cd3ded0d47da214f335c6f2441b7395dd:EHKqwgUDg9cRUdg6mS0wCztAiERPifXnfHoBJU62TxgvexAVI1GlAZQafL68sd/HlaqfHcBe4EREc0mLRIbLAw==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: bundle-remove
+tokens:
+- bundle
+- remove
+description: Remove an installed bundle
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/remove

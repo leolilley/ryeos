@@ -86,8 +86,8 @@ pub struct LocalNodeModel {
     pub spaces: Vec<SpaceSummaryModel>,
     pub bundles: Vec<BundleSummaryModel>,
     pub services: Vec<ServiceSummaryModel>,
-    pub verbs: Vec<VerbAliasSummaryModel>,
-    pub aliases: Vec<VerbAliasSummaryModel>,
+    pub commands: Vec<CommandSummaryModel>,
+    pub command_aliases: Vec<CommandSummaryModel>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -118,7 +118,7 @@ pub struct ServiceSummaryModel {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct VerbAliasSummaryModel {
+pub struct CommandSummaryModel {
     pub name: String,
     pub target: Option<String>,
 }

@@ -189,8 +189,8 @@ or node-command invocation. Examples:
 - `service:remote/execute` via `remote execute`
 - `service:vault/set` via `vault set`
 
-Verb descriptors live under `.ai/node/verbs/`; aliases live under
-`.ai/node/aliases/`.
+Command descriptors live under `.ai/node/commands/`; alternate token spellings
+are embedded in each command's `aliases` list.
 
 ### Execute-only services
 
