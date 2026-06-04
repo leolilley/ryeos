@@ -1162,6 +1162,7 @@ fn view_from_route(route: &str) -> Option<ViewSpec> {
         "gc" => Some(ViewSpec::GcStatus),
         "remotes" => Some(ViewSpec::Remotes),
         "services" => Some(ViewSpec::Services),
+        "trust" => Some(ViewSpec::Trust),
         _ => None,
     }
 }
@@ -1179,10 +1180,10 @@ fn route_for_view(view: &ViewSpec) -> Option<&'static str> {
         ViewSpec::GcStatus => Some("gc"),
         ViewSpec::Remotes => Some("remotes"),
         ViewSpec::Services => Some("services"),
+        ViewSpec::Trust => Some("trust"),
         ViewSpec::Thread { .. }
         | ViewSpec::ItemInspector
         | ViewSpec::SpaceBrowser { project: Some(_) }
-        | ViewSpec::Trust
         | ViewSpec::Graph { graph_id: Some(_) }
         | ViewSpec::EventInspector => None,
     }
@@ -1705,6 +1706,43 @@ mod tests {
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::FetchItems { limit: 1000, .. })
         ));
+    }
+
+    #[test]
+    fn trust_route_focuses_trust_view() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::RouteChanged {
+            route: "trust".to_string(),
+        });
+
+        assert_eq!(core.workspace.focused_view(), Some(&ViewSpec::Trust));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect.kind,
+            StudioEffectKind::FetchTopology
+                | StudioEffectKind::FetchThreads { .. }
+                | StudioEffectKind::FetchGcStatus
+                | StudioEffectKind::FetchItems { .. }
+        )));
+    }
+
+    #[test]
+    fn opening_trust_view_sets_location_hash() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Trust,
+                },
+            },
+        });
+
+        assert!(effects.iter().any(|effect| matches!(
+            &effect.kind,
+            StudioEffectKind::SetLocationHash { hash } if hash == "trust"
+        )));
     }
 
     #[test]
