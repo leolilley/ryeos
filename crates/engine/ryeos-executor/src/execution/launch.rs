@@ -15,7 +15,7 @@ use super::limits::{
     load_limits_config,
 };
 use super::thread_meta::ThreadMeta;
-use ryeos_app::callback_token::compute_ttl;
+use ryeos_app::callback_token::{compute_ttl, effective_bundle_id_from_item_ref};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 
@@ -859,12 +859,14 @@ pub async fn build_and_launch(
     // was the only entity gating its own callback dispatches.
     let ttl = compute_ttl(Some(hard_limits.duration_seconds));
     let child_provenance = provenance.clone_for_borrowed_child();
-    let cap = state.callback_tokens.generate(
+    let cap = state.callback_tokens.generate_with_context(
         &thread_id,
         project_path.to_path_buf(),
         ttl,
         effective_caps.clone(),
         child_provenance,
+        effective_bundle_id_from_item_ref(&resolved.item_ref),
+        Some(resolved.item_ref.clone()),
     );
 
     // 6b. Build inventory the launching kind asked for. The engine

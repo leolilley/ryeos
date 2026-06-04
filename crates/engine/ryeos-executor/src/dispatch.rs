@@ -780,12 +780,14 @@ pub(crate) async fn dispatch_op(
     // provenance instead of minting an unprovenanced token.
     let ttl = ryeos_app::callback_token::compute_ttl(None);
     let child_provenance = request.provenance.clone_for_borrowed_child();
-    let cap = state.callback_tokens.generate(
+    let cap = state.callback_tokens.generate_with_context(
         &thread_id,
         request.project_path.to_path_buf(),
         ttl,
         Vec::new(), // op threads have no caps for now
         child_provenance,
+        None,
+        Some(canonical_ref.to_string()),
     );
 
     let callback = ryeos_runtime::envelope::EnvelopeCallback {

@@ -6,6 +6,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 
 use crate::objects::{
     hash_domain_event, validate_domain_identifier, DomainEventAttribution, DomainEventObject,
@@ -33,7 +34,7 @@ pub struct DomainEventAppendRequest {
     pub attribution: DomainEventAttribution,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainEventAppendResult {
     pub event_hash: String,
     pub chain_head_hash: String,
@@ -41,7 +42,7 @@ pub struct DomainEventAppendResult {
     pub idempotent: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainEventRecord {
     pub event_hash: String,
     pub event: DomainEventObject,
