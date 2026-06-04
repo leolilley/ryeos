@@ -7,6 +7,9 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, CommandSubmitParams};
+use ryeos_app::domain_event_service::{
+    DomainEventAppendParams, DomainEventReadChainParams, DomainEventScanParams, DomainEventService,
+};
 use ryeos_app::event_store_service::{
     EventAppendBatchParams, EventAppendParams, EventReplayParams,
 };
@@ -115,7 +118,7 @@ pub async fn dispatch_runtime_method(
 ) -> Result<serde_json::Value> {
     // Validate callback token on ALL runtime.* methods
     // dispatch_action does its own stronger validation (primary + project_path)
-    if method != "runtime.dispatch_action" {
+    let callback_cap = if method != "runtime.dispatch_action" {
         let token = params
             .get("callback_token")
             .and_then(|v| v.as_str())
@@ -124,9 +127,11 @@ pub async fn dispatch_runtime_method(
             .get("thread_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
-        state
-            .callback_tokens
-            .validate_token_and_thread(token, thread_id)?;
+        Some(
+            state
+                .callback_tokens
+                .validate_token_and_thread(token, thread_id)?,
+        )
     } else {
         // runtime.dispatch_action: validate thread_auth_token (per-request
         // identity proof). Missing or invalid = hard fail, no fallback.
@@ -139,7 +144,8 @@ pub async fn dispatch_runtime_method(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         state.thread_auth.validate(tat, thread_id)?;
-    }
+        None
+    };
 
     // Strip transport-level fields before typed deserialization so
     // deny_unknown_fields on the RPC param structs doesn't reject
@@ -153,6 +159,15 @@ pub async fn dispatch_runtime_method(
         "runtime.append_event" => handle_append_event(&clean_params, state),
         "runtime.append_events" => handle_append_event_batch(&clean_params, state),
         "runtime.replay_events" => handle_replay_events(&clean_params, state),
+        "runtime.domain_events_append" => {
+            handle_domain_events_append(&clean_params, state, callback_cap.as_ref())
+        }
+        "runtime.domain_events_read_chain" => {
+            handle_domain_events_read_chain(&clean_params, state, callback_cap.as_ref())
+        }
+        "runtime.domain_events_scan" => {
+            handle_domain_events_scan(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.finalize_thread" => handle_finalize(&clean_params, state),
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
         "runtime.request_continuation" => handle_request_continuation(&clean_params, state),
@@ -265,6 +280,57 @@ fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<
         serde_json::from_value(params.clone()).context("invalid events.replay params")?;
     serde_json::to_value(state.events.replay(&params)?)
         .context("failed to encode events.replay result")
+}
+
+fn handle_domain_events_append(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: DomainEventAppendParams =
+        serde_json::from_value(params.clone()).context("invalid domain_events.append params")?;
+    serde_json::to_value(DomainEventService::append(
+        &state.state_store,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode domain_events.append result")
+}
+
+fn handle_domain_events_read_chain(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: DomainEventReadChainParams = serde_json::from_value(params.clone())
+        .context("invalid domain_events.read_chain params")?;
+    serde_json::to_value(DomainEventService::read_chain(
+        &state.state_store,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode domain_events.read_chain result")
+}
+
+fn handle_domain_events_scan(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: DomainEventScanParams =
+        serde_json::from_value(params.clone()).context("invalid domain_events.scan params")?;
+    serde_json::to_value(DomainEventService::scan(
+        &state.state_store,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode domain_events.scan result")
 }
 
 fn handle_submit_command(
@@ -963,6 +1029,134 @@ mod tests {
         )
         .await;
         assert!(resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn runtime_domain_events_use_callback_bundle_identity_and_caps() {
+        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate_with_context(
+            "T-domain-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            vec![
+                "ryeos.append.domain_events.ryeos-email/email_event".to_string(),
+                "ryeos.scan.domain_events.ryeos-email/email_event".to_string(),
+            ],
+            test_provenance(&state, "/test"),
+            Some("ryeos-email".to_string()),
+            Some("tool:ryeos-email/send".to_string()),
+        );
+
+        let append = dispatch(
+            rpc(
+                "runtime.domain_events_append",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-domain-1",
+                    "event_kind": "email_event",
+                    "chain_id": "email_1",
+                    "event_type": "email_planned",
+                    "schema_version": 1,
+                    "payload": {"email_id": "email_1"},
+                    "idempotency_key": "plan:email_1"
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(append.error.is_none(), "append failed: {:?}", append.error);
+        let event_hash = rpc_ok(&append)["event_hash"].as_str().unwrap();
+        assert_eq!(rpc_ok(&append)["event"]["bundle_id"], "ryeos-email");
+        assert_eq!(
+            rpc_ok(&append)["event"]["attribution"]["tool"],
+            "tool:ryeos-email/send"
+        );
+
+        let scan = dispatch(
+            rpc(
+                "runtime.domain_events_scan",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-domain-1",
+                    "event_kind": "email_event",
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(scan.error.is_none(), "scan failed: {:?}", scan.error);
+        assert_eq!(rpc_ok(&scan)["events"].as_array().unwrap().len(), 1);
+        assert_eq!(rpc_ok(&scan)["events"][0]["event_hash"], event_hash);
+    }
+
+    #[tokio::test]
+    async fn runtime_domain_events_reject_bundle_id_input_and_missing_cap() {
+        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate_with_context(
+            "T-domain-deny",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.append.domain_events.ryeos-email/email_event".to_string()],
+            test_provenance(&state, "/test"),
+            Some("ryeos-email".to_string()),
+            Some("tool:ryeos-email/send".to_string()),
+        );
+
+        let caller_bundle_id = dispatch(
+            rpc(
+                "runtime.domain_events_append",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-domain-deny",
+                    "bundle_id": "other-bundle",
+                    "event_kind": "email_event",
+                    "chain_id": "email_1",
+                    "event_type": "email_planned",
+                    "payload": {}
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&caller_bundle_id)
+                .message
+                .contains("unknown field `bundle_id`"),
+            "got: {}",
+            rpc_err(&caller_bundle_id).message
+        );
+
+        let cbt = state.callback_tokens.generate_with_context(
+            "T-domain-deny-2",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+            Some("ryeos-email".to_string()),
+            Some("tool:ryeos-email/send".to_string()),
+        );
+        let missing_cap = dispatch(
+            rpc(
+                "runtime.domain_events_append",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-domain-deny-2",
+                    "event_kind": "email_event",
+                    "chain_id": "email_1",
+                    "event_type": "email_planned",
+                    "payload": {}
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&missing_cap)
+                .message
+                .contains("missing required capability"),
+            "got: {}",
+            rpc_err(&missing_cap).message
+        );
     }
 
     // ── commands (via runtime.* token-gated) ────────────────────────

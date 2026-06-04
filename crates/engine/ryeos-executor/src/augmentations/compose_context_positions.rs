@@ -162,12 +162,14 @@ pub async fn run(
     // 7. Generate callback token.
     let ttl = ryeos_app::callback_token::compute_ttl(None);
     let child_provenance = provenance.clone_for_borrowed_child();
-    let cap = state.callback_tokens.generate(
+    let cap = state.callback_tokens.generate_with_context(
         &child_thread_id,
         project_path.to_path_buf(),
         ttl,
         Vec::new(), // augmentation children have no caps
         child_provenance,
+        None,
+        Some(format!("{target_kind}://{target_op}")),
     );
 
     // 8. Mint thread auth token (runtime expects RYEOSD_THREAD_AUTH_TOKEN).

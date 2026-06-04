@@ -29,6 +29,12 @@ pub struct CallbackCapability {
     /// are derived from this value with `clone_for_borrowed_child()`;
     /// there is no deploy-window fallback or daemon-engine fallback.
     pub provenance: ExecutionProvenance,
+    /// Bundle identity derived by the launcher from the verified root item.
+    /// Runtime domain-event APIs use this instead of trusting caller-supplied
+    /// bundle IDs.
+    pub effective_bundle_id: Option<String>,
+    /// Root item ref that minted this callback token, used for attribution.
+    pub item_ref: Option<String>,
 }
 
 pub struct CallbackCapabilityStore {
@@ -56,6 +62,27 @@ impl CallbackCapabilityStore {
         effective_caps: Vec<String>,
         provenance: ExecutionProvenance,
     ) -> CallbackCapability {
+        self.generate_with_context(
+            thread_id,
+            project_path,
+            ttl,
+            effective_caps,
+            provenance,
+            None,
+            None,
+        )
+    }
+
+    pub fn generate_with_context(
+        &self,
+        thread_id: &str,
+        project_path: PathBuf,
+        ttl: Duration,
+        effective_caps: Vec<String>,
+        provenance: ExecutionProvenance,
+        effective_bundle_id: Option<String>,
+        item_ref: Option<String>,
+    ) -> CallbackCapability {
         let random_bytes: [u8; 32] = rand::random();
         let hex = lillux::cas::sha256_hex(&random_bytes);
         let token = format!("cbt-{hex}");
@@ -72,6 +99,8 @@ impl CallbackCapabilityStore {
             expires_at: Instant::now() + ttl,
             effective_caps,
             provenance,
+            effective_bundle_id,
+            item_ref,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
@@ -148,6 +177,16 @@ impl CallbackCapabilityStore {
 pub fn compute_ttl(duration_seconds: Option<u64>) -> Duration {
     let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
     Duration::from_secs(secs.min(MAX_CALLBACK_TTL_SECS))
+}
+
+pub fn effective_bundle_id_from_item_ref(item_ref: &str) -> Option<String> {
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).ok()?;
+    canonical
+        .bare_id
+        .split('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone)]
@@ -459,6 +498,8 @@ mod tests {
                 PathBuf::from("/project"),
                 engine.clone(),
             ),
+            effective_bundle_id: None,
+            item_ref: None,
         };
 
         let cloned = cap.clone();

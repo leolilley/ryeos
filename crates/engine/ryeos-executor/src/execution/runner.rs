@@ -28,6 +28,7 @@ use ryeos_engine::protocol_vocabulary::{produce_env_value, EnvInjectionSource};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::compute_ttl;
+use ryeos_app::callback_token::effective_bundle_id_from_item_ref;
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
 use ryeos_app::state::AppState;
@@ -584,14 +585,17 @@ fn mint_callback_env(
     acting_principal: &str,
     caller_scopes: Vec<String>,
     provenance: ExecutionProvenance,
+    item_ref: &str,
 ) -> Result<(HashMap<String, String>, String, String)> {
     let ttl = compute_ttl(duration_seconds);
-    let cap = state.callback_tokens.generate(
+    let cap = state.callback_tokens.generate_with_context(
         thread_id,
         project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
         ttl,
         effective_caps,
         provenance,
+        effective_bundle_id_from_item_ref(item_ref),
+        Some(item_ref.to_string()),
     );
 
     let thread_auth =
@@ -734,6 +738,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         &params.acting_principal,
         vec!["execute".to_string()],
         child_provenance,
+        &params.resolved.item_ref,
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -957,6 +962,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         &params.acting_principal,
         vec!["execute".to_string()],
         child_provenance,
+        &params.resolved.item_ref,
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -1625,6 +1631,7 @@ pub async fn run_existing_detached(
         &params.acting_principal,
         vec!["execute".to_string()],
         child_provenance,
+        &params.resolved.item_ref,
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
