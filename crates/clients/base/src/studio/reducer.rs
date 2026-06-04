@@ -139,10 +139,12 @@ impl StudioCore {
             StudioUiEvent::ChooseLauncher { secondary } => {
                 let items = filtered_launcher_items(self);
                 let selected = self.ui.launcher.selected.min(items.len().saturating_sub(1));
+                if items.get(selected).is_some_and(|item| !item.enabled) {
+                    self.notice("Command is unavailable in this session.", StudioTone::Warn);
+                    self.bump_generation();
+                    return Vec::new();
+                }
                 let action = items.get(selected).and_then(|item| {
-                    if !item.enabled {
-                        return None;
-                    }
                     if secondary {
                         item.secondary_action
                             .clone()
@@ -1587,6 +1589,12 @@ mod tests {
         });
 
         assert!(effects.is_empty());
+        assert!(core.ui.launcher.open);
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Command is unavailable in this session."));
     }
 
     #[test]
