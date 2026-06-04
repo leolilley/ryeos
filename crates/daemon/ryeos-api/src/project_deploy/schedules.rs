@@ -32,6 +32,7 @@ enum ScheduleAction {
     Update {
         desired: DesiredSchedule,
         existing: ScheduleSpecRecord,
+        adopt_manual: bool,
     },
     DeleteMissing {
         schedule_id: String,
@@ -121,27 +122,37 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
 
         match existing {
             Some(existing) => {
-                let managed = existing_body
-                    .as_ref()
-                    .and_then(parse_project_managed_by)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "schedule_id '{}' already exists as a manual schedule; project sync adoption is not enabled",
-                            schedule_id
-                        )
-                    })?;
-                if managed.project_key != ctx.project_key {
-                    anyhow::bail!(
-                        "schedule_id '{}' is managed by another project and cannot be updated by this project sync",
-                        schedule_id
-                    );
-                }
+                let adopt_manual = match existing_body.as_ref().and_then(parse_project_managed_by) {
+                    Some(managed) => {
+                        if managed.project_key != ctx.project_key {
+                            anyhow::bail!(
+                                "schedule_id '{}' is managed by another project and cannot be updated by this project sync",
+                                schedule_id
+                            );
+                        }
+                        false
+                    }
+                    None => {
+                        let existing_project_root = existing.project_root.as_deref();
+                        let sync_project_root = ctx.project_path.to_string_lossy();
+                        if existing_project_root != Some(sync_project_root.as_ref()) {
+                            anyhow::bail!(
+                                "schedule_id '{}' already exists as a manual schedule for project_root {:?}; refusing to adopt for project {}",
+                                schedule_id,
+                                existing_project_root,
+                                ctx.project_path.display(),
+                            );
+                        }
+                        true
+                    }
+                };
                 ctx.caller
                     .require_owner(Some(&existing.requester_fingerprint))
                     .map_err(|e| anyhow!(e))?;
                 actions.push(ScheduleAction::Update {
                     desired: desired_schedule.clone(),
                     existing,
+                    adopt_manual,
                 });
             }
             None => {
@@ -276,7 +287,11 @@ pub fn prepare_commit(
                     tx.touch(desired.declaration.schedule_id.clone());
                     report.created += 1;
                 }
-                ScheduleAction::Update { desired, existing } => {
+                ScheduleAction::Update {
+                    desired,
+                    existing,
+                    adopt_manual: _,
+                } => {
                     tx.backup(ctx, &desired.declaration.schedule_id)?;
                     write_reconciled_schedule(
                         &node_dir,
@@ -398,7 +413,11 @@ fn revalidate_action(
             }
             reject_schedule_history_reuse(ctx, schedule_id)?;
         }
-        ScheduleAction::Update { desired, existing } => {
+        ScheduleAction::Update {
+            desired,
+            existing,
+            adopt_manual,
+        } => {
             let schedule_id = &desired.declaration.schedule_id;
             let current = ctx
                 .state
@@ -419,13 +438,12 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            let body =
-                read_existing_schedule_body(schedules_dir, schedule_id)?.ok_or_else(|| {
-                    anyhow!(
-                        "schedule_id '{}' lost node YAML during project deploy; refusing update",
-                        schedule_id
-                    )
-                })?;
+            let body = read_existing_schedule_body(schedules_dir, schedule_id)?.ok_or_else(|| {
+                anyhow!(
+                    "schedule_id '{}' lost node YAML during project deploy; refusing update",
+                    schedule_id
+                )
+            })?;
             let yaml_hash = read_existing_schedule_content_hash(schedules_dir, schedule_id)?
                 .ok_or_else(|| {
                     anyhow!(
@@ -439,17 +457,34 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            let managed = parse_project_managed_by(&body).ok_or_else(|| {
-                anyhow!(
-                    "schedule_id '{}' is no longer project-managed during project deploy",
-                    schedule_id
-                )
-            })?;
-            if managed.project_key != ctx.project_key {
-                anyhow::bail!(
-                    "schedule_id '{}' changed project ownership during project deploy",
-                    schedule_id
-                );
+            match parse_project_managed_by(&body) {
+                Some(managed) => {
+                    if managed.project_key != ctx.project_key {
+                        anyhow::bail!(
+                            "schedule_id '{}' changed project ownership during project deploy",
+                            schedule_id
+                        );
+                    }
+                }
+                None if *adopt_manual => {
+                    if current.project_root.as_deref()
+                        != Some(ctx.project_path.to_string_lossy().as_ref())
+                    {
+                        anyhow::bail!(
+                            "schedule_id '{}' changed project_root during project deploy; refusing manual adoption",
+                            schedule_id
+                        );
+                    }
+                    ctx.caller
+                        .require_owner(Some(&current.requester_fingerprint))
+                        .map_err(|e| anyhow!(e))?;
+                }
+                None => {
+                    anyhow::bail!(
+                        "schedule_id '{}' is no longer project-managed during project deploy",
+                        schedule_id
+                    );
+                }
             }
         }
         ScheduleAction::DeleteMissing {
