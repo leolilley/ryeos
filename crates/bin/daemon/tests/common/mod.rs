@@ -663,16 +663,27 @@ impl DaemonHarness {
             "project_path": project_path,
             "parameters": params,
         });
+        self.post_json("/execute", body).await
+    }
+
+    /// POST JSON to an authenticated daemon route and return
+    /// (status, json body). When the harness has fast-fixture keys, the
+    /// request is signed for the exact route path.
+    pub async fn post_json(
+        &self,
+        route_path: &str,
+        body: serde_json::Value,
+    ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
         let body_bytes = serde_json::to_vec(&body)?;
 
         let mut req = reqwest::Client::new()
-            .post(format!("http://{}/execute", self.bind))
+            .post(format!("http://{}{}", self.bind, route_path))
             .header("content-type", "application/json")
             .body(body_bytes.clone());
 
         if let (Some(user_key), Some(node_key)) = (&self.user_key, &self.node_key) {
             let headers =
-                build_signed_headers_for_bytes(user_key, node_key, "POST", "/execute", &body_bytes);
+                build_signed_headers_for_bytes(user_key, node_key, "POST", route_path, &body_bytes);
             for (k, v) in headers {
                 req = req.header(k, v);
             }

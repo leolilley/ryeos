@@ -53,7 +53,7 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(
         out,
         "  {:<30} {}",
-        "execute <item_ref>", "Execute any canonical item ref directly"
+        "execute [--async] <item_ref>", "Execute any canonical item ref directly"
     )?;
     writeln!(
         out,
@@ -278,6 +278,10 @@ fn print_installed_verb_help(
         .map(|s| s.description.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(&command_descriptor.description);
+    let is_direct_execute = matches!(
+        command_descriptor.command.dispatch,
+        ryeos_runtime::CommandDispatch::DirectExecuteItemRef { .. }
+    );
 
     writeln!(out, "ryeos {command} — {description}")?;
     writeln!(out)?;
@@ -293,9 +297,18 @@ fn print_installed_verb_help(
     writeln!(out, "USAGE:")?;
     writeln!(
         out,
-        "  ryeos {command}{}",
-        usage_tail(&command_descriptor, item.as_ref())
+        "  {}",
+        installed_usage_line(&command_descriptor, item.as_ref())
     )?;
+
+    if is_direct_execute {
+        writeln!(out)?;
+        writeln!(out, "CONTROL FLAGS:")?;
+        writeln!(
+            out,
+            "  --async              Accepted/background launch for tool refs; returns a thread_id"
+        )?;
+    }
 
     let project_resolution = command_descriptor
         .command
@@ -379,6 +392,25 @@ fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>
     } else {
         format!(" {}", parts.join(" "))
     }
+}
+
+fn installed_usage_line(
+    command: &LoadedCommandDescriptor,
+    item: Option<&ItemHelpMetadata>,
+) -> String {
+    let command_tokens = command.tokens.join(" ");
+    let control_tail = if matches!(
+        command.command.dispatch,
+        ryeos_runtime::CommandDispatch::DirectExecuteItemRef { .. }
+    ) {
+        " [--async]"
+    } else {
+        ""
+    };
+    format!(
+        "ryeos {command_tokens}{control_tail}{}",
+        usage_tail(command, item)
+    )
 }
 
 fn snapshot_bundle_roots(snapshot: &NodeConfigSnapshot) -> Vec<PathBuf> {
@@ -485,7 +517,13 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
         Some("execute") => {
             writeln!(out, "ryeos execute — Universal escape hatch")?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos execute <item_ref> [flags...]")?;
+            writeln!(out, "USAGE: ryeos execute [--async] <item_ref> [flags...]")?;
+            writeln!(out)?;
+            writeln!(out, "CONTROL FLAGS:")?;
+            writeln!(
+                out,
+                "  --async         Accepted/background launch for tool refs; returns a thread_id"
+            )?;
             writeln!(out)?;
             writeln!(out, "PARAMETER INPUT:")?;
             writeln!(out, "  --input <FILE>   Read JSON parameters from a file")?;
@@ -597,5 +635,42 @@ mod tests {
         assert!(item.is_offline_dispatch());
         assert_eq!(item.schema.get("project").unwrap(), "string?");
         assert_eq!(usage_tail(&command, Some(&item)), " <remote>");
+    }
+
+    #[test]
+    fn installed_direct_execute_help_usage_includes_async_control_flag() {
+        let command = LoadedCommandDescriptor {
+            command: ryeos_runtime::CommandDef {
+                category: "commands".into(),
+                section: "commands".into(),
+                name: "execute".into(),
+                tokens: vec!["execute".into()],
+                description: "Execute an item".into(),
+                aliases: vec![],
+                help: None,
+                arguments: vec![],
+                forms: vec![ryeos_runtime::CommandArgumentForm {
+                    slots: vec![ryeos_runtime::CommandArgumentSlot {
+                        field: "item_ref".into(),
+                        matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
+                    }],
+                }],
+                parameter_binding: None,
+                project: None,
+                dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
+                    item_ref_arg: "item_ref".into(),
+                    availability: ryeos_runtime::CommandAvailability::Both,
+                },
+                source_file: PathBuf::from("/tmp/execute.yaml"),
+                provenance: ryeos_runtime::CommandProvenance::default(),
+            },
+            tokens: vec!["execute".into()],
+            description: "Execute an item".into(),
+        };
+
+        assert_eq!(
+            installed_usage_line(&command, None),
+            "ryeos execute [--async] <item-ref>"
+        );
     }
 }
