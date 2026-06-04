@@ -95,7 +95,7 @@ function view(viewVm, tileId, dispatchUi) {
       body.append(textEl("h2", viewVm.running ? "GC running" : "GC idle"), code(JSON.stringify(viewVm.recent_events || [], null, 2)));
       break;
     case "inspector":
-      body.append(inspector(viewVm));
+      body.append(inspector(viewVm, dispatchUi));
       break;
     case "placeholder":
       body.append(textEl("h2", viewVm.title), textEl("p", viewVm.message));
@@ -501,12 +501,12 @@ function rowGlyph(item, kind) {
   return "•";
 }
 
-function inspector(vm) {
+function inspector(vm, dispatchUi) {
   const wrap = el("div", "studio-inspector-view");
   wrap.append(textEl("h2", vm.title));
   if (vm.subtitle) wrap.append(textEl("p", vm.subtitle));
   if (vm.empty) wrap.append(textEl("p", vm.empty_message || "Select an object to inspect it."));
-  for (const section of vm.sections || []) wrap.append(sectionBlock(section, null));
+  for (const section of vm.sections || []) wrap.append(sectionBlock(section, dispatchUi));
   for (const block of vm.code_blocks || []) wrap.append(textEl("h3", block.label), code(block.content));
   return wrap;
 }

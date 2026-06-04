@@ -1720,24 +1720,8 @@ fn inspector(core: &StudioCore) -> StudioInspectorVm {
         StudioInspectorState::Summary { title, detail } => {
             code_or_empty(title, None, serde_json::to_string_pretty(detail).ok(), None)
         }
-        StudioInspectorState::Item { canonical_ref } => code_or_empty(
-            canonical_ref,
-            Some("Item"),
-            core.data
-                .item_inspection
-                .as_ref()
-                .and_then(|x| serde_json::to_string_pretty(x).ok()),
-            Some("Loading item details…"),
-        ),
-        StudioInspectorState::Thread { thread_id } => code_or_empty(
-            thread_id,
-            Some("Thread"),
-            core.data
-                .thread_inspection
-                .as_ref()
-                .and_then(|x| serde_json::to_string_pretty(x).ok()),
-            Some("Loading thread details…"),
-        ),
+        StudioInspectorState::Item { canonical_ref } => item_inspector(core, canonical_ref),
+        StudioInspectorState::Thread { thread_id } => thread_inspector(core, thread_id),
         StudioInspectorState::File { root, path } => code_or_empty(
             path,
             Some(root),
@@ -1753,6 +1737,57 @@ fn inspector(core: &StudioCore) -> StudioInspectorVm {
             empty_message: Some("Select an object to inspect it.".to_string()),
         },
     }
+}
+
+fn item_inspector(core: &StudioCore, canonical_ref: &str) -> StudioInspectorVm {
+    let inspection = core.data.item_inspection.as_ref();
+    let mut vm = code_or_empty(
+        canonical_ref,
+        Some("Item"),
+        inspection.and_then(|x| serde_json::to_string_pretty(x).ok()),
+        Some("Loading item details…"),
+    );
+    if inspection.is_some_and(|x| x.item.executable) && !session_vm(core).read_only {
+        vm.sections.push(StudioSectionVm {
+            title: "Run item".to_string(),
+            rows: vec![
+                ("Action".to_string(), "Run".to_string()),
+                ("Target".to_string(), canonical_ref.to_string()),
+            ],
+            action: Some(StudioAction::ExecuteItem {
+                item_ref: canonical_ref.to_string(),
+                parameters: serde_json::json!({}),
+            }),
+        });
+    }
+    vm
+}
+
+fn thread_inspector(core: &StudioCore, thread_id: &str) -> StudioInspectorVm {
+    let inspection = core.data.thread_inspection.as_ref();
+    let mut vm = code_or_empty(
+        thread_id,
+        Some("Thread"),
+        inspection.and_then(|x| serde_json::to_string_pretty(x).ok()),
+        Some("Loading thread details…"),
+    );
+    if inspection
+        .and_then(|x| field_text(&x.thread, &["status", "state"]))
+        .is_some_and(|status| is_cancellable_thread_status(&status))
+        && !session_vm(core).read_only
+    {
+        vm.sections.push(StudioSectionVm {
+            title: "Cancel thread".to_string(),
+            rows: vec![
+                ("Action".to_string(), "Cancel".to_string()),
+                ("Thread".to_string(), thread_id.to_string()),
+            ],
+            action: Some(StudioAction::CancelThread {
+                thread_id: thread_id.to_string(),
+            }),
+        });
+    }
+    vm
 }
 
 fn code_or_empty(

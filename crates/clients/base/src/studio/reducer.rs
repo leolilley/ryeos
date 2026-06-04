@@ -300,6 +300,7 @@ impl StudioCore {
                 self.ui.inspector = StudioInspectorState::Thread {
                     thread_id: thread_id.clone(),
                 };
+                self.ensure_inspector_tile();
                 self.bump_generation();
                 vec![self.emit(StudioEffectKind::InspectThread {
                     thread_id,
@@ -1369,7 +1370,8 @@ fn non_empty(value: String) -> Option<String> {
 mod tests {
     use super::*;
     use crate::studio::dto::{
-        StudioItemDto, StudioItemsDto, StudioKnownProjectDto, StudioProjectsDto, StudioThreadsDto,
+        StudioInspectedItemDto, StudioItemDto, StudioItemInspectionDto, StudioItemsDto,
+        StudioKnownProjectDto, StudioProjectsDto, StudioThreadInspectionDto, StudioThreadsDto,
     };
     use crate::studio::effect::StudioEffectResultKind;
     use crate::studio::event::{StudioEvent, StudioFilterField, StudioUiEvent};
@@ -1429,6 +1431,20 @@ mod tests {
             executable,
             ..Default::default()
         }
+    }
+
+    fn inspector_view(vm: &crate::studio::view_model::StudioViewModel) -> &StudioViewVm {
+        fn find(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
+            match node {
+                StudioLayoutNodeVm::Split { first, second, .. } => {
+                    find(first).or_else(|| find(second))
+                }
+                StudioLayoutNodeVm::Tile { view, .. } => {
+                    matches!(view, StudioViewVm::Inspector(_)).then_some(view)
+                }
+            }
+        }
+        find(&vm.workspace.root).expect("workspace should include inspector tile")
     }
 
     #[test]
@@ -1682,6 +1698,104 @@ mod tests {
             .items
             .iter()
             .any(|item| item.label == "Inspect selection"));
+    }
+
+    #[test]
+    fn item_inspector_exposes_run_for_executable_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectItem {
+                    canonical_ref: "tool:demo/run".to_string(),
+                },
+            },
+        });
+        core.data.item_inspection = Some(StudioItemInspectionDto {
+            item: StudioInspectedItemDto {
+                canonical_ref: "tool:demo/run".to_string(),
+                executable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let run = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Run item")
+            .expect("executable item should expose run action");
+
+        assert!(matches!(
+            &run.action,
+            Some(StudioAction::ExecuteItem { item_ref, .. }) if item_ref == "tool:demo/run"
+        ));
+    }
+
+    #[test]
+    fn thread_inspector_exposes_cancel_for_running_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-running".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-running",
+                "status": "running"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+        let cancel = inspector
+            .sections
+            .iter()
+            .find(|section| section.title == "Cancel thread")
+            .expect("running thread should expose cancel action");
+
+        assert!(matches!(
+            &cancel.action,
+            Some(StudioAction::CancelThread { thread_id }) if thread_id == "T-running"
+        ));
+    }
+
+    #[test]
+    fn thread_inspector_hides_cancel_for_completed_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-done".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-done",
+                "status": "completed"
+            }),
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+        let StudioViewVm::Inspector(inspector) = inspector_view(&vm) else {
+            panic!("expected inspector view");
+        };
+
+        assert!(!inspector
+            .sections
+            .iter()
+            .any(|section| section.title == "Cancel thread"));
     }
 
     #[test]
