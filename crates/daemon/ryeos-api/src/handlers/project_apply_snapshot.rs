@@ -1,16 +1,16 @@
 //! `project/apply-snapshot` — apply an AI-only snapshot to a live project.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use lillux::cas::CasStore;
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
+use crate::project_deploy::{self, ProjectDeployContext};
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -30,6 +30,7 @@ pub struct Request {
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified().map_err(|e| anyhow!(e))?;
+    let _scheduler_guard = state.scheduler_runtime_gate.clone().write_owned().await;
 
     let project_path = canonical_existing_project_path(&req.project_path)?;
     let canonical_project_path = project_path.to_string_lossy().to_string();
@@ -123,32 +124,60 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let apply_result = (|| -> Result<ApplyReport> {
         materialize_manifest_to_staging(&cas, &manifest, &staging_root)?;
-        preflight_project_deploy(&staging_root, &project_path)?;
-        replace_managed_roots(&project_path, &staging_root)
+        let deploy_ctx = ProjectDeployContext {
+            project_path: &project_path,
+            staging_root: &staging_root,
+            manifest: &manifest,
+            snapshot_hash: &req.snapshot_hash,
+            project_key: &project_hash,
+            caller: &ctx,
+            state: &state,
+        };
+        let deploy_plan = project_deploy::plan(&deploy_ctx)?;
+        let mut root_swap = replace_managed_roots(&project_path, &staging_root)?;
+        let mut deploy_tx = match project_deploy::prepare_commit(&deploy_plan, &deploy_ctx) {
+            Ok(tx) => tx,
+            Err(err) => {
+                root_swap.rollback();
+                return Err(err);
+            }
+        };
+
+        let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+        let ref_result = if let Some(ref current) = previous_deployed_hash {
+            ryeos_state::refs::advance_deployed_project_ref(
+                &refs_root,
+                &project_hash,
+                &req.snapshot_hash,
+                current,
+                &signer,
+            )
+        } else {
+            ryeos_state::refs::write_deployed_project_ref(
+                &refs_root,
+                &project_hash,
+                &req.snapshot_hash,
+                &signer,
+            )
+        };
+        if let Err(err) = ref_result {
+            deploy_tx.rollback(&deploy_ctx);
+            root_swap.rollback();
+            return Err(err);
+        }
+
+        let deploy_report = deploy_tx.report.clone();
+        deploy_tx.finalize(&deploy_ctx);
+        root_swap.finalize();
+        let mut report = root_swap.report.clone();
+        report.deploy = deploy_report;
+        Ok(report)
     })();
     let cleanup = fs::remove_dir_all(&staging_root);
     if let Err(err) = cleanup {
         tracing::warn!(path = %staging_root.display(), error = %err, "failed to remove project apply staging dir");
     }
     let report = apply_result?;
-
-    let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    if let Some(ref current) = previous_deployed_hash {
-        ryeos_state::refs::advance_deployed_project_ref(
-            &refs_root,
-            &project_hash,
-            &req.snapshot_hash,
-            current,
-            &signer,
-        )?;
-    } else {
-        ryeos_state::refs::write_deployed_project_ref(
-            &refs_root,
-            &project_hash,
-            &req.snapshot_hash,
-            &signer,
-        )?;
-    }
 
     Ok(serde_json::json!({
         "project_path": canonical_project_path,
@@ -160,6 +189,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "files_materialized": report.files_materialized,
         "roots_replaced": report.roots_replaced,
         "roots_deleted": report.roots_deleted,
+        "schedules": {
+            "declared": report.deploy.schedules.declared,
+            "created": report.deploy.schedules.created,
+            "updated": report.deploy.schedules.updated,
+            "deleted": report.deploy.schedules.deleted,
+        },
     }))
 }
 
@@ -250,234 +285,12 @@ fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ScheduleDeclarationFile {
-    category: String,
-    version: String,
-    schema_version: String,
-    #[serde(default)]
-    #[serde(rename = "description")]
-    _description: Option<String>,
-    schedules: Vec<ScheduleDeclaration>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ScheduleDeclaration {
-    schedule_id: String,
-    item_ref: String,
-    schedule_type: String,
-    expression: String,
-    #[serde(default)]
-    timezone: Option<String>,
-    #[serde(default)]
-    misfire_policy: Option<String>,
-    #[serde(default)]
-    overlap_policy: Option<String>,
-    #[serde(default)]
-    lateness_grace_secs: Option<i64>,
-    #[serde(default = "default_schedule_enabled")]
-    enabled: bool,
-    #[serde(default)]
-    project_root: Option<String>,
-    #[serde(default)]
-    params: Value,
-}
-
-fn default_schedule_enabled() -> bool {
-    true
-}
-
-fn preflight_project_deploy(staging_root: &Path, project_path: &Path) -> Result<()> {
-    preflight_schedule_declarations(staging_root, project_path)?;
-    Ok(())
-}
-
-fn preflight_schedule_declarations(staging_root: &Path, project_path: &Path) -> Result<usize> {
-    let schedules_root = staging_root.join(".ai/config/schedules");
-    if !schedules_root.is_dir() {
-        return Ok(0);
-    }
-
-    let canonical_project_path = project_path.to_string_lossy().to_string();
-    let mut seen = HashSet::new();
-    let mut count = 0usize;
-    for path in schedule_declaration_files(&schedules_root)? {
-        let rel_path = path
-            .strip_prefix(staging_root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("read schedule declaration {}", rel_path))?;
-        let body = lillux::signature::strip_signature_lines(&content);
-        let file: ScheduleDeclarationFile = serde_yaml::from_str(&body)
-            .with_context(|| format!("parse schedule declaration {}", rel_path))?;
-        validate_schedule_declaration_file(&file, &rel_path)?;
-        for schedule in &file.schedules {
-            validate_schedule_declaration(schedule, &rel_path, &canonical_project_path)?;
-            if !seen.insert(schedule.schedule_id.clone()) {
-                anyhow::bail!(
-                    "duplicate schedule_id '{}' across project schedule declarations",
-                    schedule.schedule_id
-                );
-            }
-            count += 1;
-        }
-    }
-
-    Ok(count)
-}
-
-fn schedule_declaration_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    collect_schedule_declaration_files(root, &mut files)?;
-    files.sort();
-    Ok(files)
-}
-
-fn collect_schedule_declaration_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            anyhow::bail!(
-                "schedule declaration path '{}' is a symlink; refusing project deploy",
-                path.display()
-            );
-        }
-        if ft.is_dir() {
-            collect_schedule_declaration_files(&path, files)?;
-        } else if ft.is_file() {
-            let ext = path.extension().and_then(|ext| ext.to_str());
-            if matches!(ext, Some("yaml" | "yml")) {
-                files.push(path);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_schedule_declaration_file(
-    file: &ScheduleDeclarationFile,
-    rel_path: &str,
-) -> Result<()> {
-    if file.category != "schedules" {
-        anyhow::bail!(
-            "schedule declaration '{}' has category '{}', expected 'schedules'",
-            rel_path,
-            file.category
-        );
-    }
-    if file.version != "1.0.0" {
-        anyhow::bail!(
-            "schedule declaration '{}' has unsupported version '{}', expected '1.0.0'",
-            rel_path,
-            file.version
-        );
-    }
-    if file.schema_version != "1.0.0" {
-        anyhow::bail!(
-            "schedule declaration '{}' has unsupported schema_version '{}', expected '1.0.0'",
-            rel_path,
-            file.schema_version
-        );
-    }
-    if file.schedules.is_empty() {
-        anyhow::bail!("schedule declaration '{}' contains no schedules", rel_path);
-    }
-    Ok(())
-}
-
-fn validate_schedule_declaration(
-    schedule: &ScheduleDeclaration,
-    rel_path: &str,
-    canonical_project_path: &str,
-) -> Result<()> {
-    ryeos_scheduler::crontab::validate_schedule_id(&schedule.schedule_id)
-        .with_context(|| format!("invalid schedule_id in {}", rel_path))?;
-    ryeos_engine::canonical_ref::CanonicalRef::parse(&schedule.item_ref)
-        .with_context(|| format!("invalid item_ref for schedule '{}'", schedule.schedule_id))?;
-    ryeos_scheduler::crontab::validate_expression(&schedule.schedule_type, &schedule.expression)
-        .with_context(|| format!("invalid expression for schedule '{}'", schedule.schedule_id))?;
-    let timezone = schedule.timezone.as_deref().unwrap_or("UTC");
-    ryeos_scheduler::crontab::validate_timezone(timezone)
-        .with_context(|| format!("invalid timezone for schedule '{}'", schedule.schedule_id))?;
-    if let Some(ref p) = schedule.overlap_policy {
-        if !matches!(p.as_str(), "allow" | "skip" | "cancel_previous") {
-            anyhow::bail!(
-                "invalid overlap_policy '{}' for schedule '{}'",
-                p,
-                schedule.schedule_id
-            );
-        }
-    }
-    if let Some(ref p) = schedule.misfire_policy {
-        if !is_valid_misfire_policy(p) {
-            anyhow::bail!(
-                "invalid misfire_policy '{}' for schedule '{}'",
-                p,
-                schedule.schedule_id
-            );
-        }
-    }
-    if let Some(secs) = schedule.lateness_grace_secs {
-        if secs <= 0 {
-            anyhow::bail!(
-                "lateness_grace_secs must be positive for schedule '{}'",
-                schedule.schedule_id
-            );
-        }
-    }
-    if !schedule.params.is_null() && !schedule.params.is_object() {
-        anyhow::bail!(
-            "params must be a mapping for schedule '{}'",
-            schedule.schedule_id
-        );
-    }
-    let _enabled = schedule.enabled;
-    if let Some(ref project_root) = schedule.project_root {
-        let declared = Path::new(project_root);
-        if !declared.is_absolute() {
-            anyhow::bail!(
-                "project_root for schedule '{}' must be absolute",
-                schedule.schedule_id
-            );
-        }
-        if project_root != canonical_project_path {
-            anyhow::bail!(
-                "project_root for schedule '{}' is '{}', expected '{}'; project schedule declarations cannot target another project",
-                schedule.schedule_id,
-                project_root,
-                canonical_project_path
-            );
-        }
-    }
-    Ok(())
-}
-
-fn is_valid_misfire_policy(p: &str) -> bool {
-    match p {
-        "skip" | "fire_once_now" => true,
-        s if s.starts_with("catch_up_bounded:") => s
-            .strip_prefix("catch_up_bounded:")
-            .and_then(|n| n.parse::<usize>().ok())
-            .is_some(),
-        s if s.starts_with("catch_up_within_secs:") => s
-            .strip_prefix("catch_up_within_secs:")
-            .and_then(|n| n.parse::<u64>().ok())
-            .is_some(),
-        _ => false,
-    }
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct ApplyReport {
     files_materialized: usize,
     roots_replaced: usize,
     roots_deleted: usize,
+    deploy: project_deploy::ProjectDeployReport,
 }
 
 #[derive(Debug)]
@@ -487,7 +300,38 @@ struct RootSwap {
     installed: bool,
 }
 
-fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<ApplyReport> {
+#[derive(Debug)]
+struct PreparedRootSwap {
+    swaps: Vec<RootSwap>,
+    report: ApplyReport,
+    finalized: bool,
+}
+
+impl PreparedRootSwap {
+    fn rollback(&mut self) {
+        rollback_swaps(&self.swaps);
+        self.finalized = true;
+    }
+
+    fn finalize(&mut self) {
+        for swap in &self.swaps {
+            if let Some(backup) = &swap.backup {
+                let _ = remove_path_any(backup);
+            }
+        }
+        self.finalized = true;
+    }
+}
+
+impl Drop for PreparedRootSwap {
+    fn drop(&mut self) {
+        if !self.finalized {
+            rollback_swaps(&self.swaps);
+        }
+    }
+}
+
+fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<PreparedRootSwap> {
     let mut swaps: Vec<RootSwap> = Vec::new();
     let mut report = ApplyReport::default();
     report.files_materialized = count_files(staging_root)?;
@@ -510,6 +354,12 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
             } else {
                 None
             };
+            let swap_idx = swaps.len();
+            swaps.push(RootSwap {
+                dest: dest.clone(),
+                backup,
+                installed: false,
+            });
 
             if staged_exists {
                 if let Some(parent) = dest.parent() {
@@ -518,18 +368,9 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
                 fs::rename(&staged, &dest)
                     .with_context(|| format!("install managed root {}", dest.display()))?;
                 report.roots_replaced += 1;
-                swaps.push(RootSwap {
-                    dest,
-                    backup,
-                    installed: true,
-                });
+                swaps[swap_idx].installed = true;
             } else {
-                report.roots_deleted += usize::from(backup.is_some());
-                swaps.push(RootSwap {
-                    dest,
-                    backup,
-                    installed: false,
-                });
+                report.roots_deleted += usize::from(swaps[swap_idx].backup.is_some());
             }
         }
         Ok(())
@@ -540,12 +381,11 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
         return Err(err);
     }
 
-    for swap in swaps {
-        if let Some(backup) = swap.backup {
-            let _ = remove_path_any(&backup);
-        }
-    }
-    Ok(report)
+    Ok(PreparedRootSwap {
+        swaps,
+        report,
+        finalized: false,
+    })
 }
 
 fn rollback_swaps(swaps: &[RootSwap]) {
@@ -650,7 +490,9 @@ mod tests {
         std::fs::write(staging.path().join(".ai/directives/new.md"), "new").unwrap();
         std::fs::write(staging.path().join(".ai/config/schedules/new.yaml"), "new").unwrap();
 
-        let report = replace_managed_roots(project.path(), staging.path()).unwrap();
+        let mut prepared = replace_managed_roots(project.path(), staging.path()).unwrap();
+        prepared.finalize();
+        let report = prepared.report.clone();
         assert!(report.roots_replaced >= 1);
         assert!(report.roots_deleted >= 1);
         assert!(project.path().join(".ai/directives/new.md").exists());
@@ -781,7 +623,11 @@ schedules:
         )
         .unwrap();
 
-        let count = preflight_schedule_declarations(staging.path(), project.path()).unwrap();
+        let count = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -807,8 +653,11 @@ schedules:
             .unwrap();
         }
 
-        let err = preflight_schedule_declarations(staging.path(), project.path())
-            .expect_err("duplicate schedule ids must fail preflight");
+        let err = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .expect_err("duplicate schedule ids must fail preflight");
         assert!(format!("{err:#}").contains("duplicate schedule_id"));
     }
 
@@ -834,8 +683,11 @@ schedules:
         )
         .unwrap();
 
-        let err = preflight_schedule_declarations(staging.path(), project.path())
-            .expect_err("node-owned execution field must fail preflight");
+        let err = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .expect_err("node-owned execution field must fail preflight");
         assert!(format!("{err:#}").contains("unknown field `execution`"));
     }
 
@@ -864,8 +716,11 @@ schedules:
         )
         .unwrap();
 
-        let err = preflight_schedule_declarations(staging.path(), project.path())
-            .expect_err("foreign project root must fail preflight");
+        let err = crate::project_deploy::schedules::validate_declarations_for_test(
+            staging.path(),
+            project.path(),
+        )
+        .expect_err("foreign project root must fail preflight");
         assert!(format!("{err:#}").contains("cannot target another project"));
     }
 }

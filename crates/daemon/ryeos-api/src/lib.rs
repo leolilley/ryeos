@@ -11,6 +11,7 @@ pub mod handler_context;
 pub mod handler_error;
 pub mod handlers;
 pub mod maintenance;
+pub mod project_deploy;
 pub mod registry;
 pub mod remote;
 pub mod route_error;

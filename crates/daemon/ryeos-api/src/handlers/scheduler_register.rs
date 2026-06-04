@@ -21,7 +21,7 @@ pub struct Request {
     pub item_ref: String,
     pub schedule_type: String,
     pub expression: String,
-    #[serde(default)]
+    #[serde(default = "default_params")]
     pub params: Value,
     #[serde(default)]
     pub timezone: Option<String>,
@@ -41,6 +41,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_params() -> Value {
+    serde_json::json!({})
+}
+
 pub async fn handle(
     req: Request,
     ctx: crate::handler_context::HandlerContext,
@@ -48,6 +52,7 @@ pub async fn handle(
 ) -> Result<Value> {
     // Caller identity is used for execution authority — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
 
     // Validate
     crontab::validate_schedule_id(&req.schedule_id)?;
@@ -74,6 +79,9 @@ pub async fn handle(
         if secs <= 0 {
             bail!("lateness_grace_secs must be positive, got: {}", secs);
         }
+    }
+    if !req.params.is_object() {
+        bail!("params must be a JSON object");
     }
 
     if req.schedule_type == "at"
@@ -111,25 +119,28 @@ pub async fn handle(
         );
     }
 
+    let existing_body = if existing_spec.is_some() {
+        read_existing_schedule_body(state.as_ref(), &req.schedule_id)?
+    } else {
+        None
+    };
+    if existing_body
+        .as_ref()
+        .is_some_and(is_project_managed_schedule)
+    {
+        bail!(
+            "schedule_id '{}' is project-managed; update it through project sync or deregister first",
+            req.schedule_id
+        );
+    }
+
     // Build YAML body — preserve registered_at on updates for deterministic first-fire.
     // The YAML body is the canonical source of truth for registered_at.
     // We read it from the existing file (not DB) so repeated updates don't drift the anchor.
     let registered_at = if existing_spec.is_some() {
-        let existing_yaml_path = state
-            .config
-            .system_space_dir
-            .join(ryeos_engine::AI_DIR)
-            .join("node")
-            .join("schedules")
-            .join(&req.schedule_id)
-            .with_extension("yaml");
-        std::fs::read_to_string(&existing_yaml_path)
-            .ok()
-            .and_then(|content| {
-                let body_str = lillux::signature::strip_signature_lines(&content);
-                let body: serde_json::Value = serde_yaml::from_str(&body_str).ok()?;
-                body.get("registered_at").and_then(|v| v.as_i64())
-            })
+        existing_body
+            .as_ref()
+            .and_then(|body| body.get("registered_at").and_then(|v| v.as_i64()))
             .unwrap_or_else(|| {
                 existing_spec
                     .as_ref()
@@ -150,9 +161,7 @@ pub async fn handle(
         "enabled": req.enabled,
         "registered_at": registered_at,
     });
-    if !req.params.is_null() {
-        body["params"] = req.params.clone();
-    }
+    body["params"] = req.params.clone();
     // Normalize misfire_policy: resolve default so YAML and DB always have
     // the same resolved value (no empty strings that behave differently
     // in projection vs live paths).
@@ -295,6 +304,33 @@ fn is_valid_misfire_policy(p: &str) -> bool {
             .is_some(),
         _ => false,
     }
+}
+
+fn read_existing_schedule_body(state: &AppState, schedule_id: &str) -> Result<Option<Value>> {
+    let existing_yaml_path = state
+        .config
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("schedules")
+        .join(schedule_id)
+        .with_extension("yaml");
+    if !existing_yaml_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&existing_yaml_path)
+        .with_context(|| format!("read schedule YAML {}", existing_yaml_path.display()))?;
+    let body_str = lillux::signature::strip_signature_lines(&content);
+    let body = serde_yaml::from_str(&body_str)
+        .with_context(|| format!("parse schedule YAML {}", existing_yaml_path.display()))?;
+    Ok(Some(body))
+}
+
+fn is_project_managed_schedule(body: &Value) -> bool {
+    body.get("managed_by")
+        .and_then(|managed_by| managed_by.get("type"))
+        .and_then(|managed_type| managed_type.as_str())
+        == Some("project_ai_sync")
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

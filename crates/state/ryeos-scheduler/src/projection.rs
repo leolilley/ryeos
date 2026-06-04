@@ -397,7 +397,7 @@ fn spec_record_from_body(
         params: body
             .get("params")
             .map(|v| serde_json::to_string(v).unwrap_or_default())
-            .unwrap_or_default(),
+            .unwrap_or_else(|| "{}".to_string()),
         schedule_type: body_str(body, "schedule_type"),
         expression: body_str(body, "expression"),
         timezone: body

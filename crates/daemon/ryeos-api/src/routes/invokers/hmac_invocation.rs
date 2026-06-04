@@ -1361,6 +1361,7 @@ mod tests {
             scheduler_db: std::sync::Arc::new(
                 ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap(),
             ),
+            scheduler_runtime_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             scheduler_reload_tx: None,
             ignore_matcher: std::sync::Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
