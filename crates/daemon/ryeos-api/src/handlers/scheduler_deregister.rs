@@ -24,6 +24,7 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
+    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
     ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 

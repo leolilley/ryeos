@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ryeos_engine::trust::TrustStore;
+use tokio::sync::RwLock;
 
 /// Trait that the daemon's `AppState` implements.
 ///
@@ -38,6 +39,10 @@ pub trait SchedulerContext: Send + Sync + 'static {
 
     /// The scheduler projection database.
     fn scheduler_db(&self) -> Arc<db::SchedulerDb>;
+
+    /// Runtime gate that prevents dispatch while schedule/project deploy
+    /// mutations are in progress.
+    fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>>;
 
     /// The trust store for schedule signature verification.
     fn trust_store(&self) -> &TrustStore;
@@ -73,6 +78,10 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
 
     fn scheduler_db(&self) -> Arc<db::SchedulerDb> {
         (**self).scheduler_db()
+    }
+
+    fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>> {
+        (**self).scheduler_runtime_gate()
     }
 
     fn trust_store(&self) -> &TrustStore {

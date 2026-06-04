@@ -16,49 +16,61 @@ use crate::SchedulerContext;
 
 /// Start the timer loop. Call after listeners are bound.
 pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receiver<ReloadSignal>) {
-    let mut specs = load_specs_or_log(&ctx);
+    let mut specs = Vec::new();
     let mut last_repair = lillux::time::timestamp_millis();
 
     tracing::info!(count = specs.len(), "scheduler: timer loop started");
 
     loop {
-        let now = lillux::time::timestamp_millis();
+        let sleep_duration = {
+            let runtime_gate = ctx.scheduler_runtime_gate();
+            let Ok(_runtime_guard) = runtime_gate.try_read_owned() else {
+                tracing::debug!("scheduler: runtime mutation in progress; timer cycle paused");
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                    Some(_) = reload.recv() => {}
+                }
+                continue;
+            };
 
-        // Periodic repair sweep: every 30 seconds, finalize stale dispatched fires
-        if now - last_repair >= 30_000 {
-            repair_stale_fires(&ctx).await;
-            last_repair = now;
-        }
+            specs = load_specs_or_log(&ctx);
+            let now = lillux::time::timestamp_millis();
 
-        // Collect all specs that are due right now using the same planner
-        // consumed by diagnostics and recovery.
-        let due_specs: Vec<ScheduleSpecRecord> = specs
-            .iter()
-            .filter(|s| spec_is_due(s, &ctx, now))
-            .cloned()
-            .collect();
+            // Periodic repair sweep: every 30 seconds, finalize stale dispatched fires
+            if now - last_repair >= 30_000 {
+                repair_stale_fires(&ctx).await;
+                last_repair = now;
+            }
 
-        // Process each due spec sequentially (ordering matters for overlap)
-        for spec in &due_specs {
-            process_spec(spec, &ctx).await;
-        }
+            // Collect all specs that are due right now using the same planner
+            // consumed by diagnostics and recovery.
+            let due_specs: Vec<ScheduleSpecRecord> = specs
+                .iter()
+                .filter(|s| spec_is_due(s, &ctx, now))
+                .cloned()
+                .collect();
 
-        // Reload for next iteration
-        specs = load_specs_or_log(&ctx);
+            // Process each due spec sequentially (ordering matters for overlap)
+            for spec in &due_specs {
+                process_spec(spec, &ctx).await;
+            }
 
-        let now = lillux::time::timestamp_millis();
-        let next_fire = compute_soonest_fire(&specs, &ctx, now);
+            // Reload for next iteration
+            specs = load_specs_or_log(&ctx);
 
-        let sleep_duration = match next_fire {
-            Some(at) if at > now => std::time::Duration::from_millis((at - now) as u64),
-            _ => std::time::Duration::from_secs(1),
+            let now = lillux::time::timestamp_millis();
+            let next_fire = compute_soonest_fire(&specs, &ctx, now);
+
+            match next_fire {
+                Some(at) if at > now => std::time::Duration::from_millis((at - now) as u64),
+                _ => std::time::Duration::from_secs(1),
+            }
         };
 
         tokio::select! {
             _ = tokio::time::sleep(sleep_duration) => {}
             Some(_) = reload.recv() => {
-                specs = load_specs_or_log(&ctx);
-                tracing::debug!(count = specs.len(), "scheduler: reloaded specs");
+                tracing::debug!("scheduler: reload requested");
                 continue;
             }
         }
@@ -570,6 +582,8 @@ pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(
     ctx: Arc<Ctx>,
     intent: super::reconcile::ResumeIntent,
 ) {
+    let _runtime_guard = ctx.scheduler_runtime_gate().read_owned().await;
+
     if matches!(intent.kind, super::reconcile::ResumeIntentKind::DispatchNew) {
         dispatch_fire(
             &ctx,

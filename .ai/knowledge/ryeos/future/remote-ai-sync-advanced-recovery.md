@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-05-21T07:07:49Z:14f22c1ad5433e51cd471c86f52a1976e9b5d7cf2f7aea335151c79e911c43f6:Vl5c4jU_ElggxU_vg9_R1Kr83nKDUl5AaLN_SnntFMqqQiGhk9ScEFYlFVf_lj10Yxzi4GLdtjDIv8cUAnZJCg:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-06-04T02:13:42Z:d10a99cf20a75302671621b715d7a67e7d0e50e80dd90b32bdcc864d6ad2d72c:i+GPqlORqEcBfyT8G5w1Pl4FJDigdj1SkMAnaWYnM3/Am6A+XR6wJ+ToVSApnqq/TPV75q3Uc/5My7pqVIi7Bw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: ryeos/future
 name: remote-ai-sync-advanced-recovery
@@ -21,7 +21,22 @@ tags:
 
 This note captures the post-v1 hardening path for `remote sync-project-ai` / `project.apply-snapshot`.
 
-V1 is intentionally single-daemon oriented: it uses an in-process per-project mutex, writes a deployed ref after a successful managed-root swap, and relies on best-effort rollback during the apply call. That is adequate for the current Docker/Railway deployment model, but a future multi-process or shared-volume deployment needs stronger coordination and crash recovery.
+V1 is intentionally single-daemon oriented: it uses in-process coordination, writes a deployed ref only after the managed-root swap and schedule reconciliation have prepared successfully, and relies on request-path rollback during the apply call. That is adequate for the current Docker/Railway deployment model, but a future multi-process or shared-volume deployment needs stronger coordination and crash recovery.
+
+## Current v1 behavior
+
+`project.apply-snapshot` now treats project AI sync as a typed deploy pipeline:
+
+- AI-only manifests are still validated before materialization and must not carry a `user_manifest_hash`.
+- The apply path materializes to staging and builds a deploy plan from staged project intent before swapping live roots.
+- Managed roots are swapped before runtime projections, but backup finalization is deferred until the deployed ref has advanced.
+- `.ai/config/schedules` declarations are reconciled into node-owned `.ai/node/schedules` specs and SQLite projection rows inside the rollback window.
+- Project-managed schedule deletes remove active node specs/projections while preserving fire history.
+- Manual schedule ID collisions fail closed; implicit adoption remains deferred.
+- Scheduler mutation services and the project deploy path hold the write side of the scheduler runtime gate; timer and recovery dispatch take the read side so dispatch cannot race a deploy/mutation.
+- Project schedule declaration signature/trust verification is deferred; runtime authority comes from the verified deploy caller, and generated node-owned specs are node-signed.
+
+The remaining limitation is crash atomicity. If the daemon/process dies mid-apply, there is no durable deployment journal yet to prove whether to finish or roll back filesystem roots, schedule specs, schedule projection rows, and the deployed ref. The sections below remain the advanced recovery design.
 
 ## Goals
 
@@ -39,6 +54,8 @@ V1 is intentionally single-daemon oriented: it uses an in-process per-project mu
 - Do not treat the journal as a full history UI; deployment records can be compacted after retention requirements are met.
 
 ## Cross-process locking
+
+V1 only coordinates within the daemon process. The scheduler runtime gate prevents in-process scheduler dispatch/mutation races, but it is not a cross-process project deploy lock.
 
 Use a filesystem lock file under the live project, for example:
 
@@ -61,6 +78,8 @@ Implementation notes:
 - Keep the lock on the same filesystem as the project so it coordinates all processes touching that project tree.
 
 ## Deployment journal
+
+V1 keeps staging/backups for request-path rollback only. Future crash recovery needs a durable journal that records both managed-root and runtime projection state.
 
 Before changing live roots, create a deployment record in a durable journal directory:
 
@@ -93,7 +112,15 @@ Suggested schema:
       "action": "replace",
       "state": "pending"
     }
-  ]
+  ],
+  "schedule_reconciliation": {
+    "state": "pending",
+    "planned_creates": [],
+    "planned_updates": [],
+    "planned_deletes": [],
+    "prepared_runtime_specs": [],
+    "prepared_projection_rows": []
+  }
 }
 ```
 
@@ -154,12 +181,14 @@ The future `project.apply-snapshot` flow should become:
 7. Create journal record in `prepared` state.
 8. Materialize all files to journal staging and mark `staged`.
 9. Rename existing managed roots into journal backups and staged roots into live destinations, recording each root state.
-10. Verify live roots match the manifest and mark `swapped`.
-11. Advance deployed ref with CAS from `previous_deployed_hash` to `snapshot_hash`.
-12. Mark `committed`.
-13. Cleanup staging immediately; retain backups for a bounded window or until an explicit `deployment cleanup` maintenance pass.
+10. Prepare runtime projections such as project-managed schedules, recording old/new node spec paths and projection rows.
+11. Verify live roots and runtime projections match the deployment plan and mark `swapped` / `prepared`.
+12. Advance deployed ref with CAS from `previous_deployed_hash` to `snapshot_hash`.
+13. Mark runtime projection changes committed.
+14. Mark deployment `committed`.
+15. Cleanup staging immediately; retain backups for a bounded window or until an explicit `deployment cleanup` maintenance pass.
 
-If any step before the deployed-ref advance fails, rollback from backups while still holding the lock and mark the record `rolled_back` or `failed_rollback`.
+If any step before the deployed-ref advance fails, rollback from backups and prepared runtime projection changes while still holding the lock and mark the record `rolled_back` or `failed_rollback`.
 
 If the deployed-ref advance fails after roots are swapped, prefer rolling roots back to `previous_deployed_hash` and marking `rolled_back`. If rollback fails, mark `failed_rollback` and surface the deployment id in the error.
 
@@ -192,9 +221,10 @@ Useful future commands:
 
 ## Incremental implementation plan
 
-1. Add a small cross-process lock helper and use it in `project.apply-snapshot` and `push_head`.
+1. Add a small cross-process lock helper and use it in `project.apply-snapshot`, `push_head`, and any future runtime projection writer that can share a project filesystem.
 2. Move staging/backups under a per-deployment journal directory.
-3. Write journal records with state transitions but keep v1's rollback behavior.
-4. Add startup/before-apply recovery for incomplete records.
-5. Add status surfacing and cleanup tooling.
-6. Add tests that simulate crashes by stopping after each journal state and invoking recovery.
+3. Extend journal records to include schedule reconciliation prepare/commit/rollback state.
+4. Write journal records with state transitions while preserving v1's request-path rollback behavior.
+5. Add startup/before-apply recovery for incomplete records, including prepared schedule specs/projections.
+6. Add status surfacing and cleanup tooling.
+7. Add tests that simulate crashes by stopping after each journal state and invoking recovery.

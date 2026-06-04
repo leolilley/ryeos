@@ -25,6 +25,7 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
+    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
     ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
     let spec = state
@@ -60,7 +61,7 @@ pub async fn handle(
         serde_yaml::from_str(&body_str).map_err(|e| HandlerError::Internal(e.to_string()))?;
     body["enabled"] = Value::Bool(true);
 
-    writer::write_signed_node_item(
+    let spec_path = writer::write_signed_node_item(
         &node_dir,
         "schedules",
         &req.schedule_id,
@@ -70,8 +71,14 @@ pub async fn handle(
     .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     // Update projection — preserve registered_at (immutable anchor)
+    let content =
+        std::fs::read_to_string(&spec_path).map_err(|e| HandlerError::Internal(e.to_string()))?;
     let mut rec = spec;
     rec.enabled = true;
+    rec.signer_fingerprint =
+        ryeos_scheduler::projection::parse_signer_fingerprint_from_str(&content)
+            .unwrap_or_else(|| state.identity.fingerprint().to_string());
+    rec.spec_hash = lillux::cas::sha256_hex(content.as_bytes());
     state
         .scheduler_db
         .upsert_spec(&rec)
