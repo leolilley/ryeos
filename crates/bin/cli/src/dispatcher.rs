@@ -123,11 +123,19 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         "item_ref": resolved.item_ref,
         "parameters": resolved.parameters,
     });
+    if resolved.async_launch {
+        body["launch_mode"] = Value::String("accepted".to_string());
+    }
     if let Some(project_path) = resolved.project_path {
         body["project_path"] = Value::String(project_path.to_string_lossy().into_owned());
     }
 
-    let result = post_to_daemon(&system_space_dir, &body).await?;
+    let route_path = if resolved.async_launch {
+        "/execute/launch"
+    } else {
+        "/execute"
+    };
+    let result = post_to_daemon(&system_space_dir, route_path, &body).await?;
     print_result(result);
     Ok(())
 }
@@ -136,6 +144,7 @@ struct CliResolvedExecute {
     item_ref: String,
     parameters: Value,
     project_path: Option<PathBuf>,
+    async_launch: bool,
 }
 
 fn resolve_command_for_daemon(
@@ -144,7 +153,15 @@ fn resolve_command_for_daemon(
     default_project: Option<&Path>,
 ) -> Result<CliResolvedExecute, CliError> {
     let commands = load_commands_from_disk(system_space_dir)?;
-    let registry = CommandRegistry::from_records(&commands).map_err(|error| CliError::Local {
+    resolve_command_for_daemon_with_commands(rest, &commands, default_project)
+}
+
+fn resolve_command_for_daemon_with_commands(
+    rest: &[String],
+    commands: &[CommandDef],
+    default_project: Option<&Path>,
+) -> Result<CliResolvedExecute, CliError> {
+    let registry = CommandRegistry::from_records(commands).map_err(|error| CliError::Local {
         detail: format!("load verified node commands: {error:#}"),
     })?;
     let initial_match = registry.resolve(rest).map_err(|error| CliError::Local {
@@ -161,7 +178,15 @@ fn resolve_command_for_daemon(
     let matched = registry.resolve(&tokens).map_err(|error| CliError::Local {
         detail: error.to_string(),
     })?;
-    let tail = &tokens[matched.consumed..];
+    let mut tail = tokens[matched.consumed..].to_vec();
+    let async_launch = if matches!(
+        matched.command.dispatch,
+        CommandDispatch::DirectExecuteItemRef { .. }
+    ) {
+        strip_execute_control_flags(&mut tail)?
+    } else {
+        false
+    };
     let item_ref = match &matched.command.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
         CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => tail
@@ -185,7 +210,7 @@ fn resolve_command_for_daemon(
     };
     let parameter_tail = match matched.command.dispatch {
         CommandDispatch::DirectExecuteItemRef { .. } => &tail[1..],
-        _ => tail,
+        _ => &tail,
     };
     let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
     let project_path = apply_project_policy(&matched.command, &mut parameters)?;
@@ -193,7 +218,29 @@ fn resolve_command_for_daemon(
         item_ref,
         parameters,
         project_path,
+        async_launch,
     })
+}
+
+fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<bool, CliError> {
+    let mut async_launch = false;
+    let mut out = Vec::with_capacity(tail.len());
+    for token in tail.drain(..) {
+        match token.as_str() {
+            "--async" | "--async=true" => {
+                async_launch = true;
+            }
+            "--async=false" => {}
+            token if token.starts_with("--async=") => {
+                return Err(CliError::Local {
+                    detail: format!("invalid execute control flag value: {token}"),
+                });
+            }
+            _ => out.push(token),
+        }
+    }
+    *tail = out;
+    Ok(async_launch)
 }
 
 fn bind_command_parameters_for_daemon(
@@ -408,9 +455,10 @@ fn load_commands_from_disk(
     })
 }
 
-/// POST a JSON body to the daemon's /execute endpoint and return the response.
+/// POST a JSON body to a daemon execute route and return the response.
 async fn post_to_daemon(
     system_space_dir: &std::path::Path,
+    route_path: &str,
     body: &Value,
 ) -> Result<Value, CliError> {
     lifecycle_preflight(system_space_dir).await?;
@@ -421,9 +469,9 @@ async fn post_to_daemon(
     let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", "/execute", &body_bytes, &audience)?;
+    let headers = signer.sign("POST", route_path, &body_bytes, &audience)?;
 
-    let url = format!("{}/execute", daemon_url);
+    let url = format!("{}{}", daemon_url, route_path);
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
 }
@@ -545,6 +593,139 @@ mod tests {
             source_file: PathBuf::new(),
             source: ryeos_runtime::CommandSource::EmbeddedCore,
         }
+    }
+
+    fn direct_execute_command() -> CommandDef {
+        CommandDef {
+            category: "commands".into(),
+            section: "commands".into(),
+            name: "execute".into(),
+            tokens: s(&["execute"]),
+            description: "Execute an item".into(),
+            aliases: Vec::new(),
+            help: None,
+            arguments: Vec::new(),
+            forms: vec![ryeos_runtime::CommandArgumentForm {
+                slots: vec![ryeos_runtime::CommandArgumentSlot {
+                    field: "item_ref".into(),
+                    matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
+                }],
+            }],
+            parameter_binding: Some(ryeos_runtime::CommandParameterBinding {
+                mode: ryeos_runtime::CommandParameterBindingMode::TailObject,
+                input_flag: Some("input".into()),
+                single_json_object_arg: true,
+                flag_key_normalization: ryeos_runtime::FlagKeyNormalization::HyphenToUnderscore,
+            }),
+            project: Some(ryeos_runtime::CommandProjectPolicy {
+                resolution: ryeos_runtime::CommandProjectResolution::Optional,
+                default: ryeos_runtime::CommandProjectDefault::None,
+                no_project_flag: true,
+                request_project_path: false,
+                bind_parameter: None,
+            }),
+            dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
+                item_ref_arg: "item_ref".into(),
+                availability: ryeos_runtime::CommandAvailability::Both,
+            },
+            source_file: PathBuf::new(),
+            source: ryeos_runtime::CommandSource::EmbeddedCore,
+        }
+    }
+
+    #[test]
+    fn direct_execute_async_before_item_is_control_flag() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--async", "tool:test/run", "--batch-size", "50"]),
+            &commands,
+            None,
+        )
+        .unwrap();
+
+        assert!(resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert_eq!(resolved.parameters["batch_size"], serde_json::json!("50"));
+        assert!(resolved.parameters.get("async").is_none());
+    }
+
+    #[test]
+    fn direct_execute_async_after_item_is_control_flag() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "tool:test/run", "--async", "--provider", "zen"]),
+            &commands,
+            None,
+        )
+        .unwrap();
+
+        assert!(resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert_eq!(resolved.parameters["provider"], serde_json::json!("zen"));
+        assert!(resolved.parameters.get("async").is_none());
+    }
+
+    #[test]
+    fn direct_execute_without_async_uses_foreground_execute() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "tool:test/run", "--provider", "zen"]),
+            &commands,
+            None,
+        )
+        .unwrap();
+
+        assert!(!resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert_eq!(resolved.parameters["provider"], serde_json::json!("zen"));
+    }
+
+    #[test]
+    fn direct_execute_async_false_keeps_foreground_execute() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--async=false", "tool:test/run"]),
+            &commands,
+            None,
+        )
+        .unwrap();
+
+        assert!(!resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert!(resolved.parameters.get("async").is_none());
+    }
+
+    #[test]
+    fn direct_execute_async_invalid_value_errors() {
+        let commands = vec![direct_execute_command()];
+        let result = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--async=maybe", "tool:test/run"]),
+            &commands,
+            None,
+        );
+
+        match result {
+            Ok(_) => panic!("invalid --async value unexpectedly succeeded"),
+            Err(err) => {
+                assert!(format!("{err}").contains("invalid execute control flag value"));
+            }
+        }
+    }
+
+    #[test]
+    fn non_direct_command_async_remains_parameter() {
+        let commands = vec![command(
+            &["demo"],
+            Vec::new(),
+            CommandProjectResolution::None,
+        )];
+        let resolved =
+            resolve_command_for_daemon_with_commands(&s(&["demo", "--async"]), &commands, None)
+                .unwrap();
+
+        assert!(!resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/command");
+        assert_eq!(resolved.parameters["async"], serde_json::json!(true));
     }
 
     #[test]
