@@ -214,7 +214,7 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
                 [0.42, 0.42, 0.42],
                 color_for_topology(&node.kind, node.missing),
                 Some(label.clone()),
-                tone_for_topology(&node.kind, node.missing),
+                tone_for_topology(&node.kind, node.missing, node.trust.as_ref()),
             );
             object.opacity = if node.missing { 0.45 } else { 0.86 };
             object.action = Some(StudioAction::InspectSummary {
@@ -440,8 +440,19 @@ fn color_for_topology(kind: &str, missing: bool) -> &'static str {
     }
 }
 
-fn tone_for_topology(kind: &str, missing: bool) -> StudioTone {
+fn tone_for_topology(
+    kind: &str,
+    missing: bool,
+    trust: Option<&super::dto::StudioTopologyTrustSummaryDto>,
+) -> StudioTone {
     if missing {
+        StudioTone::Warn
+    } else if matches!(trust.map(|trust| trust.class_.as_str()), Some("trusted")) {
+        StudioTone::Good
+    } else if matches!(
+        trust.map(|trust| trust.class_.as_str()),
+        Some("untrusted" | "unsigned")
+    ) {
         StudioTone::Warn
     } else if matches!(kind, "surface" | "project" | "project_root") {
         StudioTone::Accent
@@ -592,6 +603,7 @@ mod tests {
             .expect("topology node object");
         assert_eq!(node.kind, StudioSceneObjectKind::ItemCluster);
         assert_eq!(node.label.as_deref(), Some("run"));
+        assert_eq!(node.tone, StudioTone::Good);
         let Some(StudioAction::InspectSummary { detail, .. }) = &node.action else {
             panic!("topology node should inspect summary")
         };
