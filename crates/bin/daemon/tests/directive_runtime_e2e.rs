@@ -7,8 +7,6 @@
 //! plant a directive + mock provider config, then exercise the full
 //! HTTP `/execute` → daemon → directive-runtime → mock LLM round trip.
 //!
-//! Plan: `.tmp/IMPLEMENTATION/V5.4-PLAN.md` lines 80-89 (P3b.1 - P3b.5).
-//!
 //! P3b.1 — `common::mock_provider::MockProvider` (separate file).
 //! P3b.2 — `e2e_directive_runtime_hello_world_succeeds` (this file).
 //! P3b.3 — root semantics pin re-asserted vs real spawn (this file).

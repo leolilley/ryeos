@@ -9,8 +9,6 @@
 //! The TUI does NOT implement source-space precedence, trust verification,
 //! kind-schema loading, signature verification, or extends-chain composition.
 //! Those belong in ryeosd / item services.
-//!
-//! See: .tmp/tui-effective-surface-architecture.md
 
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
