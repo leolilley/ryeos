@@ -149,8 +149,11 @@ pub fn ensure_bundles_fresh() {
 
         // Cross-process lock: under `cargo test --workspace`, multiple
         // test binaries race to check/refresh bundles. Use an flock-style
-        // lock file under target/ so only one process refreshes at a time.
-        let lock_path = root.join("target").join(".ryeos-bundle-refresh.lock");
+        // lock file under a repo-stable temp directory so only one process
+        // refreshes at a time without requiring target/ to exist.
+        let lock_dir = root.join(".tmp").join("locks");
+        std::fs::create_dir_all(&lock_dir).expect("create bundle refresh lock dir");
+        let lock_path = lock_dir.join("bundle-refresh.lock");
         let _lock = std::fs::File::create(&lock_path)
             .expect("create bundle refresh lock file");
         // Block until we have exclusive access.

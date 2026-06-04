@@ -130,6 +130,7 @@ impl FastFixture {
 ///
 /// ```text
 /// <state>/.ai/node/identity/private_key.pem            (deterministic node Ed25519)
+/// <state>/.ai/node/command_registration/default.yaml   (deterministic node-signed seed)
 /// <state>/.ai/node/vault/private_key.pem               (deterministic vault X25519)
 /// <state>/.ai/node/vault/public_key.pem
 /// <state>/.ai/node/auth/authorized_keys/               (empty dir)
@@ -156,6 +157,10 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
             .join("node")
             .join("auth")
             .join("authorized_keys"),
+        state_path
+            .join(AI_DIR)
+            .join("node")
+            .join("command_registration"),
         state_path.join(AI_DIR).join("node").join("vault"),
         state_path.join(AI_DIR).join("node").join("identity"),
         state_path.join(AI_DIR).join("state").join("objects"),
@@ -189,6 +194,16 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
         .context("re-load node identity to write public doc")?
         .write_public_identity_at(&public_identity_path, FAST_FIXTURE_TIME)
         .context("write node public identity")?;
+
+    // ── Node-owned command registration policy ──
+    //
+    // Real `ryeos init` verifies the publisher-signed seed policy from
+    // bundles/.ai/node/command_registration and re-signs it with the node
+    // identity. The node-config loader intentionally requires this section and
+    // requires the node signer, so the fast fixture mirrors that fail-closed
+    // boot contract rather than making command registration optional.
+    materialize_seed_command_registration_policy(state_path, &node)
+        .context("materialize command registration policy")?;
 
     // ── User Ed25519 identity ──
     write_pem_signing_key(
@@ -385,5 +400,29 @@ pem = "ed25519:{key_b64}"
     let signed = lillux::signature::sign_content_at(&body, sk, "#", None, FAST_FIXTURE_TIME);
     fs::write(trust_dir.join(format!("{fp}.toml")), signed)
         .with_context(|| format!("write trust doc for {fp}"))?;
+    Ok(())
+}
+
+fn materialize_seed_command_registration_policy(
+    state_path: &Path,
+    node: &SigningKey,
+) -> Result<()> {
+    let source = super::workspace_root()
+        .join("bundles")
+        .join(AI_DIR)
+        .join("node")
+        .join("command_registration")
+        .join("default.yaml");
+    let raw = fs::read_to_string(&source)
+        .with_context(|| format!("read command registration seed {}", source.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let signed = lillux::signature::sign_content_at(&body, node, "#", None, FAST_FIXTURE_TIME);
+    let target_dir = state_path
+        .join(AI_DIR)
+        .join("node")
+        .join("command_registration");
+    fs::create_dir_all(&target_dir).with_context(|| format!("create {}", target_dir.display()))?;
+    fs::write(target_dir.join("default.yaml"), signed)
+        .context("write command registration policy")?;
     Ok(())
 }

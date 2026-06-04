@@ -46,4 +46,5 @@ if [[ "$skip_tests" == "1" ]]; then
 fi
 
 echo "gate: cargo nextest run --workspace --no-fail-fast ${nextest_args[*]:-}"
-"$CARGO" nextest run --workspace --no-fail-fast "${nextest_args[@]:-}"
+RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
+    "$CARGO" nextest run --workspace --no-fail-fast "${nextest_args[@]:-}"

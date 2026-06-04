@@ -14,6 +14,7 @@
 #
 # Env:
 #   CARGO              cargo binary (default: cargo from PATH)
+#   CARGO_TARGET_DIR   cargo target dir (default: .cargo/config target-dir or ./target)
 #   TRIPLE             host triple (default: x86_64-unknown-linux-gnu)
 
 set -euo pipefail
@@ -47,13 +48,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 TRIPLE="${TRIPLE:-x86_64-unknown-linux-gnu}"
 
-# Resolve target directory: read from .cargo/config.toml or fallback
-TARGET=""
-if [ -f "$ROOT/.cargo/config.toml" ]; then
-  TARGET="$(grep -o 'target-dir *= *"[^"]*' "$ROOT/.cargo/config.toml" 2>/dev/null | sed 's/.*"//' || true)"
+# Resolve target directory: prefer Cargo's env override, then .cargo/config.toml,
+# then the workspace default. Keep this in sync with the cargo invocation so the
+# binary install step reads from the directory Cargo actually wrote.
+TARGET="${CARGO_TARGET_DIR:-}"
+if [ -z "$TARGET" ]; then
+  if [ -f "$ROOT/.cargo/config.toml" ]; then
+    TARGET="$(grep -o 'target-dir *= *"[^"]*' "$ROOT/.cargo/config.toml" 2>/dev/null | sed 's/.*"//' || true)"
+  fi
 fi
 if [ -z "$TARGET" ]; then
   TARGET="$ROOT/target"
+elif [[ "$TARGET" != /* ]]; then
+  TARGET="$ROOT/$TARGET"
 fi
 echo "[populate-bundles] target dir: $TARGET"
 

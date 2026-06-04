@@ -364,6 +364,7 @@ fn canonicalize_tokens_with_commands(
     canonicalize_tokens_with_commands_and_project(rest, commands, None)
 }
 
+#[cfg(test)]
 fn canonicalize_tokens_with_commands_and_project(
     rest: &[String],
     commands: &[CommandDef],
