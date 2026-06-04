@@ -14,6 +14,7 @@ use crate::local_verbs;
 #[command(
     name = "ryeos",
     about = "CLI for Rye OS",
+    version,
     disable_help_subcommand = true,
     trailing_var_arg = true
 )]
