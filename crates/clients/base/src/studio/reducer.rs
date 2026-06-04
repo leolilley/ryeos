@@ -369,9 +369,7 @@ impl StudioCore {
                     self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
                 } else {
-                    let _ = thread_id;
-                    self.notice("Thread commands are not wired yet.", StudioTone::Warn);
-                    Vec::new()
+                    vec![self.emit(StudioEffectKind::CancelThread { thread_id })]
                 }
             }
         }
@@ -809,6 +807,13 @@ impl StudioCore {
                     self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
                 ];
             }
+            StudioEffectResultKind::ThreadCancelled => {
+                self.notice("Thread cancelled.", StudioTone::Good);
+                return vec![
+                    self.emit(StudioEffectKind::FetchDimension),
+                    self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
+                ];
+            }
             StudioEffectResultKind::ProjectAdded => {
                 let added = match serde_json::from_value::<StudioAddProjectDto>(data) {
                     Ok(added) => added,
@@ -1116,6 +1121,9 @@ fn effect_result_kind_matches(
         ) | (
             StudioEffectKind::InvokeAction { .. },
             StudioEffectResultKind::ActionInvocation
+        ) | (
+            StudioEffectKind::CancelThread { .. },
+            StudioEffectResultKind::ThreadCancelled
         ) | (
             StudioEffectKind::SetLocationHash { .. },
             StudioEffectResultKind::BrowserOnly
@@ -1983,6 +1991,64 @@ mod tests {
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 100 })));
+    }
+
+    #[test]
+    fn writable_cancel_thread_emits_cancel_effect() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::CancelThread { thread_id }) if thread_id == "T-demo"
+        ));
+    }
+
+    #[test]
+    fn thread_cancelled_result_notices_and_refreshes() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let cancel = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        let cancel_id = cancel
+            .first()
+            .map(|effect| effect.id)
+            .expect("cancel should emit effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: cancel_id,
+                ok: true,
+                kind: StudioEffectResultKind::ThreadCancelled,
+                data: Some(serde_json::json!({
+                    "thread_id": "T-demo",
+                    "status": "cancelled"
+                })),
+                error: None,
+            },
+        });
+
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Thread cancelled."));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 200 })));
     }
 
     #[test]

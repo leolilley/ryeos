@@ -51,6 +51,9 @@ pub enum StudioEffectKind {
         command_id: String,
         args: serde_json::Value,
     },
+    CancelThread {
+        thread_id: String,
+    },
     SetLocationHash {
         hash: String,
     },
@@ -90,5 +93,6 @@ pub enum StudioEffectResultKind {
     ItemInspection,
     ThreadInspection,
     ActionInvocation,
+    ThreadCancelled,
     BrowserOnly,
 }

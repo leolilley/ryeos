@@ -43,6 +43,10 @@ export async function runEffect(effect) {
         command_id: kind.command_id,
         args: kind.args ?? {},
       }));
+    case "cancel_thread":
+      return result(effect, "thread_cancelled", await postJson("/ui/api/studio/thread/cancel", {
+        thread_id: kind.thread_id,
+      }));
     case "set_location_hash":
       location.hash = kind.hash;
       return result(effect, "browser_only", null);

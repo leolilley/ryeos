@@ -28,7 +28,10 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
 }
 
-fn require_browser_session(ctx: &HandlerContext, state: &AppState) -> Result<(), HandlerError> {
+fn require_browser_session(
+    ctx: &HandlerContext,
+    state: &AppState,
+) -> Result<crate::browser_session::BrowserSession, HandlerError> {
     let session_id = session_id_from_context(ctx)
         .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
 
@@ -36,9 +39,7 @@ fn require_browser_session(ctx: &HandlerContext, state: &AppState) -> Result<(),
         .expect("UiState not set")
         .browser_sessions
         .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    Ok(())
+        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -107,6 +108,32 @@ pub async fn handle_inspect(
     }))
 }
 
+pub async fn handle_cancel(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let session = require_browser_session(&ctx, &state)?;
+    if session.read_only {
+        return Err(
+            HandlerError::Forbidden("read-only session cannot cancel threads".into()).into(),
+        );
+    }
+    let Some(user_principal_id) = session.user_principal_id else {
+        return Err(HandlerError::Forbidden(
+            "verified user principal required to cancel threads".into(),
+        )
+        .into());
+    };
+
+    let req: ryeos_api::handlers::threads_cancel::Request = serde_json::from_value(params)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    let owner_ctx = HandlerContext::new(user_principal_id, session.granted_caps, true);
+    ryeos_api::handlers::threads_cancel::handle(req, owner_ctx, state)
+        .await
+        .map_err(Into::into)
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/studio/threads/list",
     endpoint: "ui.studio.threads.list",
@@ -129,6 +156,14 @@ pub const INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle_inspect(params, ctx, state).await }),
+};
+
+pub const CANCEL_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/studio/thread/cancel",
+    endpoint: "ui.studio.thread.cancel",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(async move { handle_cancel(params, ctx, state).await }),
 };
 
 pub const STUDIO_INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
