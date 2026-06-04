@@ -78,6 +78,8 @@ logs/
 /.ai/*
 !.ai/knowledge/
 */.ai/
+!bundles/.ai/
+!bundles/.ai/**
 !bundles/*/.ai/
 
 ## Allow lib/ directories inside .ai/ (not Python build artifacts)
@@ -144,6 +146,7 @@ bundles/*/.ai/objects/
 bundles/*/.ai/refs/
 bundles/*/.ai/bin/*/
 bundles/*/PUBLISHER_TRUST.toml
+!bundles/.ai/PUBLISHER_TRUST.toml
 
 # Local daemon state from dev/test runs
 .local/

@@ -45,6 +45,9 @@ struct BundleRegistrationBody {
     #[serde(default)]
     id: Option<String>,
     path: PathBuf,
+    #[allow(dead_code)]
+    #[serde(default)]
+    command_registration_caps: Vec<String>,
 }
 
 /// Load installed bundles from signed node bundle registrations.

@@ -548,6 +548,9 @@ struct PreflightNodeBundleRecord {
     #[allow(dead_code)]
     id: Option<String>,
     path: PathBuf,
+    #[allow(dead_code)]
+    #[serde(default)]
+    command_registration_caps: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -992,6 +995,14 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
                 "{}: legacy node config section '.ai/node/{}' is no longer supported; use '.ai/node/commands'",
                 rel.display(),
                 section
+            ));
+            continue;
+        }
+
+        if section == "command_registration" {
+            failures.push(format!(
+                "{}: command registration policy is node-owned seed/system config; normal bundles may not ship '.ai/node/command_registration'",
+                rel.display()
             ));
             continue;
         }
@@ -1746,6 +1757,34 @@ execute: tool:demo/run
                 .iter()
                 .any(|failure| failure.contains("legacy node config section")),
             "expected legacy node/verbs rejection, got: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn node_config_preflight_rejects_bundle_authored_command_registration_policy() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.sign_and_write(
+            "node/command_registration/default.yaml",
+            r#"section: command_registration
+name: default
+claim_rules:
+  - claim:
+      kind: command.root
+      value: execute
+    required_caps:
+      - ryeos.register.command.root.execute
+system_source_caps:
+  - ryeos.register.command.root.execute
+"#,
+        );
+        let trust_store = layout.trust_store();
+
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+
+        assert!(
+            failures.iter().any(|failure| failure
+                .contains("command registration policy is node-owned seed/system config")),
+            "expected command_registration rejection, got: {failures:?}"
         );
     }
 

@@ -135,6 +135,7 @@ pub fn build_test_state_with_hosted_policy(token_ttl_secs: u64) -> (tempfile::Te
                     .join(".ai/bundles/hosted-node/.ai/node/hosted/policy.yaml"),
             },
         ],
+        command_registration_policy: Default::default(),
     });
     (tmpdir, state)
 }
@@ -155,9 +156,10 @@ fn build_app_state(
         routes: vec![],
         commands: vec![],
         hosted_node_policies: vec![],
+        command_registration_policy: Default::default(),
     };
     let test_command_registry =
-        Arc::new(ryeos_runtime::CommandRegistry::from_records(&[]).unwrap());
+        Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
     let state = AppState {

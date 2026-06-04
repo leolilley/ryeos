@@ -143,8 +143,12 @@ fn resolve_command_for_daemon(
     system_space_dir: &Path,
     default_project: Option<&Path>,
 ) -> Result<CliResolvedExecute, CliError> {
-    let commands = load_commands_from_disk(system_space_dir)?;
-    let registry = CommandRegistry::from_records(&commands).map_err(|error| CliError::Local {
+    let snapshot = load_verified_snapshot(system_space_dir)?;
+    let registry = CommandRegistry::from_records(
+        &snapshot.commands,
+        &snapshot.command_registration_policy.policy,
+    )
+    .map_err(|error| CliError::Local {
         detail: format!("load verified node commands: {error:#}"),
     })?;
     let initial_match = registry.resolve(rest).map_err(|error| CliError::Local {
@@ -156,7 +160,7 @@ fn resolve_command_for_daemon(
     ) {
         rest.to_vec()
     } else {
-        canonicalize_tokens_with_commands_and_project(rest, &commands, default_project)?
+        canonicalize_tokens_with_commands_and_project(rest, &snapshot.commands, default_project)?
     };
     let matched = registry.resolve(&tokens).map_err(|error| CliError::Local {
         detail: error.to_string(),
@@ -310,9 +314,11 @@ fn canonicalize_tokens_with_commands_and_project(
     commands: &[CommandDef],
     default_project: Option<&std::path::Path>,
 ) -> Result<Vec<String>, CliError> {
-    let registry = CommandRegistry::from_records(commands).map_err(|error| CliError::Local {
-        detail: format!("load verified node commands: {error:#}"),
-    })?;
+    let policy = ryeos_runtime::CommandRegistrationPolicy::default();
+    let registry =
+        CommandRegistry::from_records(commands, &policy).map_err(|error| CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        })?;
     let Ok(matched) = registry.resolve(rest) else {
         return Ok(rest.to_vec());
     };
@@ -400,11 +406,13 @@ fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
     }
 }
 
-fn load_commands_from_disk(
+fn load_verified_snapshot(
     system_space_dir: &std::path::Path,
-) -> Result<Vec<CommandDef>, CliError> {
-    crate::node_descriptors::load_commands(system_space_dir).map_err(|error| CliError::Local {
-        detail: format!("load verified node commands: {error:#}"),
+) -> Result<ryeos_app::node_config::NodeConfigSnapshot, CliError> {
+    crate::node_descriptors::load_verified_snapshot(system_space_dir).map_err(|error| {
+        CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        }
     })
 }
 
@@ -543,7 +551,7 @@ mod tests {
                 availability: ryeos_runtime::CommandAvailability::Auto,
             },
             source_file: PathBuf::new(),
-            source: ryeos_runtime::CommandSource::EmbeddedCore,
+            provenance: ryeos_runtime::CommandProvenance::default(),
         }
     }
 

@@ -1303,9 +1303,11 @@ mod tests {
             routes: vec![],
             commands: vec![],
             hosted_node_policies: vec![],
+            command_registration_policy: Default::default(),
         };
-        let test_command_registry =
-            std::sync::Arc::new(ryeos_runtime::CommandRegistry::from_records(&[]).unwrap());
+        let test_command_registry = std::sync::Arc::new(
+            ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
+        );
         let test_auth = std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new());
         let state = ryeos_app::state::AppState {
             config: std::sync::Arc::new(config),

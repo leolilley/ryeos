@@ -441,7 +441,7 @@ mod tests {
             project: None,
             dispatch: crate::CommandDispatch::Group,
             source_file: std::path::PathBuf::new(),
-            source: crate::CommandSource::EmbeddedCore,
+            provenance: crate::CommandProvenance::default(),
         }
     }
 }

@@ -34,15 +34,51 @@ pub struct CommandDef {
     #[serde(skip)]
     pub source_file: PathBuf,
     #[serde(skip)]
-    pub source: CommandSource,
+    pub provenance: CommandProvenance,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CommandSource {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandProvenance {
+    pub origin: CommandOrigin,
+    pub command_registration_caps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CommandOrigin {
     #[default]
-    Installed,
-    EmbeddedCore,
+    InstalledBundle,
+    SystemSpace,
     SourceLocal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandRegistrationPolicy {
+    #[serde(default)]
+    pub claim_rules: Vec<CommandRegistrationRule>,
+    #[serde(default)]
+    pub system_source_caps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandRegistrationRule {
+    pub claim: CommandRegistrationClaimPattern,
+    #[serde(default)]
+    pub required_caps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandRegistrationClaimPattern {
+    pub kind: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRegistrationClaim {
+    pub kind: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,10 +263,14 @@ pub enum CommandRegistryError {
         first: String,
         second: String,
     },
-    #[error("non-core command '{name}' cannot claim reserved root '{root}'")]
-    ReservedRoot { name: String, root: String },
-    #[error("command '{name}' dispatch kind '{kind}' is embedded-core only")]
-    CoreOnlyDispatch { name: String, kind: &'static str },
+    #[error("command '{name}' claim {claim_kind}={claim_value} requires missing registration capability '{required_cap}' (source: {source_file})")]
+    MissingRegistrationCap {
+        name: String,
+        claim_kind: String,
+        claim_value: String,
+        required_cap: String,
+        source_file: PathBuf,
+    },
     #[error("command '{name}' execute ref '{execute}' is not canonical: {detail}")]
     InvalidExecuteRef {
         name: String,
@@ -256,17 +296,16 @@ pub struct CommandRegistry {
     by_tokens: HashMap<Vec<String>, usize>,
 }
 
-const RESERVED_ROOTS: &[&str] = &[
-    "help", "init", "start", "stop", "node", "system", "identity", "execute",
-];
-
 impl CommandRegistry {
-    pub fn from_records(records: &[CommandDef]) -> Result<Self, CommandRegistryError> {
+    pub fn from_records(
+        records: &[CommandDef],
+        policy: &CommandRegistrationPolicy,
+    ) -> Result<Self, CommandRegistryError> {
         let mut commands = Vec::new();
         let mut by_tokens = HashMap::new();
 
         for record in records {
-            validate_command(record)?;
+            validate_command(record, policy)?;
             let index = commands.len();
             insert_tokens(
                 &mut by_tokens,
@@ -323,7 +362,10 @@ impl CommandRegistry {
     }
 }
 
-fn validate_command(record: &CommandDef) -> Result<(), CommandRegistryError> {
+fn validate_command(
+    record: &CommandDef,
+    policy: &CommandRegistrationPolicy,
+) -> Result<(), CommandRegistryError> {
     if record.category != "commands" || record.section != "commands" {
         return Err(CommandRegistryError::InvalidSection {
             name: record.name.clone(),
@@ -332,22 +374,7 @@ fn validate_command(record: &CommandDef) -> Result<(), CommandRegistryError> {
         });
     }
     validate_tokens(&record.name, &record.tokens)?;
-    validate_reserved_root(record, &record.tokens)?;
     match &record.dispatch {
-        CommandDispatch::LocalHandler { .. } if record.source != CommandSource::EmbeddedCore => {
-            return Err(CommandRegistryError::CoreOnlyDispatch {
-                name: record.name.clone(),
-                kind: "local_handler",
-            });
-        }
-        CommandDispatch::DirectExecuteItemRef { .. }
-            if record.source != CommandSource::EmbeddedCore =>
-        {
-            return Err(CommandRegistryError::CoreOnlyDispatch {
-                name: record.name.clone(),
-                kind: "direct_execute_item_ref",
-            });
-        }
         CommandDispatch::ExecuteRef { execute, .. } => {
             ryeos_engine::canonical_ref::CanonicalRef::parse(execute).map_err(|e| {
                 CommandRegistryError::InvalidExecuteRef {
@@ -361,8 +388,8 @@ fn validate_command(record: &CommandDef) -> Result<(), CommandRegistryError> {
     }
     for alias in &record.aliases {
         validate_tokens(&record.name, &alias.tokens)?;
-        validate_reserved_root(record, &alias.tokens)?;
     }
+    validate_registration_caps(record, policy)?;
     Ok(())
 }
 
@@ -381,20 +408,80 @@ fn validate_tokens(name: &str, tokens: &[String]) -> Result<(), CommandRegistryE
     Ok(())
 }
 
-fn validate_reserved_root(
+fn validate_registration_caps(
     record: &CommandDef,
-    tokens: &[String],
+    policy: &CommandRegistrationPolicy,
 ) -> Result<(), CommandRegistryError> {
-    let Some(root) = tokens.first() else {
-        return Ok(());
-    };
-    if RESERVED_ROOTS.contains(&root.as_str()) && record.source != CommandSource::EmbeddedCore {
-        return Err(CommandRegistryError::ReservedRoot {
-            name: record.name.clone(),
-            root: root.clone(),
-        });
+    for claim in derive_registration_claims(record) {
+        for required_cap in required_caps_for_claim(policy, &claim) {
+            let granted = record
+                .provenance
+                .command_registration_caps
+                .iter()
+                .any(|grant| crate::authorizer::cap_matches(grant, required_cap));
+            if !granted {
+                return Err(CommandRegistryError::MissingRegistrationCap {
+                    name: record.name.clone(),
+                    claim_kind: claim.kind,
+                    claim_value: claim.value,
+                    required_cap: required_cap.clone(),
+                    source_file: record.source_file.clone(),
+                });
+            }
+        }
     }
     Ok(())
+}
+
+pub fn derive_registration_claims(record: &CommandDef) -> Vec<CommandRegistrationClaim> {
+    let mut claims = Vec::new();
+    if let Some(root) = record.tokens.first() {
+        claims.push(CommandRegistrationClaim {
+            kind: "command.root".to_string(),
+            value: root.clone(),
+        });
+    }
+    for alias in &record.aliases {
+        if let Some(root) = alias.tokens.first() {
+            claims.push(CommandRegistrationClaim {
+                kind: "command.root".to_string(),
+                value: root.clone(),
+            });
+        }
+    }
+    claims.push(CommandRegistrationClaim {
+        kind: "command.dispatch.kind".to_string(),
+        value: dispatch_kind_name(&record.dispatch).to_string(),
+    });
+    claims
+}
+
+fn required_caps_for_claim<'a>(
+    policy: &'a CommandRegistrationPolicy,
+    claim: &CommandRegistrationClaim,
+) -> Vec<&'a String> {
+    policy
+        .claim_rules
+        .iter()
+        .filter(|rule| claim_matches(&rule.claim, claim))
+        .flat_map(|rule| rule.required_caps.iter())
+        .collect()
+}
+
+fn claim_matches(
+    pattern: &CommandRegistrationClaimPattern,
+    claim: &CommandRegistrationClaim,
+) -> bool {
+    pattern.kind == claim.kind && pattern.value == claim.value
+}
+
+fn dispatch_kind_name(dispatch: &CommandDispatch) -> &'static str {
+    match dispatch {
+        CommandDispatch::Group => "group",
+        CommandDispatch::LocalHandler { .. } => "local_handler",
+        CommandDispatch::DirectExecuteItemRef { .. } => "direct_execute_item_ref",
+        CommandDispatch::ExecuteRef { .. } => "execute_ref",
+    }
 }
 
 fn insert_tokens(
@@ -441,7 +528,31 @@ mod tests {
                 availability: CommandAvailability::Auto,
             },
             source_file: PathBuf::new(),
-            source: CommandSource::Installed,
+            provenance: CommandProvenance::default(),
+        }
+    }
+
+    fn policy() -> CommandRegistrationPolicy {
+        CommandRegistrationPolicy {
+            claim_rules: vec![
+                CommandRegistrationRule {
+                    claim: CommandRegistrationClaimPattern {
+                        kind: "command.root".into(),
+                        value: "execute".into(),
+                    },
+                    required_caps: vec!["ryeos.register.command.root.execute".into()],
+                },
+                CommandRegistrationRule {
+                    claim: CommandRegistrationClaimPattern {
+                        kind: "command.dispatch.kind".into(),
+                        value: "direct_execute_item_ref".into(),
+                    },
+                    required_caps: vec![
+                        "ryeos.register.command.dispatch.direct_execute_item_ref".into()
+                    ],
+                },
+            ],
+            system_source_caps: vec![],
         }
     }
 
@@ -456,26 +567,94 @@ mod tests {
             removed_in: None,
         });
 
-        let err = CommandRegistry::from_records(&[record]).unwrap_err();
+        let err = CommandRegistry::from_records(&[record], &policy()).unwrap_err();
         assert!(matches!(err, CommandRegistryError::DuplicateTokens { .. }));
     }
 
     #[test]
-    fn installed_command_cannot_claim_reserved_root() {
+    fn command_claiming_protected_root_requires_registration_cap() {
         let err =
-            CommandRegistry::from_records(&[command("fake-execute", &["execute"])]).unwrap_err();
-        assert!(matches!(err, CommandRegistryError::ReservedRoot { .. }));
+            CommandRegistry::from_records(&[command("fake-execute", &["execute"])], &policy())
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CommandRegistryError::MissingRegistrationCap { .. }
+        ));
     }
 
     #[test]
-    fn installed_command_cannot_use_core_only_dispatch() {
+    fn protected_root_passes_with_matching_registration_cap() {
+        let mut record = command("fake-execute", &["execute"]);
+        record
+            .provenance
+            .command_registration_caps
+            .push("ryeos.register.command.root.execute".into());
+
+        CommandRegistry::from_records(&[record], &policy()).unwrap();
+    }
+
+    #[test]
+    fn direct_execute_item_ref_requires_registration_cap() {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
             availability: CommandAvailability::Both,
         };
 
-        let err = CommandRegistry::from_records(&[record]).unwrap_err();
-        assert!(matches!(err, CommandRegistryError::CoreOnlyDispatch { .. }));
+        let err = CommandRegistry::from_records(&[record], &policy()).unwrap_err();
+        assert!(matches!(
+            err,
+            CommandRegistryError::MissingRegistrationCap { .. }
+        ));
+    }
+
+    #[test]
+    fn wildcard_registration_grant_satisfies_required_cap() {
+        let mut record = command("demo", &["demo"]);
+        record.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            availability: CommandAvailability::Both,
+        };
+        record
+            .provenance
+            .command_registration_caps
+            .push("ryeos.register.command.*".into());
+
+        CommandRegistry::from_records(&[record], &policy()).unwrap();
+    }
+
+    #[test]
+    fn derive_registration_claims_includes_primary_alias_and_dispatch() {
+        let mut record = command("demo", &["demo"]);
+        record.aliases.push(CommandAliasDef {
+            tokens: vec!["alias".into()],
+            description: None,
+            deprecated: None,
+            replacement_tokens: None,
+            removed_in: None,
+        });
+        record.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            availability: CommandAvailability::Both,
+        };
+
+        let claims = derive_registration_claims(&record);
+        assert_eq!(
+            claims,
+            vec![
+                CommandRegistrationClaim {
+                    kind: "command.root".into(),
+                    value: "demo".into(),
+                },
+                CommandRegistrationClaim {
+                    kind: "command.root".into(),
+                    value: "alias".into(),
+                },
+                CommandRegistrationClaim {
+                    kind: "command.dispatch.kind".into(),
+                    value: "direct_execute_item_ref".into(),
+                },
+            ]
+        );
     }
 }

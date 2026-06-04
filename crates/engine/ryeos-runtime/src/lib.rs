@@ -38,9 +38,11 @@ pub use checkpoint::CheckpointWriter;
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
     CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandDef, CommandDispatch,
-    CommandHelpDef, CommandParameterBinding, CommandParameterBindingMode, CommandProjectDefault,
-    CommandProjectPolicy, CommandProjectResolution, CommandRegistry, CommandRegistryError,
-    CommandSource, FlagKeyNormalization, MatchedCommand,
+    CommandHelpDef, CommandOrigin, CommandParameterBinding, CommandParameterBindingMode,
+    CommandProjectDefault, CommandProjectPolicy, CommandProjectResolution, CommandProvenance,
+    CommandRegistrationClaim, CommandRegistrationClaimPattern, CommandRegistrationPolicy,
+    CommandRegistrationRule, CommandRegistry, CommandRegistryError, FlagKeyNormalization,
+    MatchedCommand,
 };
 pub use condition::{apply_operator, matches, resolve_path};
 pub use daemon_rpc::{

@@ -58,10 +58,13 @@ pub fn try_offline_dispatch(
     }
 
     // 2. Resolve the command from the verified snapshot.
-    let registry =
-        CommandRegistry::from_records(&snapshot.commands).map_err(|error| CliError::Local {
-            detail: format!("load verified node commands: {error:#}"),
-        })?;
+    let registry = CommandRegistry::from_records(
+        &snapshot.commands,
+        &snapshot.command_registration_policy.policy,
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("load verified node commands: {error:#}"),
+    })?;
     let Ok(matched) = registry.resolve(argv) else {
         return Ok(None);
     };
@@ -832,7 +835,7 @@ fn exec_inherited(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::SigningKey;
+    use lillux::crypto::{EncodePrivateKey, SigningKey};
     use rand::rngs::OsRng;
 
     fn expect_json(outcome: OfflineDispatchOutcome) -> Value {
@@ -867,6 +870,13 @@ mod tests {
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            let node_identity_dir = system
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("identity");
+            std::fs::create_dir_all(&node_identity_dir).unwrap();
+            let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+            std::fs::write(node_identity_dir.join("private_key.pem"), pem.as_bytes()).unwrap();
             let dev_trust = std::fs::read_to_string(
                 workspace_root()
                     .join(".dev-keys")
@@ -908,8 +918,9 @@ mod tests {
                 "kind: protocol\nname: cli_exec\ncategory: ryeos/core\nabi_version: v1\ndescription: Direct exec with argv flags and inherited stdio.\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - { name: RYEOS_PROJECT_PATH, source: project_path }\ncapabilities:\n  allows_pushed_head: false\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: none\n",
             );
             this.write_manifest();
+            this.write_command_registration_policy();
             this.write_registration();
-            this.write_bundle_registration("core", &core_bundle);
+            this.write_core_bundle_registration(&core_bundle);
             for handler_bin in [
                 "rye-composer-identity",
                 "rye-parser-regex-kv",
@@ -997,20 +1008,58 @@ mod tests {
             self.write_bundle_registration("test", &self.bundle);
         }
 
+        fn write_command_registration_policy(&self) {
+            self.write_signed(
+                &self
+                    .system
+                    .join(ryeos_engine::AI_DIR)
+                    .join("node")
+                    .join("command_registration")
+                    .join("default.yaml"),
+                "section: command_registration\nname: default\nclaim_rules:\n  - claim:\n      kind: command.root\n      value: execute\n    required_caps:\n      - ryeos.register.command.root.execute\n  - claim:\n      kind: command.dispatch.kind\n      value: direct_execute_item_ref\n    required_caps:\n      - ryeos.register.command.dispatch.direct_execute_item_ref\nsystem_source_caps:\n  - ryeos.register.command.root.execute\n  - ryeos.register.command.dispatch.direct_execute_item_ref\n",
+            );
+        }
+
+        fn write_core_bundle_registration(&self, core_bundle: &Path) {
+            self.write_bundle_registration_with_caps(
+                "core",
+                core_bundle,
+                &[
+                    "ryeos.register.command.root.execute",
+                    "ryeos.register.command.dispatch.direct_execute_item_ref",
+                ],
+            );
+        }
+
         fn write_bundle_registration(&self, id: &str, bundle_root: &Path) {
+            self.write_bundle_registration_with_caps(id, bundle_root, &[]);
+        }
+
+        fn write_bundle_registration_with_caps(
+            &self,
+            id: &str,
+            bundle_root: &Path,
+            command_registration_caps: &[&str],
+        ) {
             let path = self
                 .system
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
                 .join("bundles")
                 .join(format!("{id}.yaml"));
-            self.write_signed(
-                &path,
-                &format!(
-                    "kind: node\nsection: bundles\nid: {id}\npath: {}\n",
-                    bundle_root.display()
-                ),
+            let mut body = format!(
+                "kind: node\nsection: bundles\nid: {id}\npath: {}\n",
+                bundle_root.display()
             );
+            if !command_registration_caps.is_empty() {
+                body.push_str("command_registration_caps:\n");
+                for cap in command_registration_caps {
+                    body.push_str("  - ");
+                    body.push_str(cap);
+                    body.push('\n');
+                }
+            }
+            self.write_signed(&path, &body);
         }
 
         fn write_echo_bin(&self) {

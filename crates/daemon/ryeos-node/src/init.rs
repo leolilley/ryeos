@@ -40,6 +40,7 @@
 //! lack a `.ai/` subdirectory, are silently skipped. Hidden directories
 //! (starting with `.`) are also skipped.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,8 +48,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use lillux::crypto::{DecodePrivateKey, EncodePrivateKey, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
 
 /// SHA-256 fingerprint of the official publisher Ed25519 public key.
@@ -247,6 +249,40 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             })?;
         }
     }
+    let source_seed_trust_doc = opts
+        .source_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("PUBLISHER_TRUST.toml");
+    if source_seed_trust_doc.exists() {
+        pin_trust_file(&source_seed_trust_doc, &trust_dir).with_context(|| {
+            format!(
+                "auto-pin source-root seed trust doc at {}",
+                source_seed_trust_doc.display()
+            )
+        })?;
+    }
+
+    // Source-root seed data owns node registration grants. Init reads this
+    // declarative data and materializes signed node registrations; it does not
+    // infer command registration authority from bundle names or discovery.
+    let seed_trust_store = TrustStore::load_three_tier(None, Some(opts.user_root.as_path()), &[])
+        .context("load trust store for source-root seed data")?;
+    let command_registration_grants =
+        load_init_bundle_registration_grants(&opts.source_dir, &seed_trust_store).with_context(
+            || {
+                format!(
+                    "load init bundle registration grants from {}",
+                    opts.source_dir.display()
+                )
+            },
+        )?;
+    materialize_seed_command_registration_policy(
+        &opts.source_dir,
+        &opts.system_space_dir,
+        &seed_trust_store,
+        &node_key,
+    )
+    .with_context(|| "materialize seed command registration policy")?;
 
     // ── 6b. Build source bundle plan ──
     // Planning is always performed, even when `skip_preflight` is true: the
@@ -316,13 +352,28 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 .system_space_dir
                 .join(ryeos_engine::AI_DIR)
                 .join("node");
-            write_node_bundle_registration(&node_dir, name, &target.canonicalize()?, &node_key)
-                .with_context(|| format!("rewrite node/bundles/{}.yaml", name))?;
+            let grants = command_registration_grants
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            write_node_bundle_registration(
+                &node_dir,
+                name,
+                &target.canonicalize()?,
+                &grants,
+                &node_key,
+            )
+            .with_context(|| format!("rewrite node/bundles/{}.yaml", name))?;
         } else {
+            let grants = command_registration_grants
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
             install_bundle(
                 &opts.system_space_dir,
                 name,
                 source_path,
+                &grants,
                 &node_key,
                 &opts.system_space_dir,
                 opts.user_root.as_path(),
@@ -419,6 +470,241 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         bundles_installed,
         next_steps,
     })
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct InitBundleRegistrationGrantsFile {
+    #[serde(default)]
+    bundles: HashMap<String, InitBundleRegistrationGrant>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct InitBundleRegistrationGrant {
+    #[serde(default)]
+    command_registration_caps: Vec<String>,
+}
+
+fn load_init_bundle_registration_grants(
+    source_dir: &Path,
+    trust_store: &TrustStore,
+) -> Result<HashMap<String, Vec<String>>> {
+    let path = source_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("bundle_registration_grants")
+        .join("default.yaml");
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let raw = read_trusted_seed_yaml(&path, trust_store)
+        .with_context(|| format!("verify init bundle registration grants {}", path.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let parsed: InitBundleRegistrationGrantsFile = serde_yaml::from_str(&body)
+        .with_context(|| format!("parse init bundle registration grants {}", path.display()))?;
+    Ok(parsed
+        .bundles
+        .into_iter()
+        .map(|(name, grant)| (name, grant.command_registration_caps))
+        .collect())
+}
+
+fn materialize_seed_command_registration_policy(
+    source_dir: &Path,
+    system_space_dir: &Path,
+    trust_store: &TrustStore,
+    node_key: &SigningKey,
+) -> Result<()> {
+    let source = source_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("command_registration");
+    let source_meta = fs::symlink_metadata(&source).with_context(|| {
+        format!(
+            "missing command registration policy seed dir {}",
+            source.display()
+        )
+    })?;
+    if source_meta.file_type().is_symlink() || !source_meta.file_type().is_dir() {
+        bail!(
+            "command registration policy seed at {} must be a real directory",
+            source.display()
+        );
+    }
+    let target = system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("command_registration");
+
+    let mut policies = Vec::new();
+    for entry in fs::read_dir(&source)
+        .with_context(|| format!("read command registration policy dir {}", source.display()))?
+    {
+        let entry = entry?;
+        let source_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read seed file type {}", source_path.display()))?;
+        if file_type.is_symlink() {
+            bail!(
+                "command registration policy seed {} must not be a symlink",
+                source_path.display()
+            );
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let ext = source_path.extension().and_then(|ext| ext.to_str());
+        if ext == Some("yaml") || ext == Some("yml") {
+            policies.push(source_path);
+        }
+    }
+    policies.sort();
+    if policies.len() != 1 {
+        bail!(
+            "command registration policy seed at {} must contain exactly one .yaml/.yml file, found {}",
+            source.display(),
+            policies.len()
+        );
+    }
+
+    let source_path = &policies[0];
+    let verified = read_trusted_seed_yaml(source_path, trust_store).with_context(|| {
+        format!(
+            "verify command registration policy seed {}",
+            source_path.display()
+        )
+    })?;
+    let body = lillux::signature::strip_signature_lines(&verified);
+    validate_command_registration_seed_body(source_path, &body)?;
+
+    if target.exists() {
+        fs::remove_dir_all(&target).with_context(|| {
+            format!(
+                "remove stale command registration policy dir {}",
+                target.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(&target).with_context(|| {
+        format!(
+            "create command registration policy dir {}",
+            target.display()
+        )
+    })?;
+    let file_name = source_path
+        .file_name()
+        .context("command registration policy seed has no filename")?;
+    let target_path = target.join(file_name);
+    let signed = lillux::signature::sign_content(&body, node_key, "#", None);
+    let tmp = target_path.with_extension("tmp");
+    fs::write(&tmp, signed.as_bytes())
+        .with_context(|| format!("write command registration policy temp {}", tmp.display()))?;
+    fs::rename(&tmp, &target_path).with_context(|| {
+        format!(
+            "rename command registration policy {} -> {}",
+            tmp.display(),
+            target_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn read_trusted_seed_yaml(path: &Path, trust_store: &TrustStore) -> Result<String> {
+    let meta = fs::symlink_metadata(path)
+        .with_context(|| format!("read seed YAML metadata {}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        bail!("seed YAML {} must be a regular file", path.display());
+    }
+    let content =
+        fs::read_to_string(path).with_context(|| format!("read seed YAML {}", path.display()))?;
+    let envelope = SignatureEnvelope {
+        prefix: "#".into(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+        .with_context(|| format!("seed YAML {} has no valid signature", path.display()))?;
+    let (trust_class, _) =
+        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)
+            .with_context(|| format!("verify seed YAML signature {}", path.display()))?;
+    if trust_class != TrustClass::Trusted {
+        bail!(
+            "seed YAML {} is not trusted (trust_class: {:?})",
+            path.display(),
+            trust_class
+        );
+    }
+    Ok(content)
+}
+
+fn validate_command_registration_seed_body(path: &Path, body: &str) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawClaimPattern {
+        #[allow(dead_code)]
+        kind: String,
+        #[allow(dead_code)]
+        value: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawClaimRule {
+        #[allow(dead_code)]
+        claim: RawClaimPattern,
+        #[allow(dead_code)]
+        #[serde(default)]
+        required_caps: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawPolicy {
+        section: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        claim_rules: Vec<RawClaimRule>,
+        #[serde(default)]
+        system_source_caps: Vec<String>,
+    }
+
+    let policy: RawPolicy = serde_yaml::from_str(body)
+        .with_context(|| format!("parse command registration policy seed {}", path.display()))?;
+    if policy.section != "command_registration" {
+        bail!(
+            "command registration policy seed {} declares section '{}' instead of 'command_registration'",
+            path.display(),
+            policy.section
+        );
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .context("command registration policy seed has no filename stem")?;
+    if policy.name.as_deref().unwrap_or(stem) != stem {
+        bail!(
+            "command registration policy seed {} declares name '{}' but filename is '{}'",
+            path.display(),
+            policy.name.unwrap_or_default(),
+            stem
+        );
+    }
+    if policy.claim_rules.is_empty() {
+        bail!(
+            "command registration policy seed {} must declare at least one claim rule",
+            path.display()
+        );
+    }
+    if policy.system_source_caps.is_empty() {
+        bail!(
+            "command registration policy seed {} must declare non-empty system_source_caps",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Discover bundles in a source directory.
@@ -692,6 +978,7 @@ fn install_bundle(
     system_space_dir: &Path,
     name: &str,
     source: &Path,
+    command_registration_caps: &[String],
     node_key: &SigningKey,
     system_space_dir_for_kinds: &Path,
     user_root: &Path,
@@ -738,7 +1025,13 @@ fn install_bundle(
 
     // Write signed kind: node bundle registration record.
     let node_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("node");
-    write_node_bundle_registration(&node_dir, name, &canonical, node_key)?;
+    write_node_bundle_registration(
+        &node_dir,
+        name,
+        &canonical,
+        command_registration_caps,
+        node_key,
+    )?;
 
     Ok(canonical)
 }
@@ -752,15 +1045,24 @@ fn write_node_bundle_registration(
     node_dir: &Path,
     name: &str,
     path: &Path,
+    command_registration_caps: &[String],
     node_key: &SigningKey,
 ) -> Result<()> {
     let bundles_dir = node_dir.join("bundles");
     fs::create_dir_all(&bundles_dir)
         .with_context(|| format!("create node bundles dir {}", bundles_dir.display()))?;
-    let body = format!(
+    let mut body = format!(
         "kind: node\nsection: bundles\nid: {name}\npath: {}\n",
         path.display()
     );
+    if !command_registration_caps.is_empty() {
+        body.push_str("command_registration_caps:\n");
+        for cap in command_registration_caps {
+            body.push_str("  - ");
+            body.push_str(cap);
+            body.push('\n');
+        }
+    }
     let signed = lillux::signature::sign_content(&body, node_key, "#", None);
     let target = bundles_dir.join(format!("{name}.yaml"));
     let tmp = target.with_extension("tmp");
@@ -834,6 +1136,14 @@ mod tests {
         }
     }
 
+    fn copy_source_seed(target_source: &Path) {
+        copy_dir_recursive(
+            &workspace_root().join("bundles/.ai"),
+            &target_source.join(".ai"),
+        )
+        .expect("copy source-root seed data");
+    }
+
     #[test]
     fn run_installs_discovered_bundles() {
         let tmp = tempfile::tempdir().unwrap();
@@ -893,6 +1203,7 @@ mod tests {
             &source.join("hosted-node"),
         )
         .expect("copy hosted-node bundle");
+        copy_source_seed(&source);
 
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -983,6 +1294,66 @@ mod tests {
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
         assert_eq!(r1.node_key_fingerprint, r2.node_key_fingerprint);
         assert_eq!(r1.bundles_installed, r2.bundles_installed);
+    }
+
+    #[test]
+    fn run_init_replaces_stale_command_registration_policy_and_node_signs_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = make_opts(&state, &user);
+        let _ = run_init(&opts).expect("init #1");
+
+        let policy_dir = state.join(".ai/node/command_registration");
+        fs::write(
+            policy_dir.join("stale.yaml"),
+            "section: command_registration\n",
+        )
+        .expect("write stale policy");
+
+        let report = run_init(&opts).expect("init #2");
+        let mut policies = fs::read_dir(&policy_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        policies.sort();
+        assert_eq!(policies, vec!["default.yaml"]);
+
+        let content = fs::read_to_string(policy_dir.join("default.yaml")).unwrap();
+        let envelope = SignatureEnvelope {
+            prefix: "#".into(),
+            suffix: None,
+            after_shebang: false,
+        };
+        let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+            .expect("materialized policy should be signed");
+        assert_eq!(header.signer_fingerprint, report.node_key_fingerprint);
+    }
+
+    #[test]
+    fn run_init_fails_when_command_registration_seed_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
+            .expect("copy core bundle");
+
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = InitOptions {
+            system_space_dir: state,
+            user_root: user,
+            source_dir: source,
+            trust_files: vec![dev_trust_file()],
+            skip_preflight: true,
+        };
+
+        let err = run_init(&opts).expect_err("missing seed must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("missing command registration policy seed dir"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -1333,6 +1704,7 @@ typo_field: oops
 
         // Create a source dir with a bundle that requires an unsatisfied kind
         let source = tmp.path().join("source");
+        copy_source_seed(&source);
         let needy = source.join("needy");
         fs::create_dir_all(needy.join(".ai")).unwrap();
         // Need a PUBLISHER_TRUST.toml for the bundle (copy from dev keys)

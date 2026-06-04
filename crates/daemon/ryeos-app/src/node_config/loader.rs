@@ -28,6 +28,7 @@ use ryeos_engine::trust::TrustStore;
 
 use super::sections::bundle::BundleSection;
 use super::sections::command::CommandRecord;
+use super::sections::command_registration::CommandRegistrationPolicyRecord;
 use super::sections::hosted_node::HostedNodePolicyRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, SectionSourcePolicy, SectionTable,
@@ -47,7 +48,14 @@ pub struct BootstrapLoader<'a> {
 struct VerifiedItem {
     path: PathBuf,
     name: String,
+    signer_fingerprint: String,
     body: Value,
+}
+
+#[derive(Debug, Clone)]
+struct NodeConfigScanRoot {
+    path: PathBuf,
+    command_provenance: ryeos_runtime::CommandProvenance,
 }
 
 /// Signature envelope used for all node-config items.
@@ -146,6 +154,7 @@ fn verify_and_parse(
                 file.display()
             )
         })?;
+    let signer_fingerprint = header.signer_fingerprint.clone();
 
     let (trust_class, _) =
         ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
@@ -196,6 +205,7 @@ fn verify_and_parse(
     Ok(VerifiedItem {
         path: file.to_path_buf(),
         name: name.to_string(),
+        signer_fingerprint,
         body,
     })
 }
@@ -288,12 +298,16 @@ impl<'a> BootstrapLoader<'a> {
         section_table: &SectionTable,
         bundles: &[BundleRecord],
     ) -> Result<NodeConfigSnapshot> {
+        let command_registration_policy = self.load_command_registration_policy(section_table)?;
         let mut loaded_bundles: Vec<BundleRecord> = Vec::new();
         let mut routes: Vec<RawRouteSpec> = Vec::new();
         let mut commands: Vec<CommandRecord> = Vec::new();
         let mut hosted_node_policies: Vec<HostedNodePolicyRecord> = Vec::new();
 
         for section_name in section_table.section_names() {
+            if section_name == "command_registration" {
+                continue;
+            }
             let section = section_table.get(section_name).context(format!(
                 "section '{}' registered but handler missing",
                 section_name
@@ -301,21 +315,27 @@ impl<'a> BootstrapLoader<'a> {
 
             let scan_roots = match section.source_policy() {
                 SectionSourcePolicy::SystemAndState => {
-                    vec![self.system_space_dir.to_path_buf()]
+                    vec![system_scan_root(
+                        self.system_space_dir,
+                        &command_registration_policy.policy,
+                    )]
                 }
                 SectionSourcePolicy::EffectiveBundleRootsAndState => {
-                    let mut roots = vec![self.system_space_dir.to_path_buf()];
+                    let mut roots = vec![system_scan_root(
+                        self.system_space_dir,
+                        &command_registration_policy.policy,
+                    )];
                     for b in bundles {
-                        if !roots.iter().any(|r| r == &b.path) {
-                            roots.push(b.path.clone());
+                        if !roots.iter().any(|r| r.path == b.path) {
+                            roots.push(bundle_scan_root(b));
                         }
                     }
                     roots
                 }
             };
 
-            for root in &scan_roots {
-                let section_dir = root.join(".ai").join("node").join(section_name);
+            for scan_root in &scan_roots {
+                let section_dir = scan_root.path.join(".ai").join("node").join(section_name);
                 if !section_dir.is_dir() {
                     continue;
                 }
@@ -432,8 +452,7 @@ impl<'a> BootstrapLoader<'a> {
                             .context("CommandSection::parse returned wrong type")?
                             .clone();
                         record.source_file = verified.path.clone();
-                        record.source =
-                            command_source_for_root(root, self.system_space_dir, bundles);
+                        record.provenance = scan_root.command_provenance.clone();
                         commands.push(record);
                     } else if section_name == "hosted" {
                         let record =
@@ -461,8 +480,11 @@ impl<'a> BootstrapLoader<'a> {
             }
         }
 
-        ryeos_runtime::CommandRegistry::from_records(&commands)
-            .context("validate loaded command registry")?;
+        ryeos_runtime::CommandRegistry::from_records(
+            &commands,
+            &command_registration_policy.policy,
+        )
+        .context("validate loaded command registry")?;
         check_hosted_policy_uniqueness(&hosted_node_policies)?;
 
         Ok(NodeConfigSnapshot {
@@ -470,8 +492,102 @@ impl<'a> BootstrapLoader<'a> {
             routes,
             commands,
             hosted_node_policies,
+            command_registration_policy,
         })
     }
+
+    fn load_command_registration_policy(
+        &self,
+        section_table: &SectionTable,
+    ) -> Result<CommandRegistrationPolicyRecord> {
+        let section_name = "command_registration";
+        let node_fingerprint = node_identity_fingerprint(self.system_space_dir)?;
+        let section = section_table
+            .get(section_name)
+            .context("command_registration section handler missing")?;
+        let section_dir = self
+            .system_space_dir
+            .join(".ai")
+            .join("node")
+            .join(section_name);
+        if !section_dir.is_dir() {
+            bail!(
+                "missing required node config section '{}' at {}",
+                section_name,
+                section_dir.display()
+            );
+        }
+
+        let yaml_files = scan_yaml_files_recursive(&section_dir).with_context(|| {
+            format!(
+                "failed to scan node config section '{}' recursively in {}",
+                section_name,
+                section_dir.display()
+            )
+        })?;
+
+        let mut records = Vec::new();
+        for path in yaml_files {
+            let verified = verify_and_parse(&path, &section_dir, section_name, self.trust_store)
+                .with_context(|| {
+                    format!(
+                        "failed to verify node config item {} in section '{}'",
+                        path.display(),
+                        section_name
+                    )
+                })?;
+            if verified.signer_fingerprint != node_fingerprint {
+                bail!(
+                    "command registration policy {} must be signed by node identity {}; got signer {}",
+                    verified.path.display(),
+                    node_fingerprint,
+                    verified.signer_fingerprint
+                );
+            }
+            let record = section
+                .parse(&verified.name, &verified.body)
+                .with_context(|| {
+                    format!(
+                        "failed to parse command registration policy {}",
+                        verified.path.display()
+                    )
+                })?;
+            let mut record: CommandRegistrationPolicyRecord = record
+                .as_any()
+                .downcast_ref::<CommandRegistrationPolicyRecord>()
+                .context("CommandRegistrationSection::parse returned wrong type")?
+                .clone();
+            record.source_file = verified.path.clone();
+            records.push(record);
+        }
+
+        match records.len() {
+            1 => Ok(records.remove(0)),
+            0 => bail!(
+                "node config section '{}' must contain exactly one policy record",
+                section_name
+            ),
+            _ => bail!(
+                "node config section '{}' has multiple policy records; refusing ambiguous command registration policy",
+                section_name
+            ),
+        }
+    }
+}
+
+fn node_identity_fingerprint(system_space_dir: &Path) -> Result<String> {
+    let key_path = system_space_dir
+        .join(".ai")
+        .join("node")
+        .join("identity")
+        .join("private_key.pem");
+    let identity = crate::identity::NodeIdentity::load(&key_path).with_context(|| {
+        format!(
+            "load node identity for node-owned command registration policy from {}",
+            key_path.display()
+        )
+    })?;
+    Ok(identity.fingerprint().to_string())
 }
 
 fn check_hosted_policy_uniqueness(records: &[HostedNodePolicyRecord]) -> Result<()> {
@@ -490,26 +606,27 @@ fn check_hosted_policy_uniqueness(records: &[HostedNodePolicyRecord]) -> Result<
     )
 }
 
-fn command_source_for_root(
-    root: &Path,
+fn system_scan_root(
     system_space_dir: &Path,
-    bundles: &[BundleRecord],
-) -> ryeos_runtime::CommandSource {
-    if root == system_space_dir {
-        return ryeos_runtime::CommandSource::EmbeddedCore;
+    policy: &ryeos_runtime::CommandRegistrationPolicy,
+) -> NodeConfigScanRoot {
+    NodeConfigScanRoot {
+        path: system_space_dir.to_path_buf(),
+        command_provenance: ryeos_runtime::CommandProvenance {
+            origin: ryeos_runtime::CommandOrigin::SystemSpace,
+            command_registration_caps: policy.system_source_caps.clone(),
+        },
     }
+}
 
-    bundles
-        .iter()
-        .find(|bundle| bundle.path == root)
-        .map(|bundle| {
-            if bundle.name == "core" {
-                ryeos_runtime::CommandSource::EmbeddedCore
-            } else {
-                ryeos_runtime::CommandSource::Installed
-            }
-        })
-        .unwrap_or(ryeos_runtime::CommandSource::Installed)
+fn bundle_scan_root(bundle: &BundleRecord) -> NodeConfigScanRoot {
+    NodeConfigScanRoot {
+        path: bundle.path.clone(),
+        command_provenance: ryeos_runtime::CommandProvenance {
+            origin: ryeos_runtime::CommandOrigin::InstalledBundle,
+            command_registration_caps: bundle.command_registration_caps.clone(),
+        },
+    }
 }
 
 /// Strip the signature line(s) from the top of a file.
@@ -595,6 +712,7 @@ mod tests {
         BundleRecord {
             name: name.into(),
             path: std::path::PathBuf::from(path),
+            command_registration_caps: Vec::new(),
             source_file: std::path::PathBuf::from(source),
         }
     }
@@ -871,24 +989,17 @@ mod tests {
         let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
         let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
 
-        let core = workspace.join("bundles/core").canonicalize().unwrap();
-        let standard = workspace.join("bundles/standard").canonicalize().unwrap();
-        let cockpit = workspace.join("bundles/cockpit").canonicalize().unwrap();
-        let bundles = vec![
-            BundleRecord {
-                name: "standard".into(),
-                path: standard,
-                source_file: workspace.join("bundles/core/.ai/node/bundles/standard.yaml"),
-            },
-            BundleRecord {
-                name: "cockpit".into(),
-                path: cockpit,
-                source_file: workspace.join("bundles/core/.ai/node/bundles/cockpit.yaml"),
-            },
-        ];
+        let system = temp_system_with_command_registration_policy(&workspace);
+        let cockpit = temp_bundle_with_node_section(&workspace.join("bundles/cockpit"), "routes");
+        let bundles = vec![BundleRecord {
+            name: "cockpit".into(),
+            path: cockpit.path().to_path_buf(),
+            command_registration_caps: Vec::new(),
+            source_file: workspace.join("bundles/core/.ai/node/bundles/cockpit.yaml"),
+        }];
 
         let loader = BootstrapLoader {
-            system_space_dir: &core,
+            system_space_dir: system.path(),
             trust_store: &trust_store,
         };
         let snapshot = loader
@@ -930,7 +1041,7 @@ mod tests {
         let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
         let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
 
-        let core = workspace.join("bundles/core").canonicalize().unwrap();
+        let system = temp_system_with_command_registration_policy(&workspace);
         let hosted_node = workspace
             .join("bundles/hosted-node")
             .canonicalize()
@@ -938,11 +1049,12 @@ mod tests {
         let bundles = vec![BundleRecord {
             name: "hosted-node".into(),
             path: hosted_node,
+            command_registration_caps: Vec::new(),
             source_file: workspace.join("bundles/core/.ai/node/bundles/hosted-node.yaml"),
         }];
 
         let loader = BootstrapLoader {
-            system_space_dir: &core,
+            system_space_dir: system.path(),
             trust_store: &trust_store,
         };
         let snapshot = loader
@@ -964,6 +1076,49 @@ mod tests {
             "policy source should be the hosted node section, got {}",
             policy.source_file.display()
         );
+    }
+
+    fn temp_system_with_command_registration_policy(
+        workspace: &std::path::Path,
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let identity_dir = dir.path().join(".ai/node/identity");
+        fs::create_dir_all(&identity_dir).unwrap();
+        fs::copy(
+            workspace.join(".dev-keys/PUBLISHER_DEV.pem"),
+            identity_dir.join("private_key.pem"),
+        )
+        .unwrap();
+        let target = dir.path().join(".ai/node/command_registration");
+        fs::create_dir_all(&target).unwrap();
+        fs::copy(
+            workspace.join("bundles/.ai/node/command_registration/default.yaml"),
+            target.join("default.yaml"),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn temp_bundle_with_node_section(bundle: &std::path::Path, section: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source = bundle.join(".ai/node").join(section);
+        let target = dir.path().join(".ai/node").join(section);
+        copy_dir_recursive_for_test(&source, &target);
+        dir
+    }
+
+    fn copy_dir_recursive_for_test(source: &std::path::Path, target: &std::path::Path) {
+        fs::create_dir_all(target).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_dir_recursive_for_test(&source_path, &target_path);
+            } else {
+                fs::copy(&source_path, &target_path).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -1021,31 +1176,42 @@ mod tests {
     }
 
     #[test]
-    fn command_source_classifies_core_as_embedded_and_other_bundles_as_installed() {
+    fn command_registration_caps_follow_policy_and_registration_not_bundle_name() {
         let system = std::path::PathBuf::from("/system");
+        let policy = ryeos_runtime::CommandRegistrationPolicy {
+            claim_rules: Vec::new(),
+            system_source_caps: vec!["ryeos.register.command.root.execute".into()],
+        };
         let core = BundleRecord {
             name: "core".into(),
             path: std::path::PathBuf::from("/system/.ai/bundles/core"),
+            command_registration_caps: Vec::new(),
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/core.yaml"),
         };
         let standard = BundleRecord {
             name: "standard".into(),
             path: std::path::PathBuf::from("/system/.ai/bundles/standard"),
+            command_registration_caps: vec!["ryeos.register.command.root.standard".into()],
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/standard.yaml"),
         };
-        let bundles = vec![core.clone(), standard.clone()];
 
         assert_eq!(
-            command_source_for_root(&system, &system, &bundles),
-            ryeos_runtime::CommandSource::EmbeddedCore
+            system_scan_root(&system, &policy)
+                .command_provenance
+                .command_registration_caps,
+            vec!["ryeos.register.command.root.execute"]
         );
         assert_eq!(
-            command_source_for_root(&core.path, &system, &bundles),
-            ryeos_runtime::CommandSource::EmbeddedCore
+            bundle_scan_root(&core)
+                .command_provenance
+                .command_registration_caps,
+            Vec::<String>::new()
         );
         assert_eq!(
-            command_source_for_root(&standard.path, &system, &bundles),
-            ryeos_runtime::CommandSource::Installed
+            bundle_scan_root(&standard)
+                .command_provenance
+                .command_registration_caps,
+            vec!["ryeos.register.command.root.standard"]
         );
     }
 }

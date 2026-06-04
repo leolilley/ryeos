@@ -308,8 +308,11 @@ async fn main() -> Result<()> {
     );
 
     let command_registry = Arc::new(
-        ryeos_runtime::CommandRegistry::from_records(&node_config_snapshot.commands)
-            .context("failed to build command registry from node-config records")?,
+        ryeos_runtime::CommandRegistry::from_records(
+            &node_config_snapshot.commands,
+            &node_config_snapshot.command_registration_policy.policy,
+        )
+        .context("failed to build command registry from node-config records")?,
     );
 
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
@@ -726,8 +729,11 @@ async fn run_service_standalone(
     ));
 
     let standalone_command_registry = Arc::new(
-        ryeos_runtime::CommandRegistry::from_records(&node_config_snapshot.commands)
-            .context("failed to build command registry from node-config records")?,
+        ryeos_runtime::CommandRegistry::from_records(
+            &node_config_snapshot.commands,
+            &node_config_snapshot.command_registration_policy.policy,
+        )
+        .context("failed to build command registry from node-config records")?,
     );
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());

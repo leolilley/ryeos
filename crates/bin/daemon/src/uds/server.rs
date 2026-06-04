@@ -445,8 +445,9 @@ mod tests {
             None,
             Vec::new(),
         );
-        let test_command_registry =
-            Arc::new(ryeos_runtime::CommandRegistry::from_records(&[]).unwrap());
+        let test_command_registry = Arc::new(
+            ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
+        );
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
         let state = AppState {
@@ -478,6 +479,7 @@ mod tests {
                 routes: vec![],
                 commands: vec![],
                 hosted_node_policies: vec![],
+                command_registration_policy: Default::default(),
             }),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: test_command_registry,

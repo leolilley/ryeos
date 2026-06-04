@@ -64,11 +64,6 @@ pub fn load_command_descriptors_from_snapshot(
     out
 }
 
-pub fn load_commands(system_space_dir: &Path) -> anyhow::Result<Vec<CommandDef>> {
-    let snapshot = load_verified_snapshot(system_space_dir)?;
-    Ok(snapshot.commands)
-}
-
 pub fn find_command(
     snapshot: &NodeConfigSnapshot,
     command_tokens: &[String],
@@ -116,9 +111,10 @@ mod tests {
                     availability: ryeos_runtime::CommandAvailability::Auto,
                 },
                 source_file: PathBuf::from("/tmp/command.yaml"),
-                source: ryeos_runtime::CommandSource::Installed,
+                provenance: ryeos_runtime::CommandProvenance::default(),
             }],
             hosted_node_policies: vec![],
+            command_registration_policy: Default::default(),
         };
 
         let commands = load_command_descriptors_from_snapshot(&snapshot);

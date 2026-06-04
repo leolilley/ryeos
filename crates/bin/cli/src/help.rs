@@ -571,9 +571,10 @@ mod tests {
                     availability: ryeos_runtime::CommandAvailability::Auto,
                 },
                 source_file: PathBuf::from("/tmp/remote-doctor.yaml"),
-                source: ryeos_runtime::CommandSource::Installed,
+                provenance: ryeos_runtime::CommandProvenance::default(),
             }],
             hosted_node_policies: vec![],
+            command_registration_policy: Default::default(),
         };
         let tokens = vec!["remote".to_string(), "doctor".to_string()];
         let command = crate::node_descriptors::find_command(&snapshot, &tokens).unwrap();

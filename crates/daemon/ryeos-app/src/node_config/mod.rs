@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::node_config::sections::command::CommandRecord;
+use crate::node_config::sections::command_registration::CommandRegistrationPolicyRecord;
 use crate::node_config::sections::hosted_node::HostedNodePolicyRecord;
 use crate::route_raw::RawRouteSpec;
 
@@ -53,6 +54,9 @@ pub struct BundleRecord {
     pub name: String,
     /// Absolute, canonicalized path to the bundle root directory.
     pub path: PathBuf,
+    /// Node-owned command registration grants for commands loaded from this bundle.
+    #[serde(default)]
+    pub command_registration_caps: Vec<String>,
     /// Path to the `.yaml` file that declared this record.
     pub source_file: PathBuf,
 }
@@ -68,6 +72,8 @@ pub struct NodeConfigSnapshot {
     pub commands: Vec<CommandRecord>,
     /// Hosted node operator policies loaded from installed bundle/state roots.
     pub hosted_node_policies: Vec<HostedNodePolicyRecord>,
+    /// Effective command registration admission policy.
+    pub command_registration_policy: CommandRegistrationPolicyRecord,
 }
 
 impl NodeConfigSnapshot {}
@@ -105,6 +111,10 @@ impl SectionTable {
         let mut sections: HashMap<&'static str, Box<dyn NodeConfigSection>> = HashMap::new();
         sections.insert("bundles", Box::new(sections::bundle::BundleSection));
         sections.insert("commands", Box::new(sections::command::CommandSection));
+        sections.insert(
+            "command_registration",
+            Box::new(sections::command_registration::CommandRegistrationSection),
+        );
         sections.insert(
             "hosted",
             Box::new(sections::hosted_node::HostedNodePolicySection),

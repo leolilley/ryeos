@@ -214,9 +214,10 @@ fn build_app_state(
         routes: vec![],
         commands: vec![],
         hosted_node_policies: vec![],
+        command_registration_policy: Default::default(),
     };
     let test_command_registry =
-        Arc::new(ryeos_runtime::CommandRegistry::from_records(&[]).unwrap());
+        Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
     let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
     let state = AppState {
