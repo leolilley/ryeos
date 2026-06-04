@@ -1,0 +1,7 @@
+name: central-auth
+version: "0.1.0"
+description: "Central web-app auth primitives: principals, sessions, invites, roles and capabilities"
+requires_kinds:
+  - tool
+  - config
+uses_kinds: []

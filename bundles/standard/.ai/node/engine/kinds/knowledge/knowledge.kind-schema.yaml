@@ -1,0 +1,78 @@
+# ryeos:signed:2026-05-23T12:06:26Z:05e70e58f40cba1ca85c944b6bcd08c20917e4dd9d8b6b72b2f8ac87a245925b:p32j8n6Y4iEbtZ3u1seE2Mh3/fgiGrEWKkZy03APvqP9HGXQ3dSShKHdLyw9Y3jrSPo6TXjNFKSXsNkzeiP3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/knowledge"
+version: "1.0.0"
+location:
+  directory: knowledge
+resolution:
+  - step: resolve_references
+effective_trust:
+  include_references: false
+execution:
+  # Op-dispatch execution model. The daemon resolves the requested op
+  # (default: `compose`) against the declared operations, validates
+  # inputs, then spawns the kind's runtime with a BatchOpEnvelope.
+  # Mixed-dispatch reject forbids `operations` + `delegate`/`terminator`.
+  operations:
+    - name: compose
+      side_effects: writes_chain
+      dispatch: { via: runtime_registry }
+      inputs:
+        token_budget:
+          type: integer
+          required: false
+          default: 4000
+        exclude_refs:
+          type: array
+          items:
+            type: string
+          required: false
+          default: []
+    - name: compose_positions
+      side_effects: writes_projection
+      dispatch: { via: runtime_registry }
+      inputs:
+        roots_by_position:
+          type: object
+          required: true
+        per_position_budget:
+          type: object
+          required: false
+        default_budget:
+          type: integer
+          required: false
+          default: 2000
+  default_operation: compose
+  thread_profile:
+    name: knowledge_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
+formats:
+  - extensions: [".md"]
+    parser: parser:ryeos/core/markdown/frontmatter
+    signature:
+      prefix: "<!--"
+      suffix: "-->"
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Knowledge items have no structural shape requirement at the kind
+# level — consumers pull arbitrary structured data from markdown
+# frontmatter or yaml documents.
+# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+    version:
+      from: path
+      key: version
+    category:
+      from: relative_dir
+      required: true

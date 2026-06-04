@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:cdbdac8120ee9e41e561ba2bf468e31b426d33842b76c42a7b90cd684c92c919:+Aw3uBy7FIxG16ELJoct5ntaHtDEEUscqSA8PweF7X67qHtFQPbKXN5++x93uBtqpC4cqdSyasRT33esQDw4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: cockpit/files/read
+version: "1.0.0"
+description: Safe scoped file reading — constrained to session project root or project .ai directory. Truncated at 256 KiB.
+endpoint: ui.cockpit.files.read
+availability: daemon_only

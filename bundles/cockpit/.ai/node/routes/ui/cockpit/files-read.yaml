@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:58Z:f8c52feb09e3bf9fb46085c9db3fb785d2fc2a9609a01e5c1d19ed5e65cd2dfe:eJ9KXPElSjCV5SymSTB2GmcmuF6FQds321MkO/U+aeH63OnZRUoid4Uy1MDlI35UgRwOtO8+tlqhaRVDwTqiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/cockpit
+section: routes
+id: ui/api/cockpit/files/read
+path: /ui/api/cockpit/files/read
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/cockpit/files/read"

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-23T12:06:25Z:81f6ae978fd085cd9e1055629028ec35575758272dfbb42d0c1ae7335a147a73:Om7v5sZ4Amzx46/6KL4etU/C9qk5iJtQYA5gM0vzR6NI+S6CqbwBlC8vjyPZp6VJaa1fFE+SKdKAqPNiKl7tDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
+kind: service
+endpoint: system.push-head
+required_caps: ["ryeos.execute.service.push.head"]
+schema:
+  project_path: string
+  snapshot_hash: string
+description: "Write a principal-scoped project HEAD ref"

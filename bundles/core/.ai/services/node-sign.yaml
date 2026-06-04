@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-23T12:06:26Z:569ea02afff0cc19be7bdba097016d7861ab3919cd94a2ad5841daac5068765f:/Yjo8Uavb+oQDVRN1S0ZOP5/OJ4GjAihEjPWYlJzc9Sow55UtXyurvKDKGovCq3FMDrBawanB6JrzCott1lnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node-sign
+required_caps: ["ryeos.execute.service.node_sign"]
+schema:
+  item_ref: string
+  space: string
+  project_path: string
+description: "Sign daemon-internal kind=node items only (system space). For operator edits use ryeos-core-tools; for bundle authoring use ryeos publish."

@@ -1,0 +1,13 @@
+# ryeos:signed:2026-05-31T08:15:57Z:7fc1040ff18fac9495d3f977e69b560df31d18cd0131b76023902da292d1c2cc:KBb6EgU8ZjOUeixfHU6cmFwWK+MQxQ6a8inCfrfAp5XR00+OK3Ug8zZcGLjK+07qt9/SrF3OH0daeh+CUR+0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: web
+description: Open the browser RyeOS cockpit
+execute: client:ryeos/web
+aliases:
+- tokens:
+  - web
+  positional_forms:
+  - slots:
+    - field: surface
+  project_resolution: optional

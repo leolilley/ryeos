@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-31T08:15:57Z:33db3df2da640a38081ef02b58764ea9561cc3c3de4de25da7f6905a58de3203:bYnRiY0DUfa3KJpOg1O6pMSyuMJKhtryHHpRlzDqJNgP7KHFj1nkbEdo35sByfEHuen3ysVmTTq56cqU4p9SAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/gc/status
+path: /ui/api/studio/gc/status
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/studio/gc/status"

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:13:34Z:35f42e186e72ce1d2f75bb9cd3caa88507a7056a02198af1f56e0ece3ab38e45:0uwfhN_hZNhivNdQcq5OxT2_5arns3Va8W7vl8le4amtKDioVxgY-db5u-s0THC-qCbNVvvG9UXQ_HF_px7eBg==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-29T06:13:34Z:35f42e186e72ce1d2f75bb9cd3caa88507a7056a02198af1f56e0ece3ab38e45:0uwfhN_hZNhivNdQcq5OxT2_5arns3Va8W7vl8le4amtKDioVxgY-db5u-s0THC-qCbNVvvG9UXQ_HF_px7eBg==:4b987fd4e40303ac -->
 # Suppress Context Test
 
 Tests the `<suppress>` tag. Extends base_context (which injects base-identity via system context),
@@ -10,7 +10,7 @@ ALT_IDENTITY_PRESENT but NOT BASE_IDENTITY_PRESENT in the system prompt.
   <metadata>
     <description>Tests suppress: replaces base-identity with alt-identity.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

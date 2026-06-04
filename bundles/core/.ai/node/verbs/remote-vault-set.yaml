@@ -1,0 +1,18 @@
+# ryeos:signed:2026-05-30T07:21:31Z:9214519ce731a07f0cdf50e273332286d95c859657cd66a060753fb70ec4e14b:vdEJhxhN2a5O47axQbcsHh0uCsh7xsmRCcHpO1z0FQHOocNbFSEZ9XyDDbOXz9x4cML3mqIHN6PrKnNP3BgsAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-vault-set
+description: Set a secret on a remote node's vault
+execute: service:remote/vault-set
+aliases:
+- tokens:
+  - remote
+  - vault-set
+  positional_forms:
+  - slots:
+    - field: remote
+    - field: name
+    - field: value
+  - slots:
+    - field: name
+    - field: value

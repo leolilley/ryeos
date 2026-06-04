@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-03T03:45:48Z:bf89ab5d80713bcf9099bd18799468a7a44e0cd068f87a0c3dcff2f22353184d:wKt1fhPnTznYQzIJHM59mE9lnW8oIkQJZV7LsgDfLVyu5QuVAut94mId/72f1T6wPq3UPDtbSaQD1iGq4rgOBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: bundle-sign
+description: Sign all signable items in a bundle source tree
+execute: service:bundle/sign
+aliases:
+- tokens:
+  - bundle
+  - sign

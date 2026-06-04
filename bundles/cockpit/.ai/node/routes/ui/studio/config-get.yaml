@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-31T08:15:57Z:2395a8d94e8ba3615e21acb5988ce61b04aca704efb8a57465a5d81bedfb43fe:TzXoOPahXMvhCGPQu3UNv3tyt44vyDYyRsaYIrSBFu7qJTPjNKE9u1D3vcRCQsc5m0+RI4auGKgTrYwz4PUYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/config/get
+path: /ui/api/studio/config/get
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/studio/config/get"

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:b0620482668504e0f45009aed754c231520834fccf691215efe3aed350780651:-TSe2rUrXt-Hgip7FtEm-U9M6VT9AA4XI5E1z0MN6uV4MTuc-t_bDtZH75yWc6T-ayhoQ7G5CDZHE9WxTWmpCw==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:b0620482668504e0f45009aed754c231520834fccf691215efe3aed350780651:-TSe2rUrXt-Hgip7FtEm-U9M6VT9AA4XI5E1z0MN6uV4MTuc-t_bDtZH75yWc6T-ayhoQ7G5CDZHE9WxTWmpCw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 # Practices Injection Test
@@ -10,7 +10,7 @@ End-to-end test for knowledge context injection — verifies that the practices 
   <metadata>
     <description>Test that anti-slop practices knowledge is injected into directive context via extends chain.</description>
     <category>test/quality</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" provider="zen/zen" />
     <limits turns="6" tokens="8192" spend="0.10" />
     <context>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-29T06:13:34Z:3f3c16c36e3cc127e8c9aa7bfdbbd6948b82a92d165c553bdfa1709f0a36d3d3:TobsVYPUfx0GSki4GxgNb_SHMorwEa3sAsUlGoqIE5ag8yNaaYXWIP_8LUgJ0lCbr0_FhWQg3_eIG0W7KF2kBQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-29T06:13:34Z:3f3c16c36e3cc127e8c9aa7bfdbbd6948b82a92d165c553bdfa1709f0a36d3d3:TobsVYPUfx0GSki4GxgNb_SHMorwEa3sAsUlGoqIE5ag8yNaaYXWIP_8LUgJ0lCbr0_FhWQg3_eIG0W7KF2kBQ==:4b987fd4e40303ac -->
 # Mid Context Directive
 
 Middle layer in extends chain. Adds before-context on top of base's system context.
@@ -8,7 +8,7 @@ Middle layer in extends chain. Adds before-context on top of base's system conte
   <metadata>
     <description>Mid-layer directive extending base. Adds before-context knowledge.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

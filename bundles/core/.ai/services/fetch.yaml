@@ -1,0 +1,12 @@
+# ryeos:signed:2026-05-23T12:06:26Z:eebd8425e7cc104a846bbef4573bf3ac998804e7d96c5f1d6993f1c5073924e1:6cZeKv/CJOsWk31pJFlvaxC/VbSjI+aQhL0OpFbYRKfj5pjIHNbBF9EBFWWDZgTvughsBuZ6psmdZyDrNiVMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: fetch
+availability: offline
+offline_execute: tool:ryeos/core/fetch
+required_caps: ["ryeos.execute.service.fetch"]
+schema:
+  item_ref: string
+  with_content: boolean?
+  verify: boolean?
+  project_path: string?
+description: "Resolve, optionally verify, and read an item via the engine"

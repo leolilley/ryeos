@@ -1,0 +1,90 @@
+# ryeos:signed:2026-05-23T12:06:24Z:d12d8d687e9eca9fab7695e51bfbc5a0ff23fae9607c554bf35e363f9da8bf8b:S2CMlb6Zssax7nrnGnC9490OcX42/D8byXoJD3aCZEZbG/P9sHPGM6LBUS0/8kmVFEIQ8zccQ8ibMLExk4N/AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/streaming_tool"
+version: "1.0.0"
+location:
+  directory: tools
+effective_trust:
+  include_references: false
+resolution: []
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/tool_streaming_v1
+  thread_profile:
+    name: streaming_tool_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
+  aliases:
+    "@subprocess": "tool:ryeos/core/subprocess/execute"
+formats:
+  - extensions: [".py"]
+    parser: parser:ryeos/core/python/ast
+    signature:
+      prefix: "#"
+      after_shebang: true
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+  - extensions: [".js", ".ts", ".mjs", ".cjs"]
+    parser: parser:ryeos/core/javascript/javascript
+    signature:
+      prefix: "//"
+  - extensions: [".json"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Streaming tools use the same identity composer as regular tools.
+inventory_schema_keys: [input_schema, parameters, config_schema]
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+runtime:
+  handlers:
+    - type: config
+    - type: env_config
+    - type: config_resolve
+    - type: verify_deps
+    - type: execution_params
+    - type: native_async
+    - type: native_resume
+  ignored_keys:
+    - version
+    - category
+    - description
+    - executor_id
+    - tool_type
+    - required_secrets
+    - name
+    - required_caps
+    - config_schema
+    - execution_owner
+    - native_resume
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    executor_id:
+      from: path
+      key: executor_id
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path
+    required_secrets:
+      from: path_string_seq
+      key: required_secrets
+    required_caps:
+      from: path_string_seq
+      key: required_caps

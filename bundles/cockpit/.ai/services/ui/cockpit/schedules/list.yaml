@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:eb8e442d4b3602fe8f347100750f78a059ac3e47667ba4366a8d37ac53de9431:nIYuYo4xr1unicHWUU/UBYXGmAbg/JUfPhDtqA10v6cfgfh2KWaXeu6HIvPpNtFULYkl+4T7kF/5hFsa2gvJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: cockpit/schedules/list
+version: "1.0.0"
+description: Schedule listing for the cockpit — returns schedules with last-fire and fire-count data.
+endpoint: ui.cockpit.schedules.list
+availability: daemon_only

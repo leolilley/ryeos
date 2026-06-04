@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-23T12:06:25Z:72050af83e3d7910cde262ca89015dc6d8e4d6522aac4d0008314ee834996896:wfdGXByBKcScU2EnHCqx1hTQyOVOM9hzyLrW9NY4TUUOe8ojYs1bZL1lgOk1HnjXr4SGGPUIl7Op/jZCJVbMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: objects/has
+path: /objects/has
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:objects/has

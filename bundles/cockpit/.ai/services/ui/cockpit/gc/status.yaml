@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:520c8a9e5ce2e00e75a2336322eae6e1f28aa404b2c7d2ba32069919d65c278b:AiC/jamKkankrU7tdFnkvPP54XIea8PVhyFB8lnZxohPa27++4dHPlHrQo0WZ4BBcAQdglc0BeoNyWc23ZqBDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: cockpit/gc/status
+version: "1.0.0"
+description: Read-only GC state — running status, current phase, and recent GC event history from the JSONL log.
+endpoint: ui.cockpit.gc.status
+availability: daemon_only

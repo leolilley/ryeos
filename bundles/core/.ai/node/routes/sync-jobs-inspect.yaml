@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:51Z:16d8259858a5593c1bf2f91df79daecf4e76b2571a2e463dcbe01e6133d35023:9IupiphgZ225JxWzqa0abemnAycx8Lf7yH3wpUDRc5pYDODDbh+mPDERnhNKf80yg1KNA3XDr2rSlRBebpRYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: sync/jobs/inspect
+path: /sync/jobs/inspect
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:sync/jobs/inspect

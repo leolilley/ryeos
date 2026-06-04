@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-30T07:21:30Z:95eed91cddf3ebf95929c7ff6afec3c26b00324e253d08817578b6db22edac86:RFIQx4lska7PE237dP5tOKh1fB00ExegRo13PvWQkT6iSjeYGJovn+sVy0PNkN/jQ6BxCE+y7muKSyLKLubrBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: maintenance-gc
+description: 'Run GC: prune unreachable CAS objects, optionally compact'
+execute: service:maintenance/gc
+aliases:
+- tokens:
+  - maintenance
+  - gc
+  description: Run garbage collection on daemon state

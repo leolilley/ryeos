@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:58Z:65258eea329b41df58a1c0ff14a8c5e922e3e5b20aff5f07d58412576e4d2a6e:0FDzDNBse8CkIkwiKVMG0c/5mgzoU9KRyB58oPERaZUCiRgLPXwu5z+Pbjzzeq493FZyNcWydfmCrNMr87fMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/cockpit
+section: routes
+id: ui/api/cockpit/remotes/probe
+path: /ui/api/cockpit/remotes/probe
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 1024
+  timeout_ms: 15000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/cockpit/remotes/probe"

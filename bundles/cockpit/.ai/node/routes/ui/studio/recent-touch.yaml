@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:57Z:9e42ab564fc66957432b59a85ca052e9f00bd941603638679525a23dab35bf2b:rva3NynKCAaeOuwlxShrVY9UCzUQpDgHmhs5nHqB8KvNYzj++BM8UFeCA707zDil94qORjvM/f0fVyosjtkLDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/recent/touch
+path: /ui/api/studio/recent/touch
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/studio/recent/touch"

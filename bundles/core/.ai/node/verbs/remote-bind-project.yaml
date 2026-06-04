@@ -1,0 +1,14 @@
+# ryeos:signed:2026-05-30T07:21:30Z:a4501b8695f6f58bcd5cf50cd31c8e0b0383a1a2ef13234cbeec7091dcdddba7:o5r+OjI/ZkhgfoMd6Y9W9YTDH5VLmGtWF17yeNLTEcCOVGxsLSkB87w8CTMCft1V04Ct0JAHPnvo/ENECcqiDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-bind-project
+description: Bind a local project path to a remote project path
+execute: service:remote/bind-project
+aliases:
+- tokens:
+  - remote
+  - bind-project
+  project_resolution: required
+  positional_forms:
+  - slots:
+    - field: remote

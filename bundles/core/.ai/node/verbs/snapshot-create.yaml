@@ -1,0 +1,22 @@
+# ryeos:signed:2026-05-31T08:15:50Z:f48667549ec8ece17260b1402c8c3541999d91bf56c5a3c0fa3d6b17b89fdcc5:/G9sJg+2BV31qbqhKkOlfokH99NPPHvoMpAVIa6isN7wbkTvuVNhhEO3Wq/xbAoXXmLB+kG7IWjLh51KJl90BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: snapshot-create
+description: Create a local project snapshot
+execute: tool:ryeos/core/snapshot-create
+aliases:
+- tokens:
+  - commit
+  description: Create a snapshot using git-familiar wording
+  positional_forms:
+  - slots:
+    - field: message
+  project_resolution: required
+- tokens:
+  - snapshot
+  - create
+  description: Create a local project snapshot
+  positional_forms:
+  - slots:
+    - field: message
+  project_resolution: required

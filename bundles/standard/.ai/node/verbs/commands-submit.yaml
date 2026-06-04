@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-30T07:21:31Z:41dca1eb7de377acba9dc07492aab48980ee30a77fe406873d9c3cbd2f6a0df6:bwOJNmwB8cYyNOiJGvGxrvCN78xnmIk5M6sqdPuD+KgmCNXtT+pU+EF9ECOYkm3QWNd2HLvGSUm+323L9Q1CDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: commands-submit
+description: Submit a runtime command (e.g. cancel) to a thread
+execute: service:commands/submit
+aliases:
+- tokens:
+  - commands
+  - submit
+  description: Submit a command to a running thread

@@ -1,0 +1,53 @@
+# ryeos:signed:2026-05-23T12:06:24Z:63493d2ecc775810d2a26ef12951df78b0b885b47f6f74036a3ff4da22b1d2b7:PFLKvWyO4jWMhGeFvknzq6MBAlQ2fGW7v5oSh2N55vQziHtAPd30aHUskdfqOv8QdMYwNRz52qkBbwHukF5NBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/parser"
+version: "1.0.0"
+location:
+  directory: parsers
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Empty by design — DESERVES USER ATTENTION.
+# Parser descriptors ARE strongly typed (`ParserDescriptor` struct
+# with `#[serde(deny_unknown_fields)]` enforces shape at deserialize
+# time). The "honest" kind-level contract would require version /
+# handler / parser_api_version / output_schema, but the producer
+# is the GENERIC `parser:ryeos/core/yaml/yaml` parser whose
+# `output_schema` is `required: {}` — it parses any YAML mapping and
+# can't pre-declare per-consumer fields. Forcing a strict contract
+# here would crash boot with MissingRequiredField for every parser
+# YAML even though `serde_yaml::from_value::<ParserDescriptor>` will
+# catch the same problems at the next layer.
+# Real enforcement lives in the descriptor deserializer; this slot
+# is left empty until the wiring-contract layer learns about
+# per-consumer-kind specialisation of generic parsers.
+# Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path
+    handler:
+      from: path
+      key: handler
+# no execution block — parsers are not launcher-executable

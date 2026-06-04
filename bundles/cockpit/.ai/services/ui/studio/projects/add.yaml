@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:6998602bb0bf7aa4223c06d0cafc76e339e9b4e99d0cc9c0769b79f32d7491c4:CaEt+9tbpCQKhMSV+45dIamQSPJCUzdQgN/C7oij+lG7a7RjZLwLa29Wmjdv6m/uT0HzIkZWMSgqTQz9kLqHCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: studio/projects/add
+version: "1.0.0"
+description: Add or update a canonical local project root in the user-space Studio registry.
+endpoint: ui.studio.projects.add
+availability: daemon_only

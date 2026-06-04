@@ -1,0 +1,172 @@
+# Rye OS TUI Scene Configuration
+#
+# Edit this file and save — the TUI hot-reloads changes automatically.
+# Delete the file to regenerate defaults.
+
+[animation]
+# Milliseconds between frames (lower = smoother but more CPU)
+tick_ms = 66
+
+[scene]
+# Global speed multiplier (1.0 = normal, 0.5 = half speed, 2.0 = double)
+speed = 1.0
+
+# Shard (central crystal)
+shard.rotation_hz = 0.04
+shard.bob_hz = 0.3
+shard.bob_amplitude = 0.5
+shard.size = 0.015
+
+# Root (whole system)
+root.breathe_hz = 0.05
+root.breathe_amplitude = 0.15
+root.rotation_hz = 0.001
+
+# Spinner speed multiplier (applied to all rings)
+spinner.speed_multiplier = 10.0
+
+# Particle streams
+stream.speed = 0.08
+
+[camera]
+theta = 0.0
+phi = 1.427      # PI/2.2
+radius = 45.0
+fov_degrees = 55.0
+
+[colors]
+# Gruvbox Dark palette
+background = [0x1d, 0x20, 0x21]
+inner_ring = [0xfe, 0x80, 0x19]   # orange
+mid_ring = [0x83, 0xa5, 0x98]     # blue-gray
+outer_ring = [0xd3, 0x86, 0x9b]   # purple
+shard = [0xfe, 0x80, 0x19]        # orange
+star = [0xeb, 0xdb, 0xb2]         # light
+stream = [0xfa, 0xbd, 0x2f]       # yellow
+fragment = [0xfe, 0x80, 0x19]     # orange
+fog = [0x25, 0x28, 0x29]          # slightly warmer than bg
+
+[fog]
+# Depth fog strength (0 = no fog, 1 = max fog)
+strength = 0.7
+
+[stars]
+count = 2200
+min_radius = 60.0
+max_radius = 380.0
+min_size = 0.4
+max_size = 2.6
+twinkle_min = 0.3
+twinkle_max = 2.5
+
+# Ring definitions — named typed fields
+# Speed is in the spinner's native units (multiplied by scene.spinner.speed_multiplier at runtime)
+
+[[rings.inner]]
+rotation_x = 0.4
+rotation_z = 0.3
+radius = 4.5
+segments = 90
+speed = 0.024
+bob_strength = 1.4
+
+[[rings.inner]]
+rotation_x = 1.1
+rotation_z = 0.5
+radius = 5.2
+segments = 90
+speed = -0.019
+bob_strength = 0.3
+
+[[rings.inner]]
+rotation_x = 0.785
+rotation_z = 0.4
+radius = 5.8
+segments = 6
+is_polygon = true
+speed = 0.015
+bob_strength = 0.9
+
+[[rings.inner]]
+rotation_x = 1.0
+rotation_z = -0.8
+radius = 4.8
+segments = 90
+speed = -0.013
+bob_strength = 1.8
+
+# Mid rings — each entry also spawns a dashed companion ring
+[[rings.mid]]
+rotation_x = 0.15
+rotation_z = 0.0
+radius = 12.0
+segments = 110
+speed = 0.008
+bob_strength = 0.5
+
+[[rings.mid]]
+rotation_x = 1.45
+rotation_z = 0.3
+radius = 14.0
+segments = 110
+speed = -0.007
+bob_strength = 1.6
+
+[[rings.mid]]
+rotation_x = 0.7
+rotation_z = -0.6
+radius = 11.0
+segments = 8
+is_polygon = true
+speed = 0.006
+bob_strength = 0.2
+
+[[rings.mid]]
+rotation_x = 1.1
+rotation_z = 1.0
+radius = 13.0
+segments = 110
+speed = -0.005
+bob_strength = 1.1
+
+[[rings.outer]]
+rotation_x = 0.2
+rotation_z = 0.0
+radius = 22.0
+segments = 140
+speed = 0.003
+bob_strength = 0.7
+
+[[rings.outer]]
+rotation_x = 0.9
+rotation_z = 0.5
+radius = 28.0
+segments = 8
+is_polygon = true
+speed = -0.0025
+bob_strength = 1.3
+
+[[rings.outer]]
+rotation_x = 1.4
+rotation_z = -0.3
+radius = 25.0
+segments = 90
+speed = 0.002
+bob_strength = 0.4
+
+[[rings.outer]]
+rotation_x = 0.4
+rotation_z = 1.2
+radius = 35.0
+segments = 160
+speed = -0.0015
+bob_strength = 1.0
+
+[[rings.outer]]
+rotation_x = 1.2
+rotation_z = 0.8
+radius = 42.0
+segments = 12
+is_polygon = true
+speed = 0.001
+bob_strength = 0.15

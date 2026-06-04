@@ -1,0 +1,299 @@
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+// Re-export types now canonically owned by the shared model-resolution
+// module in ryeos-runtime. Existing `use crate::directive::*` imports
+// in the directive-runtime continue to resolve these names.
+#[allow(unused_imports)]
+pub use ryeos_runtime::model_resolution::{
+    AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig,
+    ProtocolFamily, ProviderConfig, ProviderProfile, SamplingConfig, SchemasConfig, StreamPaths,
+    SystemMessageConfig, SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode,
+    ToolSchemaConfig,
+};
+
+/// Typed runtime view of a directive's effective header *after* the
+/// daemon-side composer has produced
+/// `KindComposedView::ExtendsChain(...).composed`.
+///
+/// The runtime owns the typed shape of the fields it **consumes**
+/// (`model`, `permissions`, `limits`, `outputs`, `context`, `hooks`,
+/// `extends`, `name`).  `deny_unknown_fields` is mandatory — relaxing
+/// it once already masked a routing-config regression by accepting
+/// fields the runtime quietly ignored.
+///
+/// The composer ships extra frontmatter keys (`body`, `category`,
+/// `description`, `inputs`, `required_secrets`, …) that are owned by
+/// the engine / dispatcher (e.g. `required_secrets` is read on the
+/// daemon side by `dispatch.rs::vault_bindings`).  Those fields MUST
+/// be stripped *before* deserialising into `DirectiveHeader` —
+/// `bootstrap.rs::parse_effective_header` does the projection — so
+/// the typed shape stays narrow and `deny_unknown_fields` keeps
+/// catching real drift instead of being defeated by every new
+/// composer-emitted key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectiveHeader {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub extends: Option<String>,
+    #[serde(default)]
+    pub model: Option<ModelSpec>,
+    #[serde(default)]
+    pub permissions: Option<PermissionsSpec>,
+    #[serde(default)]
+    pub limits: Option<LimitsSpec>,
+    #[serde(default)]
+    pub outputs: Option<Vec<OutputSpec>>,
+    #[serde(default)]
+    pub context: Option<HashMap<String, Vec<String>>>,
+    #[serde(default)]
+    pub hooks: Option<Vec<Value>>,
+}
+
+/// Allow-list of composed-view top-level keys the runtime decodes
+/// into [`DirectiveHeader`].  See the type's doc comment for the
+/// rationale: every other key is owned by the daemon (composer,
+/// dispatcher, augmentations) and is read directly off
+/// `KindComposedView` by the daemon, not by the runtime.
+pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
+    "name",
+    "extends",
+    "model",
+    "permissions",
+    "limits",
+    "outputs",
+    "context",
+    "hooks",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsSpec {
+    #[serde(default)]
+    pub execute: Vec<String>,
+    #[serde(default)]
+    pub fetch: Vec<String>,
+    #[serde(default)]
+    pub sign: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsSpec {
+    #[serde(default)]
+    pub turns: Option<u32>,
+    #[serde(default)]
+    pub tokens: Option<u64>,
+    #[serde(default)]
+    pub spend_usd: Option<f64>,
+    #[serde(default)]
+    pub spawns: Option<u32>,
+    #[serde(default)]
+    pub depth: Option<u32>,
+    #[serde(default)]
+    pub duration_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSpec {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub r#type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSchema {
+    pub name: String,
+    pub item_id: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub input_schema: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionConfig {
+    /// Kind-schema metadata header (e.g. `"ryeos-runtime"`) surfaced so
+    /// `deny_unknown_fields` keeps holding the line. Not consumed by
+    /// the runtime.
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub retries: u32,
+    #[serde(default)]
+    pub retry_status_codes: Vec<u16>,
+    #[serde(default)]
+    pub never_retry: Vec<String>,
+    #[serde(default)]
+    pub backoff_base_ms: u64,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub tool_preload: bool,
+    #[serde(default)]
+    pub retry_on_timeout: bool,
+}
+
+fn default_timeout() -> u64 {
+    300
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            category: None,
+            retries: 2,
+            retry_status_codes: vec![429, 500, 502, 503],
+            never_retry: vec![],
+            backoff_base_ms: 1000,
+            timeout_seconds: default_timeout(),
+            tool_preload: false,
+            retry_on_timeout: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapConfig {
+    pub execution: ExecutionConfig,
+    pub model_routing: Option<ModelRoutingConfig>,
+    pub provider: Option<ProviderConfig>,
+    pub tools: Vec<ToolSchema>,
+    pub system_prompt: Option<String>,
+    pub user_prompt: String,
+    pub context_before: Option<String>,
+    pub context_after: Option<String>,
+    pub context_positions: HashMap<String, Vec<String>>,
+    pub hooks: Vec<ryeos_runtime::HookDefinition>,
+    pub outputs: Option<Vec<OutputSpec>>,
+    #[serde(skip)]
+    pub risk_policy: Option<crate::harness::RiskPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCall {
+    pub id: Option<String>,
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderMessage {
+    pub role: String,
+    pub content: Option<Value>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// Provider-specific hidden reasoning that must be replayed with an
+    /// assistant tool-call message for OpenAI-compatible reasoning models
+    /// such as DeepSeek thinking-mode endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(clippy::upper_case_acronyms)] // Usage is a domain term, not an acronym leak
+pub enum StreamEvent {
+    /// Incremental assistant text.
+    Delta(String),
+    /// Incremental reasoning/thinking text. Emitted when the provider
+    /// streams thinking separately (Anthropic extended thinking, Gemini
+    /// thoughts, OpenAI o-series). Not all providers produce these.
+    #[allow(dead_code)] // Emitted by parser once reasoning extraction is wired
+    ReasoningDelta(String),
+    /// Complete tool call ready to dispatch.
+    ToolUse {
+        id: Option<String>,
+        name: String,
+        arguments: Value,
+    },
+    /// Partial tool call argument JSON streamed mid-flight.
+    ///
+    /// Anthropic delivers tool arguments as `input_json_delta` chunks
+    /// before the final `content_block_stop`. Surfacing the running
+    /// accumulation here lets the runner emit progressive
+    /// `cognition_out` events so the daemon (and ultimately the
+    /// browser) can stream large structured outputs (e.g.
+    /// `directive_return.response`) instead of waiting for the whole
+    /// tool call to land at once.
+    ToolUsePartial {
+        id: Option<String>,
+        name: String,
+        /// The new JSON fragment that just arrived (NOT the cumulative
+        /// buffer — consumers get the delta and reconstruct the full
+        /// state if they need it).
+        delta: String,
+        /// Total bytes of partial JSON accumulated so far for this
+        /// tool call. Lets consumers know whether they're at the start
+        /// (and may need to skip past `{"response":"`) or in the middle.
+        total_len: usize,
+    },
+    /// Cumulative usage update from the provider. Emitted mid-stream
+    /// by providers that send incremental token counts.
+    #[allow(dead_code)] // Emitted by parser once usage extraction is wired
+    Usage(UsageUpdate),
+    /// Provider warning (safety, truncation, partial failure) that
+    /// doesn't terminate the stream.
+    #[allow(dead_code)] // Emitted by parser once warning extraction is wired
+    Warning { code: String, message: String },
+    /// Stream is finished. Terminal event — runner stops consuming.
+    /// Carries the normalized finish reason and the raw provider string.
+    Finish {
+        reason: FinishReason,
+        raw: Option<String>,
+    },
+}
+
+/// Normalized finish reason across all provider families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    /// Model produced end-of-turn.
+    Stop,
+    /// Model wants tools dispatched.
+    ToolCalls,
+    /// Hit max_tokens / output length limit.
+    Length,
+    /// Content filtered by provider safety.
+    ContentFilter,
+    /// Unmappable; check raw string.
+    Other,
+}
+
+/// Cumulative token usage from the provider.
+#[derive(Debug, Clone, Default)]
+pub struct UsageUpdate {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+}
+
+/// Normalize a provider-specific finish reason string to a canonical enum.
+/// Case-insensitive: Gemini sends uppercase `"STOP"`, Anthropic sends
+/// lowercase `"end_turn"`, OpenAI sends lowercase `"stop"`.
+pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
+    let lower = raw.map(|s| s.to_ascii_lowercase());
+    match lower.as_deref() {
+        Some("stop") | Some("end_turn") | Some("end_of_turn") => FinishReason::Stop,
+        Some("tool_calls") | Some("function_call") | Some("tool_use") => FinishReason::ToolCalls,
+        Some("length") | Some("max_tokens") | Some("model_length") => FinishReason::Length,
+        Some("content_filter") | Some("safety") | Some("recitation") | Some("blocklist") => {
+            FinishReason::ContentFilter
+        }
+        _ => FinishReason::Other,
+    }
+}

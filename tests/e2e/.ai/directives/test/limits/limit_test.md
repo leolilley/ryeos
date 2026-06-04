@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:3e59e048e26719e1abc1167159bfdc3c9065f853e1c0ba5f5a4be99a44aa6a18:4E7UAhzejcXv3uv80aPRWHiS8ye5IawVmacFGhKQjbbJLQ-nwyUrzq7pEs2Uwk7QbwjDSeL6o56WBSBLXQJGAQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:3e59e048e26719e1abc1167159bfdc3c9065f853e1c0ba5f5a4be99a44aa6a18:4E7UAhzejcXv3uv80aPRWHiS8ye5IawVmacFGhKQjbbJLQ-nwyUrzq7pEs2Uwk7QbwjDSeL6o56WBSBLXQJGAQ==:4b987fd4e40303ac -->
 # Limit Test: Turns Limit
 
 Test that the default_escalate_limit hook fires when turns limit is exceeded.
@@ -8,7 +8,7 @@ Test that the default_escalate_limit hook fires when turns limit is exceeded.
   <metadata>
     <description>Test: exceed turns limit — should trigger escalation hook.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="1" tokens="4096" spend="1.0" />
   </metadata>

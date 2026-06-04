@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:14:55Z:c18e90d2221218e49901274ada8f96ad5cbb1f24f83c9246dfc39b44e183e461:BwbyWH9p9h52hvyUoXU2UHduv8pVyNJ9ya_zl6-sDrRzZP2pF1hYMb7r1KPR9NjdK7Y19-LZwg4rwI-o7gmSBA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:14:55Z:c18e90d2221218e49901274ada8f96ad5cbb1f24f83c9246dfc39b44e183e461:BwbyWH9p9h52hvyUoXU2UHduv8pVyNJ9ya_zl6-sDrRzZP2pF1hYMb7r1KPR9NjdK7Y19-LZwg4rwI-o7gmSBA==:4b987fd4e40303ac -->
 
 # Self-Evolving Researcher
 
@@ -9,7 +9,7 @@ Self-evolution and research directive. Searches for existing knowledge, loads re
   <metadata>
     <description>Self-evolving researcher — searches knowledge, synthesizes a research report, creates a new knowledge entry from findings, signs it, and logs the evolution. Demonstrates fetch, execute, and sign across all item types.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Self-evolving research with knowledge creation and signing</model>
     <limits turns="12" tokens="4096" />
     <permissions>

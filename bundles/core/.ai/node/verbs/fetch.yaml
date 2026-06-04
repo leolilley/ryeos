@@ -1,0 +1,23 @@
+# ryeos:signed:2026-05-31T08:15:50Z:9c9cb4c37acaffeb925aabc715fa30d13e93bebd3f2537cfe193f254461bed4a:oz6DBfI3tqH7cVaV/ZwuQ6ZyroD19zsyFpB6GAFWgK7YCzJjACBQ2rCcuLBEmdrSylhpu5scl/Z/66fZjcP+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: fetch
+description: Fetch/resolve an item (read-only)
+execute: tool:ryeos/core/fetch
+aliases:
+- tokens:
+  - f
+  description: Fetch (short form)
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
+  project_resolution: optional
+- tokens:
+  - fetch
+  description: Fetch a resource from the daemon
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
+  project_resolution: optional

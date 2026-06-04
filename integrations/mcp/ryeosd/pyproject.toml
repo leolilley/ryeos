@@ -1,0 +1,46 @@
+[project]
+name = "ryeosd-mcp"
+version = "0.5.0"
+description = "MCP server for RYE OS — thin wrapper over the ryeos CLI"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Leo Lilley", email = "leo.lml.lilley@gmail.com"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+
+dependencies = [
+    "mcp",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+ryeosd-mcp = "ryeosd_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/leolilley/ryeos"
+Repository = "https://github.com/leolilley/ryeos"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ryeosd_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Upstream pytest-asyncio uses asyncio APIs deprecated on Python 3.14;
+# importlib.metadata also emits an implicit-None deprecation. Neither
+# is our code; ignore these specific warnings only.
+filterwarnings = [
+    "ignore:'asyncio\\..*' is deprecated:DeprecationWarning",
+    "ignore:Implicit None on return values is deprecated:DeprecationWarning",
+]

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-30T07:21:31Z:1f92507f87b4505eef33c9eafdf9a521df9af961d72a6f18a5446eabc62a9c9e:Xs+6KXeQXi/Tshgcl2qQYfSN04aveA4WAd4m8SVAJ0jau3Wd2MruhRNru9n9WanAUc8Na6HaQlR/MqF4Y1neDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: thread-list
+description: List threads (audit + runtime), optionally limited
+execute: service:threads/list
+aliases:
+- tokens:
+  - thread
+  - list
+  description: List threads

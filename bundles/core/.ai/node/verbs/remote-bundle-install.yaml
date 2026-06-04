@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-30T07:21:30Z:a16cf9f6e7e8014c76e749d5c68bd4266783b000b8668787c43dc6da3e66cd42:Cnxko03iwoXzUDPC4LXfaZuR7YaF152ATI836+oMLAynFCMbdKXD+zZz8BK1ONmoaYIgdxfWaHT9KWwC+RoWCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-bundle-install
+description: Install a bundle from a remote node
+execute: service:remote/bundle-install
+aliases:
+- tokens:
+  - remote
+  - bundle-install

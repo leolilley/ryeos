@@ -1,0 +1,8 @@
+# ryeos:signed:2026-05-31T08:15:52Z:404b127cbc6f62dc7b561bd2d91e21321cb2dbeff340835032ac7a9ab7aacbb0:Ia6yTNTamTP3n48O8CKNxLq9nL26zOb4z3jVvXXtoSTW02UV1ttNFugYLvRsWEpH7QWWMv78GSJP7zS4HRAzAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: federation.heads.list
+required_caps: ["ryeos.execute.service.federation.heads.list"]
+schema:
+  prefix: string?
+  limit: number?
+description: "List namespace-neutral signed heads for federation head exchange"

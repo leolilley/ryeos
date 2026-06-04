@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:e8b1cd2d8a65ebd51518c05ad5cd4e351089d01e0eb9c278e67e6ce5de43ea1d:8RSKLYsB0BViMqXe8OWUxM9d20db5LQL1nLEX6i80xiYQWeN04gMxDvdKC8DqHMoJ8EQmMTHaLLcVKBd2y0NBQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:e8b1cd2d8a65ebd51518c05ad5cd4e351089d01e0eb9c278e67e6ce5de43ea1d:8RSKLYsB0BViMqXe8OWUxM9d20db5LQL1nLEX6i80xiYQWeN04gMxDvdKC8DqHMoJ8EQmMTHaLLcVKBd2y0NBQ==:4b987fd4e40303ac -->
 # Spawn Chain 4 Levels Deep
 
 End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tests budget cascading, limit inheritance, permission inheritance, and depth tracking across 4 levels.
@@ -8,7 +8,7 @@ End-to-end test: root → L1 → L2 → L3. Each level writes a marker file. Tes
   <metadata>
     <description>Root of a 4-level spawn chain. Writes root marker, spawns level 1 child. Tests full inheritance stack.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="6" tokens="4096" spend="1.00" depth="5" spawns="3" />
     <permissions>

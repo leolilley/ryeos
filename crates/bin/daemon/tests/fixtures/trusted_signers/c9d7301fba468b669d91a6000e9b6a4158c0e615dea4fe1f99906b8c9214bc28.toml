@@ -1,0 +1,11 @@
+version = "1.0.0"
+fingerprint = "c9d7301fba468b669d91a6000e9b6a4158c0e615dea4fe1f99906b8c9214bc28"
+owner = "self"
+attestation = ""
+
+[public_key]
+pem = """
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA52ibSX/VklcQK5eGaC10ELQ18hsWgUQtO/tKzeYlNgM=
+-----END PUBLIC KEY-----
+"""

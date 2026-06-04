@@ -1,0 +1,14 @@
+# ryeos:signed:2026-05-31T08:15:50Z:9f5a6b15af1b6619813b9ca3d1de317c35a19a38929022562b652b83a2f06bd2:CrfMuu+elJ83/+5EhRvu3rT7sqkOkzQMYybNFWfWP7Mh9D7kJk3NFACNe0CqY3gzpKBDjVSiovYWTaAwwxn7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-status
+description: Check a remote node's status and public key
+execute: service:remote/status
+aliases:
+- tokens:
+  - remote
+  - status
+  project_resolution: optional
+  positional_forms:
+  - slots:
+    - field: remote

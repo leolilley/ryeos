@@ -1,0 +1,11 @@
+name: standard
+version: "0.5.0"
+description: "Workflow: directives, graphs, knowledge, model providers, scheduler, threads"
+requires_kinds:
+  - config
+  - handler
+  - parser
+  - runtime
+  - service
+  - tool
+uses_kinds: []

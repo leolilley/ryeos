@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:f7314560d83972166b3f647cbff91e917b012ece4072eb80c7aef6e5ca3fae77:VK9JYmIIEco1EI4mnUqGJINuBicvIq4noA01EUIPsvEHcKKf4vXb3kFUWFgSV0I1H60rAWqTGv1tcMCIp8QfAg==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:f7314560d83972166b3f647cbff91e917b012ece4072eb80c7aef6e5ca3fae77:VK9JYmIIEco1EI4mnUqGJINuBicvIq4noA01EUIPsvEHcKKf4vXb3kFUWFgSV0I1H60rAWqTGv1tcMCIp8QfAg==:4b987fd4e40303ac -->
 # Write File
 
 Simple single-step directive that writes a greeting message to a specified file path.
@@ -8,7 +8,7 @@ Simple single-step directive that writes a greeting message to a specified file 
   <metadata>
     <description>Write a greeting message to a file using rye/file-system/write.</description>
     <category>test/tools/file_system</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="4096" />
     <permissions>

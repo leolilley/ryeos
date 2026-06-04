@@ -1,0 +1,28 @@
+# ryeos:signed:2026-05-23T13:47:52Z:a5c556205809de6e87f6373b2812ba620af23e14983ad43a3f80b22ec3201833:uBqJ1kbfonli9u+QQjrnekS6giWKrR6JT95i0sJVDC7G3yVbQN20prJstg1bHtLcoIi8tm/I9G0/i6Ft3RHaAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: client
+name: surface-open
+version: "1.0.0"
+description: >-
+  Verb-named terminal surface renderer. The `surface open` alias maps
+  to verb `surface-open`, and client.open derives `client:ryeos/surface-open`
+  from that verb. This descriptor wires the verb data-drivenly to the
+  same TUI launcher that the `tui` verb uses.
+
+serves:
+  kind: surface
+  renderer: terminal
+
+launch:
+  mode: cli_exec
+  binary_ref: bin/{triple}/ryeos-tui
+  args:
+    surface: "--surface"
+    surface_file: "--surface-file"
+    mock: "--mock"
+    read_only: "--read-only"
+    project: "--project"
+
+capabilities:
+  requires_daemon: true
+  owns_tty: true
+  interactive: true

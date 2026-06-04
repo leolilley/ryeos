@@ -1,0 +1,13 @@
+# ryeos:signed:2026-05-30T07:21:31Z:e27ccd9f362bfe271503a44d3ebb3b4fec8e483e90177e7d2a44147c97d5f8d5:gDsOofz99FhzBs9rQb/1OF1h1Wt+kAlC7oZviveA2meSVPfPzzRLCPkDRMWBZj1seWCIlSbJyW/ndvsBfzBfDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-vault-list
+description: List secrets on a remote node's vault
+execute: service:remote/vault-list
+aliases:
+- tokens:
+  - remote
+  - vault-list
+  positional_forms:
+  - slots:
+    - field: remote

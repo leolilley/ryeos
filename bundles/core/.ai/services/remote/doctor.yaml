@@ -1,0 +1,8 @@
+# ryeos:signed:2026-05-23T12:06:25Z:21cbcb73b8a9c6632b98fb7900770f50fa0ddd4a74f4a5064224ac1eca315db3:EdGeROZrU8MCErnsgWd2DuX3ipuOhAJ/lkQgH9zEhnlYbBDjL5y8XxFQwH7s1hvAYuNXjE5ltDGC9s/sb1SDCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.doctor
+required_caps: ["ryeos.execute.service.remote.doctor"]
+schema:
+  remote: string?
+  project: string?
+description: "Diagnose remote node authorization and project setup"

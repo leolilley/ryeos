@@ -1,0 +1,1033 @@
+//! Node-vault: operator-secret store consumed by the existing
+//! `vault_bindings` plumbing in `services::thread_lifecycle::spawn_item`.
+//!
+//! ## Architectural role
+//!
+//! The daemon owns a single shared secret store. At request-build time
+//! ([`dispatch::dispatch_subprocess`] and the runner's resume path), the
+//! daemon reads the operator's secrets via [`NodeVault::read_all`] and
+//! threads them through `ExecutionParams.vault_bindings` →
+//! `spawn_item` → `spec.env` → `Command::env()` so every spawned
+//! subprocess (directive runtime, graph runtime, tool primitive, …)
+//! sees them.
+//!
+//! Subprocesses (e.g. `ryeos-directive-runtime`) just call
+//! `std::env::var("ZEN_API_KEY")` against their inherited env. They
+//! don't know a vault exists. The daemon stays vendor-agnostic — it
+//! never enumerates provider names or secret-key conventions; it only
+//! moves opaque `String -> String` pairs.
+//!
+//! ## Trust boundary
+//!
+//! - The daemon process trusts what's on its filesystem (signed
+//!   bundles, etc.). Vault secrets are encrypted at rest with an
+//!   X25519 sealed envelope (see [`SealedEnvelopeVault`] and
+//!   [`lillux::vault`]); the daemon's vault X25519 secret key
+//!   (auto-generated at boot, separate from the Ed25519 node identity)
+//!   is the only thing that can decrypt them.
+//! - Already-set process env on the daemon does NOT poison the vault.
+//!   Host env is only consulted for item-declared `required_secrets`,
+//!   and only those declared names are projected into subprocess env.
+//!
+//! ## Backend (`SealedEnvelopeVault`)
+//!
+//! Encrypted store at `<state>/.ai/state/secrets/store.enc` (TOML
+//! [`lillux::vault::SealedEnvelope`]); plaintext is a TOML map of
+//! `KEY = "VALUE"` after decryption. Vault X25519 secret key lives at
+//! `<state>/.ai/node/vault/private_key.pem` (0600).
+//!
+//! - Store missing → empty vault, request proceeds. (Operator hasn't
+//!   provisioned secrets — legitimate state.)
+//! - Store present but corrupt / wrong fingerprint / tampered → fail-loud
+//!   at read time; the request that triggered the read returns an
+//!   error.
+//! - Decrypted key on the OS-protected blocked list (`PATH`, `HOME`,
+//!   …) → fail-loud at read time via [`validate_decrypted_keys`]. A
+//!   poisoned store must never silently shadow `PATH` for spawned
+//!   subprocesses.
+//! - Empty / non-`[A-Za-z0-9_]+` keys → fail-loud post-decrypt.
+//!
+//! No silent dropping of bad entries: typed-fail-loud, end-to-end.
+
+use std::collections::HashMap;
+use std::env::VarError;
+use std::path::{Path, PathBuf};
+
+use anyhow::{anyhow, bail, Result};
+
+use ryeos_engine::roots;
+
+// Vault key-name policy + write helpers live in
+// `ryeos_tools::actions::vault` so they can be shared with the CLI
+// `ryeos vault {put,list,remove,rewrap}` verbs without a circular
+// crate dependency. We re-export the pieces public callers (tests,
+// fixtures, dispatch) need so this module's surface is unchanged.
+pub use ryeos_vault::paths::default_sealed_store_path;
+pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
+pub use ryeos_vault::sealed::write_sealed_secrets;
+
+/// Read-only operator-secret store. Daemon-owned, swappable backend.
+pub trait NodeVault: Send + Sync + std::fmt::Debug {
+    /// Return the secrets the given principal is allowed to see.
+    ///
+    /// V0 ignores `principal` (single-operator node, no per-principal
+    /// scoping). V1 sealed-envelope backend will scope by principal
+    /// fingerprint, matching Python `ryeos-node/ryeos_node/vault.py`'s
+    /// `<cas_base>/<fingerprint>/vault/<NAME>.json` layout.
+    fn read_all(&self, principal: &str) -> Result<HashMap<String, String>>;
+
+    /// Set a secret. Server-side sealing: the daemon re-encrypts the
+    /// entire store. The `principal` param is accepted but ignored in v1
+    /// (single shared store per trust boundary).
+    fn set_secret(&self, principal: &str, name: &str, value: &str) -> Result<()>;
+
+    /// List secret key names (never values).
+    fn list_keys(&self, principal: &str) -> Result<Vec<String>>;
+
+    /// Delete a secret by name. Returns `true` if the key existed.
+    fn delete_secret(&self, principal: &str, name: &str) -> Result<bool>;
+}
+
+/// Read only the secrets declared on the spawning item's
+/// `ItemMetadata.required_secrets`, refusing if any declared secret
+/// is missing.
+///
+/// This is the **only** vault entry point the dispatcher should use.
+/// Calling [`NodeVault::read_all`] directly and pouring the entire
+/// vault into a subprocess env was the v0 leak pattern: every spawn,
+/// regardless of what the item actually needed, got every secret the
+/// operator owned. Items now declare what they need; this function
+/// projects the source(s) to that subset.
+///
+/// ## Sources, in precedence order (highest wins)
+///
+/// 1. The sealed-envelope vault (`vault.read_all(principal)`).
+/// 2. Declared names from the daemon host environment (for hosted
+///    platforms like Railway/Fly/Render where service variables are
+///    the operator's native secret mechanism).
+/// 3. `.env` files under each entry of `dotenv_search_dirs`, with
+///    later directories overriding earlier ones (typical caller
+///    passes `[user_home, project_root]` so project beats user).
+///
+/// `.env` is intentionally lower precedence than both vault and host
+/// env — the vault is RyeOS's explicit operator store, host env is the
+/// deployment platform's operator store, and project `.env` is a
+/// convenience fallback for local/dev. Vault entries always win.
+///
+/// ## Refusal semantics
+///
+/// Refuses on any declared secret missing from ALL sources — that's
+/// a misconfiguration the caller wants surfaced, not silently
+/// absorbed (the alternative is a tool calling a provider with
+/// `None` and emitting an opaque upstream auth error).
+///
+/// Empty `required_secrets` ⇒ empty map. Neither vault, host env, nor
+/// `.env` files are read in that case (the dispatch fast-path).
+pub fn read_required_secrets(
+    vault: &dyn NodeVault,
+    principal: &str,
+    required_secrets: &[String],
+    dotenv_search_dirs: &[PathBuf],
+) -> Result<HashMap<String, String>> {
+    if required_secrets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    for key in required_secrets {
+        crate::process::validate_spawn_secret_name(key)
+            .map_err(|e| anyhow!("vault: invalid declared secret `{key}`: {e:#}"))?;
+    }
+    let vault_map = vault.read_all(principal)?;
+    let host_env_map = read_declared_host_env(required_secrets)?;
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+        .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
+    let mut out = HashMap::with_capacity(required_secrets.len());
+    let mut missing: Vec<&str> = Vec::new();
+    for key in required_secrets {
+        // Vault wins on conflict; host env is the deployment fallback;
+        // .env is the local/dev convenience fallback.
+        if let Some(v) = vault_map.get(key.as_str()) {
+            out.insert(key.clone(), v.clone());
+        } else if let Some(v) = host_env_map.get(key.as_str()) {
+            out.insert(key.clone(), v.clone());
+        } else if let Some(v) = dotenv_map.get(key.as_str()) {
+            out.insert(key.clone(), v.clone());
+        } else {
+            missing.push(key.as_str());
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "vault: missing declared secret(s) for principal `{principal}`: [{}]. \
+             The item declares these in `required_secrets` but none of the checked \
+             sources provides them: sealed vault, daemon host environment, or \
+             `.env` overlay. For hosted deployments, configure them as service \
+             variables. For local/dev, use `ryeos vault put` or a project/user \
+             `.env`, or remove the declaration.",
+            missing.join(", ")
+        );
+    }
+    Ok(out)
+}
+
+fn read_declared_host_env(required_secrets: &[String]) -> Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    for key in required_secrets {
+        match std::env::var(key) {
+            Ok(value) => {
+                out.insert(key.clone(), value);
+            }
+            Err(VarError::NotPresent) => {}
+            Err(VarError::NotUnicode(_)) => {
+                bail!(
+                    "vault: declared secret `{key}` is present in daemon host env \
+                     but is not valid UTF-8"
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Compute the conventional `.env` search directories for the
+/// dispatch path: `[user_home, project_root]` when both are
+/// available, falling back to whichever is present.
+///
+/// Order matters — later entries win on key collision (see
+/// [`read_required_secrets`]). The operator's user-wide `.env` is
+/// loaded first; the project's `.env` overrides on top.
+///
+/// Returns an empty vector when neither is resolvable. The dispatch
+/// path then degenerates to vault-only (the pre-step-7c behavior).
+pub fn dotenv_search_dirs(project_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(p) = roots::user_dotenv_path() {
+        dirs.push(p.parent().unwrap().to_path_buf());
+    }
+    if let Some(p) = project_path {
+        dirs.push(p.to_path_buf());
+    }
+    dirs
+}
+
+/// Stub vault — used only when the daemon is constructed for a unit
+/// test that doesn't want to depend on the operator's filesystem.
+/// Always returns an empty map.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmptyVault;
+
+impl NodeVault for EmptyVault {
+    fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
+        Ok(HashMap::new())
+    }
+
+    fn set_secret(&self, _principal: &str, _name: &str, _value: &str) -> Result<()> {
+        bail!("vault: EmptyVault does not support writes")
+    }
+
+    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    fn delete_secret(&self, _principal: &str, _name: &str) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+// ── V1 sealed-envelope vault ────────────────────────────────────────
+
+/// V1: encrypted secret store backed by an X25519 sealed envelope.
+///
+/// Storage layout:
+///   - Vault X25519 secret key: `<state>/.ai/node/vault/private_key.pem`
+///     (generated at `ryeos init` time, file mode 0600).
+///   - Encrypted store: `<state>/.ai/state/secrets/store.enc`. Single
+///     TOML file containing the [`lillux::vault::SealedEnvelope`].
+///     The decrypted plaintext is a TOML map of `KEY = "VALUE"`.
+///
+/// Trust boundary: the daemon process holds the vault secret key in
+/// memory for the lifetime of the daemon. Subprocesses inherit
+/// secrets via env, NOT the key itself. Vault-key rotation is an
+/// explicit `ryeos vault rewrap` operation; the daemon refuses to read
+/// envelopes whose `vault_pubkey_fingerprint` doesn't match.
+#[derive(Debug, Clone)]
+pub struct SealedEnvelopeVault {
+    store_path: PathBuf,
+    secret_key: lillux::vault::VaultSecretKey,
+}
+
+impl SealedEnvelopeVault {
+    /// Build a vault from an in-memory key + on-disk store path.
+    pub fn new(store_path: PathBuf, secret_key: lillux::vault::VaultSecretKey) -> Self {
+        Self {
+            store_path,
+            secret_key,
+        }
+    }
+
+    /// Load the vault secret key from `<system_space_dir>/.ai/node/vault/private_key.pem`
+    /// and bind it to `<system_space_dir>/.ai/state/secrets/store.enc`.
+    pub fn load(system_space_dir: &Path) -> Result<Self> {
+        let secret_path = system_space_dir
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("vault")
+            .join("private_key.pem");
+        let secret_key = lillux::vault::read_secret_key(&secret_path)
+            .map_err(|e| anyhow!("vault: load secret key {}: {e:#}", secret_path.display()))?;
+        Ok(Self::new(
+            default_sealed_store_path(system_space_dir),
+            secret_key,
+        ))
+    }
+
+    pub fn store_path(&self) -> &Path {
+        &self.store_path
+    }
+
+    pub fn public_key(&self) -> lillux::vault::VaultPublicKey {
+        self.secret_key.public_key()
+    }
+
+    /// Internal read-all without the trait dispatch.
+    fn read_all_internal(&self) -> Result<HashMap<String, String>> {
+        if !self.store_path.exists() {
+            return Ok(HashMap::new());
+        }
+        let raw = std::fs::read_to_string(&self.store_path).map_err(|e| {
+            anyhow!(
+                "vault: read sealed store {}: {e}",
+                self.store_path.display()
+            )
+        })?;
+        let envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw).map_err(|e| {
+            anyhow!(
+                "vault: sealed store {} is not a valid envelope TOML: {e}",
+                self.store_path.display()
+            )
+        })?;
+        let plaintext = lillux::vault::open(&self.secret_key, &envelope)
+            .map_err(|e| anyhow!("vault: open envelope: {e:#}"))?;
+        let plaintext_str = std::str::from_utf8(&plaintext)
+            .map_err(|e| anyhow!("vault: decrypted plaintext is not UTF-8: {e}"))?;
+        let map: HashMap<String, String> = toml::from_str(plaintext_str)
+            .map_err(|e| anyhow!("vault: decrypted plaintext is not a valid TOML map: {e}"))?;
+        validate_decrypted_keys(&map, &self.store_path)?;
+        Ok(map)
+    }
+
+    /// Atomic read-modify-write on the sealed store.
+    ///
+    /// If the store file exists but cannot be read (corrupt, wrong key,
+    /// etc.), this returns an error rather than silently starting from
+    /// an empty store. A missing store file is fine (first write).
+    fn read_modify_write<T>(
+        &self,
+        modify: impl FnOnce(&mut HashMap<String, String>) -> Result<T>,
+    ) -> Result<T> {
+        let mut map = if self.store_path.exists() {
+            self.read_all_internal()?
+        } else {
+            HashMap::new()
+        };
+        let result = modify(&mut map)?;
+        validate_decrypted_keys(&map, &self.store_path)?;
+        let pk = self.secret_key.public_key();
+        write_sealed_secrets(&self.store_path, &pk, &map)?;
+        Ok(result)
+    }
+}
+
+impl NodeVault for SealedEnvelopeVault {
+    fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
+        self.read_all_internal()
+    }
+
+    fn set_secret(&self, _principal: &str, name: &str, value: &str) -> Result<()> {
+        // Validate key name
+        validate_key_name(name)?;
+        self.read_modify_write(|map| {
+            map.insert(name.to_string(), value.to_string());
+            Ok(())
+        })
+    }
+
+    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+        let map = self.read_all_internal()?;
+        let mut keys: Vec<String> = map.into_keys().collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    fn delete_secret(&self, _principal: &str, name: &str) -> Result<bool> {
+        // Validate key name before attempting delete
+        validate_key_name(name)?;
+        self.read_modify_write(|map| Ok(map.remove(name).is_some()))
+    }
+}
+
+/// Read a single named secret from the vault. Returns `Ok(Some(value))`
+/// when present, `Ok(None)` when absent. Use this for the narrow
+/// provider-secret injection path after model-target preflight.
+pub fn read_named_secret(
+    vault: &dyn NodeVault,
+    principal: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    let map = vault.read_all(principal)?;
+    Ok(map.get(name).cloned())
+}
+
+/// Resolve one explicitly requested secret name through the same source
+/// stack used by `read_required_secrets`: sealed vault, daemon host env,
+/// then `.env` overlay. Returns `Ok(None)` when absent from every source.
+pub fn read_explicit_secret(
+    vault: &dyn NodeVault,
+    principal: &str,
+    name: &str,
+    dotenv_search_dirs: &[PathBuf],
+) -> Result<Option<String>> {
+    crate::process::validate_spawn_secret_name(name)
+        .map_err(|e| anyhow!("vault: invalid explicit secret `{name}`: {e:#}"))?;
+    let required = vec![name.to_string()];
+    let vault_map = vault.read_all(principal)?;
+    if let Some(value) = vault_map.get(name) {
+        return Ok(Some(value.clone()));
+    }
+    let host_env_map = read_declared_host_env(&required)?;
+    if let Some(value) = host_env_map.get(name) {
+        return Ok(Some(value.clone()));
+    }
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+        .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
+    Ok(dotenv_map.get(name).cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        _guard: MutexGuard<'static, ()>,
+        previous: Vec<(String, Option<OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn set(vars: &[(&str, Option<&str>)]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let previous = vars
+                .iter()
+                .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in vars {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_vault_trait_returns_empty() {
+        assert!(EmptyVault.read_all("op").unwrap().is_empty());
+    }
+
+    /// Test fixture: a vault that returns a fixed map.
+    #[derive(Debug)]
+    struct FixedVault(HashMap<String, String>);
+    impl NodeVault for FixedVault {
+        fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
+            Ok(self.0.clone())
+        }
+        fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            bail!("FixedVault does not support writes")
+        }
+        fn list_keys(&self, principal: &str) -> Result<Vec<String>> {
+            let map = self.read_all(principal)?;
+            let mut keys: Vec<String> = map.into_keys().collect();
+            keys.sort();
+            Ok(keys)
+        }
+        fn delete_secret(&self, _: &str, _: &str) -> Result<bool> {
+            bail!("FixedVault does not support writes")
+        }
+    }
+
+    #[test]
+    fn read_required_empty_required_skips_vault_read() {
+        // Use a vault that would panic if read; assert no read happens.
+        #[derive(Debug)]
+        struct PanicVault;
+        impl NodeVault for PanicVault {
+            fn read_all(&self, _: &str) -> Result<HashMap<String, String>> {
+                panic!("read_all should not be called when required is empty");
+            }
+            fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<()> {
+                panic!("set_secret should not be called")
+            }
+            fn list_keys(&self, _: &str) -> Result<Vec<String>> {
+                panic!("list_keys should not be called")
+            }
+            fn delete_secret(&self, _: &str, _: &str) -> Result<bool> {
+                panic!("delete_secret should not be called")
+            }
+        }
+        let bindings = read_required_secrets(&PanicVault, "op", &[], &[]).unwrap();
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn read_required_returns_only_declared_keys() {
+        let mut all = HashMap::new();
+        all.insert("OPENAI_API_KEY".to_string(), "sk-1".to_string());
+        all.insert("DATABASE_URL".to_string(), "postgres://".to_string());
+        all.insert("UNRELATED".to_string(), "secret-not-declared".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["OPENAI_API_KEY".to_string()];
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings.get("OPENAI_API_KEY"), Some(&"sk-1".to_string()));
+        assert!(!bindings.contains_key("DATABASE_URL"));
+        assert!(!bindings.contains_key("UNRELATED"));
+    }
+
+    #[test]
+    fn read_required_fails_on_missing_declared_secret() {
+        let mut all = HashMap::new();
+        all.insert("FOO".to_string(), "bar".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["FOO".to_string(), "MISSING_KEY".to_string()];
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("MISSING_KEY"),
+            "expected MISSING_KEY in error: {msg}"
+        );
+        assert!(
+            msg.contains("missing declared secret"),
+            "expected scoping note in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn host_env_supplies_declared_secret() {
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_SECRET", Some("from-host"))]);
+        let v = FixedVault(HashMap::new());
+        let required = vec!["SNAPTRACK_TEST_HOST_SECRET".to_string()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+
+        assert_eq!(
+            bindings.get("SNAPTRACK_TEST_HOST_SECRET"),
+            Some(&"from-host".to_string())
+        );
+    }
+
+    #[test]
+    fn vault_beats_host_env_for_declared_secret() {
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_PRECEDENCE", Some("from-host"))]);
+        let mut all = HashMap::new();
+        all.insert(
+            "SNAPTRACK_TEST_PRECEDENCE".to_string(),
+            "from-vault".to_string(),
+        );
+        let v = FixedVault(all);
+        let required = vec!["SNAPTRACK_TEST_PRECEDENCE".to_string()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+
+        assert_eq!(
+            bindings.get("SNAPTRACK_TEST_PRECEDENCE"),
+            Some(&"from-vault".to_string())
+        );
+    }
+
+    #[test]
+    fn host_env_beats_dotenv_for_declared_secret() {
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_DOTENV", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            "SNAPTRACK_TEST_HOST_DOTENV=from-dotenv\n",
+        )
+        .unwrap();
+        let v = FixedVault(HashMap::new());
+        let required = vec!["SNAPTRACK_TEST_HOST_DOTENV".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+
+        assert_eq!(
+            bindings.get("SNAPTRACK_TEST_HOST_DOTENV"),
+            Some(&"from-host".to_string())
+        );
+    }
+
+    #[test]
+    fn host_env_only_returns_declared_keys() {
+        let _env = EnvVarGuard::set(&[
+            ("SNAPTRACK_TEST_DECLARED", Some("declared")),
+            ("SNAPTRACK_TEST_UNDECLARED", Some("must-not-leak")),
+        ]);
+        let v = FixedVault(HashMap::new());
+        let required = vec!["SNAPTRACK_TEST_DECLARED".to_string()];
+
+        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings.get("SNAPTRACK_TEST_DECLARED"),
+            Some(&"declared".to_string())
+        );
+        assert!(!bindings.contains_key("SNAPTRACK_TEST_UNDECLARED"));
+    }
+
+    #[test]
+    fn declared_secret_rejects_blocked_host_env_name() {
+        let v = FixedVault(HashMap::new());
+        let required = vec!["PATH".to_string()];
+
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("invalid declared secret"), "got: {msg}");
+        assert!(msg.contains("blocked list"), "got: {msg}");
+    }
+
+    #[test]
+    fn missing_declared_secret_mentions_host_env_source() {
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_MISSING_SECRET", None)]);
+        let v = FixedVault(HashMap::new());
+        let required = vec!["SNAPTRACK_TEST_MISSING_SECRET".to_string()];
+
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("SNAPTRACK_TEST_MISSING_SECRET"), "got: {msg}");
+        assert!(msg.contains("daemon host environment"), "got: {msg}");
+        assert!(msg.contains("sealed vault"), "got: {msg}");
+        assert!(msg.contains(".env"), "got: {msg}");
+    }
+
+    // ── SealedEnvelopeVault tests ────────────────────────────────
+
+    #[test]
+    fn sealed_vault_missing_store_returns_empty() {
+        let tmp =
+            std::env::temp_dir().join(format!("ryeosd-sealed-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(tmp.join("store.enc"), sk);
+        assert!(v.read_all("op").unwrap().is_empty());
+    }
+
+    #[test]
+    fn sealed_vault_roundtrip_via_write_helper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let pk = sk.public_key();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("OPENAI_API_KEY".to_string(), "sk-1".to_string());
+        secrets.insert("DATABASE_URL".to_string(), "postgres://u@h/db".to_string());
+        write_sealed_secrets(&store_path, &pk, &secrets).unwrap();
+
+        let v = SealedEnvelopeVault::new(store_path.clone(), sk);
+        let got = v.read_all("op").unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got.get("OPENAI_API_KEY").unwrap(), "sk-1");
+        assert_eq!(got.get("DATABASE_URL").unwrap(), "postgres://u@h/db");
+    }
+
+    #[test]
+    fn sealed_vault_read_with_wrong_key_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk_writer = lillux::vault::VaultSecretKey::generate();
+        let sk_reader = lillux::vault::VaultSecretKey::generate();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("FOO".to_string(), "bar".to_string());
+        write_sealed_secrets(&store_path, &sk_writer.public_key(), &secrets).unwrap();
+
+        let v = SealedEnvelopeVault::new(store_path, sk_reader);
+        let err = v.read_all("op").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("fingerprint") || msg.contains("AEAD"),
+            "expected fingerprint/AEAD failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn sealed_vault_write_rejects_blocked_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let pk = lillux::vault::VaultSecretKey::generate().public_key();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("PATH".to_string(), "/evil".to_string());
+        let err = write_sealed_secrets(&store_path, &pk, &secrets).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("PATH"),
+            "expected PATH in error: {err}"
+        );
+    }
+
+    #[test]
+    fn sealed_vault_write_rejects_invalid_key_chars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let pk = lillux::vault::VaultSecretKey::generate().public_key();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("FOO-BAR".to_string(), "x".to_string());
+        let err = write_sealed_secrets(&store_path, &pk, &secrets).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid key"),
+            "expected invalid key in error: {err}"
+        );
+    }
+
+    #[test]
+    fn sealed_vault_round_trip_with_quoting_edge_cases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let pk = sk.public_key();
+
+        let mut secrets = HashMap::new();
+        secrets.insert("WITH_QUOTE".to_string(), "abc\"def".to_string());
+        secrets.insert("WITH_BACKSLASH".to_string(), "line\\path".to_string());
+        secrets.insert("WITH_NEWLINE".to_string(), "a\nb".to_string());
+        secrets.insert("WITH_UNICODE".to_string(), "naïve".to_string());
+        write_sealed_secrets(&store_path, &pk, &secrets).unwrap();
+
+        let v = SealedEnvelopeVault::new(store_path, sk);
+        let got = v.read_all("op").unwrap();
+        for (k, v) in &secrets {
+            assert_eq!(got.get(k), Some(v), "round-trip mismatch for {k}");
+        }
+    }
+
+    #[test]
+    fn sealed_vault_load_from_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        let key_path = state
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("vault")
+            .join("private_key.pem");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&key_path, &sk).unwrap();
+
+        let v = SealedEnvelopeVault::load(state).unwrap();
+        assert_eq!(v.public_key().fingerprint(), sk.public_key().fingerprint());
+        assert_eq!(v.store_path(), default_sealed_store_path(state));
+    }
+
+    #[test]
+    fn read_required_fails_on_multiple_missing_listed_together() {
+        let v = FixedVault(HashMap::new());
+        let required = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
+        let msg = format!("{err:#}");
+        for k in &["A", "B", "C"] {
+            assert!(msg.contains(k), "expected {k} in error: {msg}");
+        }
+    }
+
+    // ── .env overlay layering ────────────────────────────────────
+
+    #[test]
+    fn dotenv_overlay_supplies_missing_declared_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "FROM_DOTENV=hello\n").unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let required = vec!["FROM_DOTENV".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(bindings.get("FROM_DOTENV"), Some(&"hello".to_string()));
+    }
+
+    #[test]
+    fn dotenv_overlay_loses_to_vault_on_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "FOO=from-dotenv\n").unwrap();
+
+        let mut all = HashMap::new();
+        all.insert("FOO".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["FOO".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(
+            bindings.get("FOO"),
+            Some(&"from-vault".to_string()),
+            "vault must win on key collision with .env"
+        );
+    }
+
+    #[test]
+    fn project_dotenv_overrides_user_dotenv() {
+        let user = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join(".env"), "API_KEY=user-default\n").unwrap();
+        std::fs::write(project.path().join(".env"), "API_KEY=project-override\n").unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let required = vec!["API_KEY".to_string()];
+        let dirs = vec![user.path().to_path_buf(), project.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(
+            bindings.get("API_KEY"),
+            Some(&"project-override".to_string()),
+            "later (project) .env must override earlier (user) .env"
+        );
+    }
+
+    #[test]
+    fn dotenv_overlay_rejects_blocked_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "PATH=/evil\n").unwrap();
+
+        let v = FixedVault(HashMap::new());
+        // Even with no required_secrets touching PATH, the parser
+        // bails because the file itself is poisoned. The dispatcher
+        // should not silently absorb a project's attempt to shadow
+        // PATH. (Empty required_secrets short-circuits before the
+        // .env read, so we declare a different secret to force the
+        // .env walk.)
+        let required = vec!["UNRELATED".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let err = read_required_secrets(&v, "op", &required, &dirs).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("PATH") && msg.contains("blocked"),
+            "expected blocked PATH error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dotenv_overlay_skipped_when_required_empty() {
+        // `read_required_secrets` short-circuits on empty required;
+        // no .env walk happens, so a poisoned .env doesn't trip the
+        // parser when nothing was declared.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "PATH=/evil\n").unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &[], &dirs).unwrap();
+        assert!(bindings.is_empty());
+    }
+
+    // ── read_named_secret tests ──────────────────────────────────
+
+    #[test]
+    fn read_named_secret_present() {
+        let mut map = HashMap::new();
+        map.insert("ZEN_API_KEY".to_string(), "sk-zen".to_string());
+        map.insert("OTHER".to_string(), "other-val".to_string());
+        let v = FixedVault(map);
+
+        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        assert_eq!(result, Some("sk-zen".to_string()));
+    }
+
+    #[test]
+    fn read_named_secret_absent() {
+        let mut map = HashMap::new();
+        map.insert("OTHER".to_string(), "other-val".to_string());
+        let v = FixedVault(map);
+
+        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn read_named_secret_only_asked_one_back() {
+        let mut map = HashMap::new();
+        map.insert("ZEN_API_KEY".to_string(), "sk-zen".to_string());
+        map.insert("OPENROUTER_API_KEY".to_string(), "sk-or".to_string());
+        let v = FixedVault(map);
+
+        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        assert_eq!(result, Some("sk-zen".to_string()));
+        // Confirm we only got the one we asked for — no multi-key
+        // injection in the return value.
+    }
+
+    // ── Vault CRUD tests via SealedEnvelopeVault ──
+
+    #[test]
+    fn vault_set_list_delete_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        // Set secrets
+        v.set_secret("op", "API_KEY", "sk-123").unwrap();
+        v.set_secret("op", "DB_URL", "postgres://host/db").unwrap();
+
+        // List keys
+        let mut keys = v.list_keys("op").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["API_KEY", "DB_URL"]);
+
+        // Read back
+        let all = v.read_all("op").unwrap();
+        assert_eq!(all.get("API_KEY"), Some(&"sk-123".to_string()));
+        assert_eq!(all.get("DB_URL"), Some(&"postgres://host/db".to_string()));
+
+        // Delete one
+        let deleted = v.delete_secret("op", "API_KEY").unwrap();
+        assert!(deleted, "should return true for existing key");
+
+        // Verify deleted
+        let keys = v.list_keys("op").unwrap();
+        assert_eq!(keys, vec!["DB_URL"]);
+
+        // Delete non-existent returns false
+        let deleted = v.delete_secret("op", "NOPE").unwrap();
+        assert!(!deleted, "should return false for missing key");
+    }
+
+    #[test]
+    fn vault_set_rejects_invalid_key_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        // Hyphens are not allowed (only [A-Za-z0-9_])
+        let err = v.set_secret("op", "my-key", "val").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("key name"),
+            "expected key name error, got: {msg}"
+        );
+
+        // Blocked name
+        let err = v.set_secret("op", "PATH", "/evil").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("blocked"),
+            "expected blocked error, got: {msg}"
+        );
+
+        // Empty name
+        let err = v.set_secret("op", "", "val").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("empty"), "expected empty error, got: {msg}");
+    }
+
+    #[test]
+    fn vault_delete_rejects_invalid_key_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        let err = v.delete_secret("op", "bad-key").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("key name"),
+            "expected key name error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn vault_set_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+
+        v.set_secret("op", "KEY", "old").unwrap();
+        v.set_secret("op", "KEY", "new").unwrap();
+
+        let all = v.read_all("op").unwrap();
+        assert_eq!(all.get("KEY"), Some(&"new".to_string()));
+        assert_eq!(all.len(), 1, "should have exactly one key");
+    }
+
+    // ── Remote vault E2E simulation ──
+    // Tests the vault handler contract (set → list → delete → list)
+    // against a real SealedEnvelopeVault. The vault_set / vault_list /
+    // vault_delete handlers delegate to these same trait methods.
+
+    #[test]
+    fn vault_handler_e2e_set_list_delete_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let vault = SealedEnvelopeVault::new(store_path, sk);
+
+        // Simulate vault_set("API_KEY", "sk-secret-123")
+        vault
+            .set_secret("caller", "API_KEY", "sk-secret-123")
+            .unwrap();
+        // Simulate vault_set("DB_URL", "postgres://localhost/db")
+        vault
+            .set_secret("caller", "DB_URL", "postgres://localhost/db")
+            .unwrap();
+
+        // Simulate vault_list
+        let mut keys = vault.list_keys("caller").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["API_KEY", "DB_URL"]);
+
+        // Simulate vault_set overwriting (handler returns vault_fingerprint)
+        vault.set_secret("caller", "API_KEY", "sk-new-key").unwrap();
+
+        // Verify overwrite
+        let all = vault.read_all("caller").unwrap();
+        assert_eq!(all.get("API_KEY"), Some(&"sk-new-key".to_string()));
+        assert_eq!(all.len(), 2);
+
+        // Simulate vault_delete
+        let deleted = vault.delete_secret("caller", "API_KEY").unwrap();
+        assert!(deleted);
+
+        // Verify deleted
+        let keys = vault.list_keys("caller").unwrap();
+        assert_eq!(keys, vec!["DB_URL"]);
+
+        // Simulate vault_delete with invalid name (handler returns 400)
+        let err = vault.delete_secret("caller", "bad-key").unwrap_err();
+        assert!(format!("{err:#}").contains("key name"));
+
+        // Simulate vault_set with blocked name (handler returns 400)
+        let err = vault.set_secret("caller", "PATH", "/evil").unwrap_err();
+        assert!(format!("{err:#}").contains("blocked"));
+    }
+}

@@ -1,0 +1,14 @@
+# ryeos:signed:2026-05-31T08:15:50Z:3ded54f5c3c37c3780452ac69f5c8fb506e94f912ac0bbb10ad5fdf45d213a07:isATpzLAgblJt1TR0tKZSLQ92fG3vfkXp9dxiGtr65M7cTH0tqIs7WEG6jEWH52ms3UXzkb7cgutB/bpiGD+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-configure
+description: Add or update a remote node configuration, optionally from a descriptor trust pin
+execute: service:remote/configure
+aliases:
+- tokens:
+  - remote
+  - configure
+  project_resolution: optional
+  positional_forms:
+  - slots:
+    - field: remote

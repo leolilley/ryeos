@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:95193f0661205cbff874546ca32fe4fee6992976a40fc38abcdc1220cec1072f:raXAexO6jmFJ2EOBVyM5qzudylUfYWmWl4U8IJps/FDe4JHMrolSqR3t4GVZL7K8VVg0fGWSmJj7VOEt1+/+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: cockpit/item/inspect
+version: "1.0.0"
+description: Inspect one real canonical item — resolve, classify trust, and return raw source and effective composition.
+endpoint: ui.cockpit.item.inspect
+availability: daemon_only

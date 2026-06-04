@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:7dd2f6ca4cdcb78962749071ddcb0a480eeaa89f7384b3ead0577adc5e21a0cd:0Wl7nniXjEinADDnmE+IatnSSAyyThLCbCV8GvujwPRBSQ/N8FObnLmFCnJu02rLr8BF+sEMeIOPFQw5F7wDCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: studio/projects/resolve
+version: "1.0.0"
+description: Resolve one local Studio project registry entry by opaque local id.
+endpoint: ui.studio.projects.resolve
+availability: daemon_only

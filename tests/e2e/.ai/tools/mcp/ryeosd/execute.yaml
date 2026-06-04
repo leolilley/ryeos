@@ -1,0 +1,25 @@
+# ryeos:signed:2026-04-09T00:59:52Z:603f7e0b77a4c208edb5c06857cdb4e3b67a5fa66ec9a1afc315073809c0b8f3:ceeYHEXWyYtDDRN0TLzitmWERGPzbqW_mCDzr_vZjvwFCoLEaf2ioCF1iArwgdpZeIchwe9ezJQalaVhyJ1uAQ:4b987fd4e40303ac
+tool_type: mcp
+executor_id: rye/core/runtimes/mcp/stdio
+category: mcp/ryeosd
+version: 1.0.0
+description: Run the ryeos CLI through the local MCP wrapper
+config:
+  server: mcp/servers/ryeosd
+  server_config_path: '{project_path}/.ai/tools/mcp/servers/ryeosd.yaml'
+  tool_name: cli
+input_schema:
+  type: object
+  properties:
+    args:
+      type: array
+      items:
+        type: string
+      description: "Arguments passed to ryeos; do not include the binary name"
+    project_path:
+      type: string
+    timeout_s:
+      type: number
+      default: 60
+  required:
+  - args

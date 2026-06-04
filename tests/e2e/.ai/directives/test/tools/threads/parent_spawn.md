@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:b89f254d735e8a258229384d5c61a5cd2cd0ca3eb49e65b6c246fc9344a6697f:QFc9Wlf0V5WtbxM3twimjqC1MTXzV0MqyRfounTuk7Mw5n7dfYkPh0B4pCk4LRtfwTwHzjPZFO9-qvUQwDl7DA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:b89f254d735e8a258229384d5c61a5cd2cd0ca3eb49e65b6c246fc9344a6697f:QFc9Wlf0V5WtbxM3twimjqC1MTXzV0MqyRfounTuk7Mw5n7dfYkPh0B4pCk4LRtfwTwHzjPZFO9-qvUQwDl7DA==:4b987fd4e40303ac -->
 # Parent Spawn
 
 Parent directive that writes its own file, then spawns a child thread to write a second file. Tests recursive thread spawning — should produce two thread folders.
@@ -8,7 +8,7 @@ Parent directive that writes its own file, then spawns a child thread to write a
   <metadata>
     <description>Write a parent log file, then spawn a child thread (test/tools/file_system/child_write) to write a second file. Verifies both files exist.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="8" tokens="32000" />
     <permissions>

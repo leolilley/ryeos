@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:ce1484c36e3c9aedbd414a2c052e8181048d3a11eb0386c8d5695327c7c28ac5:xI89/rltjvc7UITU+NlJOCIRJY9fqx/VAlIpjegddLxS3YUHkLhmbBjI6ZtPP7N0wiPtwGILWw7iKY3Uoe/tAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: graph/topology
+version: "1.0.0"
+description: Returns the authenticated browser session's resolved RyeOS topology graph.
+endpoint: ui.graph.topology
+availability: daemon_only

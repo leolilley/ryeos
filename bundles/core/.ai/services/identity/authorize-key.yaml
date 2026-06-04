@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-23T12:06:26Z:ed989e2b4e698875842d3a235e394bba8ac955a2ee5ce511c48e93351b21ae17:tNTK0nHjuK2TUzDayd45iNZLHhmdv0+itHLr8xPE9PeQpftHu28I9dkuhyEHI6Ay501j6V3i3Lg9zzBPzokmCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
+kind: service
+endpoint: identity.authorize-key
+required_caps: ["ryeos.execute.service.authorize.key"]
+schema:
+  public_key: string
+  label: string
+  scopes: string[]
+description: "Authorize a public key with scoped capabilities"

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-03T03:45:48Z:f0bd1f1c65f8adc3cdcc9a835c2ea429d87cfd62d5d8c1d987a240cddde868b4:seNDUym1CVJTNx35vutjrRGQFT8fmonQUGExmQdlvj3aiYQDPQJio28Z4FQmnISmBE5hfw+F2v8f/cBRtFQDDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle.sign
+availability: offline
+offline_execute: tool:ryeos/core/bundle/sign
+required_caps: []
+schema:
+  source: string
+  registry_root: string?
+  registry_roots: array?
+description: "Sign all signable items in a bundle source tree and rebuild binary manifest sidecars when needed."

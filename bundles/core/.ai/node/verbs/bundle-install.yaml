@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-30T07:21:30Z:054faa89e7bfe73a56ee3f893fbedab2ac0eea2d7bdb719aa48071b76ea44c4b:+xWG5ZzBzDyaQXZCtedBpC7TCfimHREj679iIKxFDpIhEB5IbDuc9p1VCt2hBFU4WMzZ/7lWjJ99aolRTv5PAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: bundle-install
+description: Install a bundle into the daemon's state
+execute: service:bundle/install
+aliases:
+- tokens:
+  - bundle
+  - install

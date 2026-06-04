@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-31T08:15:50Z:b20620555ab7994735718e5720c7586b5297085ed3ebb985f0f71aadbd70b914:47WwK68NOozIbGqiVVhMfAqAoxFH7isabSNR0CBWh9nGl3eftt6aHoro4BFmPK2VfJGQddvHyYOib8VDjgPZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-descriptor
+description: Export a remote descriptor trust pin for this node
+execute: tool:ryeos/core/remote-descriptor
+aliases:
+- tokens:
+  - remote-descriptor
+  description: Export a remote descriptor trust pin

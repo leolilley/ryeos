@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:0257648faba31849a0be24962d9f44a5e644895f41a7bed4f530fa36349cfbc7:A1Iyh6vpz8rKbRn2ITZGg-1vMvgZs6JQuaUu-fqOTuQ6nr3938WYGeuSuAxwR5T-7GFxxq2PMbTfAYpGDgzpAw==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:0257648faba31849a0be24962d9f44a5e644895f41a7bed4f530fa36349cfbc7:A1Iyh6vpz8rKbRn2ITZGg-1vMvgZs6JQuaUu-fqOTuQ6nr3938WYGeuSuAxwR5T-7GFxxq2PMbTfAYpGDgzpAw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 # Quality Review
 
@@ -9,7 +9,7 @@ Review code changes for quality issues — runs gates then uses LLM analysis aga
   <metadata>
     <description>Review code changes for quality — deterministic gates + semantic LLM analysis</description>
     <category>rye/code/quality</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="standard" />
     <limits turns="10" tokens="32000" />
     <context>

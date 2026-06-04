@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:51Z:00bad4e27c9b8949c2d9f44d3e03386a38d392bba9b4741706148afeadf935aa:Ic62nXoBbf2fwg/DPjevlzXL5UrbJFIN89xUxUegcOHSBdxMgvPRN/NCGTxULSEeJ3l6MtR9XaxZCJAl+k/QBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: sync/jobs/list
+path: /sync/jobs/list
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:sync/jobs/list

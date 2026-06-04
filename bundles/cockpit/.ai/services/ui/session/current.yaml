@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:77e265f84e169c3374ac9d0ec27ba7658490f3e250441512b2a81e7c4fe55d00:mdsOyu97QwS3VuDKeEKVVGmdLEIbRbhfNisRf4G0iJ/S1/dUC8iC8LejP0REm9p2M+YzjEegxbufSexVNhAoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: session-current
+version: "1.0.0"
+description: Returns the authenticated browser session's context fields.
+endpoint: ui.session.current
+availability: daemon_only

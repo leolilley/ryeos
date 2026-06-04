@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:51Z:3598b8a5ee10a7fcabb4f9fa220657d2fa7b3f1ad08299d5fc019856d8f33c18:xOaKo+efHRwQLdLB2znz65RvqJWPm7nef0VZCsxbfZwBXT0A8moM0F7vw3wYv6hIJ23ENDkKPQ0pijVB9Am1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: objects/closure/describe
+path: /objects/closure/describe
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:objects/closure/describe

@@ -1,0 +1,8 @@
+# ryeos:signed:2026-05-31T08:15:52Z:e58da068d4c2d3e343b066916d9f0f1716fe8f93072168816b1df2cb96a3e464:wYieaT4yTkKA6fa0gc6jAM4JXLJb+hIA5st8cfAMM3ziycGvrfEFemfjCTCyYhH1pE3f746aifxVvTxw8y9NCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: admission.status
+required_caps: ["ryeos.execute.service.admission.status"]
+schema:
+  subject_hash: string
+  policy: string
+description: "Inspect the node admission head and attestation for a subject under a policy"

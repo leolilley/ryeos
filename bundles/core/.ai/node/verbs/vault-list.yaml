@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-30T07:21:31Z:272eb871992b29f818ea59c1cefa618806b87c60fa623d36a6571e400017f6fb:3CNRTw39dZj/zDVX2rezS9QuELIrBmXwV6GYWjr7A3DPUVOcBtz/ZnAtAJ/r9Y12UajFdCrkGm9QspDrmhIjAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: vault-list
+description: List secret key names in the node vault
+execute: service:vault/list
+aliases:
+- tokens:
+  - vault
+  - list

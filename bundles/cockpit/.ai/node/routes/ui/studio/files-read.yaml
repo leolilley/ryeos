@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:57Z:e453a7c7a58ebf58630044f226fe348652139477291bbf5af7a9d93bc7c45703:KgT25XZxLFQjMtjutRa+9r/54pQrWeEVgGY0upw828hX3nV1Pa9oCRxt3yUV++TL067EkkcvWlCu/pbD85KeAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/files/read
+path: /ui/api/studio/files/read
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/studio/files/read"

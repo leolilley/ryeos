@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:14:55Z:b30c0392986bbae7602e6f3af0adea94b21c164df1292d75138b1dcefa05569b:so4LcWWK75V3DwJYR7-NDDI2Fh-CKi7YB0NkF85oxOHrMWIU9af6IYX7qDKSv1ty6KTGkE-MRfPB3ZLBjX_vBA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:14:55Z:b30c0392986bbae7602e6f3af0adea94b21c164df1292d75138b1dcefa05569b:so4LcWWK75V3DwJYR7-NDDI2Fh-CKi7YB0NkF85oxOHrMWIU9af6IYX7qDKSv1ty6KTGkE-MRfPB3ZLBjX_vBA==:4b987fd4e40303ac -->
 
 # Spawn Child Directive
 
@@ -9,7 +9,7 @@ Recursive directive spawning test. Parent writes a plan file, spawns child direc
   <metadata>
     <description>Recursive directive spawning — parent orchestrates a plan, spawns a child directive to write a greeting file, verifies the child's output, and appends a completion summary.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Child thread spawning and cross-thread verification</model>
     <limits turns="8" tokens="3072" />
     <permissions>

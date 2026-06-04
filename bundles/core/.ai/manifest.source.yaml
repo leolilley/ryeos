@@ -1,0 +1,4 @@
+name: core
+version: "0.5.0"
+description: "Engine foundation: kind schemas, handlers, parsers, services, tools"
+requires_kinds: []

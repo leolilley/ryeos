@@ -1,0 +1,9 @@
+# ryeos:signed:2026-05-23T12:06:26Z:9a8cbc0a87cb55393940a759ce740550cabc75e87266fd656c226eadac470b1c:dlk8EQB5gvVPo+o1SJ03d+1eUIe7Zmqxm2Ce1OL0wAPEQw60AsfUHbhXnwSWlrmh9cTMK4nKVmSLosQtfdNKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+---
+kind: service
+endpoint: remote.bundle-install
+required_caps: ["ryeos.execute.service.bundle.install"]
+schema:
+  remote: string?
+  bundle_name: string
+description: "Install a bundle from a remote node via CAS pipeline"

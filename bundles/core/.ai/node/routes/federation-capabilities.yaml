@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:51Z:2058aa8d8d11f161c54957566eb6c761df15b7bd6f4ea5edb363ee8faa816830:zojeHaJZ9upNPwS4DqpQMjt6pTK9YBCMhYIBZzCV53mGLEwJskqj8zNWvOuxYFcGhAktKR9iH7VkhRL0z+r0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: federation/capabilities
+path: /federation/capabilities
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1024
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:federation/capabilities

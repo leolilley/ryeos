@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-04-01T08:05:35Z:30f0944a7457fb65894b1fad8559543e2cb8ff4f30143ddd3d7b505415bd14a1:3RAVc51inSJ9-jehtJSGhIsgmLM8AzIMdTnDr273CgnnQQCQ8pAOQgMNmqufo5mtBH-8I0Z6W4mhhY_d9Pt2Aw:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-04-01T08:05:35Z:30f0944a7457fb65894b1fad8559543e2cb8ff4f30143ddd3d7b505415bd14a1:3RAVc51inSJ9-jehtJSGhIsgmLM8AzIMdTnDr273CgnnQQCQ8pAOQgMNmqufo5mtBH-8I0Z6W4mhhY_d9Pt2Aw:4b987fd4e40303ac -->
 
 # Zen Gemini Test
 
@@ -9,7 +9,7 @@ Test directive that exercises the Zen provider with a Gemini model — verifies 
   <metadata>
     <description>Test Zen provider with Gemini model via Google Generative AI profile.</description>
     <category>test</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model id="gemini-3-flash" provider="zen/zen" />
     <limits turns="6" tokens="32000" spend="0.10" />
     <permissions>

@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-23T12:06:25Z:17ae219a956cc3e47704e02a8e695625249463d8065643122b726b7cb423b5e9:f2MGpjOJOQdPu1v7mNCMolVRhv7rpJWtlTJM/nRGMHsw+SBQ5CJ9mIRD/ZEUwz46vpODaxkF3B4yZPcVfHuEAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: bundle/export
+path: /bundle/export
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 16
+response:
+  mode: json
+  source: service:bundle/export

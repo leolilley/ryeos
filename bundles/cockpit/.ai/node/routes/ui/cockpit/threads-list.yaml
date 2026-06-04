@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-31T08:15:58Z:f4c9fcdf93682a9e553b60cb368bfea520ba5e855b287b8077ba00e0aba9166b:TzpKxuPpvwjiAlJYV1+ilIi9ySaHGpWraSO4OeANxfHkoU01p/0ajNjG4XPzidIdj8PkNho6mDTFh14IO7fsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/cockpit
+section: routes
+id: ui/api/cockpit/threads/list
+path: /ui/api/cockpit/threads/list
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/cockpit/threads/list"

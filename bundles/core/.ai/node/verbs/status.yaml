@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-31T08:17:38Z:5152ad94100699947c58057a877436b77ce01459eb94a1ba7b8083258d3f0781:qRAyORf+EvhMUmPLmzYwm/2FA8HMkVJnVIWqK+DhpY2miPmmd/ROXEZlrm2ehvw6uqk358eobKSSoatxaY/+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: status
+description: 'Show daemon status: version, uptime, bind address, active threads'
+execute: service:system/status
+aliases:
+- tokens:
+  - daemon
+  - status

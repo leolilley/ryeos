@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+#
+# ryeosd-full:dev — fast local dev image.
+# Copies host-built release binaries + already-published bundles
+# instead of compiling inside the image. Run scripts/populate-bundles.sh
+# on the host first.
+#
+# Build:
+#   docker build -f Dockerfile.dev -t ryeosd-full:dev .
+
+# debian:trixie ships glibc 2.41+, matching modern host toolchains. The
+# previous base (debian:bookworm-slim, glibc 2.36) refused to load
+# host-built release binaries with `GLIBC_2.39 not found`.
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get purge -y curl gnupg && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Host-built binaries (release profile, x86_64-unknown-linux-gnu).
+COPY target/release/ryeosd             /usr/local/bin/ryeosd
+COPY target/release/ryeos              /usr/local/bin/ryeos
+COPY target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
+
+# Already-published bundles (CAS rebuilt by populate-bundles.sh).
+COPY bundles/core        /opt/ryeos/core
+COPY bundles/standard    /opt/ryeos/standard
+COPY bundles/web         /opt/ryeos/web
+COPY bundles/cockpit     /opt/ryeos/cockpit
+COPY bundles/hosted-node /opt/ryeos/hosted-node
+
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENV HOME=/data/user
+ENV USER_SPACE=/data/user
+ENV RYEOS_SYSTEM_SPACE_DIR=/data/core
+EXPOSE 8000
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

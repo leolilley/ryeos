@@ -1,0 +1,33 @@
+# ryeos:signed:2026-05-31T08:15:52Z:a5af217ecbaeec4e497e2b048e9f7c4cc4fa627029b614736c5486f181702208:kai6LNHzRTR7f1WyhyLRluUC3yZbfrtM1m3STU2jvAr91KQ8/7XtwJKVsqn7Xudvfjo8dZIcqOrro4hnYDDICA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "ryeos/core"
+name: "admission-token"
+required_caps: ["ryeos.execute.tool.ryeos.core.admission-token"]
+description: "Mint a one-time node-local admission token for remote bootstrap."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "admission-token"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    system_space_dir:
+      type: string
+      description: "Target node system space root. Defaults to RYEOS_SYSTEM_SPACE_DIR."
+    scopes:
+      type: string
+      description: "Comma-separated scopes this token may grant."
+    label:
+      type: string
+      description: "Optional default label for the eventual authorized-key entry."
+    ttl_secs:
+      type: number
+      description: "Token lifetime in seconds. Defaults to 600."
+      default: 600
+  required: [scopes]

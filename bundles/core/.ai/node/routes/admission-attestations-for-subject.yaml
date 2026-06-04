@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:51Z:dd373edf90572fa4ae4ae13a944b6a218f27c7838a6d1508c8dea8073d30e97c:/3CGZT0kzxwn6ikv7UUY0kWhGoZqNcX4+B9sfi8AQsKLrTFH1Cj62vCytdY2nrhQvPGyRPYz4Hy7KHjFfihTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: admission/attestations-for-subject
+path: /admission/attestations-for-subject
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:admission/attestations-for-subject

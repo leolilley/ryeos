@@ -1,0 +1,129 @@
+# ryeos:signed:2026-05-27T06:45:50Z:1f307af85004089dcad4ac0e162f9d0567b2508f93a46e68e1f6ce70fc849360:EKWIE8r+yN0n1/2r6dBaHQVx5T6mVI78Dw9G04OV8j13b54c97Hroe/ARykgx/4zM4fLTVGh3JRDeLviAvn1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime/model-providers"
+family: chat_completions
+base_url: "https://openrouter.ai/api/v1"
+auth:
+  env_var: OPENROUTER_API_KEY
+  header_name: Authorization
+  prefix: "Bearer "
+headers:
+  Content-Type: application/json
+schemas:
+  messages:
+    role_map: {user: user, assistant: assistant, system: system, tool: tool}
+    content_key: content
+    system_message: {mode: message_role}
+    tool_result:
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      id: "{id}"
+      type: function
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+  tools:
+    template:
+      type: function
+      function:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
+  streaming: {mode: delta_merge}
+body_template:
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
+  stream_options:
+    include_usage: true
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+  models:
+    # Anthropic Claude
+    anthropic/claude-opus-4-7:             {input_per_million: 5.00, output_per_million: 25.00}
+    anthropic/claude-opus-4-6:             {input_per_million: 5.00, output_per_million: 25.00}
+    anthropic/claude-opus-4-5:             {input_per_million: 5.00, output_per_million: 25.00}
+    anthropic/claude-opus-4-1:             {input_per_million: 15.00, output_per_million: 75.00}
+    anthropic/claude-sonnet-4-6:           {input_per_million: 3.00, output_per_million: 15.00}
+    anthropic/claude-sonnet-4-5:           {input_per_million: 3.00, output_per_million: 15.00}
+    anthropic/claude-sonnet-4:             {input_per_million: 3.00, output_per_million: 15.00}
+    anthropic/claude-haiku-4-5:            {input_per_million: 1.00, output_per_million: 5.00}
+    anthropic/claude-3-5-haiku:            {input_per_million: 0.80, output_per_million: 4.00}
+    # OpenAI
+    openai/gpt-5-5-pro:                    {input_per_million: 30.00, output_per_million: 180.00}
+    openai/gpt-5-5:                        {input_per_million: 5.00, output_per_million: 30.00}
+    openai/gpt-5-4-pro:                    {input_per_million: 30.00, output_per_million: 180.00}
+    openai/gpt-5-4:                        {input_per_million: 2.50, output_per_million: 15.00}
+    openai/gpt-5-4-mini:                   {input_per_million: 0.75, output_per_million: 4.50}
+    openai/gpt-5-4-nano:                   {input_per_million: 0.20, output_per_million: 1.25}
+    openai/gpt-4-1:                        {input_per_million: 2.00, output_per_million: 8.00}
+    openai/gpt-4-1-mini:                   {input_per_million: 0.40, output_per_million: 1.60}
+    openai/gpt-4-1-nano:                   {input_per_million: 0.10, output_per_million: 0.40}
+    openai/gpt-4o:                         {input_per_million: 2.50, output_per_million: 10.00}
+    openai/gpt-4o-mini:                    {input_per_million: 0.15, output_per_million: 0.60}
+    openai/o3:                             {input_per_million: 2.00, output_per_million: 8.00}
+    openai/o3-mini:                        {input_per_million: 1.10, output_per_million: 4.40}
+    openai/o4-mini:                        {input_per_million: 1.10, output_per_million: 4.40}
+    # Google Gemini
+    google/gemini-3-5-flash:               {input_per_million: 1.50, output_per_million: 9.00}
+    google/gemini-3-1-pro-preview:         {input_per_million: 2.00, output_per_million: 12.00}
+    google/gemini-2-5-pro:                 {input_per_million: 1.25, output_per_million: 10.00}
+    google/gemini-2-5-flash:               {input_per_million: 0.30, output_per_million: 2.50}
+    google/gemini-2-5-flash-lite:          {input_per_million: 0.10, output_per_million: 0.40}
+    # Meta Llama
+    meta-llama/llama-4-maverick:           {input_per_million: 0.15, output_per_million: 0.60}
+    meta-llama/llama-4-scout:              {input_per_million: 0.08, output_per_million: 0.30}
+    meta-llama/llama-3-3-70b-instruct:     {input_per_million: 0.10, output_per_million: 0.32}
+    # DeepSeek
+    deepseek/deepseek-r1-0528:             {input_per_million: 0.50, output_per_million: 2.15}
+    deepseek/deepseek-r1:                  {input_per_million: 0.70, output_per_million: 2.50}
+    deepseek/deepseek-chat:                {input_per_million: 0.23, output_per_million: 0.91}
+    deepseek/deepseek-v4-pro:              {input_per_million: 0.44, output_per_million: 0.87}
+    deepseek/deepseek-v4-flash:            {input_per_million: 0.10, output_per_million: 0.20}
+    # Qwen
+    qwen/qwen3-7-max:                      {input_per_million: 2.50, output_per_million: 7.50}
+    qwen/qwen3-6-plus:                     {input_per_million: 0.33, output_per_million: 1.95}
+    qwen/qwen3-coder:                      {input_per_million: 0.22, output_per_million: 1.80}
+    qwen/qwen3-coder-plus:                 {input_per_million: 0.65, output_per_million: 3.25}
+    # xAI Grok
+    x-ai/grok-4-3:                         {input_per_million: 1.25, output_per_million: 2.50}
+    x-ai/grok-4-20:                        {input_per_million: 1.25, output_per_million: 2.50}
+    # Mistral
+    mistralai/mistral-medium-3-5:          {input_per_million: 1.50, output_per_million: 7.50}
+    mistralai/mistral-large-2512:          {input_per_million: 0.50, output_per_million: 1.50}
+    mistralai/codestral-2508:              {input_per_million: 0.30, output_per_million: 0.90}
+    mistralai/devstral-medium:             {input_per_million: 0.40, output_per_million: 2.00}
+    # Other
+    moonshotai/kimi-k2-6:                  {input_per_million: 0.73, output_per_million: 3.49}
+    z-ai/glm-5-1:                          {input_per_million: 0.98, output_per_million: 3.08}
+    z-ai/glm-5:                            {input_per_million: 0.60, output_per_million: 1.92}
+    amazon/nova-premier-v1:                {input_per_million: 2.50, output_per_million: 12.50}
+    amazon/nova-pro-v1:                    {input_per_million: 0.80, output_per_million: 3.20}
+    bytedance-seed/seed-2-0-lite:          {input_per_million: 0.25, output_per_million: 2.00}
+    nvidia/nemotron-3-super-120b-a12b:     {input_per_million: 0.09, output_per_million: 0.45}
+extra:
+  stream_url: "/chat/completions"
+  available_models:
+    anthropic: [anthropic/claude-opus-4-7, anthropic/claude-opus-4-6, anthropic/claude-opus-4-5,
+                anthropic/claude-opus-4-1, anthropic/claude-sonnet-4-6, anthropic/claude-sonnet-4-5,
+                anthropic/claude-sonnet-4, anthropic/claude-haiku-4-5, anthropic/claude-3-5-haiku]
+    openai: [openai/gpt-5-5-pro, openai/gpt-5-5, openai/gpt-5-4-pro, openai/gpt-5-4,
+             openai/gpt-5-4-mini, openai/gpt-5-4-nano, openai/gpt-4-1, openai/gpt-4-1-mini,
+             openai/gpt-4-1-nano, openai/gpt-4o, openai/gpt-4o-mini, openai/o3,
+             openai/o3-mini, openai/o4-mini]
+    google: [google/gemini-3-5-flash, google/gemini-3-1-pro-preview, google/gemini-2-5-pro,
+             google/gemini-2-5-flash, google/gemini-2-5-flash-lite]
+    llama: [meta-llama/llama-4-maverick, meta-llama/llama-4-scout, meta-llama/llama-3-3-70b-instruct]
+    deepseek: [deepseek/deepseek-r1-0528, deepseek/deepseek-r1, deepseek/deepseek-chat,
+               deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash]
+    qwen: [qwen/qwen3-7-max, qwen/qwen3-6-plus, qwen/qwen3-coder, qwen/qwen3-coder-plus]
+    grok: [x-ai/grok-4-3, x-ai/grok-4-20]
+    mistral: [mistralai/mistral-medium-3-5, mistralai/mistral-large-2512, mistralai/codestral-2508,
+              mistralai/devstral-medium]
+    other: [moonshotai/kimi-k2-6, z-ai/glm-5-1, z-ai/glm-5, amazon/nova-premier-v1,
+            amazon/nova-pro-v1, bytedance-seed/seed-2-0-lite, nvidia/nemotron-3-super-120b-a12b]

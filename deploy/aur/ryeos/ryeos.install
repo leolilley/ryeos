@@ -1,0 +1,26 @@
+post_install() {
+    for bundle_path in /usr/share/ryeos/*/; do
+        if [[ ! -d "$bundle_path/.ai" ]]; then
+            echo "ERROR: $bundle_path/.ai missing — bundle structure incorrect" >&2
+            return 1
+        fi
+    done
+
+    echo "ryeos bundles installed to /usr/share/ryeos"
+    echo
+    echo "Initialize with:"
+    echo "  ryeos init \\"
+    echo "    --trust-file /usr/share/ryeos/core/PUBLISHER_TRUST.toml \\"
+    echo "    --trust-file /usr/share/ryeos/standard/PUBLISHER_TRUST.toml \\"
+    echo "    --trust-file /usr/share/ryeos/web/PUBLISHER_TRUST.toml \\"
+    echo "    --trust-file /usr/share/ryeos/cockpit/PUBLISHER_TRUST.toml \\"
+    echo "    --trust-file /usr/share/ryeos/hosted-node/PUBLISHER_TRUST.toml"
+    echo
+    echo "(The --trust-file flags pin the packaged bundle signers."
+    echo " Production installs may omit them once bundles are signed"
+    echo " with the official publisher key.)"
+}
+
+post_upgrade() {
+    post_install
+}

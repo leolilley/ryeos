@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-31T08:15:58Z:091d2537e4aeca7a49165d709dd9380db4d203bb186fe216d1031101165e5b14:Cd/S7IQ9ehZXkMW7xEwgWjQ8gFV5QtKAm+TsCSOkyLXH1XFWYUMxNVfEMwtOyg3w599Nt0K/HA59ZEwolrNpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/cockpit
+section: routes
+id: ui/api/cockpit/snapshot
+path: /ui/api/cockpit/snapshot
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 256
+response:
+  mode: json
+  source: "service:ui/cockpit/snapshot"

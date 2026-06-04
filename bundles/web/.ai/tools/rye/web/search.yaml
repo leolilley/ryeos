@@ -1,0 +1,29 @@
+# ryeos:signed:2026-05-26T06:36:57Z:cffa20a05ff74ef50a9f69521174bc9a2c3f23ab37578274347ed9f4c54cc215:zblyBlH/7na4FG8Rmw/eUZ29IvgxPwFNKE65bTqLqUi8zb3GFSEc32ZQb4hOFQ1KoXoyVPyxoRLfhgZQoalAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "rye/web"
+version: "1.0.0"
+tool_type: "subprocess"
+executor_id: "@subprocess"
+description: "Search the web and return ranked result titles, URLs, and snippets"
+
+config:
+  command: "bin:ryeos-web-tools"
+  args:
+    - "search"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: "Search query"
+      minLength: 1
+    num_results:
+      type: integer
+      minimum: 1
+      maximum: 20
+      default: 10
+      description: "Maximum number of DuckDuckGo results to return"
+  required: [query]

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:14:55Z:b7a62f43316f39ee8626becbf4d9e67842f4928fb218c5be53ee03d638051555:UVLMBiiMaDGjQtm0rRyp8IQ8yEPVuRmWbQhy9G7Me0DCOq8lSNNBkWLs4Mn19y3vYI60IJeP5pWlvrddZ678CA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:14:55Z:b7a62f43316f39ee8626becbf4d9e67842f4928fb218c5be53ee03d638051555:UVLMBiiMaDGjQtm0rRyp8IQ8yEPVuRmWbQhy9G7Me0DCOq8lSNNBkWLs4Mn19y3vYI60IJeP5pWlvrddZ678CA==:4b987fd4e40303ac -->
 
 # Multi-Thread Pipeline
 
@@ -9,7 +9,7 @@ Multi-thread orchestration pipeline that spawns multiple child directives in seq
   <metadata>
     <description>Multi-thread orchestration pipeline — spawns child directives in sequence with cross-thread coordination via shared filesystem. Writes a manifest, spawns research, verifies output, then produces analysis and summary.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022">Multi-stage pipeline orchestration with cross-thread file coordination</model>
     <limits turns="10" tokens="4096" />
     <permissions>

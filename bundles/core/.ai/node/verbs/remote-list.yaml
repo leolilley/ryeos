@@ -1,0 +1,11 @@
+# ryeos:signed:2026-05-30T07:21:30Z:363d8ce4a6bd28acac8cee1f539af02293ec7b9e05d07d6c25cc34b4b2da76bb:YhKSxmrOSuiXA36+FpIABER4+MNF5zpu0quUW6bZ2+2glNN2IRwbqLlWpWx15lPm88fiYEZns/4pqKefO2k/BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: remote-list
+description: List configured remote nodes
+execute: service:remote/list
+aliases:
+- tokens:
+  - remote
+  - list
+  project_resolution: optional

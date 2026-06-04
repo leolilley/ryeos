@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:14:55Z:6967a5eca52850e819885eecf8ffb64b9b619338427d135edcf3c2234a1a2b08:3rgBqvLoRUh8H0Em0xKFxK11pYEitfgE0JRD6pvH_7znmh7yDy7izNYuGmYK8iiqzBCrvb7I6DFXb7QbFwW6Bw==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:14:55Z:6967a5eca52850e819885eecf8ffb64b9b619338427d135edcf3c2234a1a2b08:3rgBqvLoRUh8H0Em0xKFxK11pYEitfgE0JRD6pvH_7znmh7yDy7izNYuGmYK8iiqzBCrvb7I6DFXb7QbFwW6Bw==:4b987fd4e40303ac -->
 
 # Search and Report
 
@@ -9,7 +9,7 @@ Multi-step directive that searches the knowledge base for entries on a topic, th
   <metadata>
     <description>Search knowledge entries for a topic and write a summary report.</description>
     <category>test/tools/primary</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022" />
     <limits turns="5" tokens="2048" />
     <permissions>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:ef1d32354fc54be67f3f900d9f728ac9b11cef9d26a1eee090bc09f881dc6138:YBn3X67p2qLA7l7ECp9wjL1pRtwwavTskqb5IoGHgXuVywEQu4nVpzMzLKLdby3Ru6Tmy8wnk6aZSZmaLX6iBg==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:ef1d32354fc54be67f3f900d9f728ac9b11cef9d26a1eee090bc09f881dc6138:YBn3X67p2qLA7l7ECp9wjL1pRtwwavTskqb5IoGHgXuVywEQu4nVpzMzLKLdby3Ru6Tmy8wnk6aZSZmaLX6iBg==:4b987fd4e40303ac -->
 <!-- -->
 
 # Orchestrate Review
@@ -10,7 +10,7 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
   <metadata>
     <description>Orchestrate a code review by chaining analyze_code and summarize_text directives via nested LLM threads.</description>
     <category>test/graphs</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="general" provider="zen/zen" />
     <limits turns="12" tokens="40000" spend="0.50" />
     <permissions>

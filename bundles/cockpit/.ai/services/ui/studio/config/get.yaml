@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:58Z:ba1d1fbbfb4437f5f5de21a9a613ad78d36df4e2f32878883bcc65c0f8095996:040obsafM/Rj4WWvIBZRRqsv3f24+IsybnflFBtcWk2KUApVDLr1q8Y+MkI0zLtUJqp1pAkc24Hv7yyq74mMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: studio/config/get
+version: "1.0.0"
+description: Read durable local Studio user preferences.
+endpoint: ui.studio.config.get
+availability: daemon_only

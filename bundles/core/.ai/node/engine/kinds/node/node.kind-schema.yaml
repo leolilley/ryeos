@@ -1,0 +1,52 @@
+# ryeos:signed:2026-05-23T12:06:24Z:f57a728acddf3b7eaf1bedc98d0094ef5bb529798ec023dd6abe719a0edefcf7:Glk3KLbcri7he0Yt2OeeBAdV9WWs5LLBmlABNLvDWInxrI70ToJvb2nyN9izPjSIcSuepjTwTF9pZl0xqU02BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/node"
+version: "1.0.0"
+# `node` items are signed YAMLs that describe per-node configuration
+# (bundle registrations, identity attestations, etc.). They live under
+# `<space>/.ai/node/<section>/<name>.yaml` and are interpreted by the
+# daemon's node-config loader, not by the dispatch loop — node items
+# are not directly executable. The schema therefore intentionally has
+# no `execution:` block; root-execute lookups against `node:*` refs
+# must yield 501 the same way `config:*` does.
+location:
+  directory: node
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# Identity composer — node items are loaded as-is. Per-section parsing
+# is performed by the node-config `SectionTable` after load, not here.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  # `section` is enforced at load time by the node-config
+  # `BootstrapLoader` (path = section invariant), not via the parser
+  # composer contract — the YAML parser declares `section` as
+  # Optional, so making it Required here would fail
+  # `ParserComposerContractViolation`. The loader's stricter check
+  # gives a better error message anyway.
+  required: {}
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    section:
+      from: path
+      key: section
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: path
+      key: category
+      required: true
+      match: path

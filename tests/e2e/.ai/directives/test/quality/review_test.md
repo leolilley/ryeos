@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:808dc195b0a80b36be82bffdbebcd9c65ae4b84ee368ddc832aa640f1aef85bc:kv470ao9JK1mtFDX4peiEsNt7AdEj2GFBdRAvucoKXOTw-gf-t0BhmFmUYNa9OZOekKshkPtWdKfba_TlglsDw==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:808dc195b0a80b36be82bffdbebcd9c65ae4b84ee368ddc832aa640f1aef85bc:kv470ao9JK1mtFDX4peiEsNt7AdEj2GFBdRAvucoKXOTw-gf-t0BhmFmUYNa9OZOekKshkPtWdKfba_TlglsDw==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 # Quality Review Test
@@ -10,7 +10,7 @@ End-to-end test for the review directive — verifies the full review flow with 
   <metadata>
     <description>Test the quality review directive — spawn a review thread and verify it produces a structured verdict.</description>
     <category>test/quality</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" provider="zen/zen" />
     <limits turns="12" tokens="32000" spend="2.00" spawns="3" />
     <permissions>

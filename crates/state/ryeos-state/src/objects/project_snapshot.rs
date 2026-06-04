@@ -1,0 +1,198 @@
+//! ProjectSnapshot — a snapshot of a project's source state.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::project_sync::ProjectSyncScope;
+
+/// A snapshot of a project's source files at a point in time.
+///
+/// Stored in CAS as an immutable object. Linked from thread snapshots
+/// via `base_project_snapshot_hash` and `result_project_snapshot_hash`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSnapshot {
+    /// Hash of the project manifest (root descriptor).
+    pub project_manifest_hash: String,
+    /// Hash of the user-level manifest (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_manifest_hash: Option<String>,
+    /// Optional operator-facing description for manually created snapshots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Declared scope of the project manifest. When absent on the
+    /// wire (only possible for objects written before this field
+    /// existed), falls back to [`ProjectSyncScope::default`].
+    #[serde(default)]
+    pub project_sync_scope: ProjectSyncScope,
+    /// Parent snapshot hashes (DAG structure for versioning).
+    pub parent_hashes: Vec<String>,
+    /// ISO-8601 timestamp of creation.
+    pub created_at: String,
+    /// Source type (e.g. "fold_back", "manual_push").
+    pub source: String,
+}
+
+impl ProjectSnapshot {
+    /// Schema version for project snapshots.
+    pub const SCHEMA: u32 = 4;
+
+    /// Serialize to a CAS JSON object.
+    pub fn to_value(&self) -> Value {
+        let mut v = json!({
+            "kind": "project_snapshot",
+            "schema": Self::SCHEMA,
+            "project_manifest_hash": self.project_manifest_hash,
+            "project_sync_scope": self.project_sync_scope,
+            "parent_hashes": self.parent_hashes,
+            "created_at": self.created_at,
+            "source": self.source,
+        });
+        if let Some(ref umh) = self.user_manifest_hash {
+            v.as_object_mut()
+                .unwrap()
+                .insert("user_manifest_hash".into(), json!(umh));
+        }
+        if let Some(ref message) = self.message {
+            v.as_object_mut()
+                .unwrap()
+                .insert("message".into(), json!(message));
+        }
+        v
+    }
+
+    /// Deserialize from a CAS JSON value.
+    pub fn from_value(value: &Value) -> anyhow::Result<Self> {
+        Ok(Self {
+            project_manifest_hash: value
+                .get("project_manifest_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing project_manifest_hash"))?
+                .to_string(),
+            user_manifest_hash: value
+                .get("user_manifest_hash")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            project_sync_scope: value
+                .get("project_sync_scope")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default(),
+            parent_hashes: value
+                .get("parent_hashes")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            created_at: value
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing created_at"))?
+                .to_string(),
+            source: value
+                .get("source")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing source"))?
+                .to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip() {
+        let original = ProjectSnapshot {
+            project_manifest_hash: "ab".repeat(32),
+            user_manifest_hash: None,
+            message: None,
+            project_sync_scope: ProjectSyncScope::FullProject,
+            parent_hashes: vec![],
+            created_at: "2026-04-23T00:00:00Z".to_string(),
+            source: "fold_back".to_string(),
+        };
+        let value = original.to_value();
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(
+            restored.project_manifest_hash,
+            original.project_manifest_hash
+        );
+        assert_eq!(restored.source, "fold_back");
+    }
+
+    #[test]
+    fn roundtrip_with_user_manifest() {
+        let original = ProjectSnapshot {
+            project_manifest_hash: "ab".repeat(32),
+            user_manifest_hash: Some("cd".repeat(32)),
+            message: None,
+            project_sync_scope: ProjectSyncScope::FullProject,
+            parent_hashes: vec!["ef".repeat(32)],
+            created_at: "2026-04-23T00:00:00Z".to_string(),
+            source: "manual_push".to_string(),
+        };
+        let value = original.to_value();
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(restored.user_manifest_hash, Some("cd".repeat(32)));
+        assert_eq!(restored.parent_hashes.len(), 1);
+    }
+
+    #[test]
+    fn missing_project_sync_scope_uses_default_scope() {
+        let value = json!({
+            "kind": "project_snapshot",
+            "schema": 2,
+            "project_manifest_hash": "ab".repeat(32),
+            "parent_hashes": [],
+            "created_at": "2026-04-23T00:00:00Z",
+            "source": "old_push",
+        });
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(restored.project_sync_scope, ProjectSyncScope::default());
+    }
+
+    #[test]
+    fn ai_only_scope_roundtrips() {
+        let original = ProjectSnapshot {
+            project_manifest_hash: "ab".repeat(32),
+            user_manifest_hash: None,
+            message: None,
+            project_sync_scope: ProjectSyncScope::AiOnly,
+            parent_hashes: vec![],
+            created_at: "2026-04-23T00:00:00Z".to_string(),
+            source: "remote_ai_sync".to_string(),
+        };
+        let value = original.to_value();
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(restored.project_sync_scope, ProjectSyncScope::AiOnly);
+    }
+
+    #[test]
+    fn roundtrip_with_message() {
+        let original = ProjectSnapshot {
+            project_manifest_hash: "ab".repeat(32),
+            user_manifest_hash: None,
+            message: Some("Update deployment workflow".to_string()),
+            project_sync_scope: ProjectSyncScope::FullProject,
+            parent_hashes: vec![],
+            created_at: "2026-04-23T00:00:00Z".to_string(),
+            source: "snapshot_create".to_string(),
+        };
+        let value = original.to_value();
+        let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(
+            restored.message,
+            Some("Update deployment workflow".to_string())
+        );
+    }
+}

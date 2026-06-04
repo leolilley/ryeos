@@ -1,0 +1,15 @@
+# ryeos:signed:2026-05-31T08:15:50Z:02731989fc8f7cc85b46cc87b0b549f9950f23d6573fb769ca4940a8b3f2748f:LtRqWAS8mYMdWH8DGQuT2fWf7YXWiR5yHh7dMAn1OR6qwxXs9Xr/XbngZ+ip8cePUe08+x9jJhNwVLKTRbyFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: verify
+description: Verify an item's signature chain
+execute: tool:ryeos/core/verify
+aliases:
+- tokens:
+  - verify
+  description: Verify an item's signature and integrity
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
+  project_resolution: optional

@@ -1,0 +1,28 @@
+# ryeos:signed:2026-05-31T02:07:37Z:608097f763be21ee7f691396c2dbf37562e40e7a93abaffefc859af3e1f9c534:ouieMlsiJX84qGTF4nDTXrw0LX6GF9aydG6bX8Nv8+ILIAzoTA2qj+2JdDk40GDj74+j9NkO8BIwlARi/IrMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "ryeos/core"
+name: "snapshot-status"
+required_caps: ["project.read"]
+description: "Compare the project worktree with the principal's local snapshot head."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "snapshot"
+    - "status"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 60
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root path"
+    include_unchanged:
+      type: boolean
+      description: "Include unchanged files in the changes list"
+      default: false
+  required: [project_path]

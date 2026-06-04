@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:e3f1b69c28369a7d9c11ce8e019e23b418829134adcfde64510a5f1db49e3d4d:T_mHI4hoDGCqLvrakhVAgS1KlvxcrjNpTd-uxjfmP50GTIn1V2mYWBAHGZ1cqVDIzUEOqc8W9DrPz40NzB01Cg==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:e3f1b69c28369a7d9c11ce8e019e23b418829134adcfde64510a5f1db49e3d4d:T_mHI4hoDGCqLvrakhVAgS1KlvxcrjNpTd-uxjfmP50GTIn1V2mYWBAHGZ1cqVDIzUEOqc8W9DrPz40NzB01Cg==:4b987fd4e40303ac -->
 
 # Write and Read
 
@@ -9,7 +9,7 @@ Two-step directive that writes content to a file, then reads it back to verify t
   <metadata>
     <description>Write content to a file then read it back to verify correctness.</description>
     <category>test/tools/file_system</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" id="claude-3-5-haiku-20241022" />
     <limits turns="5" tokens="2048" />
     <permissions>

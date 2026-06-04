@@ -1,0 +1,86 @@
+# ryeos:signed:2026-05-29T07:12:22Z:59a08f0e135f9e5ca54756c0be8290c29063b13fdb0fb4de4d31616ecafc1cdf:36Nfk0vLNc6csYmbkgHu5axXoJmRAjnQtj8aGHfoy5sFE77N7MZR9yb3cNycE18BjmoqBTYdlXl081x1AdiaAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: cockpit-base
+version: "1.0.0"
+description: Default RyeOS cockpit — three-pane mission control
+
+layout:
+  root: main
+  nodes:
+    main:
+      type: split
+      axis: horizontal
+      ratio: 0.25
+      first: thread_list
+      second: right
+    thread_list:
+      type: pane
+      view: thread_list
+    right:
+      type: split
+      axis: vertical
+      ratio: 0.85
+      first: thread
+      second: status
+    thread:
+      type: pane
+      view: thread
+    status:
+      type: pane
+      view: overview
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.overview
+    label: Overview
+    category: View
+  - id: view.thread_list
+    label: Threads
+    category: View
+  - id: view.remotes
+    label: Remotes
+    category: View
+  - id: view.services
+    label: Services
+    category: View
+  - id: view.items
+    label: Items
+    category: View
+  - id: view.item_inspector
+    label: Item Inspector
+    category: View
+  - id: view.schedules
+    label: Schedules
+    category: View
+  - id: view.gc
+    label: GC
+    category: View
+  - id: view.files
+    label: Files
+    category: View
+  - id: view.trust
+    label: Trust
+    category: View
+  - id: view.graph
+    label: Graph
+    category: View
+  - id: layout.reset
+    label: Reset Layout
+    category: Layout
+
+instruments:
+  - id: thread_budget
+    kind: facet_gauge
+    source: focused.thread
+    facets:
+      - cost.spend
+      - cost.input_tokens
+      - cost.output_tokens
+  - id: graph_progress
+    kind: facet_status
+    source: focused.thread
+    facets:
+      - graph.current_node
+      - graph.progress

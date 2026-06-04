@@ -1,0 +1,17 @@
+# ryeos:signed:2026-05-31T08:15:51Z:5211d32a02d0e9f389d68c69dc02890e0d8177d4cc4d3cbf1e897214cbc5841c:5HSfWJmAGXjRKOwX4MDIwjLtkVmU5NoexaoIeHuO9r14Ef7FH3FvI3Mz8Me82iNMJCAK30UNDy0mg/60RobWAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes
+section: routes
+id: admission/status
+path: /admission/status
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: service:admission/status

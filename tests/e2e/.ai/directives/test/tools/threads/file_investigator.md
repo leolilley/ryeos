@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:b26a09891d190959087dffa30b446f70fd3d921d5b39c41a395dc8dc4ec1ff6f:sw4wFOCB7IJWDN7OdZNz6QdIFCDWcAhWUFnr4j-oGYtqIKYwHIyevWwOCbM3NmvKliuUFwpXFBruQdzDxf0CCQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:b26a09891d190959087dffa30b446f70fd3d921d5b39c41a395dc8dc4ec1ff6f:sw4wFOCB7IJWDN7OdZNz6QdIFCDWcAhWUFnr4j-oGYtqIKYwHIyevWwOCbM3NmvKliuUFwpXFBruQdzDxf0CCQ==:4b987fd4e40303ac -->
 # File Investigator
 
 Creates a mystery file, then investigates it — reads it back, lists the directory, writes a report summarizing findings.
@@ -8,7 +8,7 @@ Creates a mystery file, then investigates it — reads it back, lists the direct
   <metadata>
     <description>Write a mystery file, investigate it with reads and directory listing, then write a report.</description>
     <category>test/tools/threads</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="10" tokens="40000" />
     <permissions>

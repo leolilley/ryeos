@@ -1,0 +1,19 @@
+# ryeos:signed:2026-05-31T08:15:51Z:d33cb1321140897ac52e81d5c095b67f9a7880cc7e22bb5349d0eac79782bdcb:MdkwPAh1vOD65vWNP2xdQbnFN411aqDxRS9MqcM3rGMT/iEYnPIDyguMuwzxYL+sNYVbEWbM3ZwndEh0b9JvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.import-admitted-head
+required_caps: ["ryeos.execute.service.remote.import-admitted-head"]
+schema:
+  remote: string?
+  project: string?
+  policy: string?
+  subject_hash: string?
+  limit: number?
+  max_objects: number?
+  max_blobs: number?
+  max_object_bytes: number?
+  max_total_object_bytes: number?
+  max_blob_bytes: number?
+  max_total_blob_bytes: number?
+  max_response_bytes: number?
+  max_links_per_object: number?
+description: "Discover a remote admission head and import its admitted CAS root with pinned trust"

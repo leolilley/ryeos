@@ -1,0 +1,7 @@
+# ryeos:signed:2026-05-31T08:15:52Z:065c7ca7ab4e9c899fc6c36642ef605b4f1dc069187813bd96d53afd4d3feb61:Q3acw701jIwROzpqG8Fvo+a6wMIB6bdGtruwNb/j7fTARLo2S29obx5gm9dWQeyR2Js7FjBCwF5IAeKKH8eiCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: sync.jobs.inspect
+required_caps: ["ryeos.execute.service.sync.jobs.inspect"]
+schema:
+  job_id: string
+description: "Inspect one durable distributed sync job"

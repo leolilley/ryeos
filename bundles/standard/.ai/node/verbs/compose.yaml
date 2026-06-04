@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-30T07:21:31Z:5680cbc0de6b09c9392e296571895dc27145c49b70461f9170cdf8c966e91685:d4+bgn3nbV78ST4dH3XztWTNEjT/FIbSJa+CEI7dvWnDH+yn6UxW40ZRTyE0fnu+BTnJW7Yquf3qqw9XINUaDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: compose
+description: Compose a knowledge graph context block within a token budget
+execute: service:rye/dispatch
+aliases:
+- tokens:
+  - compose
+  description: Compose a multi-step execution graph

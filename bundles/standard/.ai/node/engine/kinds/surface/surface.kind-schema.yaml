@@ -1,0 +1,103 @@
+# ryeos:signed:2026-05-24T11:43:17Z:ed36bb7eba5d13a78bcb4e055b3070bd897c8de6157b55a0871b4bb8d014b6ec:uz2wn0AJrys6RvbrTRqTCCXLiUalxPvZTcYmPMW8GGIjypD3SLPri50uSUIqaTnJehirhMmjwpN3tsfqCTcBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/surface"
+version: "1.0.0"
+location:
+  directory: surfaces
+
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+
+composer: handler:ryeos/core/extends-chain
+resolution:
+  - step: resolve_extends_chain
+    field: extends
+    max_depth: 16
+effective_trust:
+  include_references: false
+composer_config:
+  extends_field: extends
+  fields:
+    - name: layout
+      strategy: replace_root_last
+      expect_value_type: mapping
+      required: true
+    - name: input
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: ambient
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: affordances
+      strategy: keyed_seq_merge_root_last
+      key: id
+      expect_value_type: array
+    - name: instruments
+      strategy: keyed_seq_merge_root_last
+      key: id
+      expect_value_type: array
+    - name: capabilities
+      strategy: narrow_against_parent_effective
+      expect_value_type: mapping
+
+composed_value_contract:
+  root_type: mapping
+  required:
+    layout:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          root: { type: single, prim: string }
+        optional:
+          nodes: { type: single, prim: mapping }
+  optional:
+    extends:
+      type: union
+      prims: [string, "null"]
+    input:
+      type: single
+      prim: mapping
+    ambient:
+      type: single
+      prim: mapping
+    affordances:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+          optional:
+            label: { type: single, prim: string }
+            category: { type: single, prim: string }
+            icon: { type: single, prim: string }
+            caps: { type: single, prim: sequence, elements: { type: single, prim: string } }
+    instruments:
+      type: single
+      prim: sequence
+    capabilities:
+      type: single
+      prim: mapping
+
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: relative_dir
+      required: true

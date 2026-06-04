@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:ee640f7a92b486f5b3af012adb7b4eed0eaf49ede284aa806d942b150381b24f:OlMjMVU04VtGi1OmTfnBYIASR3vigRawleWX-d9yJ0eQZL7A9ZimZwZuu4IU8Tp40JdlxFdN4YWJWVv6WhbFBQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:ee640f7a92b486f5b3af012adb7b4eed0eaf49ede284aa806d942b150381b24f:OlMjMVU04VtGi1OmTfnBYIASR3vigRawleWX-d9yJ0eQZL7A9ZimZwZuu4IU8Tp40JdlxFdN4YWJWVv6WhbFBQ==:4b987fd4e40303ac -->
 <!-- rye:unsigned -->
 
 # Build With Review Test
@@ -10,7 +10,7 @@ End-to-end test for the build_with_review orchestrator — verifies the full bui
   <metadata>
     <description>Test the build_with_review orchestrator — spawn a build+review cycle and verify the retry loop.</description>
     <category>test/quality</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" provider="zen/zen" />
     <limits turns="15" tokens="64000" spend="1.00" spawns="10" depth="5" />
     <permissions>

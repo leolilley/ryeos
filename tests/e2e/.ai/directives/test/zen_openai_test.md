@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:c4e58a6439eddd9e73806d8b9bd5f0c17fae60cef7a3e4a317840957799af84c:hi2R83OKYIt7yVANtsh452vbWzCFiWmwqA5AoTXbHyU3tg3cV8wd8hULqpAIXYOCpL1TBHQRVwX8KNx8tARlBQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:c4e58a6439eddd9e73806d8b9bd5f0c17fae60cef7a3e4a317840957799af84c:hi2R83OKYIt7yVANtsh452vbWzCFiWmwqA5AoTXbHyU3tg3cV8wd8hULqpAIXYOCpL1TBHQRVwX8KNx8tARlBQ==:4b987fd4e40303ac -->
 
 # Zen OpenAI Test
 
@@ -9,7 +9,7 @@ Test directive that exercises the Zen provider with an OpenAI-compatible model â
   <metadata>
     <description>Test Zen provider with OpenAI-compatible model (MiniMax) via Chat Completions profile.</description>
     <category>test</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model id="minimax-m2.5-free" provider="zen/zen" />
     <limits turns="6" tokens="4096" spend="0.05" />
     <permissions>

@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:e6e0685096459585d32f84f57281a068defa9e244a1c6f871301973892b693bc:wf25UWODhQyT70uNVopZBPiqwmRhtpSMcstgNdKSJhxBcb7Yf9McLhQLZAwhoSGANq-3N32gYxkMD32JdyXFDA==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:e6e0685096459585d32f84f57281a068defa9e244a1c6f871301973892b693bc:wf25UWODhQyT70uNVopZBPiqwmRhtpSMcstgNdKSJhxBcb7Yf9McLhQLZAwhoSGANq-3N32gYxkMD32JdyXFDA==:4b987fd4e40303ac -->
 # Base Context Directive
 
 Root of an extends chain. Declares system context that should propagate to all children.
@@ -8,7 +8,7 @@ Root of an extends chain. Declares system context that should propagate to all c
   <metadata>
     <description>Base directive that injects system-level context via the extends chain.</description>
     <category>test/context</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="4" tokens="4096" spend="0.10" />
     <context>

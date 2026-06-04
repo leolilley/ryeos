@@ -1,0 +1,10 @@
+# ryeos:signed:2026-05-30T07:21:31Z:f9157eeb3b45ca0f09db3db55f3537f415c45013369e0f25b30870dde77a926a:UFiHWEklL66HuETt7I4H3aQIdHHtTnhGgE8PvqG4AbRrNEa2IwoU88JKLJPKR+/GoAftR/B3JlWzfKL1StftDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: vault-delete
+description: Delete a secret from the node vault
+execute: service:vault/delete
+aliases:
+- tokens:
+  - vault
+  - delete

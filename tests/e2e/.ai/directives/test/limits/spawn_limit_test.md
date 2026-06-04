@@ -1,4 +1,4 @@
-<!-- rye:signed:2026-03-11T07:13:35Z:057faa4ca7a400ff4e681adb8d96014b0f798e22c190380455c555b91f8b648f:NGIYGqE5UvD_FOOe-y4EKBAUVtvIkmdyWUMBOvz8FlYmbaPtR3J-eqedjtNpn9LEJOwnZVWmQo8BFqaNdfjhAQ==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-03-11T07:13:35Z:057faa4ca7a400ff4e681adb8d96014b0f798e22c190380455c555b91f8b648f:NGIYGqE5UvD_FOOe-y4EKBAUVtvIkmdyWUMBOvz8FlYmbaPtR3J-eqedjtNpn9LEJOwnZVWmQo8BFqaNdfjhAQ==:4b987fd4e40303ac -->
 # Spawn Limit Test
 
 Test that spawn limit enforcement works. This directive has a low spawns limit.
@@ -8,7 +8,7 @@ Test that spawn limit enforcement works. This directive has a low spawns limit.
   <metadata>
     <description>Test: verify spawn limit enforcement prevents excessive child threads.</description>
     <category>test/limits</category>
-    <author>rye-os</author>
+    <author>ryeos</author>
     <model tier="fast" />
     <limits turns="3" tokens="4096" spend="0.10" spawns="2" />
   </metadata>

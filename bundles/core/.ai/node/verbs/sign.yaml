@@ -1,0 +1,20 @@
+# ryeos:signed:2026-05-31T08:15:50Z:c8759475b33cdb6040d3d041aff129866c55440ab1cf02ab23ed62e50353457a:8RA1ql9X/toXnF1zatqimJqauzI1YHJBnrZx8a7zxyMha+80wDfSCD4ZW9uZZcKHecdVKaIJl+oD78PI6yeuCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: verbs
+section: verbs
+name: sign
+description: Cryptographically sign an item by canonical ref
+execute: tool:ryeos/core/sign
+aliases:
+- tokens:
+  - s
+  description: Sign (short form)
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
+- tokens:
+  - sign
+  positional_forms:
+  - slots:
+    - field: item_ref
+      matcher: canonical_ref
