@@ -1,12 +1,13 @@
 //! `project/apply-snapshot` — apply an AI-only snapshot to a live project.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use lillux::cas::CasStore;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
@@ -14,7 +15,7 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::objects::{ItemSource, ProjectSnapshot, SourceManifest};
-use ryeos_state::project_sync::{ProjectSyncScope, PROJECT_AI_SYNC_DIRS};
+use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +123,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let apply_result = (|| -> Result<ApplyReport> {
         materialize_manifest_to_staging(&cas, &manifest, &staging_root)?;
+        preflight_project_deploy(&staging_root, &project_path)?;
         replace_managed_roots(&project_path, &staging_root)
     })();
     let cleanup = fs::remove_dir_all(&staging_root);
@@ -248,6 +250,229 @@ fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleDeclarationFile {
+    category: String,
+    version: String,
+    schema_version: String,
+    #[serde(default)]
+    #[serde(rename = "description")]
+    _description: Option<String>,
+    schedules: Vec<ScheduleDeclaration>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleDeclaration {
+    schedule_id: String,
+    item_ref: String,
+    schedule_type: String,
+    expression: String,
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    misfire_policy: Option<String>,
+    #[serde(default)]
+    overlap_policy: Option<String>,
+    #[serde(default)]
+    lateness_grace_secs: Option<i64>,
+    #[serde(default = "default_schedule_enabled")]
+    enabled: bool,
+    #[serde(default)]
+    project_root: Option<String>,
+    #[serde(default)]
+    params: Value,
+}
+
+fn default_schedule_enabled() -> bool {
+    true
+}
+
+fn preflight_project_deploy(staging_root: &Path, project_path: &Path) -> Result<()> {
+    preflight_schedule_declarations(staging_root, project_path)?;
+    Ok(())
+}
+
+fn preflight_schedule_declarations(staging_root: &Path, project_path: &Path) -> Result<usize> {
+    let schedules_root = staging_root.join(".ai/config/schedules");
+    if !schedules_root.is_dir() {
+        return Ok(0);
+    }
+
+    let canonical_project_path = project_path.to_string_lossy().to_string();
+    let mut seen = HashSet::new();
+    let mut count = 0usize;
+    for path in schedule_declaration_files(&schedules_root)? {
+        let rel_path = path
+            .strip_prefix(staging_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("read schedule declaration {}", rel_path))?;
+        let body = lillux::signature::strip_signature_lines(&content);
+        let file: ScheduleDeclarationFile = serde_yaml::from_str(&body)
+            .with_context(|| format!("parse schedule declaration {}", rel_path))?;
+        validate_schedule_declaration_file(&file, &rel_path)?;
+        for schedule in &file.schedules {
+            validate_schedule_declaration(schedule, &rel_path, &canonical_project_path)?;
+            if !seen.insert(schedule.schedule_id.clone()) {
+                anyhow::bail!(
+                    "duplicate schedule_id '{}' across project schedule declarations",
+                    schedule.schedule_id
+                );
+            }
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+fn schedule_declaration_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_schedule_declaration_files(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_schedule_declaration_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            anyhow::bail!(
+                "schedule declaration path '{}' is a symlink; refusing project deploy",
+                path.display()
+            );
+        }
+        if ft.is_dir() {
+            collect_schedule_declaration_files(&path, files)?;
+        } else if ft.is_file() {
+            let ext = path.extension().and_then(|ext| ext.to_str());
+            if matches!(ext, Some("yaml" | "yml")) {
+                files.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_schedule_declaration_file(
+    file: &ScheduleDeclarationFile,
+    rel_path: &str,
+) -> Result<()> {
+    if file.category != "schedules" {
+        anyhow::bail!(
+            "schedule declaration '{}' has category '{}', expected 'schedules'",
+            rel_path,
+            file.category
+        );
+    }
+    if file.version != "1.0.0" {
+        anyhow::bail!(
+            "schedule declaration '{}' has unsupported version '{}', expected '1.0.0'",
+            rel_path,
+            file.version
+        );
+    }
+    if file.schema_version != "1.0.0" {
+        anyhow::bail!(
+            "schedule declaration '{}' has unsupported schema_version '{}', expected '1.0.0'",
+            rel_path,
+            file.schema_version
+        );
+    }
+    if file.schedules.is_empty() {
+        anyhow::bail!("schedule declaration '{}' contains no schedules", rel_path);
+    }
+    Ok(())
+}
+
+fn validate_schedule_declaration(
+    schedule: &ScheduleDeclaration,
+    rel_path: &str,
+    canonical_project_path: &str,
+) -> Result<()> {
+    ryeos_scheduler::crontab::validate_schedule_id(&schedule.schedule_id)
+        .with_context(|| format!("invalid schedule_id in {}", rel_path))?;
+    ryeos_engine::canonical_ref::CanonicalRef::parse(&schedule.item_ref)
+        .with_context(|| format!("invalid item_ref for schedule '{}'", schedule.schedule_id))?;
+    ryeos_scheduler::crontab::validate_expression(&schedule.schedule_type, &schedule.expression)
+        .with_context(|| format!("invalid expression for schedule '{}'", schedule.schedule_id))?;
+    let timezone = schedule.timezone.as_deref().unwrap_or("UTC");
+    ryeos_scheduler::crontab::validate_timezone(timezone)
+        .with_context(|| format!("invalid timezone for schedule '{}'", schedule.schedule_id))?;
+    if let Some(ref p) = schedule.overlap_policy {
+        if !matches!(p.as_str(), "allow" | "skip" | "cancel_previous") {
+            anyhow::bail!(
+                "invalid overlap_policy '{}' for schedule '{}'",
+                p,
+                schedule.schedule_id
+            );
+        }
+    }
+    if let Some(ref p) = schedule.misfire_policy {
+        if !is_valid_misfire_policy(p) {
+            anyhow::bail!(
+                "invalid misfire_policy '{}' for schedule '{}'",
+                p,
+                schedule.schedule_id
+            );
+        }
+    }
+    if let Some(secs) = schedule.lateness_grace_secs {
+        if secs <= 0 {
+            anyhow::bail!(
+                "lateness_grace_secs must be positive for schedule '{}'",
+                schedule.schedule_id
+            );
+        }
+    }
+    if !schedule.params.is_null() && !schedule.params.is_object() {
+        anyhow::bail!(
+            "params must be a mapping for schedule '{}'",
+            schedule.schedule_id
+        );
+    }
+    let _enabled = schedule.enabled;
+    if let Some(ref project_root) = schedule.project_root {
+        let declared = Path::new(project_root);
+        if !declared.is_absolute() {
+            anyhow::bail!(
+                "project_root for schedule '{}' must be absolute",
+                schedule.schedule_id
+            );
+        }
+        if project_root != canonical_project_path {
+            anyhow::bail!(
+                "project_root for schedule '{}' is '{}', expected '{}'; project schedule declarations cannot target another project",
+                schedule.schedule_id,
+                project_root,
+                canonical_project_path
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_misfire_policy(p: &str) -> bool {
+    match p {
+        "skip" | "fire_once_now" => true,
+        s if s.starts_with("catch_up_bounded:") => s
+            .strip_prefix("catch_up_bounded:")
+            .and_then(|n| n.parse::<usize>().ok())
+            .is_some(),
+        s if s.starts_with("catch_up_within_secs:") => s
+            .strip_prefix("catch_up_within_secs:")
+            .and_then(|n| n.parse::<u64>().ok())
+            .is_some(),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Default)]
 struct ApplyReport {
     files_materialized: usize,
@@ -268,7 +493,7 @@ fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<App
     report.files_materialized = count_files(staging_root)?;
 
     let result = (|| -> Result<()> {
-        for rel_root in PROJECT_AI_SYNC_DIRS {
+        for rel_root in ryeos_state::project_sync::materialized_project_ai_surface_roots() {
             reject_symlinked_existing_path(project_path, rel_root)?;
             let dest = project_path.join(rel_root);
             let staged = staging_root.join(rel_root);
@@ -406,14 +631,24 @@ mod tests {
         let project = TempDir::new().unwrap();
         std::fs::create_dir_all(project.path().join(".ai/directives")).unwrap();
         std::fs::create_dir_all(project.path().join(".ai/tools")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/config/schedules")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/node/schedules")).unwrap();
         std::fs::create_dir_all(project.path().join("src")).unwrap();
         std::fs::write(project.path().join(".ai/directives/old.md"), "old").unwrap();
         std::fs::write(project.path().join(".ai/tools/old.sh"), "old").unwrap();
+        std::fs::write(project.path().join(".ai/config/schedules/old.yaml"), "old").unwrap();
+        std::fs::write(
+            project.path().join(".ai/node/schedules/runtime.yaml"),
+            "runtime",
+        )
+        .unwrap();
         std::fs::write(project.path().join("src/index.ts"), "app").unwrap();
 
         let staging = TempDir::new().unwrap();
         std::fs::create_dir_all(staging.path().join(".ai/directives")).unwrap();
+        std::fs::create_dir_all(staging.path().join(".ai/config/schedules")).unwrap();
         std::fs::write(staging.path().join(".ai/directives/new.md"), "new").unwrap();
+        std::fs::write(staging.path().join(".ai/config/schedules/new.yaml"), "new").unwrap();
 
         let report = replace_managed_roots(project.path(), staging.path()).unwrap();
         assert!(report.roots_replaced >= 1);
@@ -421,6 +656,19 @@ mod tests {
         assert!(project.path().join(".ai/directives/new.md").exists());
         assert!(!project.path().join(".ai/directives/old.md").exists());
         assert!(!project.path().join(".ai/tools").exists());
+        assert!(project
+            .path()
+            .join(".ai/config/schedules/new.yaml")
+            .exists());
+        assert!(!project
+            .path()
+            .join(".ai/config/schedules/old.yaml")
+            .exists());
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".ai/node/schedules/runtime.yaml"))
+                .unwrap(),
+            "runtime"
+        );
         assert_eq!(
             std::fs::read_to_string(project.path().join("src/index.ts")).unwrap(),
             "app"
@@ -501,5 +749,123 @@ mod tests {
         apply_mode(&path, Some(0o4755)).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_accepts_valid_project_intent() {
+        let project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        std::fs::write(
+            schedules.join("snap-track.yaml"),
+            format!(
+                r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: snap-track-discover-feed-scrape
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+    timezone: UTC
+    misfire_policy: skip
+    overlap_policy: skip
+    enabled: true
+    project_root: {}
+    params:
+      country: US
+"#,
+                project.path().display()
+            ),
+        )
+        .unwrap();
+
+        let count = preflight_schedule_declarations(staging.path(), project.path()).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_rejects_duplicate_ids() {
+        let project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        for file in ["a.yaml", "b.yaml"] {
+            std::fs::write(
+                schedules.join(file),
+                r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: duplicate-schedule
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+"#,
+            )
+            .unwrap();
+        }
+
+        let err = preflight_schedule_declarations(staging.path(), project.path())
+            .expect_err("duplicate schedule ids must fail preflight");
+        assert!(format!("{err:#}").contains("duplicate schedule_id"));
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_rejects_node_owned_fields() {
+        let project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        std::fs::write(
+            schedules.join("bad.yaml"),
+            r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: bad-schedule
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+    execution:
+      requester_fingerprint: fp:test
+"#,
+        )
+        .unwrap();
+
+        let err = preflight_schedule_declarations(staging.path(), project.path())
+            .expect_err("node-owned execution field must fail preflight");
+        assert!(format!("{err:#}").contains("unknown field `execution`"));
+    }
+
+    #[test]
+    fn preflight_schedule_declarations_rejects_other_project_root() {
+        let project = TempDir::new().unwrap();
+        let other_project = TempDir::new().unwrap();
+        let staging = TempDir::new().unwrap();
+        let schedules = staging.path().join(".ai/config/schedules");
+        std::fs::create_dir_all(&schedules).unwrap();
+        std::fs::write(
+            schedules.join("bad-root.yaml"),
+            format!(
+                r#"category: schedules
+version: 1.0.0
+schema_version: 1.0.0
+schedules:
+  - schedule_id: wrong-root
+    item_ref: graph:snap-track/discover_feed_scrape
+    schedule_type: cron
+    expression: "0 */15 * * * *"
+    project_root: {}
+"#,
+                other_project.path().display()
+            ),
+        )
+        .unwrap();
+
+        let err = preflight_schedule_declarations(staging.path(), project.path())
+            .expect_err("foreign project root must fail preflight");
+        assert!(format!("{err:#}").contains("cannot target another project"));
     }
 }
