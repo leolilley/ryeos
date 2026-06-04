@@ -1419,6 +1419,19 @@ mod tests {
     }
 
     #[test]
+    fn launcher_includes_remotes_view() {
+        assert!(launcher_items().iter().any(|item| {
+            item.label == "Remotes"
+                && matches!(
+                    item.action,
+                    StudioAction::OpenView {
+                        view: ViewSpec::Remotes
+                    }
+                )
+        }));
+    }
+
+    #[test]
     fn launcher_includes_trust_view() {
         assert!(launcher_items().iter().any(|item| {
             item.label == "Trust"

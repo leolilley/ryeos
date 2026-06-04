@@ -862,7 +862,7 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
         .collect()
 }
 
-fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 10] {
+fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 11] {
     [
         (
             "Graph",
@@ -879,6 +879,7 @@ fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 10] {
         ("Files", "Project files", ViewSpec::Files),
         ("Threads", "Runs and events", ViewSpec::ThreadList),
         ("Services", "Daemon endpoints", ViewSpec::Services),
+        ("Remotes", "Federated nodes", ViewSpec::Remotes),
         ("Trust", "Principals and caps", ViewSpec::Trust),
         ("Schedules", "Timed work", ViewSpec::Schedules),
         ("GC", "State cleanup", ViewSpec::GcStatus),
