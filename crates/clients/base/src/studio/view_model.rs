@@ -26,6 +26,7 @@ pub struct StudioSessionVm {
     pub session_id: String,
     pub project_path: Option<String>,
     pub surface_ref: String,
+    pub user_principal_id: Option<String>,
     pub read_only: bool,
 }
 
@@ -626,6 +627,24 @@ fn status_bar_vm(
                 grow: false,
             },
             StudioStatusSegmentVm {
+                id: "principal".to_string(),
+                label: Some("principal".to_string()),
+                value: session
+                    .user_principal_id
+                    .as_deref()
+                    .map(short_principal)
+                    .unwrap_or_else(|| "local".to_string()),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "surface".to_string(),
+                label: Some("surface".to_string()),
+                value: short_surface_ref(&session.surface_ref),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
                 id: "project".to_string(),
                 label: None,
                 value: session
@@ -813,6 +832,11 @@ fn session_vm(core: &StudioCore) -> StudioSessionVm {
             .map(|session| session.surface_ref.clone())
             .or_else(|| dimension.map(|dimension| dimension.session.surface_ref.clone()))
             .unwrap_or_default(),
+        user_principal_id: browser
+            .and_then(|session| session.user_principal_id.clone())
+            .or_else(|| {
+                dimension.and_then(|dimension| dimension.session.user_principal_id.clone())
+            }),
         read_only: browser
             .map(|session| session.read_only)
             .or_else(|| dimension.map(|dimension| dimension.session.read_only))
@@ -833,8 +857,13 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
         .collect()
 }
 
-fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 8] {
+fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 9] {
     [
+        (
+            "Graph",
+            "RyeOS topology",
+            ViewSpec::Graph { graph_id: None },
+        ),
         ("Atlas", "2D namespace map", ViewSpec::Atlas),
         (
             "Items",
@@ -848,6 +877,36 @@ fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 8] {
         ("Schedules", "Timed work", ViewSpec::Schedules),
         ("GC", "State cleanup", ViewSpec::GcStatus),
     ]
+}
+
+fn short_principal(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix("fp:") {
+        let prefix = rest.chars().take(8).collect::<String>();
+        return format!("fp:{prefix}…");
+    }
+    truncate_middle(value, 14)
+}
+
+fn short_surface_ref(value: &str) -> String {
+    value.strip_prefix("surface:").unwrap_or(value).to_string()
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(1) / 2;
+    let start = value.chars().take(keep).collect::<String>();
+    let end = value
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{start}…{end}")
 }
 
 fn launcher(core: &StudioCore) -> StudioLauncherVm {

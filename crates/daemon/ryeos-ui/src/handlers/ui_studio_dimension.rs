@@ -45,6 +45,8 @@ pub struct StudioDimensionProjection {
 pub struct SessionInfo {
     pub session_id: String,
     pub surface_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_principal_id: Option<String>,
     pub read_only: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub granted_caps: Vec<String>,
@@ -284,6 +286,7 @@ fn build_dimension_projection(
         session: SessionInfo {
             session_id: session.session_id.clone(),
             surface_ref: session.surface_ref.clone(),
+            user_principal_id: session.user_principal_id.clone(),
             read_only: session.read_only,
             granted_caps: session.granted_caps.clone(),
         },

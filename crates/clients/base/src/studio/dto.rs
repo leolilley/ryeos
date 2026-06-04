@@ -35,6 +35,8 @@ pub struct StudioSessionDto {
     #[serde(default)]
     pub surface_ref: String,
     #[serde(default)]
+    pub user_principal_id: Option<String>,
+    #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
     pub granted_caps: Vec<String>,
@@ -194,6 +196,56 @@ pub struct StudioGcSummaryDto {
     pub running: bool,
     #[serde(default)]
     pub recent_events: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioTopologyDto {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub nodes: Vec<StudioTopologyNodeDto>,
+    #[serde(default)]
+    pub edges: Vec<StudioTopologyEdgeDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioTopologyNodeDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default, rename = "ref")]
+    pub ref_: String,
+    #[serde(default)]
+    pub space: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default, rename = "virtual")]
+    pub virtual_: bool,
+    #[serde(default)]
+    pub missing: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioTopologyEdgeDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default, rename = "type")]
+    pub type_: String,
+    #[serde(default)]
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

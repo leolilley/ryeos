@@ -1,7 +1,7 @@
 use super::dto::{
     StudioAddProjectDto, StudioDimensionDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
     StudioItemInspectionDto, StudioItemsDto, StudioOpenProjectDto, StudioSchedulesDto,
-    StudioThreadInspectionDto, StudioThreadsDto,
+    StudioThreadInspectionDto, StudioThreadsDto, StudioTopologyDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::event::{
@@ -278,7 +278,7 @@ impl StudioCore {
                 self.ui.inspector = StudioInspectorState::Item {
                     canonical_ref: canonical_ref.clone(),
                 };
-                self.ensure_item_inspector_tile();
+                self.ensure_inspector_tile();
                 self.bump_generation();
                 vec![self.emit(StudioEffectKind::InspectItem {
                     canonical_ref,
@@ -303,6 +303,7 @@ impl StudioCore {
             }
             StudioAction::InspectSummary { title, detail } => {
                 self.ui.inspector = StudioInspectorState::Summary { title, detail };
+                self.ensure_inspector_tile();
                 self.bump_generation();
                 Vec::new()
             }
@@ -468,7 +469,7 @@ impl StudioCore {
         self.initial_effects()
     }
 
-    fn ensure_item_inspector_tile(&mut self) {
+    fn ensure_inspector_tile(&mut self) {
         if let Some(tile_id) = self
             .workspace
             .layout
@@ -731,6 +732,7 @@ impl StudioCore {
             }
             ViewSpec::Atlas => vec![
                 self.emit(StudioEffectKind::FetchDimension),
+                self.emit(StudioEffectKind::FetchTopology),
                 self.emit(StudioEffectKind::FetchItems {
                     tile_id: None,
                     query: None,
@@ -738,12 +740,15 @@ impl StudioCore {
                     limit: 1000,
                 }),
             ],
+            ViewSpec::Graph { .. } => vec![
+                self.emit(StudioEffectKind::FetchDimension),
+                self.emit(StudioEffectKind::FetchTopology),
+            ],
             ViewSpec::Overview
             | ViewSpec::Remotes
             | ViewSpec::Services
             | ViewSpec::ItemInspector
             | ViewSpec::Trust
-            | ViewSpec::Graph { .. }
             | ViewSpec::EventInspector => vec![self.emit(StudioEffectKind::FetchDimension)],
         }
     }
@@ -790,6 +795,11 @@ impl StudioCore {
                         core.data.projects = Some(projects);
                     },
                 );
+            }
+            StudioEffectResultKind::Topology => {
+                self.apply_parsed::<StudioTopologyDto>(data, "topology", |core, topology| {
+                    core.data.topology = Some(topology);
+                });
             }
             StudioEffectResultKind::ProjectAdded => {
                 let added = match serde_json::from_value::<StudioAddProjectDto>(data) {
@@ -842,6 +852,7 @@ impl StudioCore {
                     }
                 }
                 self.data.dimension = None;
+                self.data.topology = None;
                 self.data.items = None;
                 self.data.tile_items.clear();
                 self.data.files = None;
@@ -1062,6 +1073,9 @@ fn effect_result_kind_matches(
             StudioEffectKind::FetchProjects,
             StudioEffectResultKind::Projects
         ) | (
+            StudioEffectKind::FetchTopology,
+            StudioEffectResultKind::Topology
+        ) | (
             StudioEffectKind::AddProject { .. },
             StudioEffectResultKind::ProjectAdded
         ) | (
@@ -1108,6 +1122,7 @@ fn effect_depends_on_project_binding(kind: &StudioEffectKind) -> bool {
     matches!(
         kind,
         StudioEffectKind::FetchDimension
+            | StudioEffectKind::FetchTopology
             | StudioEffectKind::FetchItems { .. }
             | StudioEffectKind::ListFiles { .. }
             | StudioEffectKind::ReadFile { .. }
@@ -1279,6 +1294,7 @@ mod tests {
         BrowserSession {
             session_id: "session-1".to_string(),
             surface_ref: "surface:ryeos/studio/base".to_string(),
+            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             effective_surface: None,
             project_path: Some("/tmp/project".to_string()),
             read_only: true,
@@ -1331,10 +1347,120 @@ mod tests {
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
-        assert!(effects.iter().any(|effect| matches!(
-            effect.kind,
-            StudioEffectKind::FetchItems { tile_id: None, .. }
-        )));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology)));
+    }
+
+    #[test]
+    fn graph_view_effects_fetch_topology() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Graph { graph_id: None },
+                },
+            },
+        });
+
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology)));
+    }
+
+    #[test]
+    fn topology_effect_result_updates_state() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let effects = core.initial_effects();
+        let topology_id = effects
+            .iter()
+            .find(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology))
+            .map(|effect| effect.id)
+            .expect("graph startup should fetch topology");
+
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: topology_id,
+                ok: true,
+                kind: StudioEffectResultKind::Topology,
+                data: Some(serde_json::json!({
+                    "version": "1",
+                    "kind": "topology",
+                    "metadata": {},
+                    "nodes": [{
+                        "id": "tool:demo/run",
+                        "kind": "tool",
+                        "label": "run",
+                        "ref": "tool:demo/run"
+                    }],
+                    "edges": []
+                })),
+                error: None,
+            },
+        });
+
+        let topology = core.data.topology.as_ref().expect("topology state");
+        assert_eq!(topology.nodes.len(), 1);
+        assert_eq!(topology.nodes[0].ref_, "tool:demo/run");
+    }
+
+    #[test]
+    fn launcher_includes_graph_view() {
+        assert!(launcher_items().iter().any(|item| {
+            item.label == "Graph"
+                && matches!(
+                    item.action,
+                    StudioAction::OpenView {
+                        view: ViewSpec::Graph { graph_id: None }
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn status_bar_exposes_principal_and_surface() {
+        let core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        let envelope = core.envelope(Vec::new());
+        let segments = &envelope.view_model.presentation.chrome.status_bar.segments;
+        let value = |id: &str| {
+            segments
+                .iter()
+                .find(|segment| segment.id == id)
+                .map(|segment| segment.value.as_str())
+        };
+
+        assert_eq!(value("principal"), Some("fp:abababab…"));
+        assert_eq!(value("surface"), Some("ryeos/studio/base"));
+    }
+
+    #[test]
+    fn inspect_summary_opens_inspector_tile() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        assert!(core
+            .workspace
+            .tiles
+            .values()
+            .all(|tile| !matches!(tile.view, ViewSpec::ItemInspector)));
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectSummary {
+                    title: "Topology: run".to_string(),
+                    detail: serde_json::json!({ "ref": "tool:demo/run" }),
+                },
+            },
+        });
+
+        let focused = core
+            .workspace
+            .tiles
+            .get(&core.workspace.focused_tile)
+            .expect("focused tile");
+        assert!(matches!(focused.view, ViewSpec::ItemInspector));
+        assert!(matches!(
+            core.ui.inspector,
+            StudioInspectorState::Summary { .. }
+        ));
     }
 
     #[test]

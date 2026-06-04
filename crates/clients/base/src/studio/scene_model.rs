@@ -176,6 +176,65 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
         }
     }
 
+    if let Some(topology) = &core.data.topology {
+        let limit = topology.nodes.len().min(48);
+        for (index, node) in topology.nodes.iter().take(limit).enumerate() {
+            let angle = index as f32 * 0.72;
+            let radius = 4.2 + ((index % 4) as f32 * 0.45);
+            let y = ((index % 5) as f32 - 2.0) * 0.22;
+            let id = if node.id.is_empty() {
+                format!("topology:node:{index}")
+            } else {
+                format!("topology:node:{}", node.id)
+            };
+            let label = if node.label.is_empty() {
+                node.ref_.clone()
+            } else {
+                node.label.clone()
+            };
+            let detail = serde_json::json!({
+                "id": node.id,
+                "kind": node.kind,
+                "ref": node.ref_,
+                "space": node.space,
+                "path": node.path,
+                "namespace": node.namespace,
+                "virtual": node.virtual_,
+                "missing": node.missing,
+            });
+            let mut object = scene_object(
+                &id,
+                scene_kind_for_topology(&node.kind),
+                [angle.cos() * radius, y, angle.sin() * radius],
+                [0.42, 0.42, 0.42],
+                color_for_topology(&node.kind, node.missing),
+                Some(label.clone()),
+                tone_for_topology(&node.kind, node.missing),
+            );
+            object.opacity = if node.missing { 0.45 } else { 0.86 };
+            object.action = Some(StudioAction::InspectSummary {
+                title: format!("Topology: {label}"),
+                detail,
+            });
+            scene.objects.push(object);
+        }
+
+        if topology.nodes.len() > limit {
+            scene.objects.push(scene_object(
+                "topology:truncated",
+                StudioSceneObjectKind::LabelAnchor,
+                [0.0, 1.2, -4.8],
+                [0.55, 0.55, 0.55],
+                "#928374",
+                Some(format!(
+                    "{} more topology nodes",
+                    topology.nodes.len() - limit
+                )),
+                StudioTone::Neutral,
+            ));
+        }
+    }
+
     if let Some(items) = &core.data.items {
         scene.objects.push(scene_object(
             "items:cluster",
@@ -283,6 +342,41 @@ fn scale_for_count(count: usize) -> f32 {
     (0.65 + (count as f32).sqrt() * 0.12).min(2.2)
 }
 
+fn scene_kind_for_topology(kind: &str) -> StudioSceneObjectKind {
+    match kind {
+        "project" | "project_root" | "surface" => StudioSceneObjectKind::ProjectCore,
+        "space" => StudioSceneObjectKind::SpaceRing,
+        "service" | "route" | "handler" | "protocol" => StudioSceneObjectKind::ServiceBeacon,
+        "thread" => StudioSceneObjectKind::ThreadFlow,
+        "schedule" => StudioSceneObjectKind::SchedulePulse,
+        _ => StudioSceneObjectKind::ItemCluster,
+    }
+}
+
+fn color_for_topology(kind: &str, missing: bool) -> &'static str {
+    if missing {
+        return "#928374";
+    }
+    match kind {
+        "directive" => "#fabd2f",
+        "tool" => "#8ec07c",
+        "knowledge" => "#83a598",
+        "service" | "route" => "#b8bb26",
+        "surface" | "project" | "project_root" => "#fe8019",
+        _ => "#d5c4a1",
+    }
+}
+
+fn tone_for_topology(kind: &str, missing: bool) -> StudioTone {
+    if missing {
+        StudioTone::Warn
+    } else if matches!(kind, "surface" | "project" | "project_root") {
+        StudioTone::Accent
+    } else {
+        StudioTone::Neutral
+    }
+}
+
 fn atlas_context_refs(core: &StudioCore) -> Vec<String> {
     let Some(inspection) = &core.data.item_inspection else {
         return Vec::new();
@@ -345,7 +439,9 @@ fn is_canonical_item_ref(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::studio::dto::{StudioItemDto, StudioItemsDto};
+    use crate::studio::dto::{
+        StudioItemDto, StudioItemsDto, StudioTopologyDto, StudioTopologyNodeDto,
+    };
 
     #[test]
     fn scene_model_includes_namespace_atlas_for_items() {
@@ -388,6 +484,34 @@ mod tests {
             .find(|node| node.namespace_key == "rye/core/create_tool")
             .expect("projected stack");
         assert_eq!(stack_node.stack.len(), 2);
+    }
+
+    #[test]
+    fn scene_model_projects_topology_nodes() {
+        let mut core = StudioCore::default();
+        core.data.topology = Some(StudioTopologyDto {
+            nodes: vec![StudioTopologyNodeDto {
+                id: "tool:demo/run".to_string(),
+                kind: "tool".to_string(),
+                label: "run".to_string(),
+                ref_: "tool:demo/run".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let scene = build_scene_model(&core);
+        let node = scene
+            .objects
+            .iter()
+            .find(|object| object.id == "topology:node:tool:demo/run")
+            .expect("topology node object");
+        assert_eq!(node.kind, StudioSceneObjectKind::ItemCluster);
+        assert_eq!(node.label.as_deref(), Some("run"));
+        assert!(matches!(
+            node.action,
+            Some(StudioAction::InspectSummary { .. })
+        ));
     }
 
     #[test]

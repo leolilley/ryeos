@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use super::dto::{
     StudioDimensionDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
     StudioItemInspectionDto, StudioItemsDto, StudioProjectsDto, StudioSchedulesDto,
-    StudioThreadInspectionDto, StudioThreadsDto,
+    StudioThreadInspectionDto, StudioThreadsDto, StudioTopologyDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::scene_model::StudioSceneModel;
@@ -20,6 +20,8 @@ pub struct BrowserSession {
     pub session_id: String,
     #[serde(default)]
     pub surface_ref: String,
+    #[serde(default)]
+    pub user_principal_id: Option<String>,
     #[serde(default)]
     pub effective_surface: Option<serde_json::Value>,
     #[serde(default)]
@@ -164,6 +166,7 @@ fn default_true() -> bool {
 pub struct StudioDataState {
     pub session: Option<BrowserSession>,
     pub dimension: Option<StudioDimensionDto>,
+    pub topology: Option<StudioTopologyDto>,
     pub projects: Option<StudioProjectsDto>,
     pub threads: Option<StudioThreadsDto>,
     pub items: Option<StudioItemsDto>,
@@ -264,6 +267,7 @@ impl StudioCore {
         let mut needs_schedules = false;
         let mut needs_gc = false;
         let mut needs_atlas_items = false;
+        let mut needs_topology = false;
         let mut item_tiles = Vec::new();
         let mut file_tiles = Vec::new();
 
@@ -274,17 +278,20 @@ impl StudioCore {
             match tile.view {
                 ViewSpec::Thread { .. } | ViewSpec::ThreadList => needs_threads = true,
                 ViewSpec::SpaceBrowser { .. } => item_tiles.push((tile_id, tile.local.clone())),
-                ViewSpec::Atlas => needs_atlas_items = true,
+                ViewSpec::Atlas => {
+                    needs_atlas_items = true;
+                    needs_topology = true;
+                }
                 ViewSpec::Schedules => needs_schedules = true,
                 ViewSpec::GcStatus => needs_gc = true,
                 ViewSpec::Files => file_tiles.push((tile_id, tile.local.clone())),
+                ViewSpec::Graph { .. } => needs_topology = true,
                 ViewSpec::Overview
                 | ViewSpec::Remotes
                 | ViewSpec::Services
                 | ViewSpec::ItemInspector
                 | ViewSpec::Projects
                 | ViewSpec::Trust
-                | ViewSpec::Graph { .. }
                 | ViewSpec::EventInspector => {}
             }
         }
@@ -315,6 +322,9 @@ impl StudioCore {
                 kind: None,
                 limit: 1000,
             }));
+        }
+        if needs_topology {
+            effects.push(self.emit(StudioEffectKind::FetchTopology));
         }
         if needs_schedules {
             effects.push(self.emit(StudioEffectKind::FetchSchedules));

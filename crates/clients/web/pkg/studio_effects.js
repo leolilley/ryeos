@@ -5,6 +5,8 @@ export async function runEffect(effect) {
       return result(effect, "dimension", await getJson("/ui/api/studio/dimension"));
     case "fetch_projects":
       return result(effect, "projects", await optionalProjectsJson());
+    case "fetch_topology":
+      return result(effect, "topology", await getJson("/ui/api/graph/topology"));
     case "add_project":
       return result(effect, "project_added", await postJson("/ui/api/studio/projects/add", { root: kind.root }));
     case "open_project":
@@ -101,6 +103,7 @@ function resultKindFor(effect) {
   const type = effect?.kind?.type;
   if (type === "fetch_dimension") return "dimension";
   if (type === "fetch_projects") return "projects";
+  if (type === "fetch_topology") return "topology";
   if (type === "add_project") return "project_added";
   if (type === "open_project") return "project_opened";
   if (type === "fetch_threads") return "threads";

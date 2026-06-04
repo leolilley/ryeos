@@ -11,6 +11,7 @@ pub struct StudioEffect {
 pub enum StudioEffectKind {
     FetchDimension,
     FetchProjects,
+    FetchTopology,
     AddProject {
         root: String,
     },
@@ -73,6 +74,7 @@ pub struct StudioEffectResult {
 pub enum StudioEffectResultKind {
     Dimension,
     Projects,
+    Topology,
     ProjectAdded,
     ProjectOpened,
     Threads,
