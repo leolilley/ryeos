@@ -462,7 +462,17 @@ function sectionBlock(block, dispatchUi) {
   const dl = el("dl");
   for (const [key, value] of block.rows || []) dl.append(textEl("dt", key), textEl("dd", value));
   section.append(dl);
-  if (block.action && dispatchUi) section.addEventListener("click", () => dispatchUi({ type: "activate", action: block.action }));
+  if (block.action && dispatchUi) {
+    const actionLabel = (block.rows || []).find(([key]) => key === "Action")?.[1] || "Run";
+    const button = el("button", "studio-section-action");
+    button.type = "button";
+    button.textContent = actionLabel;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      dispatchUi({ type: "activate", action: block.action });
+    });
+    section.append(button);
+  }
   return section;
 }
 

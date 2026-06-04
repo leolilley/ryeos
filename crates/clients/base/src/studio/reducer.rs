@@ -779,6 +779,47 @@ impl StudioCore {
             return Vec::new();
         }
 
+        if matches!(
+            result.kind,
+            StudioEffectResultKind::ActionInvocation | StudioEffectResultKind::ThreadCancelled
+        ) {
+            let data = result
+                .data
+                .as_ref()
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            match result.kind {
+                StudioEffectResultKind::ActionInvocation => {
+                    self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
+                    return vec![
+                        self.emit(StudioEffectKind::FetchDimension),
+                        self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
+                    ];
+                }
+                StudioEffectResultKind::ThreadCancelled => {
+                    self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
+                    let mut effects = vec![
+                        self.emit(StudioEffectKind::FetchDimension),
+                        self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
+                    ];
+                    if let StudioEffectKind::CancelThread { thread_id } = &expected {
+                        if matches!(
+                            &self.ui.inspector,
+                            StudioInspectorState::Thread { thread_id: current } if current == thread_id
+                        ) {
+                            self.data.thread_inspection = None;
+                            effects.push(self.emit(StudioEffectKind::InspectThread {
+                                thread_id: thread_id.clone(),
+                                event_limit: 100,
+                            }));
+                        }
+                    }
+                    return effects;
+                }
+                _ => unreachable!(),
+            }
+        }
+
         let Some(data) = result.data else {
             self.bump_generation();
             return Vec::new();
@@ -804,19 +845,8 @@ impl StudioCore {
                     core.data.topology = Some(topology);
                 });
             }
-            StudioEffectResultKind::ActionInvocation => {
-                self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
-                return vec![
-                    self.emit(StudioEffectKind::FetchDimension),
-                    self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
-                ];
-            }
-            StudioEffectResultKind::ThreadCancelled => {
-                self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
-                return vec![
-                    self.emit(StudioEffectKind::FetchDimension),
-                    self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
-                ];
+            StudioEffectResultKind::ActionInvocation | StudioEffectResultKind::ThreadCancelled => {
+                unreachable!("command results are handled before optional data extraction")
             }
             StudioEffectResultKind::ProjectAdded => {
                 let added = match serde_json::from_value::<StudioAddProjectDto>(data) {
@@ -2420,6 +2450,45 @@ mod tests {
     }
 
     #[test]
+    fn action_invocation_success_without_body_still_notices_and_refreshes() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let invoke = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        let invoke_id = invoke
+            .first()
+            .map(|effect| effect.id)
+            .expect("execute should emit invoke effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: invoke_id,
+                ok: true,
+                kind: StudioEffectResultKind::ActionInvocation,
+                data: None,
+                error: None,
+            },
+        });
+
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Ran tool:demo/run."));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 100 })));
+    }
+
+    #[test]
     fn writable_cancel_thread_emits_cancel_effect() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(StudioEvent::Ui {
@@ -2507,6 +2576,58 @@ mod tests {
             notice.message == "Cancel T-demo failed: thread already finished"
                 && notice.tone == StudioTone::Danger
         }));
+    }
+
+    #[test]
+    fn thread_cancelled_from_inspector_clears_stale_detail_and_reinspects() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        core.data.thread_inspection = Some(StudioThreadInspectionDto {
+            thread: serde_json::json!({
+                "thread_id": "T-demo",
+                "status": "running"
+            }),
+            ..Default::default()
+        });
+        let cancel = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        let cancel_id = cancel
+            .first()
+            .map(|effect| effect.id)
+            .expect("cancel should emit effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: cancel_id,
+                ok: true,
+                kind: StudioEffectResultKind::ThreadCancelled,
+                data: None,
+                error: None,
+            },
+        });
+
+        assert!(core.data.thread_inspection.is_none());
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 200 })));
+        assert!(effects.iter().any(|effect| matches!(
+            &effect.kind,
+            StudioEffectKind::InspectThread { thread_id, event_limit: 100 } if thread_id == "T-demo"
+        )));
     }
 
     #[test]

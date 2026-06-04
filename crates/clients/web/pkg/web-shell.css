@@ -751,6 +751,19 @@ body {
 .studio-section dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; margin: 0; }
 .studio-section dt { color: var(--studio-muted); text-transform: uppercase; font-size: 0.76rem; }
 .studio-section dd { margin: 0; overflow-wrap: anywhere; }
+.studio-section-action {
+  margin-top: 14px;
+  border: 1px solid rgba(var(--studio-accent-rgb), 0.55);
+  background: rgba(var(--studio-accent-rgb), 0.12);
+  color: var(--studio-accent);
+  padding: 8px 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.studio-section-action:hover {
+  background: var(--studio-accent);
+  color: var(--studio-bg);
+}
 
 .studio-list-header {
   display: grid;
