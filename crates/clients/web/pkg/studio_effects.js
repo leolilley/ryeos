@@ -38,6 +38,11 @@ export async function runEffect(effect) {
         thread_id: kind.thread_id,
         event_limit: kind.event_limit,
       }));
+    case "invoke_action":
+      return result(effect, "action_invocation", await postJson("/ui/api/actions/invoke", {
+        command_id: kind.command_id,
+        args: kind.args ?? {},
+      }));
     case "set_location_hash":
       location.hash = kind.hash;
       return result(effect, "browser_only", null);

@@ -358,9 +358,10 @@ impl StudioCore {
                     self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
                 } else {
-                    let _ = (item_ref, parameters);
-                    self.notice("Execution from RyeOS is not wired yet.", StudioTone::Warn);
-                    Vec::new()
+                    vec![self.emit(StudioEffectKind::InvokeAction {
+                        command_id: item_ref,
+                        args: parameters,
+                    })]
                 }
             }
             StudioAction::CancelThread { thread_id } => {
@@ -801,6 +802,13 @@ impl StudioCore {
                     core.data.topology = Some(topology);
                 });
             }
+            StudioEffectResultKind::ActionInvocation => {
+                self.notice("Action invoked.", StudioTone::Good);
+                return vec![
+                    self.emit(StudioEffectKind::FetchDimension),
+                    self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
+                ];
+            }
             StudioEffectResultKind::ProjectAdded => {
                 let added = match serde_json::from_value::<StudioAddProjectDto>(data) {
                     Ok(added) => added,
@@ -1106,6 +1114,9 @@ fn effect_result_kind_matches(
             StudioEffectKind::InspectThread { .. },
             StudioEffectResultKind::ThreadInspection
         ) | (
+            StudioEffectKind::InvokeAction { .. },
+            StudioEffectResultKind::ActionInvocation
+        ) | (
             StudioEffectKind::SetLocationHash { .. },
             StudioEffectResultKind::BrowserOnly
         ) | (
@@ -1127,6 +1138,7 @@ fn effect_depends_on_project_binding(kind: &StudioEffectKind) -> bool {
             | StudioEffectKind::ListFiles { .. }
             | StudioEffectKind::ReadFile { .. }
             | StudioEffectKind::InspectItem { .. }
+            | StudioEffectKind::InvokeAction { .. }
     )
 }
 
@@ -1909,6 +1921,68 @@ mod tests {
 
         assert!(effects.is_empty());
         assert_eq!(core.ui.notices.len(), 1);
+    }
+
+    #[test]
+    fn writable_execute_invokes_action_endpoint() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({ "target": "demo" }),
+                },
+            },
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::InvokeAction { command_id, args })
+                if command_id == "tool:demo/run" && args["target"] == "demo"
+        ));
+    }
+
+    #[test]
+    fn action_invocation_result_notices_and_refreshes() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let invoke = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        let invoke_id = invoke
+            .first()
+            .map(|effect| effect.id)
+            .expect("execute should emit invoke effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: invoke_id,
+                ok: true,
+                kind: StudioEffectResultKind::ActionInvocation,
+                data: Some(serde_json::json!({
+                    "status": "executed",
+                    "command_id": "tool:demo/run",
+                    "invocation_id": "inv-1"
+                })),
+                error: None,
+            },
+        });
+
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Action invoked."));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 100 })));
     }
 
     #[test]

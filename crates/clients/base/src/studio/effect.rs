@@ -47,6 +47,10 @@ pub enum StudioEffectKind {
         thread_id: String,
         event_limit: usize,
     },
+    InvokeAction {
+        command_id: String,
+        args: serde_json::Value,
+    },
     SetLocationHash {
         hash: String,
     },
@@ -85,5 +89,6 @@ pub enum StudioEffectResultKind {
     FileRead,
     ItemInspection,
     ThreadInspection,
+    ActionInvocation,
     BrowserOnly,
 }
