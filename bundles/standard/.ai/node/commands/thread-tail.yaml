@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:66a6e18e1055011834b537f12488cc75644d845006bb8ddc694af0baedc831b1:4zUqgeNKKY3/scMzTzkDOtFeJ9g5vMcV4SmgXNBsvGMjbmnRNkJNA/gOP4VIIngaYYxuspe6/0b2QpkUrCo4Ag==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: thread-tail
+tokens:
+- thread
+- tail
+description: Tail a thread's persisted events live (SSE)
+dispatch:
+  kind: execute_ref
+  execute: service:threads/tail

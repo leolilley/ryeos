@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-04T04:39:02Z:81614b829229a80735f9a5fa325e3f651ff07fcbde35398b760fea1407e77ea8:/bk3oTCKs3b5kC/STLyr90FzmGFMYOBmXJkR+Yb6L538WGuTf8e8JPV2kSAZQTo5CGxZNqdERAM9krbaQYPdDA==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-sync-project-ai
+tokens:
+- remote
+- sync-project-ai
+description: Sync managed project .ai content to a remote node and apply it
+forms:
+- slots:
+  - field: remote
+project:
+  resolution: required
+  bind_parameter: project
+dispatch:
+  kind: execute_ref
+  execute: service:remote/sync-project-ai

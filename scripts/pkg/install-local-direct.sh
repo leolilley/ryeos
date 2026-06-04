@@ -357,9 +357,9 @@ if [[ $run_init -eq 1 ]]; then
         done
     fi
     if [[ "$bundle_set" == "full" ]]; then
-        grep -q '^execute: client:ryeos/tui$' \
-            "$state_root/.ai/bundles/cockpit/.ai/node/verbs/tui.yaml" || \
-            die "initialized tui verb is stale or not client-backed"
+        grep -q '^  execute: client:ryeos/tui$' \
+            "$state_root/.ai/bundles/cockpit/.ai/node/commands/tui.yaml" || \
+            die "initialized tui command is stale or not client-backed"
     fi
 fi
 

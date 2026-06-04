@@ -7,8 +7,8 @@
 //! 1. Detecting an explicit `--project <path>` (or `-p <path>`) in the
 //!    tail and canonicalizing the path against the *CLI's* cwd.
 //! 2. Detecting `--no-project` in the tail and passing it through.
-//! 3. If neither is present, using cwd as the project root only when
-//!    cwd directly contains `.ai/` and is not the RyeOS user-space root.
+//! 3. If neither is present, walking upward from cwd to find a directory
+//!    containing `.ai/` that is not the RyeOS user-space root.
 //!    Otherwise, falling back to `--no-project` so execution resolves
 //!    against user space.
 //!
@@ -139,11 +139,15 @@ fn resolve_spec_from_cwd(
                 return Ok(ResolvedProjectSpec::NoProject);
             }
 
-            if canonical_cwd.join(ryeos_engine::AI_DIR).is_dir() {
-                Ok(ResolvedProjectSpec::Explicit(canonical_cwd))
-            } else {
-                Ok(ResolvedProjectSpec::NoProject)
+            for ancestor in canonical_cwd.ancestors() {
+                if ancestor.starts_with(&user_root) {
+                    return Ok(ResolvedProjectSpec::NoProject);
+                }
+                if ancestor.join(ryeos_engine::AI_DIR).is_dir() {
+                    return Ok(ResolvedProjectSpec::Explicit(ancestor.to_path_buf()));
+                }
             }
+            Ok(ResolvedProjectSpec::NoProject)
         }
     }
 }

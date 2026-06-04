@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:212346e9e41784e64aa3d2bf377aad9dec9ac51a2db50bbc6f5002c4eb40ff84:5UXemsvaOd9FaQ5+9dL5ypVKVwhDwbfij/Bm9EK2o5ADJ1JvH0Ri1B8ClJrroSQ4g5LTbMn21BVyqvHKZ8ixAg==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: bundle-install
+tokens:
+- bundle
+- install
+description: Install a bundle into the daemon's state
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/install

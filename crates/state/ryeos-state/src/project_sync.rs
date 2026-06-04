@@ -75,7 +75,7 @@ pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
         true,
     ),
     surface(
-        ".ai/node/verbs",
+        ".ai/node/commands",
         ProjectAiSurfaceKind::NodeExtensionDeclarations,
         true,
     ),

@@ -9,12 +9,12 @@ use crate::input::{InputEvent, Key, Mouse, MouseAction, ScrollDirection};
 use crate::layout::Rect;
 use crate::model::AppModel;
 use crate::store::{
-    BundleSummaryModel, CockpitSnapshotModel, DaemonStatus, EventRecord, FileBrowserModel,
-    FileEntryModel, FileReadModel, GcStatusModel, GcSummaryModel, IdentityInfoModel, IdentityModel,
-    ItemInspectionModel, ItemModel, LocalNodeModel, ProjectInfoModel, ProjectModel,
-    ScheduleListModel, ScheduleModel, ScheduleSummaryModel, ServiceSummaryModel, SessionModel,
-    SpaceSummaryModel, ThreadInspectionModel, ThreadModel, ThreadStatus, ThreadUsage,
-    VerbAliasSummaryModel,
+    BundleSummaryModel, CockpitSnapshotModel, CommandSummaryModel, DaemonStatus, EventRecord,
+    FileBrowserModel, FileEntryModel, FileReadModel, GcStatusModel, GcSummaryModel,
+    IdentityInfoModel, IdentityModel, ItemInspectionModel, ItemModel, LocalNodeModel,
+    ProjectInfoModel, ProjectModel, ScheduleListModel, ScheduleModel, ScheduleSummaryModel,
+    ServiceSummaryModel, SessionModel, SpaceSummaryModel, ThreadInspectionModel, ThreadModel,
+    ThreadStatus, ThreadUsage,
 };
 use crate::workspace::InputCapability;
 use crate::workspace::ViewSpec;
@@ -164,9 +164,9 @@ pub struct CockpitLocalNode {
     #[serde(default)]
     pub services: Vec<CockpitService>,
     #[serde(default)]
-    pub verbs: Vec<CockpitVerbAlias>,
+    pub commands: Vec<CockpitCommand>,
     #[serde(default)]
-    pub aliases: Vec<CockpitVerbAlias>,
+    pub command_aliases: Vec<CockpitCommand>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -208,7 +208,7 @@ pub struct CockpitService {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitVerbAlias {
+pub struct CockpitCommand {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -1342,20 +1342,20 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
                     required_caps: service.required_caps,
                 })
                 .collect(),
-            verbs: snapshot
+            commands: snapshot
                 .local_node
-                .verbs
+                .commands
                 .into_iter()
-                .map(|verb| VerbAliasSummaryModel {
+                .map(|verb| CommandSummaryModel {
                     name: verb.name,
                     target: verb.target,
                 })
                 .collect(),
-            aliases: snapshot
+            command_aliases: snapshot
                 .local_node
-                .aliases
+                .command_aliases
                 .into_iter()
-                .map(|alias| VerbAliasSummaryModel {
+                .map(|alias| CommandSummaryModel {
                     name: alias.name,
                     target: alias.target,
                 })

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:c2dfd9a2b642d6060c18dd7ddc393333f810af65ec1d356bbf6458d945b12b56:1t2dS9pypN7ZvMO13TdUwoGjqrvAXz65e5+OuMRR+DER7OQn4A/DIRYoBv5pzafdbj19suHkhYEUZ8o0PoOXAA==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: scheduler-pause
+tokens:
+- scheduler
+- pause
+description: Pause a schedule
+dispatch:
+  kind: execute_ref
+  execute: service:scheduler/pause

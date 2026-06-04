@@ -30,7 +30,7 @@ use crate::objects::SourceManifest;
 /// cross-node sync. Anything not in this set is local-only.
 ///
 /// All entries are honoured by the per-request engine overlay on the
-/// remote — handler descriptors, parsers, kind schemas, and verbs
+/// remote — handler descriptors, parsers, kind schemas, and commands
 /// all resolve from the materialised user root, not the
 /// remote's global engine.
 pub const USER_SPACE_SYNC_DIRS: &[&str] = &[
@@ -41,7 +41,7 @@ pub const USER_SPACE_SYNC_DIRS: &[&str] = &[
     "handlers",
     "protocols",
     "node/engine/kinds",
-    "node/verbs",
+    "node/commands",
 ];
 
 /// Trust pins are also pushed but handled separately: they go into a
@@ -166,7 +166,7 @@ mod tests {
             "knowledge/my/notes.md",
             "config/keys/trusted/abc.toml",
             "node/engine/kinds/my.kind-schema.yaml",
-            "node/verbs/my.yaml",
+            "node/commands/my.yaml",
         ]);
         validate_user_manifest_paths(&m).expect("allowed paths must pass");
     }

@@ -1,0 +1,22 @@
+# ryeos:signed:2026-06-04T04:39:02Z:5598768f2fc35e771033d89fda1838f574bbd51b98ab6055ed81c46685888da5:VmpQSP3LKG9ApT7VfdWruHkSyLfNRgZP9qIlM90oqgk3LBAQJfdi8sytY8tk5HMC9eREWOYzAMwpO5JzeIJTCQ==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-run
+tokens:
+- remote
+- run
+description: Execute an item against a configured remote project
+forms:
+- slots:
+  - field: remote
+  - field: item_ref
+    matcher: canonical_ref
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+project:
+  resolution: required
+  bind_parameter: project
+dispatch:
+  kind: execute_ref
+  execute: service:remote/run

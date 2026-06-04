@@ -5,9 +5,8 @@ use serde::Serialize;
 use tokio::sync::{mpsc, RwLock};
 
 use ryeos_engine::engine::Engine;
-use ryeos_runtime::alias_registry::AliasRegistry;
 use ryeos_runtime::authorizer::Authorizer;
-use ryeos_runtime::verb_registry::VerbRegistry;
+use ryeos_runtime::CommandRegistry;
 use ryeos_scheduler::db::SchedulerDb;
 use ryeos_scheduler::ReloadSignal;
 
@@ -79,13 +78,10 @@ pub struct AppState {
     /// vendor-agnostic — this trait moves opaque `String -> String`
     /// pairs and never enumerates provider names.
     pub vault: Arc<dyn NodeVault>,
-    /// Verb registry for capability checking. Built once at startup
-    /// from node-config verb YAMLs.
-    pub verb_registry: Arc<VerbRegistry>,
-    /// Alias registry for token routing. Built once at startup
-    /// from node-config alias YAMLs.
-    pub alias_registry: Arc<AliasRegistry>,
-    /// Unified capability evaluator. Built once at startup from `verb_registry`.
+    /// Command registry for token routing. Built once at startup
+    /// from node-config command YAMLs.
+    pub command_registry: Arc<CommandRegistry>,
+    /// Unified capability evaluator. Built once at startup.
     /// All enforcement sites use this shared instance instead of constructing
     /// per-request.
     pub authorizer: Arc<Authorizer>,

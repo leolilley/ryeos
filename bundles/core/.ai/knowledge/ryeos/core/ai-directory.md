@@ -165,14 +165,13 @@ bootstrap loader:
 
 | Section          | Who Contributes            | Purpose                      |
 |------------------|-----------------------------|------------------------------|
-| `aliases/`       | Bundles + state             | CLI token shortcuts          |
 | `bundles/`       | State only                  | Bundle path registrations    |
 | `routes/`        | Bundles + state             | HTTP endpoint definitions    |
-| `verbs/`         | Bundles + state             | CLI verb definitions         |
+| `commands/`      | Bundles + state             | CLI command definitions      |
 | `engine/kinds/`  | Loaded by KindRegistry      | Kind schema YAMLs            |
 | `identity/`      | Bootstrap-managed           | Node signing keys            |
 | `auth/`          | Bootstrap-managed           | Authorized keys              |
 | `vault/`         | Bootstrap-managed           | Encryption keys              |
 
-A YAML at `.ai/node/verbs/sign.yaml` must declare `section: verbs`.
+A YAML at `.ai/node/commands/sign.yaml` must declare `section: commands`.
 The loader enforces this path invariant strictly.

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:2471e3bcd8949e9e63399cadc11e2b3dc2a36e65d2b0e1c5c290a1bdff6dab91:CvVUOkBnRGi+f/p/dyeyygp6IAr2F/EG+/na6LLj9LzyqHH/DyZhw6ozXjmXZ9UW7PML96tDMtFwtUc2mOXWAQ==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: bundle-publish
+tokens:
+- bundle
+- publish
+description: Full bundle release pipeline (sign, manifest, trust doc)
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/publish

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:966ac7741619dc5894592fad09f5999d2c20fe3d1c0ebfd7aab5cc4e7e8b186d:sbOGKkDt+XCBQC3nLIrlKX+FQ+u7j5ZYMIu8QtRDo4j7A1W+zLN6GUPgpfFNXF0p2cNpf9F8NgI6kmj+xKbeAg==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-authorize
+tokens:
+- remote
+- authorize
+description: Authorize a key on a remote node
+dispatch:
+  kind: execute_ref
+  execute: service:remote/authorize

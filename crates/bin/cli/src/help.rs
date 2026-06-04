@@ -1,6 +1,6 @@
-//! CLI help — static lifecycle section + dynamic alias discovery.
+//! CLI help — static lifecycle section + dynamic command discovery.
 //!
-//! `ryeos help` prints lifecycle verbs (always available) and discovers
+//! `ryeos help` prints lifecycle commands (always available) and discovers
 //! the rest from installed bundle descriptors on disk. No daemon required.
 //! `ryeos help <verb>` uses installed descriptors first and only queries the
 //! daemon when no local descriptor help is available.
@@ -16,9 +16,9 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::{EffectiveItemRequest, Engine};
 use serde_json::Value;
 
-use crate::node_descriptors::LoadedAliasDescriptor;
+use crate::node_descriptors::LoadedCommandDescriptor;
 
-/// Print top-level help. Static lifecycle help always renders. Dynamic alias
+/// Print top-level help. Static lifecycle help always renders. Dynamic command
 /// discovery is included only after installed node config verifies; verification
 /// failures are surfaced as warnings instead of being treated as absent config.
 pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
@@ -62,7 +62,7 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     )?;
     writeln!(out)?;
 
-    // ── Dynamic alias discovery from installed bundles ──
+    // ── Dynamic command discovery from installed bundles ──
     let system_space_dir = discover_system_space_dir();
     let snapshot = match crate::node_descriptors::load_verified_snapshot(&system_space_dir) {
         Ok(snapshot) => Some(snapshot),
@@ -80,7 +80,7 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
         .flatten();
     let discovered = snapshot
         .as_ref()
-        .map(|snapshot| discover_aliases_from_snapshot(snapshot, engine.as_ref(), "."))
+        .map(|snapshot| discover_commands_from_snapshot(snapshot, engine.as_ref(), "."))
         .unwrap_or_default();
 
     if !discovered.is_empty() {
@@ -118,103 +118,49 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Discover aliases from verified installed node config.
+/// Discover commands from verified installed node config.
 /// Returns (token_string, description, is_offline) tuples.
-fn discover_aliases_from_snapshot(
+fn discover_commands_from_snapshot(
     snapshot: &NodeConfigSnapshot,
     engine: Option<&Engine>,
     project_path: &str,
 ) -> Vec<(String, String, bool)> {
     let mut results = Vec::new();
-    let aliases = crate::node_descriptors::load_alias_descriptors_from_snapshot(snapshot);
+    let commands = crate::node_descriptors::load_command_descriptors_from_snapshot(snapshot);
 
-    for alias in aliases {
+    for command in commands {
         // Skip short aliases (s, f) — they're abbreviations.
-        if alias.def.tokens.len() == 1 && alias.def.tokens[0].len() <= 1 {
+        if command.tokens.len() == 1 && command.tokens[0].len() <= 1 {
             continue;
         }
 
-        let metadata =
-            crate::node_descriptors::load_verb_descriptor_from_snapshot(snapshot, &alias.def.verb)
-                .and_then(|verb| {
-                    engine.and_then(|engine| {
-                        resolve_effective_help(engine, &verb.execute, project_path)
-                    })
-                });
+        let metadata = command.execute_ref().and_then(|execute| {
+            engine.and_then(|engine| resolve_effective_help(engine, execute, project_path))
+        });
         let is_offline = metadata
             .as_ref()
             .is_some_and(ItemHelpMetadata::is_offline_dispatch);
-        results.push((alias.def.tokens.join(" "), alias.description, is_offline));
+        results.push((command.tokens.join(" "), command.description, is_offline));
     }
 
     results.sort_by(|a, b| a.0.cmp(&b.0));
     results
 }
 
-/// Print verb-specific help by querying the daemon with validate_only.
-///
-/// This sends a `validate_only: true` request which resolves the alias
-/// and returns metadata without executing. If the daemon is unreachable
-/// or the tokens don't resolve, prints a descriptive error.
+/// Print command-specific help from installed descriptors or local bootstrap help.
 pub async fn print_verb_help(
     verb_tokens: &[String],
     system_space_dir: &std::path::Path,
     project_path: &str,
 ) -> Result<(), CliError> {
     // Prefer installed descriptor help. This keeps help kind-agnostic in the
-    // CLI: aliases/verbs are node config, and the help renderer does not need
-    // to classify the execute ref before deciding whether it can print usage.
+    // CLI: command descriptors are node config, and the help renderer does not
+    // need to classify the execute ref before deciding whether it can print usage.
     if print_installed_verb_help(verb_tokens, system_space_dir, project_path)? {
         return Ok(());
     }
 
-    // Try to reach the daemon. If unavailable, fall back to a helpful
-    // message rather than a raw connection error.
-    let daemon_url = match crate::transport::http::resolve_daemon_url(system_space_dir).await {
-        Ok(url) => url,
-        Err(e) => {
-            // Daemon not running — show what we can from local knowledge
-            eprintln!("note: daemon not reachable, showing limited help");
-            eprintln!("  detail: {e:#}");
-            eprintln!();
-            if !print_installed_verb_help(verb_tokens, system_space_dir, project_path)? {
-                print_local_verb_help(verb_tokens)?;
-            }
-            return Ok(());
-        }
-    };
-
-    let signer = match crate::transport::signing::Signer::resolve(system_space_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("note: cannot sign help request (user key not found)");
-            eprintln!("  detail: {e:#}");
-            eprintln!();
-            if !print_installed_verb_help(verb_tokens, system_space_dir, project_path)? {
-                print_local_verb_help(verb_tokens)?;
-            }
-            return Ok(());
-        }
-    };
-
-    let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
-
-    let body = serde_json::json!({
-        "tokens": verb_tokens,
-        "project_path": project_path,
-        "parameters": {},
-        "validate_only": true,
-    });
-
-    let body_bytes = serde_json::to_vec(&body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", "/execute", &body_bytes, &audience)?;
-
-    let url = format!("{}/execute", daemon_url);
-    let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
-
-    // If the daemon resolved it, show the result
-    let pretty = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
-    println!("{pretty}");
+    print_local_verb_help(verb_tokens)?;
 
     Ok(())
 }
@@ -313,30 +259,25 @@ fn print_installed_verb_help(
             ))
         })?;
     let bundle_roots = snapshot_bundle_roots(&snapshot);
-    let Some(alias) = crate::node_descriptors::find_alias(&snapshot, verb_tokens) else {
+    let Some(command_descriptor) = crate::node_descriptors::find_command(&snapshot, verb_tokens)
+    else {
         return Ok(false);
     };
-    let verb =
-        crate::node_descriptors::load_verb_descriptor_from_snapshot(&snapshot, &alias.def.verb);
+    let execute_ref = command_descriptor.execute_ref();
     let engine = build_help_engine(system_space_dir, project_path, &bundle_roots).ok();
-    let item = verb.as_ref().and_then(|v| {
+    let item = execute_ref.and_then(|execute| {
         engine
             .as_ref()
-            .and_then(|engine| resolve_effective_help(engine, &v.execute, project_path))
+            .and_then(|engine| resolve_effective_help(engine, execute, project_path))
     });
 
     let mut out = std::io::stdout();
-    let command = alias.def.tokens.join(" ");
+    let command = command_descriptor.tokens.join(" ");
     let description = item
         .as_ref()
         .map(|s| s.description.as_str())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            verb.as_ref()
-                .map(|v| v.description.as_str())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or(&alias.description);
+        .unwrap_or(&command_descriptor.description);
 
     writeln!(out, "ryeos {command} — {description}")?;
     writeln!(out)?;
@@ -345,25 +286,31 @@ fn print_installed_verb_help(
             writeln!(out, "DISPATCH: offline (no daemon required)")?;
             writeln!(out)?;
         }
-    } else if let Some(verb) = &verb {
-        writeln!(out, "EXECUTE: {}", verb.execute)?;
+    } else if let Some(execute_ref) = execute_ref {
+        writeln!(out, "EXECUTE: {execute_ref}")?;
         writeln!(out)?;
     }
     writeln!(out, "USAGE:")?;
     writeln!(
         out,
         "  ryeos {command}{}",
-        usage_tail(&alias, item.as_ref())
+        usage_tail(&command_descriptor, item.as_ref())
     )?;
 
-    if alias.def.project_resolution != ryeos_runtime::ProjectResolution::None {
+    let project_resolution = command_descriptor
+        .command
+        .project
+        .as_ref()
+        .map(|project| project.resolution)
+        .unwrap_or_default();
+    if project_resolution != ryeos_runtime::CommandProjectResolution::None {
         writeln!(out)?;
         writeln!(out, "PROJECT:")?;
         writeln!(
             out,
             "  --project <DIR>       Project root; accepted before or after the verb"
         )?;
-        if alias.def.project_resolution == ryeos_runtime::ProjectResolution::Optional {
+        if project_resolution == ryeos_runtime::CommandProjectResolution::Optional {
             writeln!(
                 out,
                 "  --no-project          Resolve against user/system space only"
@@ -392,10 +339,10 @@ fn print_installed_verb_help(
     Ok(true)
 }
 
-fn usage_tail(alias: &LoadedAliasDescriptor, item: Option<&ItemHelpMetadata>) -> String {
+fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>) -> String {
     let mut parts = Vec::new();
-    if !alias.def.positional_forms.is_empty() {
-        for form in &alias.def.positional_forms {
+    if !command.command.forms.is_empty() {
+        for form in &command.command.forms {
             let shape = form
                 .slots
                 .iter()
@@ -589,54 +536,53 @@ fn discover_system_space_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::node_config::sections::alias as node_alias;
     use ryeos_app::node_config::NodeConfigSnapshot;
 
     #[test]
-    fn installed_help_reads_alias_verb_and_effective_item_metadata() {
+    fn installed_help_reads_command_and_effective_item_metadata() {
         let snapshot = NodeConfigSnapshot {
             bundles: vec![],
             routes: vec![],
-            verbs: vec![ryeos_app::node_config::sections::verb::VerbRecord {
-                category: "verbs".into(),
-                section: "verbs".into(),
+            commands: vec![ryeos_runtime::CommandDef {
+                category: "commands".into(),
+                section: "commands".into(),
                 name: "remote-doctor".into(),
-                description: "Diagnose remote setup".into(),
-                execute: Some("tool:remote/doctor".into()),
-                aliases: vec![],
-                source_file: PathBuf::from("/tmp/remote-doctor.yaml"),
-            }],
-            aliases: vec![node_alias::AliasRecord {
-                category: "aliases".into(),
-                section: "aliases".into(),
                 tokens: vec!["remote".into(), "doctor".into()],
-                verb: "remote-doctor".into(),
                 description: "Diagnose remote setup".into(),
-                deprecated: None,
-                replacement_tokens: None,
-                removed_in: None,
-                positional_forms: vec![node_alias::PositionalForm {
-                    slots: vec![node_alias::PositionalSlot {
+                aliases: vec![],
+                help: None,
+                arguments: vec![],
+                forms: vec![ryeos_runtime::CommandArgumentForm {
+                    slots: vec![ryeos_runtime::CommandArgumentSlot {
                         field: "remote".into(),
-                        matcher: node_alias::PositionalMatcher::Any,
+                        matcher: ryeos_runtime::CommandArgumentKind::String,
                     }],
                 }],
-                project_resolution: node_alias::ProjectResolution::Optional,
+                parameter_binding: None,
+                project: Some(ryeos_runtime::CommandProjectPolicy {
+                    resolution: ryeos_runtime::CommandProjectResolution::Optional,
+                    default: ryeos_runtime::CommandProjectDefault::None,
+                    no_project_flag: false,
+                    request_project_path: false,
+                    bind_parameter: None,
+                }),
+                dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
+                    execute: "tool:remote/doctor".into(),
+                    availability: ryeos_runtime::CommandAvailability::Auto,
+                },
                 source_file: PathBuf::from("/tmp/remote-doctor.yaml"),
+                source: ryeos_runtime::CommandSource::Installed,
             }],
             hosted_node_policies: vec![],
         };
         let tokens = vec!["remote".to_string(), "doctor".to_string()];
-        let alias = crate::node_descriptors::find_alias(&snapshot, &tokens).unwrap();
-        assert_eq!(alias.def.verb, "remote-doctor");
+        let command = crate::node_descriptors::find_command(&snapshot, &tokens).unwrap();
+        assert_eq!(command.command.name, "remote-doctor");
         assert_eq!(
-            alias.def.project_resolution,
-            ryeos_runtime::ProjectResolution::Optional
+            command.command.project.as_ref().unwrap().resolution,
+            ryeos_runtime::CommandProjectResolution::Optional
         );
-        let verb =
-            crate::node_descriptors::load_verb_descriptor_from_snapshot(&snapshot, &alias.def.verb)
-                .unwrap();
-        assert_eq!(verb.execute, "tool:remote/doctor");
+        assert_eq!(command.execute_ref(), Some("tool:remote/doctor"));
 
         let item = ItemHelpMetadata::from_composed(&serde_json::json!({
             "required_caps": ["ryeos.execute.tool.remote.doctor"],
@@ -649,6 +595,6 @@ mod tests {
         }));
         assert!(item.is_offline_dispatch());
         assert_eq!(item.schema.get("project").unwrap(), "string?");
-        assert_eq!(usage_tail(&alias, Some(&item)), " <remote>");
+        assert_eq!(usage_tail(&command, Some(&item)), " <remote>");
     }
 }

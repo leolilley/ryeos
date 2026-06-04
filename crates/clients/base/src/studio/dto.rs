@@ -55,9 +55,9 @@ pub struct StudioLocalNodeDto {
     #[serde(default)]
     pub services: Vec<StudioServiceDto>,
     #[serde(default)]
-    pub verbs: Vec<StudioVerbAliasDto>,
+    pub commands: Vec<StudioCommandDto>,
     #[serde(default)]
-    pub aliases: Vec<StudioVerbAliasDto>,
+    pub command_aliases: Vec<StudioCommandDto>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -99,7 +99,7 @@ pub struct StudioServiceDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StudioVerbAliasDto {
+pub struct StudioCommandDto {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
