@@ -1288,6 +1288,7 @@ mod tests {
     use crate::studio::effect::StudioEffectResultKind;
     use crate::studio::event::{StudioEvent, StudioFilterField, StudioUiEvent};
     use crate::studio::model::{BrowserSession, BrowserViewport, StudioCore};
+    use crate::studio::view_model::{StudioLayoutNodeVm, StudioViewVm};
     use crate::workspace::FocusDirection;
 
     fn session() -> BrowserSession {
@@ -1418,6 +1419,19 @@ mod tests {
     }
 
     #[test]
+    fn launcher_includes_trust_view() {
+        assert!(launcher_items().iter().any(|item| {
+            item.label == "Trust"
+                && matches!(
+                    item.action,
+                    StudioAction::OpenView {
+                        view: ViewSpec::Trust
+                    }
+                )
+        }));
+    }
+
+    #[test]
     fn status_bar_exposes_principal_and_surface() {
         let core = StudioCore::new(session(), BrowserViewport::default(), 0);
         let envelope = core.envelope(Vec::new());
@@ -1431,6 +1445,76 @@ mod tests {
 
         assert_eq!(value("principal"), Some("fp:abababab…"));
         assert_eq!(value("surface"), Some("ryeos/studio/base"));
+    }
+
+    #[test]
+    fn trust_view_exposes_principals_and_capabilities() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        core.data.dimension = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": "studio.test",
+                "session": {
+                    "session_id": "session-1",
+                    "surface_ref": "surface:ryeos/studio/base",
+                    "user_principal_id": "fp:session",
+                    "read_only": false,
+                    "granted_caps": ["rye.execute.service.ui.*"]
+                },
+                "local_node": {
+                    "identity": {
+                        "principal_id": "fp:node",
+                        "fingerprint": "node-fingerprint"
+                    },
+                    "services": [
+                        {
+                            "endpoint": "ui.session.current",
+                            "service_ref": "service:ui/session/current",
+                            "availability": "daemon",
+                            "required_caps": ["rye.execute.service.ui.session.current"]
+                        }
+                    ]
+                }
+            }))
+            .expect("dimension dto should parse"),
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Trust,
+                },
+            },
+        });
+
+        let envelope = core.envelope(Vec::new());
+        let tile = match envelope.view_model.workspace.root {
+            StudioLayoutNodeVm::Tile { view, .. } => view,
+            _ => panic!("expected single trust tile"),
+        };
+        let rows = match tile {
+            StudioViewVm::Rows { title, rows, .. } => {
+                assert_eq!(title, "Trust");
+                rows
+            }
+            other => panic!("expected trust rows, got {other:?}"),
+        };
+
+        assert!(rows.iter().any(|row| {
+            row.primary == "Session principal"
+                && row.secondary.as_deref()
+                    == Some("fp:abababababababababababababababababababababababababababababababab")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.primary == "Local node principal" && row.secondary.as_deref() == Some("fp:node")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.primary == "Granted capability"
+                && row.secondary.as_deref() == Some("rye.execute.service.ui.*")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.primary == "Required capability"
+                && row.secondary.as_deref() == Some("rye.execute.service.ui.session.current")
+                && row.meta.as_deref() == Some("ui.session.current")
+        }));
     }
 
     #[test]

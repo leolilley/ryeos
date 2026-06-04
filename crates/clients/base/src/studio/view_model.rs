@@ -808,9 +808,14 @@ fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm
             columns: vec!["Name".to_string(), "Root".to_string(), "Status".to_string()],
             rows: rows_for(core, &tile.view, Some(tile_id)),
         },
-        ViewSpec::Trust => StudioViewVm::Placeholder {
+        ViewSpec::Trust => StudioViewVm::Rows {
             title: "Trust".to_string(),
-            message: "Trust view is not wired yet.".to_string(),
+            columns: vec![
+                "Scope".to_string(),
+                "Value".to_string(),
+                "Detail".to_string(),
+            ],
+            rows: rows_for(core, &tile.view, None),
         },
     }
 }
@@ -857,7 +862,7 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
         .collect()
 }
 
-fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 9] {
+fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 10] {
     [
         (
             "Graph",
@@ -874,6 +879,7 @@ fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 9] {
         ("Files", "Project files", ViewSpec::Files),
         ("Threads", "Runs and events", ViewSpec::ThreadList),
         ("Services", "Daemon endpoints", ViewSpec::Services),
+        ("Trust", "Principals and caps", ViewSpec::Trust),
         ("Schedules", "Timed work", ViewSpec::Schedules),
         ("GC", "State cleanup", ViewSpec::GcStatus),
     ]
@@ -1100,6 +1106,93 @@ fn project_rows(core: &StudioCore) -> Vec<StudioRowVm> {
     rows
 }
 
+fn trust_rows(core: &StudioCore) -> Vec<StudioRowVm> {
+    let session = session_vm(core);
+    let dimension = core.data.dimension.as_ref();
+    let mut rows = vec![
+        row(
+            "session_principal".to_string(),
+            "Session principal".to_string(),
+            session.user_principal_id.clone(),
+            Some(
+                if session.read_only {
+                    "read only"
+                } else {
+                    "writable"
+                }
+                .to_string(),
+            ),
+            Some(StudioAction::InspectSummary {
+                title: "Session trust".to_string(),
+                detail: serde_json::json!({
+                    "session_id": session.session_id,
+                    "surface_ref": session.surface_ref,
+                    "user_principal_id": session.user_principal_id,
+                    "read_only": session.read_only,
+                }),
+            }),
+        ),
+        row(
+            "local_node_principal".to_string(),
+            "Local node principal".to_string(),
+            dimension.map(|dimension| dimension.local_node.identity.principal_id.clone()),
+            dimension.map(|dimension| dimension.local_node.identity.fingerprint.clone()),
+            dimension.map(|dimension| StudioAction::InspectSummary {
+                title: "Local node identity".to_string(),
+                detail: serde_json::to_value(&dimension.local_node.identity).unwrap_or_default(),
+            }),
+        ),
+        row(
+            "surface".to_string(),
+            "Surface".to_string(),
+            Some(session.surface_ref),
+            Some("effective session surface".to_string()),
+            None,
+        ),
+    ];
+
+    let browser_caps = core
+        .data
+        .session
+        .as_ref()
+        .map(|session| session.granted_caps.clone())
+        .unwrap_or_default();
+    let granted_caps = dimension
+        .map(|dimension| dimension.session.granted_caps.clone())
+        .unwrap_or(browser_caps);
+    rows.extend(granted_caps.into_iter().enumerate().map(|(index, cap)| {
+        row(
+            format!("granted_cap:{index}"),
+            "Granted capability".to_string(),
+            Some(cap.clone()),
+            Some("session".to_string()),
+            Some(StudioAction::InspectSummary {
+                title: "Granted capability".to_string(),
+                detail: serde_json::json!({ "capability": cap }),
+            }),
+        )
+    }));
+
+    if let Some(dimension) = dimension {
+        rows.extend(dimension.local_node.services.iter().flat_map(|service| {
+            service.required_caps.iter().map(move |cap| {
+                row(
+                    format!("required_cap:{}:{cap}", service.endpoint),
+                    "Required capability".to_string(),
+                    Some(cap.clone()),
+                    Some(service.endpoint.clone()),
+                    Some(StudioAction::InspectSummary {
+                        title: service.endpoint.clone(),
+                        detail: serde_json::to_value(service).unwrap_or_default(),
+                    }),
+                )
+            })
+        }));
+    }
+
+    rows
+}
+
 fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<StudioRowVm> {
     let mut rows: Vec<StudioRowVm> = match view {
         ViewSpec::ThreadList | ViewSpec::Thread { .. } => core
@@ -1188,6 +1281,7 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
             })
             .collect(),
         ViewSpec::Projects => project_rows(core),
+        ViewSpec::Trust => trust_rows(core),
         _ => Vec::new(),
     };
     if let Some(cursor) = tile_id.and_then(|tile_id| selected_cursor(core, tile_id)) {
