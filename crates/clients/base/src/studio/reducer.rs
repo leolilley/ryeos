@@ -772,9 +772,7 @@ impl StudioCore {
 
         if !result.ok {
             self.notice(
-                result
-                    .error
-                    .unwrap_or_else(|| "RyeOS platform effect failed".to_string()),
+                effect_failure_notice(&expected, result.error.as_deref()),
                 StudioTone::Danger,
             );
             return Vec::new();
@@ -806,14 +804,14 @@ impl StudioCore {
                 });
             }
             StudioEffectResultKind::ActionInvocation => {
-                self.notice("Action invoked.", StudioTone::Good);
+                self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
                 return vec![
                     self.emit(StudioEffectKind::FetchDimension),
                     self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
                 ];
             }
             StudioEffectResultKind::ThreadCancelled => {
-                self.notice("Thread cancelled.", StudioTone::Good);
+                self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
                 return vec![
                     self.emit(StudioEffectKind::FetchDimension),
                     self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
@@ -1076,6 +1074,65 @@ fn tile_file_state(core: &StudioCore, tile_id: TileId) -> Option<(String, String
         return None;
     };
     Some((root.clone(), path.clone()))
+}
+
+fn effect_success_notice(expected: &StudioEffectKind, data: &serde_json::Value) -> String {
+    match expected {
+        StudioEffectKind::InvokeAction { command_id, .. } => {
+            let item_ref =
+                json_field_text(data, &["command_id"]).unwrap_or_else(|| command_id.clone());
+            format!("Ran {item_ref}.")
+        }
+        StudioEffectKind::CancelThread { thread_id } => {
+            let thread =
+                json_field_text(data, &["thread_id", "id"]).unwrap_or_else(|| thread_id.clone());
+            format!("Cancelled {thread}.")
+        }
+        _ => "RyeOS command completed.".to_string(),
+    }
+}
+
+fn effect_failure_notice(expected: &StudioEffectKind, error: Option<&str>) -> String {
+    let reason = error
+        .and_then(effect_error_summary)
+        .unwrap_or_else(|| "RyeOS platform effect failed".to_string());
+    match expected {
+        StudioEffectKind::InvokeAction { command_id, .. } => {
+            format!("Run {command_id} failed: {reason}")
+        }
+        StudioEffectKind::CancelThread { thread_id } => {
+            format!("Cancel {thread_id} failed: {reason}")
+        }
+        _ => reason,
+    }
+}
+
+fn effect_error_summary(raw: &str) -> Option<String> {
+    structured_error_message(raw).or_else(|| {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn structured_error_message(raw: &str) -> Option<String> {
+    raw.char_indices()
+        .filter_map(|(index, ch)| (ch == '{').then_some(index))
+        .find_map(|index| serde_json::from_str::<serde_json::Value>(&raw[index..]).ok())
+        .and_then(|value| {
+            json_field_text(&value, &["message", "error", "detail", "code"]).or_else(|| {
+                value
+                    .get("body")
+                    .and_then(|body| json_field_text(body, &["message", "error", "detail", "code"]))
+            })
+        })
+}
+
+fn json_field_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| value.get(*key)).map(|v| {
+        v.as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| v.to_string())
+    })
 }
 
 fn effect_result_kind_matches(
@@ -2204,13 +2261,48 @@ mod tests {
             .ui
             .notices
             .iter()
-            .any(|notice| notice.message == "Action invoked."));
+            .any(|notice| notice.message == "Ran tool:demo/run."));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 100 })));
+    }
+
+    #[test]
+    fn action_invocation_failure_names_item_and_structured_error() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let invoke = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ExecuteItem {
+                    item_ref: "tool:demo/run".to_string(),
+                    parameters: serde_json::json!({}),
+                },
+            },
+        });
+        let invoke_id = invoke
+            .first()
+            .map(|effect| effect.id)
+            .expect("execute should emit invoke effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: invoke_id,
+                ok: false,
+                kind: StudioEffectResultKind::ActionInvocation,
+                data: None,
+                error: Some(
+                    "/ui/api/actions/invoke: 500 {\"message\":\"capability denied\"}".to_string(),
+                ),
+            },
+        });
+
+        assert!(effects.is_empty());
+        assert!(core.ui.notices.iter().any(|notice| {
+            notice.message == "Run tool:demo/run failed: capability denied"
+                && notice.tone == StudioTone::Danger
+        }));
     }
 
     #[test]
@@ -2262,13 +2354,45 @@ mod tests {
             .ui
             .notices
             .iter()
-            .any(|notice| notice.message == "Thread cancelled."));
+            .any(|notice| notice.message == "Cancelled T-demo."));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 200 })));
+    }
+
+    #[test]
+    fn thread_cancel_failure_names_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let cancel = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::CancelThread {
+                    thread_id: "T-demo".to_string(),
+                },
+            },
+        });
+        let cancel_id = cancel
+            .first()
+            .map(|effect| effect.id)
+            .expect("cancel should emit effect");
+
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: cancel_id,
+                ok: false,
+                kind: StudioEffectResultKind::ThreadCancelled,
+                data: None,
+                error: Some("thread already finished".to_string()),
+            },
+        });
+
+        assert!(effects.is_empty());
+        assert!(core.ui.notices.iter().any(|notice| {
+            notice.message == "Cancel T-demo failed: thread already finished"
+                && notice.tone == StudioTone::Danger
+        }));
     }
 
     #[test]
