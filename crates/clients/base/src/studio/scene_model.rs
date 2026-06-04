@@ -178,15 +178,18 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
 
     if let Some(topology) = &core.data.topology {
         let limit = topology.nodes.len().min(48);
+        let mut projected_nodes = Vec::new();
         for (index, node) in topology.nodes.iter().take(limit).enumerate() {
             let angle = index as f32 * 0.72;
             let radius = 4.2 + ((index % 4) as f32 * 0.45);
             let y = ((index % 5) as f32 - 2.0) * 0.22;
+            let position = [angle.cos() * radius, y, angle.sin() * radius];
             let id = if node.id.is_empty() {
                 format!("topology:node:{index}")
             } else {
                 format!("topology:node:{}", node.id)
             };
+            projected_nodes.push((node.id.clone(), position));
             let label = if node.label.is_empty() {
                 node.ref_.clone()
             } else {
@@ -205,7 +208,7 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             let mut object = scene_object(
                 &id,
                 scene_kind_for_topology(&node.kind),
-                [angle.cos() * radius, y, angle.sin() * radius],
+                position,
                 [0.42, 0.42, 0.42],
                 color_for_topology(&node.kind, node.missing),
                 Some(label.clone()),
@@ -215,6 +218,43 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             object.action = Some(StudioAction::InspectSummary {
                 title: format!("Topology: {label}"),
                 detail,
+            });
+            scene.objects.push(object);
+        }
+
+        for (index, edge) in topology.edges.iter().take(64).enumerate() {
+            let Some(from) = topology_node_position(&projected_nodes, &edge.from) else {
+                continue;
+            };
+            let Some(to) = topology_node_position(&projected_nodes, &edge.to) else {
+                continue;
+            };
+            let position = midpoint(from, to);
+            let length = distance(from, to).max(0.2);
+            let label = if edge.label.is_empty() {
+                edge.type_.clone()
+            } else {
+                edge.label.clone()
+            };
+            let mut object = scene_object(
+                &format!("topology:edge:{}", edge_id(edge, index)),
+                StudioSceneObjectKind::Link,
+                position,
+                [length, 0.05, 0.05],
+                "#928374",
+                Some(label.clone()),
+                StudioTone::Neutral,
+            );
+            object.opacity = 0.34;
+            object.action = Some(StudioAction::InspectSummary {
+                title: format!("Topology edge: {label}"),
+                detail: serde_json::json!({
+                    "id": edge.id,
+                    "from": edge.from,
+                    "to": edge.to,
+                    "type": edge.type_,
+                    "label": edge.label,
+                }),
             });
             scene.objects.push(object);
         }
@@ -342,6 +382,35 @@ fn scale_for_count(count: usize) -> f32 {
     (0.65 + (count as f32).sqrt() * 0.12).min(2.2)
 }
 
+fn topology_node_position(nodes: &[(String, [f32; 3])], id: &str) -> Option<[f32; 3]> {
+    nodes
+        .iter()
+        .find_map(|(node_id, position)| (node_id == id).then_some(*position))
+}
+
+fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        (a[0] + b[0]) * 0.5,
+        (a[1] + b[1]) * 0.5,
+        (a[2] + b[2]) * 0.5,
+    ]
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn edge_id(edge: &super::dto::StudioTopologyEdgeDto, index: usize) -> String {
+    if edge.id.is_empty() {
+        format!("{index}:{}:{}", edge.from, edge.to)
+    } else {
+        edge.id.clone()
+    }
+}
+
 fn scene_kind_for_topology(kind: &str) -> StudioSceneObjectKind {
     match kind {
         "project" | "project_root" | "surface" => StudioSceneObjectKind::ProjectCore,
@@ -440,7 +509,8 @@ fn is_canonical_item_ref(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::studio::dto::{
-        StudioItemDto, StudioItemsDto, StudioTopologyDto, StudioTopologyNodeDto,
+        StudioItemDto, StudioItemsDto, StudioTopologyDto, StudioTopologyEdgeDto,
+        StudioTopologyNodeDto,
     };
 
     #[test]
@@ -510,6 +580,51 @@ mod tests {
         assert_eq!(node.label.as_deref(), Some("run"));
         assert!(matches!(
             node.action,
+            Some(StudioAction::InspectSummary { .. })
+        ));
+    }
+
+    #[test]
+    fn scene_model_projects_topology_edges() {
+        let mut core = StudioCore::default();
+        core.data.topology = Some(StudioTopologyDto {
+            nodes: vec![
+                StudioTopologyNodeDto {
+                    id: "tool:demo/run".to_string(),
+                    kind: "tool".to_string(),
+                    label: "run".to_string(),
+                    ref_: "tool:demo/run".to_string(),
+                    ..Default::default()
+                },
+                StudioTopologyNodeDto {
+                    id: "knowledge:demo/readme".to_string(),
+                    kind: "knowledge".to_string(),
+                    label: "readme".to_string(),
+                    ref_: "knowledge:demo/readme".to_string(),
+                    ..Default::default()
+                },
+            ],
+            edges: vec![StudioTopologyEdgeDto {
+                id: "edge-1".to_string(),
+                from: "tool:demo/run".to_string(),
+                to: "knowledge:demo/readme".to_string(),
+                type_: "context".to_string(),
+                label: "uses".to_string(),
+            }],
+            ..Default::default()
+        });
+
+        let scene = build_scene_model(&core);
+        let edge = scene
+            .objects
+            .iter()
+            .find(|object| object.id == "topology:edge:edge-1")
+            .expect("topology edge object");
+        assert_eq!(edge.kind, StudioSceneObjectKind::Link);
+        assert_eq!(edge.label.as_deref(), Some("uses"));
+        assert!(edge.scale[0] > 0.2);
+        assert!(matches!(
+            edge.action,
             Some(StudioAction::InspectSummary { .. })
         ));
     }
