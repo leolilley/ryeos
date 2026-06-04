@@ -209,6 +209,8 @@ function sceneMap(scene, dispatchUi) {
     node.style.left = `${50 + (object.position?.[0] || 0) * 12}%`;
     node.style.top = `${50 + (object.position?.[2] || 0) * 12}%`;
     node.style.setProperty("--node-color", object.color || "#fabd2f");
+    node.style.opacity = String(object.opacity ?? 1);
+    if (object.kind === "link") node.style.width = `${Math.max(72, (object.scale?.[0] || 1) * 24)}px`;
     node.disabled = !object.action;
     node.append(textEl("strong", object.label || object.id), textEl("span", object.kind || "object"));
     if (object.action) node.addEventListener("click", () => dispatchUi({ type: "activate", action: object.action }));
