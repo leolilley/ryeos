@@ -1309,7 +1309,9 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::studio::dto::{StudioItemDto, StudioItemsDto, StudioThreadsDto};
+    use crate::studio::dto::{
+        StudioItemDto, StudioItemsDto, StudioKnownProjectDto, StudioProjectsDto, StudioThreadsDto,
+    };
     use crate::studio::effect::StudioEffectResultKind;
     use crate::studio::event::{StudioEvent, StudioFilterField, StudioUiEvent};
     use crate::studio::model::{BrowserSession, BrowserViewport, StudioCore};
@@ -1510,6 +1512,32 @@ mod tests {
     }
 
     #[test]
+    fn launcher_offers_inspect_for_selected_item() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = open_items_tile(&mut core);
+        core.data.tile_items.insert(
+            tile_id.0.to_string(),
+            StudioItemsDto {
+                items: vec![executable_item(true)],
+                ..Default::default()
+            },
+        );
+
+        let vm = build_view_model(&core);
+        let inspect = vm
+            .launcher
+            .items
+            .iter()
+            .find(|item| item.label == "Inspect selection")
+            .expect("selected item should expose inspect command");
+
+        assert!(matches!(
+            &inspect.action,
+            StudioAction::InspectItem { canonical_ref } if canonical_ref == "tool:demo/run"
+        ));
+    }
+
+    #[test]
     fn launcher_does_not_offer_run_for_selected_non_executable_item() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         let tile_id = open_items_tile(&mut core);
@@ -1546,7 +1574,7 @@ mod tests {
         });
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::SetLauncherQuery {
-                query: "run".to_string(),
+                query: "Run run".to_string(),
             },
         });
 
@@ -1559,6 +1587,36 @@ mod tests {
         });
 
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn launcher_does_not_label_project_activation_as_inspect() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Projects,
+                },
+            },
+        });
+        core.data.projects = Some(StudioProjectsDto {
+            projects: vec![StudioKnownProjectDto {
+                local_id: "project-1".to_string(),
+                name: "Project 1".to_string(),
+                root: "/tmp/project-1".to_string(),
+                exists: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let vm = build_view_model(&core);
+
+        assert!(!vm
+            .launcher
+            .items
+            .iter()
+            .any(|item| item.label == "Inspect selection"));
     }
 
     #[test]

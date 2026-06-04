@@ -871,6 +871,16 @@ pub(crate) fn launcher_items_for(core: &StudioCore) -> Vec<StudioLauncherItemVm>
 fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     let mut items = Vec::new();
 
+    if let Some(action) = inspect_action_for_focused_row(core) {
+        items.push(StudioLauncherItemVm {
+            label: "Inspect selection".to_string(),
+            hint: focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string()),
+            action,
+            secondary_action: None,
+            enabled: true,
+        });
+    }
+
     if let Some((canonical_ref, label)) = focused_executable_item(core) {
         items.push(StudioLauncherItemVm {
             label: format!("Run {label}"),
@@ -894,17 +904,17 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
         });
     }
 
-    if let Some(action) = action_for_focused_row(core) {
-        items.push(StudioLauncherItemVm {
-            label: "Inspect selection".to_string(),
-            hint: focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string()),
-            action,
-            secondary_action: None,
-            enabled: true,
-        });
-    }
-
     items
+}
+
+fn inspect_action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
+    match action_for_focused_row(core)? {
+        action @ (StudioAction::InspectItem { .. }
+        | StudioAction::InspectThread { .. }
+        | StudioAction::InspectSummary { .. }
+        | StudioAction::ReadFile { .. }) => Some(action),
+        _ => None,
+    }
 }
 
 fn focused_executable_item(core: &StudioCore) -> Option<(String, String)> {
