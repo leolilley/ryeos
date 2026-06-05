@@ -21,7 +21,7 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
 
     surface.draw_text(0, 0, "Services", header);
 
-    let Some(snapshot) = &model.store.cockpit else {
+    let Some(snapshot) = &model.store.studio else {
         let msg = "Waiting for daemon snapshot";
         surface.draw_text(w.saturating_sub(msg.len()) / 2, h / 2, msg, muted);
         return surface;
@@ -29,10 +29,10 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
 
     if w > 24 {
         let summary = format!(
-            "{} services · {} verbs · {} aliases",
+            "{} services · {} commands · {} command aliases",
             snapshot.local_node.services.len(),
-            snapshot.local_node.verbs.len(),
-            snapshot.local_node.aliases.len()
+            snapshot.local_node.commands.len(),
+            snapshot.local_node.command_aliases.len()
         );
         surface.draw_text(w.saturating_sub(summary.len() + 1), 0, &summary, muted);
     }
@@ -76,16 +76,16 @@ pub fn build(model: &AppModel, w: usize, h: usize) -> TextSurface {
         surface.draw_text(0, row, "Commands", accent);
         row += 1;
 
-        let mut verbs = snapshot.local_node.verbs.clone();
-        verbs.sort_by(|a, b| a.name.cmp(&b.name));
-        for verb in verbs.iter().take(4) {
+        let mut commands = snapshot.local_node.commands.clone();
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        for command in commands.iter().take(4) {
             if row >= h {
                 break;
             }
-            let target = verb.target.as_deref().unwrap_or("—");
+            let target = command.target.as_deref().unwrap_or("—");
             let line = format!(
                 "  {:<18} {}",
-                truncate(&verb.name, 18),
+                truncate(&command.name, 18),
                 truncate(target, w.saturating_sub(22))
             );
             surface.draw_text(0, row, &line, dim);

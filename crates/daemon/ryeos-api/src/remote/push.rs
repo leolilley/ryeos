@@ -13,7 +13,7 @@ use base64::Engine as _;
 use lillux::cas::{sha256_hex, CasStore};
 use ryeos_state::ignore::IgnoreMatcher;
 use ryeos_state::objects::SourceManifest;
-use ryeos_state::project_sync::{ProjectSyncScope, PROJECT_AI_SYNC_DIRS};
+use ryeos_state::project_sync::{ProjectSyncScope, PROJECT_AI_SURFACES};
 
 use crate::remote::client::{BlobUpload, RemoteClient};
 use ryeos_app::state::AppState;
@@ -444,8 +444,11 @@ fn ingest_project_ai_for_push(
     items: &mut HashMap<String, String>,
     remote_ignore: Option<&IgnoreMatcher>,
 ) -> Result<()> {
-    for dir in PROJECT_AI_SYNC_DIRS {
-        let abs = project_root.join(dir);
+    for surface in PROJECT_AI_SURFACES
+        .iter()
+        .filter(|surface| surface.materialize_to_project)
+    {
+        let abs = project_root.join(surface.root);
         match std::fs::symlink_metadata(&abs) {
             Ok(md) if md.file_type().is_symlink() => {
                 tracing::warn!(path = %abs.display(), "skipping symlinked project AI sync root");
@@ -645,6 +648,39 @@ fn ingest_for_push(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod project_ai_ingest_tests {
+    use super::ingest_project_ai_for_push;
+    use lillux::cas::CasStore;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[test]
+    fn project_ai_ingest_includes_schedule_declarations_not_node_schedule_specs() {
+        let project = TempDir::new().unwrap();
+        let cas_dir = TempDir::new().unwrap();
+        let cas = CasStore::new(cas_dir.path().to_path_buf());
+        std::fs::create_dir_all(project.path().join(".ai/config/schedules")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ai/node/schedules")).unwrap();
+        std::fs::write(
+            project.path().join(".ai/config/schedules/snap-track.yaml"),
+            "schedule intent",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".ai/node/schedules/runtime.yaml"),
+            "runtime state",
+        )
+        .unwrap();
+
+        let mut items = HashMap::new();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items, None).unwrap();
+
+        assert!(items.contains_key(".ai/config/schedules/snap-track.yaml"));
+        assert!(!items.contains_key(".ai/node/schedules/runtime.yaml"));
+    }
 }
 
 #[cfg(test)]

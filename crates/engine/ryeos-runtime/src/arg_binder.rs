@@ -1,6 +1,6 @@
 //! Shared argument binder — unified argv → JSON parameters.
 //!
-//! Used by the resolver (daemon token mode) and the CLI (execute escape hatch).
+//! Used by command dispatchers and direct execute mode.
 //! Single source of truth for heuristic flag/value binding.
 //!
 //! ## Rules
@@ -16,7 +16,7 @@
 //!   deserialize via [`crate::scalar_or_vec`] to accept both forms.
 //! - Empty input → `{}`
 
-use crate::alias_registry::{AliasDef, PositionalMatcher, PositionalSlot};
+use crate::command::{CommandArgumentKind, CommandArgumentSlot, CommandDef};
 
 /// Normalise a flag key: strip the `--` prefix (already done by caller)
 /// and replace hyphens with underscores so `--public-key` becomes `public_key`.
@@ -74,22 +74,22 @@ pub fn bind_argv(argv: &[String]) -> serde_json::Value {
     serde_json::Value::Object(params)
 }
 
-/// Alias-aware binding driven by alias metadata. Supports ordered
+/// Command-aware binding driven by command metadata. Supports ordered
 /// positional forms and fails closed on undeclared positional tails.
-pub fn bind_argv_with_alias(
+pub fn bind_argv_with_command(
     argv: &[String],
-    alias: Option<&AliasDef>,
+    command: Option<&CommandDef>,
 ) -> Result<serde_json::Value, String> {
-    let Some(alias) = alias else {
+    let Some(command) = command else {
         return Ok(bind_argv(argv));
     };
 
     let mut value = bind_argv(argv);
-    decode_structured_alias_fields(&mut value)?;
+    decode_structured_command_fields(&mut value)?;
 
-    let forms = alias.positional_forms.clone();
+    let forms = command.forms.clone();
     if forms.is_empty() {
-        reject_undeclared_positionals(&value, alias)?;
+        reject_undeclared_positionals(&value, command)?;
         return Ok(value);
     }
 
@@ -109,7 +109,7 @@ pub fn bind_argv_with_alias(
     }
 
     for form in &forms {
-        let unset_slots: Vec<&PositionalSlot> = form
+        let unset_slots: Vec<&CommandArgumentSlot> = form
             .slots
             .iter()
             .filter(|slot| !obj.contains_key(&normalise_key(&slot.field)))
@@ -134,13 +134,13 @@ pub fn bind_argv_with_alias(
 
     Err(format!(
         "positional arguments {:?} do not match any positional form for alias {:?}",
-        positionals, alias.tokens
+        positionals, command.tokens
     ))
 }
 
 fn reject_undeclared_positionals(
     value: &serde_json::Value,
-    alias: &AliasDef,
+    command: &CommandDef,
 ) -> Result<(), String> {
     let positionals = value
         .get("_args")
@@ -151,12 +151,12 @@ fn reject_undeclared_positionals(
         return Ok(());
     }
     Err(format!(
-        "alias {:?} does not declare positional_forms but received {positionals} positional argument(s)",
-        alias.tokens
+        "command {:?} does not declare positional forms but received {positionals} positional argument(s)",
+        command.tokens
     ))
 }
 
-fn decode_structured_alias_fields(value: &mut serde_json::Value) -> Result<(), String> {
+fn decode_structured_command_fields(value: &mut serde_json::Value) -> Result<(), String> {
     let Some(obj) = value.as_object_mut() else {
         return Ok(());
     };
@@ -175,10 +175,10 @@ fn decode_structured_alias_fields(value: &mut serde_json::Value) -> Result<(), S
     Ok(())
 }
 
-fn positional_matches(matcher: PositionalMatcher, arg: &str) -> bool {
+fn positional_matches(matcher: CommandArgumentKind, arg: &str) -> bool {
     match matcher {
-        PositionalMatcher::Any => true,
-        PositionalMatcher::CanonicalRef => {
+        CommandArgumentKind::String | CommandArgumentKind::Path | CommandArgumentKind::Json => true,
+        CommandArgumentKind::CanonicalRef => {
             ryeos_engine::canonical_ref::CanonicalRef::parse(arg).is_ok()
         }
     }
@@ -395,23 +395,15 @@ mod tests {
     }
 
     #[test]
-    fn alias_decodes_parameters_json_object() {
-        let alias = AliasDef {
-            tokens: vec!["remote".into(), "run".into()],
-            verb: "remote-run".into(),
-            deprecated: false,
-            replacement_tokens: None,
-            removed_in: None,
-            positional_forms: Vec::new(),
-            project_resolution: crate::alias_registry::ProjectResolution::None,
-        };
+    fn command_decodes_parameters_json_object() {
+        let command = test_command(vec!["remote".into(), "run".into()], Vec::new());
 
-        let result = bind_argv_with_alias(
+        let result = bind_argv_with_command(
             &[
                 "--parameters".into(),
                 r#"{"smoke_only":true,"limit":1}"#.into(),
             ],
-            Some(&alias),
+            Some(&command),
         )
         .unwrap();
 
@@ -420,22 +412,36 @@ mod tests {
     }
 
     #[test]
-    fn alias_rejects_parameters_json_array() {
-        let alias = AliasDef {
-            tokens: vec!["remote".into(), "run".into()],
-            verb: "remote-run".into(),
-            deprecated: false,
-            replacement_tokens: None,
-            removed_in: None,
-            positional_forms: Vec::new(),
-            project_resolution: crate::alias_registry::ProjectResolution::None,
-        };
+    fn command_rejects_parameters_json_array() {
+        let command = test_command(vec!["remote".into(), "run".into()], Vec::new());
 
-        let result = bind_argv_with_alias(
+        let result = bind_argv_with_command(
             &["--parameters".into(), r#"["not","object"]"#.into()],
-            Some(&alias),
+            Some(&command),
         );
 
         assert!(result.unwrap_err().contains("JSON object"));
+    }
+
+    fn test_command(
+        tokens: Vec<String>,
+        forms: Vec<crate::CommandArgumentForm>,
+    ) -> crate::CommandDef {
+        crate::CommandDef {
+            category: "commands".into(),
+            section: "commands".into(),
+            name: tokens.join("-"),
+            tokens,
+            description: String::new(),
+            aliases: Vec::new(),
+            help: None,
+            arguments: Vec::new(),
+            forms,
+            parameter_binding: None,
+            project: None,
+            dispatch: crate::CommandDispatch::Group,
+            source_file: std::path::PathBuf::new(),
+            provenance: crate::CommandProvenance::default(),
+        }
     }
 }

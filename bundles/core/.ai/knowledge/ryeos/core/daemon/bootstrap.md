@@ -58,7 +58,7 @@ items needed to read other items.
 ## Section tables
 
 The node loader merges `node/` sections from installed bundles and
-daemon state. Section paths are meaningful: `.ai/node/verbs/sign.yaml`
-must declare `verbs`, and route/alias/verb descriptors are registered
+daemon state. Section paths are meaningful: `.ai/node/commands/sign.yaml`
+must declare `commands`, and route/command descriptors are registered
 into separate section tables. Installed bundles are signed system-space
 contributors.

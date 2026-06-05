@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:c2a831ecf67ceb23e9b80052b05412acd84db5039cdcc2f688b69ad0f5d090bd:A0Q41f1ZgROqrEmWomvh6q/fE229pJgEFB4z+Isi2HRLlPLxZWA2ceWLm92rQY8mQTE2LvV9uCQX6FQO2c1AAw==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: bundle-sign
+tokens:
+- bundle
+- sign
+description: Sign all signable items in a bundle source tree
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/sign

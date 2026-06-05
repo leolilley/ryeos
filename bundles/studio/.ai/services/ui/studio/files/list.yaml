@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-03T06:08:23Z:95c17174bca42819c3dc32f2809cb2f22801ed6ffd807cc26bdfd51794247f30:zZN2VxZsmJMyanA9xL7fmZGvABlMx5BV4P2O8PtCQPDByHmdpgk4IN9/h69dht/nCi4kK4MVLuBYxOE89ssTBg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+kind: service
+name: studio/files/list
+version: "1.0.0"
+description: Safe scoped file listing for RyeOS Studio — constrained to session project root or project .ai directory. No arbitrary path access.
+endpoint: ui.studio.files.list
+availability: daemon_only

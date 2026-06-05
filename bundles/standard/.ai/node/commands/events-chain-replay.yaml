@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:061b2322a59aaa9fcd79a4beece105631a2777e50df8947d3e2b782bf4c56046:24eZsogAT200rVyYTsYhsmWGSbOykwdIUPIa6FuYXTrmT4ucrW/vlukZjPLjXOffrCTx1Y81Ljn86wXwW0k9BQ==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: events-chain-replay
+tokens:
+- events
+- chain-replay
+description: Replay events across an entire chain (root and descendants)
+dispatch:
+  kind: execute_ref
+  execute: service:events/chain_replay

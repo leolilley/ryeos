@@ -9,8 +9,9 @@ pub struct StudioEffect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioEffectKind {
-    FetchSnapshot,
+    FetchDimension,
     FetchProjects,
+    FetchTopology,
     AddProject {
         root: String,
     },
@@ -46,6 +47,13 @@ pub enum StudioEffectKind {
         thread_id: String,
         event_limit: usize,
     },
+    InvokeAction {
+        command_id: String,
+        args: serde_json::Value,
+    },
+    CancelThread {
+        thread_id: String,
+    },
     SetLocationHash {
         hash: String,
     },
@@ -71,8 +79,9 @@ pub struct StudioEffectResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StudioEffectResultKind {
-    Snapshot,
+    Dimension,
     Projects,
+    Topology,
     ProjectAdded,
     ProjectOpened,
     Threads,
@@ -83,5 +92,7 @@ pub enum StudioEffectResultKind {
     FileRead,
     ItemInspection,
     ThreadInspection,
+    ActionInvocation,
+    ThreadCancelled,
     BrowserOnly,
 }

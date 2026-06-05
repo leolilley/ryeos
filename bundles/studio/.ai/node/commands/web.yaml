@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-04T07:15:08Z:681756fcf0c5eb4482ccbe80ac9d40b18ad12094aa516f85a8c3e0b013e36c14:fA5AE5UA6aXbAGK2O0BlgjMt+m+WyLBo0QEQwsVAeGHHnW6/Nye/qPpbfSjJneLVduc4APBbsxf61+Oj4uYaCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: commands
+section: commands
+name: web
+tokens:
+- web
+description: Open the browser RyeOS Studio
+forms:
+- slots:
+  - field: surface
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/web

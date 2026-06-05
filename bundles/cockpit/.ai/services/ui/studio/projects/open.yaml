@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-31T08:15:58Z:b8ce5413e63b6f8e54488e86fb34430a362c940a921db174b3873e3adf223450:R/ZiHzdd/eMcUCrbQS5EvIPpzv2aSoUzkZIRpr8zJgd7o3EYEp88bec+4RYx3pGIimkAUuGjSN+EgZSBs+8YBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-name: studio/projects/open
-version: "1.0.0"
-description: Open a registered local Studio project by local id and bind it to the current browser session.
-endpoint: ui.studio.projects.open
-availability: daemon_only

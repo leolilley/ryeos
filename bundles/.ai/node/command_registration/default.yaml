@@ -1,0 +1,65 @@
+# ryeos:signed:2026-06-04T06:15:11Z:dcc062f07c5159a3e4eb23f788ff239797efb47b11bc7c2823ea82b55a907077:m5PHXKUBH1lMHgyMO0F+6qyj+X9odDky9ENfbBKpb4rea86LSoQUjOaGby73UuEgI1lUIvFX1QggkiuHK9m7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+section: command_registration
+name: default
+claim_rules:
+  - claim:
+      kind: command.root
+      value: help
+    required_caps:
+      - ryeos.register.command.root.help
+  - claim:
+      kind: command.root
+      value: init
+    required_caps:
+      - ryeos.register.command.root.init
+  - claim:
+      kind: command.root
+      value: start
+    required_caps:
+      - ryeos.register.command.root.start
+  - claim:
+      kind: command.root
+      value: stop
+    required_caps:
+      - ryeos.register.command.root.stop
+  - claim:
+      kind: command.root
+      value: node
+    required_caps:
+      - ryeos.register.command.root.node
+  - claim:
+      kind: command.root
+      value: system
+    required_caps:
+      - ryeos.register.command.root.system
+  - claim:
+      kind: command.root
+      value: identity
+    required_caps:
+      - ryeos.register.command.root.identity
+  - claim:
+      kind: command.root
+      value: execute
+    required_caps:
+      - ryeos.register.command.root.execute
+  - claim:
+      kind: command.dispatch.kind
+      value: direct_execute_item_ref
+    required_caps:
+      - ryeos.register.command.dispatch.direct_execute_item_ref
+  - claim:
+      kind: command.dispatch.kind
+      value: local_handler
+    required_caps:
+      - ryeos.register.command.dispatch.local_handler
+system_source_caps:
+  - ryeos.register.command.root.help
+  - ryeos.register.command.root.init
+  - ryeos.register.command.root.start
+  - ryeos.register.command.root.stop
+  - ryeos.register.command.root.node
+  - ryeos.register.command.root.system
+  - ryeos.register.command.root.identity
+  - ryeos.register.command.root.execute
+  - ryeos.register.command.dispatch.direct_execute_item_ref
+  - ryeos.register.command.dispatch.local_handler

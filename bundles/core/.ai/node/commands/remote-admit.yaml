@@ -1,0 +1,18 @@
+# ryeos:signed:2026-06-04T04:39:02Z:e7ac2d12cd6600730def6b0c88cfb4840cec885adf2d019edcadddef8d7a3d1c:q/GcsC8DUdRgwJqZc4CSGZiSWoVTb4gnxyQNeKaKubu0KCogmP7VmHUBW/ZlSPbjPbMWeK28WxCragmMS5R/Cw==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-admit
+tokens:
+- remote
+- admit
+description: Claim a one-time admission token on a configured remote node
+forms:
+- slots:
+  - field: remote
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: service:remote/admit

@@ -650,6 +650,10 @@ function semanticMarker(object) {
     case "remote_node":
       geometry = new THREE.OctahedronGeometry(0.38 * size, 0);
       break;
+    case "link":
+      geometry = new THREE.BoxGeometry(0.92 * size, 0.025, 0.025);
+      material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: Math.min(opacity, 0.44) });
+      break;
     default:
       geometry = new THREE.SphereGeometry(0.32 * size, 12, 8);
       break;

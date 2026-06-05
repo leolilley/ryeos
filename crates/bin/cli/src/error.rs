@@ -73,9 +73,6 @@ pub enum CliError {
     #[error(transparent)]
     Transport(#[from] CliTransportError),
 
-    #[error("unknown verb: {argv:?}")]
-    UnknownVerb { argv: Vec<String> },
-
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

@@ -54,10 +54,10 @@ impl UdsRuntimeClient {
 
     fn inject_callback_token(&self, params: &mut Value) {
         if let Some(map) = params.as_object_mut() {
-            if !map.contains_key("callback_token") && !self.callback_token.is_empty() {
+            if !self.callback_token.is_empty() {
                 map.insert("callback_token".to_string(), json!(self.callback_token));
             }
-            if !map.contains_key("thread_auth_token") && !self.thread_auth_token.is_empty() {
+            if !self.thread_auth_token.is_empty() {
                 map.insert(
                     "thread_auth_token".to_string(),
                     json!(self.thread_auth_token),
@@ -178,6 +178,45 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.replay_events", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn domain_events_append(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.domain_events_append", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn domain_events_read_chain(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.domain_events_read_chain", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn domain_events_scan(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.domain_events_scan", request)
             .await
             .map_err(Self::map_rpc_error)
     }

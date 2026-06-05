@@ -26,6 +26,7 @@ pub struct StudioSessionVm {
     pub session_id: String,
     pub project_path: Option<String>,
     pub surface_ref: String,
+    pub user_principal_id: Option<String>,
     pub read_only: bool,
 }
 
@@ -484,9 +485,9 @@ fn presentation_metrics_vm(
         .map(|threads| threads.threads.len())
         .unwrap_or_else(|| {
             core.data
-                .snapshot
+                .dimension
                 .as_ref()
-                .map(|snapshot| snapshot.threads.active_count.max(0) as usize)
+                .map(|dimension| dimension.threads.active_count.max(0) as usize)
                 .unwrap_or_default()
         });
     let project_count = core
@@ -497,9 +498,9 @@ fn presentation_metrics_vm(
         .unwrap_or_default();
     let service_count = core
         .data
-        .snapshot
+        .dimension
         .as_ref()
-        .map(|snapshot| snapshot.local_node.services.len())
+        .map(|dimension| dimension.local_node.services.len())
         .unwrap_or_default();
     let schedule_count = core
         .data
@@ -508,16 +509,16 @@ fn presentation_metrics_vm(
         .map(|schedules| schedules.schedules.len())
         .or_else(|| {
             core.data
-                .snapshot
+                .dimension
                 .as_ref()
-                .map(|snapshot| snapshot.schedules.total)
+                .map(|dimension| dimension.schedules.total)
         })
         .unwrap_or_default();
     let active_thread_count = core
         .data
-        .snapshot
+        .dimension
         .as_ref()
-        .map(|snapshot| snapshot.threads.active_count)
+        .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
     let scene_object_count = build_scene_model(core).objects.len();
     let activity_level = presentation_activity_level(
@@ -622,6 +623,24 @@ fn status_bar_vm(
                 id: "threads".to_string(),
                 label: Some("threads".to_string()),
                 value: thread_count.to_string(),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "principal".to_string(),
+                label: Some("principal".to_string()),
+                value: session
+                    .user_principal_id
+                    .as_deref()
+                    .map(short_principal)
+                    .unwrap_or_else(|| "local".to_string()),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            StudioStatusSegmentVm {
+                id: "surface".to_string(),
+                label: Some("surface".to_string()),
+                value: short_surface_ref(&session.surface_ref),
                 tone: StudioTone::Neutral,
                 grow: false,
             },
@@ -789,33 +808,43 @@ fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm
             columns: vec!["Name".to_string(), "Root".to_string(), "Status".to_string()],
             rows: rows_for(core, &tile.view, Some(tile_id)),
         },
-        ViewSpec::Trust => StudioViewVm::Placeholder {
+        ViewSpec::Trust => StudioViewVm::Rows {
             title: "Trust".to_string(),
-            message: "Trust view is not wired yet.".to_string(),
+            columns: vec![
+                "Scope".to_string(),
+                "Value".to_string(),
+                "Detail".to_string(),
+            ],
+            rows: rows_for(core, &tile.view, None),
         },
     }
 }
 
 fn session_vm(core: &StudioCore) -> StudioSessionVm {
     let browser = core.data.session.as_ref();
-    let snapshot = core.data.snapshot.as_ref();
+    let dimension = core.data.dimension.as_ref();
     StudioSessionVm {
         session_id: browser
             .map(|session| session.session_id.clone())
-            .or_else(|| snapshot.map(|snapshot| snapshot.session.session_id.clone()))
+            .or_else(|| dimension.map(|dimension| dimension.session.session_id.clone()))
             .unwrap_or_default(),
         project_path: browser
             .and_then(|session| session.project_path.clone())
             .or_else(|| {
-                snapshot.and_then(|snapshot| snapshot.project.as_ref().map(|p| p.path.clone()))
+                dimension.and_then(|dimension| dimension.project.as_ref().map(|p| p.path.clone()))
             }),
         surface_ref: browser
             .map(|session| session.surface_ref.clone())
-            .or_else(|| snapshot.map(|snapshot| snapshot.session.surface_ref.clone()))
+            .or_else(|| dimension.map(|dimension| dimension.session.surface_ref.clone()))
             .unwrap_or_default(),
+        user_principal_id: browser
+            .and_then(|session| session.user_principal_id.clone())
+            .or_else(|| {
+                dimension.and_then(|dimension| dimension.session.user_principal_id.clone())
+            }),
         read_only: browser
             .map(|session| session.read_only)
-            .or_else(|| snapshot.map(|snapshot| snapshot.session.read_only))
+            .or_else(|| dimension.map(|dimension| dimension.session.read_only))
             .unwrap_or(true),
     }
 }
@@ -833,8 +862,137 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
         .collect()
 }
 
-fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 8] {
+pub(crate) fn launcher_items_for(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    let mut items = context_launcher_items(core);
+    items.extend(launcher_items());
+    items
+}
+
+fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    let mut items = Vec::new();
+
+    if let Some(action) = inspect_action_for_focused_row(core) {
+        items.push(StudioLauncherItemVm {
+            label: "Inspect selection".to_string(),
+            hint: focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string()),
+            action,
+            secondary_action: None,
+            enabled: true,
+        });
+    }
+
+    if let Some((canonical_ref, label)) = focused_executable_item(core) {
+        let parameters = serde_json::json!({});
+        let pending = core.has_pending_invoke(&canonical_ref, &parameters);
+        items.push(StudioLauncherItemVm {
+            label: if pending {
+                format!("Running {label}…")
+            } else {
+                format!("Run {label}")
+            },
+            hint: if pending {
+                format!("pending · {canonical_ref}")
+            } else {
+                canonical_ref.clone()
+            },
+            action: StudioAction::ExecuteItem {
+                item_ref: canonical_ref,
+                parameters,
+            },
+            secondary_action: None,
+            enabled: !session_vm(core).read_only && !pending,
+        });
+    }
+
+    if let Some((thread_id, status)) = focused_cancellable_thread(core) {
+        let pending = core.has_pending_cancel(&thread_id);
+        items.push(StudioLauncherItemVm {
+            label: if pending {
+                format!("Cancelling {thread_id}…")
+            } else {
+                format!("Cancel {thread_id}")
+            },
+            hint: if pending {
+                format!("pending · thread status: {status}")
+            } else {
+                format!("thread status: {status}")
+            },
+            action: StudioAction::CancelThread { thread_id },
+            secondary_action: None,
+            enabled: !session_vm(core).read_only && !pending,
+        });
+    }
+
+    items
+}
+
+fn inspect_action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
+    match action_for_focused_row(core)? {
+        action @ (StudioAction::InspectItem { .. }
+        | StudioAction::InspectThread { .. }
+        | StudioAction::InspectSummary { .. }
+        | StudioAction::ReadFile { .. }) => Some(action),
+        _ => None,
+    }
+}
+
+fn focused_executable_item(core: &StudioCore) -> Option<(String, String)> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    if !matches!(view, ViewSpec::SpaceBrowser { .. }) {
+        return None;
+    }
+    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+    let row_ref = rows_for(core, view, Some(tile_id)).get(cursor)?.id.clone();
+    let item = focused_item_set(core, tile_id)
+        .into_iter()
+        .find(|item| item.canonical_ref == row_ref && item.executable)?;
+    let label = item_leaf_label(&item.label, &item.bare_id, &item.bare_id);
+    Some((item.canonical_ref, label))
+}
+
+fn focused_item_set(core: &StudioCore, tile_id: TileId) -> Vec<super::dto::StudioItemDto> {
+    let tile_id_text = tile_id_text(tile_id);
+    core.data
+        .tile_items
+        .get(&tile_id_text)
+        .or(core.data.items.as_ref())
+        .map(|items| items.items.clone())
+        .unwrap_or_default()
+}
+
+fn focused_cancellable_thread(core: &StudioCore) -> Option<(String, String)> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    if !matches!(view, ViewSpec::ThreadList) {
+        return None;
+    }
+    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+    let thread = core.data.threads.as_ref()?.threads.get(cursor)?;
+    let thread_id = field_text(thread, &["thread_id", "id"])?;
+    let status = field_text(thread, &["status", "state"]).unwrap_or_else(|| "unknown".to_string());
+    is_cancellable_thread_status(&status).then_some((thread_id, status))
+}
+
+fn is_cancellable_thread_status(status: &str) -> bool {
+    matches!(status.to_ascii_lowercase().as_str(), "created" | "running")
+}
+
+fn focused_selection_hint(core: &StudioCore) -> Option<String> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+    let row = rows_for(core, view, Some(tile_id)).get(cursor)?.clone();
+    Some(row.secondary.or(row.meta).unwrap_or(row.primary))
+}
+
+fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 11] {
     [
+        (
+            "Graph",
+            "RyeOS topology",
+            ViewSpec::Graph { graph_id: None },
+        ),
         ("Atlas", "2D namespace map", ViewSpec::Atlas),
         (
             "Items",
@@ -845,14 +1003,46 @@ fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 8] {
         ("Files", "Project files", ViewSpec::Files),
         ("Threads", "Runs and events", ViewSpec::ThreadList),
         ("Services", "Daemon endpoints", ViewSpec::Services),
+        ("Remotes", "Federated nodes", ViewSpec::Remotes),
+        ("Trust", "Principals and caps", ViewSpec::Trust),
         ("Schedules", "Timed work", ViewSpec::Schedules),
         ("GC", "State cleanup", ViewSpec::GcStatus),
     ]
 }
 
+fn short_principal(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix("fp:") {
+        let prefix = rest.chars().take(8).collect::<String>();
+        return format!("fp:{prefix}…");
+    }
+    truncate_middle(value, 14)
+}
+
+fn short_surface_ref(value: &str) -> String {
+    value.strip_prefix("surface:").unwrap_or(value).to_string()
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(1) / 2;
+    let start = value.chars().take(keep).collect::<String>();
+    let end = value
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{start}…{end}")
+}
+
 fn launcher(core: &StudioCore) -> StudioLauncherVm {
     let query = core.ui.launcher.query.trim().to_lowercase();
-    let items: Vec<_> = launcher_items()
+    let items: Vec<_> = launcher_items_for(core)
         .into_iter()
         .filter(|item| {
             let haystack = format!("{} {}", item.label, item.hint).to_lowercase();
@@ -960,7 +1150,7 @@ fn overview(core: &StudioCore) -> StudioViewVm {
                 "Services",
                 &core
                     .data
-                    .snapshot
+                    .dimension
                     .as_ref()
                     .map(|x| x.local_node.services.len())
                     .unwrap_or(0)
@@ -983,7 +1173,7 @@ fn overview(core: &StudioCore) -> StudioViewVm {
                 ),
                 ("Mode".to_string(), "RyeOS".to_string()),
             ],
-            action: Some(StudioAction::SelectSnapshot),
+            action: Some(StudioAction::SelectDimension),
         }],
     }
 }
@@ -1041,6 +1231,93 @@ fn project_rows(core: &StudioCore) -> Vec<StudioRowVm> {
     rows
 }
 
+fn trust_rows(core: &StudioCore) -> Vec<StudioRowVm> {
+    let session = session_vm(core);
+    let dimension = core.data.dimension.as_ref();
+    let mut rows = vec![
+        row(
+            "session_principal".to_string(),
+            "Session principal".to_string(),
+            session.user_principal_id.clone(),
+            Some(
+                if session.read_only {
+                    "read only"
+                } else {
+                    "writable"
+                }
+                .to_string(),
+            ),
+            Some(StudioAction::InspectSummary {
+                title: "Session trust".to_string(),
+                detail: serde_json::json!({
+                    "session_id": session.session_id,
+                    "surface_ref": session.surface_ref,
+                    "user_principal_id": session.user_principal_id,
+                    "read_only": session.read_only,
+                }),
+            }),
+        ),
+        row(
+            "local_node_principal".to_string(),
+            "Local node principal".to_string(),
+            dimension.map(|dimension| dimension.local_node.identity.principal_id.clone()),
+            dimension.map(|dimension| dimension.local_node.identity.fingerprint.clone()),
+            dimension.map(|dimension| StudioAction::InspectSummary {
+                title: "Local node identity".to_string(),
+                detail: serde_json::to_value(&dimension.local_node.identity).unwrap_or_default(),
+            }),
+        ),
+        row(
+            "surface".to_string(),
+            "Surface".to_string(),
+            Some(session.surface_ref),
+            Some("effective session surface".to_string()),
+            None,
+        ),
+    ];
+
+    let browser_caps = core
+        .data
+        .session
+        .as_ref()
+        .map(|session| session.granted_caps.clone())
+        .unwrap_or_default();
+    let granted_caps = dimension
+        .map(|dimension| dimension.session.granted_caps.clone())
+        .unwrap_or(browser_caps);
+    rows.extend(granted_caps.into_iter().enumerate().map(|(index, cap)| {
+        row(
+            format!("granted_cap:{index}"),
+            "Granted capability".to_string(),
+            Some(cap.clone()),
+            Some("session".to_string()),
+            Some(StudioAction::InspectSummary {
+                title: "Granted capability".to_string(),
+                detail: serde_json::json!({ "capability": cap }),
+            }),
+        )
+    }));
+
+    if let Some(dimension) = dimension {
+        rows.extend(dimension.local_node.services.iter().flat_map(|service| {
+            service.required_caps.iter().map(move |cap| {
+                row(
+                    format!("required_cap:{}:{cap}", service.endpoint),
+                    "Required capability".to_string(),
+                    Some(cap.clone()),
+                    Some(service.endpoint.clone()),
+                    Some(StudioAction::InspectSummary {
+                        title: service.endpoint.clone(),
+                        detail: serde_json::to_value(service).unwrap_or_default(),
+                    }),
+                )
+            })
+        }));
+    }
+
+    rows
+}
+
 fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<StudioRowVm> {
     let mut rows: Vec<StudioRowVm> = match view {
         ViewSpec::ThreadList | ViewSpec::Thread { .. } => core
@@ -1090,7 +1367,7 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
             .collect(),
         ViewSpec::Remotes => core
             .data
-            .snapshot
+            .dimension
             .as_ref()
             .map(|x| x.remotes.clone())
             .unwrap_or_default()
@@ -1110,7 +1387,7 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
             .collect(),
         ViewSpec::Services => core
             .data
-            .snapshot
+            .dimension
             .as_ref()
             .map(|x| x.local_node.services.clone())
             .unwrap_or_default()
@@ -1129,6 +1406,7 @@ fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<
             })
             .collect(),
         ViewSpec::Projects => project_rows(core),
+        ViewSpec::Trust => trust_rows(core),
         _ => Vec::new(),
     };
     if let Some(cursor) = tile_id.and_then(|tile_id| selected_cursor(core, tile_id)) {
@@ -1434,7 +1712,7 @@ fn file_state(tile: &TileState) -> (String, String) {
 
 fn inspector(core: &StudioCore) -> StudioInspectorVm {
     match &core.ui.inspector {
-        StudioInspectorState::Snapshot => StudioInspectorVm {
+        StudioInspectorState::Dimension => StudioInspectorVm {
             title: "RyeOS".to_string(),
             subtitle: Some("Current project and local node state".to_string()),
             sections: vec![StudioSectionVm {
@@ -1458,24 +1736,8 @@ fn inspector(core: &StudioCore) -> StudioInspectorVm {
         StudioInspectorState::Summary { title, detail } => {
             code_or_empty(title, None, serde_json::to_string_pretty(detail).ok(), None)
         }
-        StudioInspectorState::Item { canonical_ref } => code_or_empty(
-            canonical_ref,
-            Some("Item"),
-            core.data
-                .item_inspection
-                .as_ref()
-                .and_then(|x| serde_json::to_string_pretty(x).ok()),
-            Some("Loading item details…"),
-        ),
-        StudioInspectorState::Thread { thread_id } => code_or_empty(
-            thread_id,
-            Some("Thread"),
-            core.data
-                .thread_inspection
-                .as_ref()
-                .and_then(|x| serde_json::to_string_pretty(x).ok()),
-            Some("Loading thread details…"),
-        ),
+        StudioInspectorState::Item { canonical_ref } => item_inspector(core, canonical_ref),
+        StudioInspectorState::Thread { thread_id } => thread_inspector(core, thread_id),
         StudioInspectorState::File { root, path } => code_or_empty(
             path,
             Some(root),
@@ -1491,6 +1753,72 @@ fn inspector(core: &StudioCore) -> StudioInspectorVm {
             empty_message: Some("Select an object to inspect it.".to_string()),
         },
     }
+}
+
+fn item_inspector(core: &StudioCore, canonical_ref: &str) -> StudioInspectorVm {
+    let inspection = core.data.item_inspection.as_ref();
+    let mut vm = code_or_empty(
+        canonical_ref,
+        Some("Item"),
+        inspection.and_then(|x| serde_json::to_string_pretty(x).ok()),
+        Some("Loading item details…"),
+    );
+    let parameters = serde_json::json!({});
+    let pending = core.has_pending_invoke(canonical_ref, &parameters);
+    if inspection.is_some_and(|x| x.item.executable) && !session_vm(core).read_only && !pending {
+        vm.sections.push(StudioSectionVm {
+            title: "Run item".to_string(),
+            rows: vec![
+                ("Action".to_string(), "Run".to_string()),
+                ("Target".to_string(), canonical_ref.to_string()),
+            ],
+            action: Some(StudioAction::ExecuteItem {
+                item_ref: canonical_ref.to_string(),
+                parameters,
+            }),
+        });
+    } else if inspection.is_some_and(|x| x.item.executable) && pending {
+        vm.sections.push(StudioSectionVm {
+            title: "Run item".to_string(),
+            rows: vec![
+                ("Action".to_string(), "Running".to_string()),
+                ("Target".to_string(), canonical_ref.to_string()),
+            ],
+            action: None,
+        });
+    }
+    vm
+}
+
+fn thread_inspector(core: &StudioCore, thread_id: &str) -> StudioInspectorVm {
+    let inspection = core.data.thread_inspection.as_ref();
+    let mut vm = code_or_empty(
+        thread_id,
+        Some("Thread"),
+        inspection.and_then(|x| serde_json::to_string_pretty(x).ok()),
+        Some("Loading thread details…"),
+    );
+    if inspection
+        .and_then(|x| field_text(&x.thread, &["status", "state"]))
+        .is_some_and(|status| is_cancellable_thread_status(&status))
+        && !session_vm(core).read_only
+    {
+        let pending = core.has_pending_cancel(thread_id);
+        vm.sections.push(StudioSectionVm {
+            title: "Cancel thread".to_string(),
+            rows: vec![
+                (
+                    "Action".to_string(),
+                    if pending { "Cancelling" } else { "Cancel" }.to_string(),
+                ),
+                ("Thread".to_string(), thread_id.to_string()),
+            ],
+            action: (!pending).then_some(StudioAction::CancelThread {
+                thread_id: thread_id.to_string(),
+            }),
+        });
+    }
+    vm
 }
 
 fn code_or_empty(
@@ -1571,9 +1899,9 @@ fn join_path(base: &str, name: &str) -> String {
 
 fn health_label(core: &StudioCore) -> String {
     core.data
-        .snapshot
+        .dimension
         .as_ref()
-        .and_then(|snapshot| snapshot.local_node.health.get("status"))
+        .and_then(|dimension| dimension.local_node.health.get("status"))
         .and_then(|v| v.as_str())
         .unwrap_or("connecting")
         .to_string()
@@ -1581,9 +1909,9 @@ fn health_label(core: &StudioCore) -> String {
 
 fn ryeos_version(core: &StudioCore) -> String {
     core.data
-        .snapshot
+        .dimension
         .as_ref()
-        .and_then(|snapshot| snapshot.local_node.status.get("version"))
+        .and_then(|dimension| dimension.local_node.status.get("version"))
         .and_then(|v| v.as_str())
         .map(normalize_version_label)
         .unwrap_or_else(|| {

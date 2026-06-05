@@ -34,6 +34,10 @@ impl SchedulerContext for AppSchedulerContext {
         self.0.scheduler_db.clone()
     }
 
+    fn scheduler_runtime_gate(&self) -> Arc<tokio::sync::RwLock<()>> {
+        self.0.scheduler_runtime_gate.clone()
+    }
+
     fn trust_store(&self) -> &ryeos_engine::trust::TrustStore {
         &self.0.engine.trust_store
     }

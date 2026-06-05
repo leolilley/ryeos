@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-03T06:30:02Z:37ab2304dffbf9a391ad47c2f33fc7057cb7cf9761412081a3d56c375f2470bc:i6ZoqZDVZERBcMdvAY/pTYulvP/vqKgVdTBu0HJWFkFAnRbAQLYMU7pk5JI5Bvke/ExS65zQ37wK/Bys33yCAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-04T02:13:42Z:13c72379d4d9f5a4063e9a24bfb7e72a0584a86209363e9548c06935347cbeb1:b+RQekhVh0mcj7BN7xgLBVw4f/RAclb/p4luG5DDfyjeHqZrOcfNQgUXhasoxh40aB3F1U9rLk4/mKG6EZTbAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: ryeos/future
 name: scheduler-deferred-advanced-work
@@ -32,13 +32,28 @@ The safe half of the scheduler SLA/durable cursor plan has been implemented:
 - advisory `schedule_cursors` projection;
 - fail-closed diagnostic ownership behavior.
 
+Project AI schedule reconciliation has also landed:
+
+- project-authored `.ai/config/schedules` declarations project into node-owned `.ai/node/schedules` specs;
+- project-managed schedule create/update/delete is reconciled during `project.apply-snapshot`;
+- update preserves requester fingerprint and granted capabilities unless reauthorization is added later;
+- manual schedule ID collisions fail closed rather than being implicitly adopted;
+- removed project-managed declarations delete active specs/projections but preserve JSONL fire history;
+- scheduler registration and project schedule declarations normalize missing `params` to `{}` and require object params;
+- pause/resume rewrites now recompute `spec_hash` and signer fingerprint;
+- timer and recovery dispatch honor the shared scheduler runtime gate so they do not race scheduler mutations or project deploy reconciliation.
+
+Project schedule declaration signature/trust verification remains deferred:
+runtime authority comes from the verified deploy caller, and generated node-owned
+schedule specs are node-signed.
+
 This document records what remains intentionally deferred.
 
 ## Deferred work
 
 ### 1. Distributed scheduler owner leases
 
-The current scheduler remains local-process oriented. It does not yet coordinate schedule ownership across multiple daemon instances.
+The current scheduler remains local-process oriented. The in-process scheduler runtime gate serializes mutation/deploy against local timer and recovery dispatch, but it does not coordinate schedule ownership across multiple daemon instances.
 
 Future implementation should define:
 
@@ -125,6 +140,8 @@ Avoid doing this as a broad mechanical refactor unless it directly supports life
 
 SQLite fire/cursor projection writes and JSONL append-only history are still not one atomic transaction.
 
+Project schedule reconciliation now has request-path rollback for prepared schedule YAML/projection mutations, but that is not crash-atomic across daemon death. Durable deploy journaling and recovery should cover schedule reconciliation before treating project-deployed schedules as fully crash-recoverable.
+
 Current accepted model:
 
 - JSONL remains the durable rebuild/audit source;
@@ -142,7 +159,24 @@ Future work could explore stronger durability if needed:
 
 Only pursue this if real failure modes require it. Do not make advisory cursors authoritative to compensate for projection divergence.
 
-### 7. Advanced cursor performance optimization
+### 7. Project declaration signature/trust verification
+
+Project schedule declarations are currently treated as deploy intent validated
+under a verified `project.apply-snapshot` caller. The declaration file's own
+signature/trust is not yet used for admission policy.
+
+Future work should define:
+
+- whether declarations must be signed separately from the snapshot object;
+- which signer classes may author project schedule declarations;
+- how declaration signer identity composes with deploy caller authority;
+- diagnostics for unsigned, untrusted, or mismatched declarations;
+- whether `managed_by.source_body_hash` should include signer provenance.
+
+Do not let project YAML self-grant execution capabilities. Runtime authority
+must continue to come from verified caller context or an explicit future policy.
+
+### 8. Advanced cursor performance optimization
 
 The current cursor fields are useful diagnostics, not a planner bypass.
 
@@ -156,7 +190,7 @@ Future optimization may read cursors to reduce repeated planner work, but only a
 
 The first optimized mode should still fall back to the shared planner and deterministic fire claim behavior.
 
-### 8. Richer scheduler observability
+### 9. Richer scheduler observability
 
 Diagnostics now expose current planning state, grace, and advisory cursor fields. More operator visibility remains possible:
 
@@ -181,12 +215,18 @@ Keep observability read-only unless a repair action is explicitly requested.
 - Anonymous or unverified scheduler diagnostics should fail closed.
 - Schema migrations must preserve exact SQLite schema validation.
 - Schedule updates must preserve original requester and granted capabilities unless reauthorization is explicit.
+- Project-managed schedule adoption must remain explicit; do not silently convert manual node schedules into project-managed schedules.
+- Project schedule reconciliation must preserve fire history when deleting active specs/projections.
+- Timer and recovery dispatch must keep honoring the scheduler runtime gate around mutation/deploy windows.
+- Project declaration signatures must not be treated as runtime execution authority unless an explicit admission policy is designed.
 
 ## Suggested next implementation order
 
 1. Design the explicit fire lifecycle/state machine.
 2. Centralize reason/outcome constants as part of that lifecycle design.
-3. Add `scheduler.explain_fire` using existing durable history.
-4. Add richer read-only observability and consistency checks.
-5. Design distributed owner leases separately.
-6. Only then consider authoritative cursor-driven scheduling.
+3. Add crash-recovery journaling for project schedule reconciliation as part of project AI deploy journaling.
+4. Define project declaration signature/trust admission policy if project signer identity needs to matter.
+5. Add `scheduler.explain_fire` using existing durable history.
+6. Add richer read-only observability and consistency checks.
+7. Design distributed owner leases separately.
+8. Only then consider authoritative cursor-driven scheduling.

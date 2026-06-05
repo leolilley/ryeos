@@ -14,6 +14,7 @@
 #
 # Env:
 #   CARGO              cargo binary (default: cargo from PATH)
+#   CARGO_TARGET_DIR   cargo target dir (default: .cargo/config target-dir or ./target)
 #   TRIPLE             host triple (default: x86_64-unknown-linux-gnu)
 
 set -euo pipefail
@@ -47,25 +48,31 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 TRIPLE="${TRIPLE:-x86_64-unknown-linux-gnu}"
 
-# Resolve target directory: read from .cargo/config.toml or fallback
-TARGET=""
-if [ -f "$ROOT/.cargo/config.toml" ]; then
-  TARGET="$(grep -o 'target-dir *= *"[^"]*' "$ROOT/.cargo/config.toml" 2>/dev/null | sed 's/.*"//' || true)"
+# Resolve target directory: prefer Cargo's env override, then .cargo/config.toml,
+# then the workspace default. Keep this in sync with the cargo invocation so the
+# binary install step reads from the directory Cargo actually wrote.
+TARGET="${CARGO_TARGET_DIR:-}"
+if [ -z "$TARGET" ]; then
+  if [ -f "$ROOT/.cargo/config.toml" ]; then
+    TARGET="$(grep -o 'target-dir *= *"[^"]*' "$ROOT/.cargo/config.toml" 2>/dev/null | sed 's/.*"//' || true)"
+  fi
 fi
 if [ -z "$TARGET" ]; then
   TARGET="$ROOT/target"
+elif [[ "$TARGET" != /* ]]; then
+  TARGET="$ROOT/$TARGET"
 fi
 echo "[populate-bundles] target dir: $TARGET"
 
 CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
 WEB="$ROOT/bundles/web"
-COCKPIT="$ROOT/bundles/cockpit"
+STUDIO="$ROOT/bundles/studio"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
 
 case "$BUNDLE_SET" in
   full)
-    BUNDLE_DIRS=("$CORE" "$STD" "$WEB" "$COCKPIT" "$HOSTED_NODE")
+    BUNDLE_DIRS=("$CORE" "$STD" "$WEB" "$STUDIO" "$HOSTED_NODE")
     ;;
   hosted-node)
     BUNDLE_DIRS=("$CORE" "$HOSTED_NODE")
@@ -86,12 +93,12 @@ done
 CORE_BIN="$CORE/.ai/bin/$TRIPLE"
 STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
-COCKPIT_BIN="$COCKPIT/.ai/bin/$TRIPLE"
+STUDIO_BIN="$STUDIO/.ai/bin/$TRIPLE"
 HOSTED_NODE_BIN="$HOSTED_NODE/.ai/bin/$TRIPLE"
 
 case "$BUNDLE_SET" in
   full)
-    mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN" "$COCKPIT_BIN" "$HOSTED_NODE_BIN"
+    mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN" "$STUDIO_BIN" "$HOSTED_NODE_BIN"
     ;;
   hosted-node)
     mkdir -p "$CORE_BIN" "$HOSTED_NODE_BIN"
@@ -146,11 +153,11 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
     "$TARGET/release/rye-composer-graph-permissions" \
     "$STD_BIN/"
 
-  echo "[populate-bundles] installing cockpit bundle binaries → $COCKPIT_BIN"
+  echo "[populate-bundles] installing studio bundle binaries → $STUDIO_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-tui" \
     "$TARGET/release/web" \
-    "$COCKPIT_BIN/"
+    "$STUDIO_BIN/"
 
   echo "[populate-bundles] installing web bundle binaries → $WEB_BIN"
   install -m 0755 \
@@ -198,8 +205,8 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 
-  echo "[populate-bundles] publishing cockpit bundle…"
-  USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$COCKPIT" \
+  echo "[populate-bundles] publishing studio bundle…"
+  USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$STUDIO" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
     --owner "$OWNER" >/dev/null

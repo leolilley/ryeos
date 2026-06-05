@@ -2,7 +2,7 @@
 //!
 //! Surfaces declare commands (palette entries, keybindings, contextual actions).
 //! Each affordance invokes either:
-//! - A **UI-local verb** for cockpit behavior (focus, split, quit, etc.)
+//! - A **UI-local verb** for studio behavior (focus, split, quit, etc.)
 //! - A **Rye-native invocation** for daemon behavior (aliases, verbs, operations)
 //!
 //! Dispatch is code-owned. Surfaces expose data; Rust owns execution.
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// What an affordance invokes.
 ///
-/// UI verbs are cockpit-local — they mutate the model through the reducer.
+/// UI verbs are studio-local — they mutate the model through the reducer.
 /// Rye invocations go through the daemon unexpanded.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -38,7 +38,7 @@ pub struct UiInvocation {
     pub args: serde_json::Value,
 }
 
-/// Closed enum of UI verbs — intentionally small, cockpit-only.
+/// Closed enum of UI verbs — intentionally small, studio-only.
 ///
 /// Rye operations (cancel_thread, execute_item, etc.) belong in `InvocationSpec::Rye`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

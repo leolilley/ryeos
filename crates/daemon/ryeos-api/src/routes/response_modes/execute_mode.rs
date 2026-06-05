@@ -40,12 +40,8 @@ use ryeos_state::ignore::IgnoreMatcher;
 #[serde(deny_unknown_fields)]
 pub struct ExecuteRequest {
     /// Canonical item ref to execute (e.g. "directive:my/agent").
-    /// Mutually exclusive with `tokens`.
     #[serde(default)]
     pub item_ref: Option<String>,
-    /// CLI token sequence to resolve via alias registry.
-    #[serde(default)]
-    pub tokens: Option<Vec<String>>,
     /// Project root path for three-tier resolution.
     #[serde(default)]
     pub project_path: Option<String>,
@@ -171,94 +167,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
             request.launch_mode = "accepted".to_string();
         }
 
-        // API invariants: item_ref and tokens are mutually exclusive; one required.
-        match (&request.item_ref, &request.tokens) {
-            (Some(_), Some(_)) => {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "item_ref and tokens are mutually exclusive" })),
-                )
-                    .into_response());
-            }
-            (None, None) => {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "either item_ref or tokens is required" })),
-                )
-                    .into_response());
-            }
-            _ => {}
-        }
-
-        // Token mode: parameters must be empty.
-        if request.tokens.is_some()
-            && !request.parameters.is_null()
-            && !request
-                .parameters
-                .as_object()
-                .map_or(true, |m| m.is_empty())
-        {
+        if request.item_ref.is_none() {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                axum::Json(json!({
-                    "error": "in tokens mode, parameters are computed server-side; client must not supply them"
-                })),
+                axum::Json(json!({ "error": "item_ref is required" })),
             )
                 .into_response());
-        }
-
-        // Token resolution.
-        if let Some(ref tokens) = request.tokens {
-            if tokens.is_empty() {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "tokens array is empty" })),
-                )
-                    .into_response());
-            }
-            let resolved =
-                ryeos_runtime::resolve_command(tokens, &state.alias_registry, &state.verb_registry)
-                    .map_err(|e| match &e {
-                        ryeos_runtime::ResolveError::NoMatch { tokens } => {
-                            RouteDispatchError::BadRequest(
-                                json!({
-                                    "error": e.to_string(),
-                                    "tokens": tokens,
-                                })
-                                .to_string(),
-                            )
-                        }
-                        ryeos_runtime::ResolveError::VerbNotFound { .. } => {
-                            RouteDispatchError::Internal(e.to_string())
-                        }
-                        ryeos_runtime::ResolveError::VerbNotExecutable { .. } => {
-                            RouteDispatchError::BadRequest(e.to_string())
-                        }
-                        ryeos_runtime::ResolveError::Bind { .. } => {
-                            RouteDispatchError::BadRequest(e.to_string())
-                        }
-                    })?;
-
-            tracing::debug!(
-                tokens = ?tokens,
-                verb = %resolved.verb,
-                consumed = resolved.consumed,
-                item_ref = %resolved.execute_ref,
-                deprecated = resolved.deprecated,
-                "resolved tokens via shared resolver"
-            );
-
-            if resolved.deprecated {
-                tracing::warn!(
-                    verb = %resolved.verb,
-                    replacement = ?resolved.replacement_tokens,
-                    removed_in = ?resolved.removed_in,
-                    "deprecated alias used"
-                );
-            }
-
-            request.item_ref = Some(resolved.execute_ref);
-            request.parameters = resolved.parameters;
         }
 
         let item_ref = request.item_ref.as_ref().unwrap();
@@ -537,6 +451,86 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         item_ref, e
                     ))
                 })?;
+            if parsed_item_ref.kind() != "tool" {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": "launch_mode='accepted' currently supports tool refs only" })),
+                )
+                    .into_response());
+            }
+            let accepted_resolved = match ryeos_app::thread_lifecycle::resolve_root_execution(
+                ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
+                    engine: &project_ctx.request_engine,
+                    site_id,
+                    project_path: &project_ctx.effective_path,
+                    item_ref,
+                    // Accepted launch dispatches the background execution
+                    // through the normal inline lifecycle; preflight the
+                    // same launch mode so unsupported refs fail before we
+                    // mint and return a thread_id.
+                    launch_mode: "inline",
+                    parameters: request.parameters.clone(),
+                    requested_by: Some(caller_principal_id.clone()),
+                    caller_scopes: caller_scopes.clone(),
+                    validate_only: false,
+                },
+            ) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({
+                            "error": format!("accepted launch preflight failed: {err}"),
+                        })),
+                    )
+                        .into_response());
+                }
+            };
+            if let Err(err) = ryeos_app::thread_lifecycle::validate_item(
+                &project_ctx.request_engine,
+                &accepted_resolved,
+            ) {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({
+                        "error": format!("accepted launch validation failed: {err}"),
+                    })),
+                )
+                    .into_response());
+            }
+            let required_caps = ryeos_app::service_registry::extract_required_caps(
+                &accepted_resolved.resolved_item.metadata.extra,
+            );
+            if !required_caps.is_empty() {
+                let cap_refs = required_caps.iter().map(String::as_str).collect::<Vec<_>>();
+                let policy = AuthorizationPolicy::require_all(&cap_refs);
+                if state.authorizer.authorize(&caller_scopes, &policy).is_err() {
+                    return Ok((
+                        StatusCode::FORBIDDEN,
+                        axum::Json(json!({
+                            "error": "accepted launch missing required item capabilities",
+                            "required": required_caps,
+                        })),
+                    )
+                        .into_response());
+                }
+            }
+            let dotenv_dirs =
+                ryeos_app::vault::dotenv_search_dirs(Some(provenance.original_project_path()));
+            if let Err(err) = ryeos_app::vault::read_required_secrets(
+                state.vault.as_ref(),
+                &caller_principal_id,
+                &accepted_resolved.resolved_item.metadata.required_secrets,
+                &dotenv_dirs,
+            ) {
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({
+                        "error": format!("accepted launch secret preflight failed: {err}"),
+                    })),
+                )
+                    .into_response());
+            }
             let accepted_project_path = crate::routes::abs_path::AbsolutePathBuf::try_new(
                 project_ctx.effective_path.clone(),
             )
@@ -1032,7 +1026,6 @@ mod tests {
     fn target_request(target_site_id: Option<&str>) -> ExecuteRequest {
         ExecuteRequest {
             item_ref: Some("tool:test/thing".into()),
-            tokens: None,
             project_path: Some("/tmp/project".into()),
             parameters: serde_json::Value::Null,
             launch_mode: "inline".into(),

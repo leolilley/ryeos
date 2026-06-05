@@ -1,7 +1,0 @@
-# ryeos:signed:2026-05-31T08:15:58Z:90b32a73c1df6d5a7f6720d92c396a29093dafd659df1ff035d1846594d64fe9:XbM0XnK9aH48+eCTBysqN+XUW2ySQPqwMv3+azvSNc1p0j9JeE2jl26iRtxLHQf4/X3kOcLcTq3IzkbXHa61AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-name: cockpit/remotes/probe
-version: "1.0.0"
-description: On-demand health check against a named remote — called explicitly from the cockpit UI, not during page load.
-endpoint: ui.cockpit.remotes.probe
-availability: daemon_only

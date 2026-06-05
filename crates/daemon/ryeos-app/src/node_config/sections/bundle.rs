@@ -31,9 +31,18 @@ impl NodeConfigSection for BundleSection {
             bail!("bundle '{}' path must be absolute, got: {}", name, path);
         }
 
+        let command_registration_caps = body
+            .get("command_registration_caps")
+            .cloned()
+            .map(serde_json::from_value::<Vec<String>>)
+            .transpose()
+            .context("bundle record has invalid 'command_registration_caps' field")?
+            .unwrap_or_default();
+
         let record = BundleRecord {
             name: name.to_string(),
             path: path_buf,
+            command_registration_caps,
             source_file: std::path::PathBuf::new(),
         };
         Ok(Box::new(record))

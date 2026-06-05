@@ -253,6 +253,41 @@ pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
     Ok(out)
 }
 
+/// Recover a remote entry's project bindings without requiring the
+/// entire entry to satisfy the current [`RemoteConfig`] schema.
+///
+/// This is used by `remote configure` when repairing older remote
+/// entries. Those entries may be missing newly-required fields such as
+/// `signing_key`, but their local-to-remote project bindings are still
+/// valuable and must not be dropped during refresh.
+pub fn load_remote_project_bindings_at(
+    path: &Path,
+    remote_name: &str,
+) -> Result<HashMap<String, RemoteProjectBinding>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
+    let file: RemotesFile = serde_yaml::from_str(&content)
+        .with_context(|| format!("invalid remotes config: {}", path.display()))?;
+    let Some(raw) = file.remotes.get(remote_name) else {
+        return Ok(HashMap::new());
+    };
+    let Some(bindings) = raw.get("project_bindings") else {
+        return Ok(HashMap::new());
+    };
+    serde_yaml::from_value::<HashMap<String, RemoteProjectBinding>>(bindings.clone()).with_context(
+        || {
+            format!(
+                "invalid project_bindings for remote '{}' in {}",
+                remote_name,
+                path.display()
+            )
+        },
+    )
+}
+
 /// Locate the scope (file root) that owns a given remote name.
 ///
 /// Checks project-level first (project wins on collision, matching
@@ -908,6 +943,48 @@ remotes:
         );
         assert!(merged.contains_key("user-only"));
         assert!(merged.contains_key("project-only"));
+    }
+
+    #[test]
+    fn load_remote_project_bindings_recovers_from_legacy_entry() {
+        let project_root = tempfile::tempdir().unwrap();
+        let project_path = remotes_config_path(project_root.path());
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+remotes:
+  v2:
+    name: v2
+    url: https://project-level.example.com
+    principal_id: fp:legacy
+    site_id: site:legacy
+    vault_fingerprint: sha256:legacy
+    ingest_ignore:
+      patterns: []
+    project_bindings:
+      /workspace/projects/snap-track:
+        remote_project_path: /data/projects/snap-track
+        sync_scope: ai_only
+"#,
+        )
+        .unwrap();
+
+        let valid_remotes = load_remotes_at(&project_path).unwrap();
+        assert!(
+            valid_remotes.is_empty(),
+            "legacy entry is intentionally invalid without signing_key"
+        );
+
+        let bindings = load_remote_project_bindings_at(&project_path, "v2").unwrap();
+        assert_eq!(
+            bindings["/workspace/projects/snap-track"].remote_project_path,
+            "/data/projects/snap-track"
+        );
+        assert_eq!(
+            bindings["/workspace/projects/snap-track"].sync_scope,
+            ProjectSyncScope::AiOnly
+        );
     }
 
     #[test]

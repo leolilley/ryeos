@@ -22,22 +22,111 @@ pub enum ProjectSyncScope {
     FullProject,
 }
 
-/// Managed project `.ai` roots that AI-only project sync may deploy.
+/// Kind of deployable project `.ai` surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectAiSurfaceKind {
+    /// Signed RyeOS items that materialize as project content.
+    ProjectItems,
+    /// Project-authored configuration that materializes as project intent.
+    ProjectConfig,
+    /// Project-authored trust pins.
+    TrustPins,
+    /// Project-authored schedule declarations; reconciled separately into
+    /// node-owned scheduler runtime specs.
+    ScheduleDeclarations,
+    /// Project/bundle-authored node extension declarations, not runtime state.
+    NodeExtensionDeclarations,
+}
+
+/// Deployable project `.ai` surface descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectAiSurface {
+    pub root: &'static str,
+    pub kind: ProjectAiSurfaceKind,
+    pub materialize_to_project: bool,
+}
+
+const fn surface(
+    root: &'static str,
+    kind: ProjectAiSurfaceKind,
+    materialize_to_project: bool,
+) -> ProjectAiSurface {
+    ProjectAiSurface {
+        root,
+        kind,
+        materialize_to_project,
+    }
+}
+
+/// Deployable project `.ai` surfaces that AI-only project sync may ingest.
 ///
-/// This intentionally excludes `.ai/node/routes` and `.ai/services`; v1
-/// project AI sync does not mutate the remote node's public HTTP surface.
-pub const PROJECT_AI_SYNC_DIRS: &[&str] = &[
-    ".ai/directives",
-    ".ai/tools",
-    ".ai/knowledge",
-    ".ai/parsers",
-    ".ai/handlers",
-    ".ai/protocols",
-    ".ai/node/engine/kinds",
-    ".ai/node/verbs",
-    ".ai/config/agent",
-    ".ai/config/keys/trusted",
+/// This intentionally excludes node-owned runtime state such as
+/// `.ai/node/routes`, `.ai/node/schedules`, `.ai/state`, and signing keys.
+pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
+    surface(".ai/directives", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(".ai/tools", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(".ai/graphs", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(".ai/knowledge", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(".ai/parsers", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(".ai/handlers", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(".ai/protocols", ProjectAiSurfaceKind::ProjectItems, true),
+    surface(
+        ".ai/node/engine/kinds",
+        ProjectAiSurfaceKind::NodeExtensionDeclarations,
+        true,
+    ),
+    surface(
+        ".ai/node/commands",
+        ProjectAiSurfaceKind::NodeExtensionDeclarations,
+        true,
+    ),
+    surface(
+        ".ai/config/agent",
+        ProjectAiSurfaceKind::ProjectConfig,
+        true,
+    ),
+    surface(
+        ".ai/config/execution",
+        ProjectAiSurfaceKind::ProjectConfig,
+        true,
+    ),
+    surface(
+        ".ai/config/ryeos-runtime",
+        ProjectAiSurfaceKind::ProjectConfig,
+        true,
+    ),
+    surface(
+        ".ai/config/keys/trusted",
+        ProjectAiSurfaceKind::TrustPins,
+        true,
+    ),
+    surface(
+        ".ai/config/schedules",
+        ProjectAiSurfaceKind::ScheduleDeclarations,
+        true,
+    ),
 ];
+
+/// Node-local or runtime-owned prefixes that project AI sync must not deploy.
+pub const PROJECT_AI_LOCAL_ONLY_PREFIXES: &[&str] = &[
+    ".ai/state",
+    ".ai/node/schedules",
+    ".ai/node/routes",
+    ".ai/node/identity",
+    ".ai/node/auth",
+    ".ai/node/vault",
+    ".ai/node/bundles",
+    ".ai/config/keys/signing",
+];
+
+/// Classification of a relative path in a project AI snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectAiPathClass {
+    Deployable(ProjectAiSurface),
+    LocalOnly { prefix: &'static str },
+    UnknownAiPath,
+    NonAiPath,
+}
 
 /// Validate all paths in a project manifest for the declared sync scope.
 pub fn validate_project_manifest_paths(
@@ -55,33 +144,80 @@ pub fn validate_project_manifest_path(rel_path: &str, scope: ProjectSyncScope) -
     validate_safe_relative_path(rel_path)?;
 
     if scope == ProjectSyncScope::AiOnly {
-        if is_project_ai_sync_root(rel_path) {
-            anyhow::bail!(
-                "AI-only project manifest path '{}' names a managed .ai sync root; expected a file below a managed root",
-                rel_path
-            );
-        }
-        if !is_project_ai_sync_path(rel_path) {
-            anyhow::bail!(
-                "AI-only project manifest path '{}' is outside managed .ai sync roots",
-                rel_path
-            );
+        match classify_project_ai_path(rel_path) {
+            ProjectAiPathClass::Deployable(surface) if rel_path == surface.root => {
+                anyhow::bail!(
+                    "AI-only project manifest path '{}' names a deployable .ai surface root; expected a file below the surface root",
+                    rel_path
+                );
+            }
+            ProjectAiPathClass::Deployable(_) => {}
+            ProjectAiPathClass::LocalOnly { prefix } => {
+                anyhow::bail!(
+                    "AI-only project manifest path '{}' is under node-local/runtime-owned .ai prefix '{}' and cannot be deployed",
+                    rel_path,
+                    prefix
+                );
+            }
+            ProjectAiPathClass::UnknownAiPath => {
+                anyhow::bail!(
+                    "AI-only project manifest path '{}' is under .ai but outside deployable project surfaces",
+                    rel_path
+                );
+            }
+            ProjectAiPathClass::NonAiPath => {
+                anyhow::bail!(
+                    "AI-only project manifest path '{}' is non-.ai project content; use full_project sync for app code",
+                    rel_path
+                );
+            }
         }
     }
 
     Ok(())
 }
 
+/// Classify a relative path for AI-only project sync diagnostics.
+pub fn classify_project_ai_path(rel_path: &str) -> ProjectAiPathClass {
+    for surface in PROJECT_AI_SURFACES {
+        if rel_path == surface.root || rel_path.starts_with(&format!("{}/", surface.root)) {
+            return ProjectAiPathClass::Deployable(*surface);
+        }
+    }
+
+    for prefix in PROJECT_AI_LOCAL_ONLY_PREFIXES {
+        if rel_path == *prefix || rel_path.starts_with(&format!("{prefix}/")) {
+            return ProjectAiPathClass::LocalOnly { prefix };
+        }
+    }
+
+    if rel_path == ".ai" || rel_path.starts_with(".ai/") {
+        ProjectAiPathClass::UnknownAiPath
+    } else {
+        ProjectAiPathClass::NonAiPath
+    }
+}
+
 /// True when a relative path is inside one of the managed AI sync roots.
 pub fn is_project_ai_sync_path(rel_path: &str) -> bool {
-    PROJECT_AI_SYNC_DIRS
-        .iter()
-        .any(|root| rel_path == *root || rel_path.starts_with(&format!("{root}/")))
+    PROJECT_AI_SURFACES.iter().any(|surface| {
+        rel_path == surface.root || rel_path.starts_with(&format!("{}/", surface.root))
+    })
 }
 
 /// True when a relative path is exactly one of the managed AI sync roots.
 pub fn is_project_ai_sync_root(rel_path: &str) -> bool {
-    PROJECT_AI_SYNC_DIRS.iter().any(|root| rel_path == *root)
+    PROJECT_AI_SURFACES
+        .iter()
+        .any(|surface| rel_path == surface.root)
+}
+
+/// Project AI surfaces materialized to the live project path during apply.
+pub fn materialized_project_ai_surface_roots() -> impl Iterator<Item = &'static str> {
+    PROJECT_AI_SURFACES
+        .iter()
+        .filter(|surface| surface.materialize_to_project)
+        .map(|surface| surface.root)
 }
 
 /// Basic relative path safety shared by full-project and AI-only snapshots.
@@ -133,32 +269,95 @@ mod tests {
 
     #[test]
     fn ai_only_accepts_managed_roots() {
-        let m = manifest(&[".ai/directives/foo.md", ".ai/tools/app/tool.yaml"]);
+        let m = manifest(&[
+            ".ai/directives/foo.md",
+            ".ai/tools/app/tool.yaml",
+            ".ai/graphs/app/flow.yaml",
+            ".ai/config/execution/execution.yaml",
+            ".ai/config/ryeos-runtime/limits.yaml",
+            ".ai/config/schedules/snap-track.yaml",
+        ]);
         validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly).unwrap();
     }
 
     #[test]
     fn ai_only_rejects_exact_managed_roots() {
-        for path in [".ai/directives", ".ai/tools", ".ai/config/keys/trusted"] {
+        for path in [
+            ".ai/directives",
+            ".ai/tools",
+            ".ai/graphs",
+            ".ai/config/execution",
+            ".ai/config/ryeos-runtime",
+            ".ai/config/keys/trusted",
+            ".ai/config/schedules",
+        ] {
             let err = validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::AiOnly)
                 .expect_err("exact managed root path must be rejected");
-            assert!(format!("{err:#}").contains("names a managed"));
+            assert!(format!("{err:#}").contains("names a deployable"));
         }
     }
 
     #[test]
     fn ai_only_rejects_app_code_and_unmanaged_ai() {
-        for path in [
-            "src/index.ts",
-            ".ai/state/runtime.sqlite3",
-            ".ai/config/keys/signing/private.pem",
-            ".ai/node/routes/apply.yaml",
-            ".ai/services/project/apply.yaml",
+        for (path, expected) in [
+            ("src/index.ts", "non-.ai project content"),
+            (".ai/state/runtime.sqlite3", "node-local/runtime-owned"),
+            (
+                ".ai/config/keys/signing/private.pem",
+                "node-local/runtime-owned",
+            ),
+            (".ai/node/routes/apply.yaml", "node-local/runtime-owned"),
+            (
+                ".ai/services/project/apply.yaml",
+                "outside deployable project surfaces",
+            ),
         ] {
             let err = validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::AiOnly)
                 .expect_err("path must be rejected");
-            assert!(format!("{err:#}").contains("outside managed"));
+            assert!(
+                format!("{err:#}").contains(expected),
+                "error for {path} should contain {expected:?}, got {err:#}"
+            );
         }
+    }
+
+    #[test]
+    fn classifies_project_ai_paths() {
+        assert!(matches!(
+            classify_project_ai_path(".ai/config/schedules/snap-track.yaml"),
+            ProjectAiPathClass::Deployable(ProjectAiSurface {
+                kind: ProjectAiSurfaceKind::ScheduleDeclarations,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_project_ai_path(".ai/graphs/snap-track/show_rescrape.yaml"),
+            ProjectAiPathClass::Deployable(ProjectAiSurface {
+                kind: ProjectAiSurfaceKind::ProjectItems,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_project_ai_path(".ai/config/execution/execution.yaml"),
+            ProjectAiPathClass::Deployable(ProjectAiSurface {
+                kind: ProjectAiSurfaceKind::ProjectConfig,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_project_ai_path(".ai/node/schedules/foo.yaml"),
+            ProjectAiPathClass::LocalOnly {
+                prefix: ".ai/node/schedules"
+            }
+        ));
+        assert_eq!(
+            classify_project_ai_path(".ai/unknown/foo.yaml"),
+            ProjectAiPathClass::UnknownAiPath
+        );
+        assert_eq!(
+            classify_project_ai_path("src/index.ts"),
+            ProjectAiPathClass::NonAiPath
+        );
     }
 
     #[test]

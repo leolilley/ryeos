@@ -1,4 +1,4 @@
-//! SurfaceSpec — declarative UI contract for the RyeOS cockpit.
+//! SurfaceSpec — declarative UI contract for the RyeOS Studio.
 //!
 //! A surface is a non-executable Rye item describing layout, views, commands,
 //! and instruments. The TUI consumes **effective surfaces** — either:
@@ -9,8 +9,6 @@
 //! The TUI does NOT implement source-space precedence, trust verification,
 //! kind-schema loading, signature verification, or extends-chain composition.
 //! Those belong in ryeosd / item services.
-//!
-//! See: .tmp/tui-effective-surface-architecture.md
 
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
@@ -469,9 +467,9 @@ fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
 // Built-in default surface
 // ---------------------------------------------------------------------------
 
-/// The built-in default cockpit surface — mission-control layout.
+/// The built-in default Studio surface — mission-control layout.
 ///
-/// Data-equivalent to `surface:ryeos/cockpit/base`.
+/// Data-equivalent to `surface:ryeos/studio/base`.
 /// Three-pane: thread list (left 25%) | thread (right-top 85%) + status (right-bottom).
 pub fn builtin_default() -> SurfaceSpec {
     let mut nodes = std::collections::HashMap::new();
@@ -514,10 +512,10 @@ pub fn builtin_default() -> SurfaceSpec {
     );
 
     SurfaceSpec {
-        name: "cockpit-base".into(),
+        name: "studio-base".into(),
         version: "1.0.0".into(),
         extends: None,
-        description: Some("Default RyeOS cockpit — three-pane mission control".into()),
+        description: Some("Default RyeOS Studio — three-pane mission control".into()),
         layout: SurfaceLayoutSpec {
             root: "main".into(),
             nodes,
@@ -896,7 +894,7 @@ mod tests {
     #[test]
     fn builtin_default_is_valid() {
         let spec = builtin_default();
-        assert_eq!(spec.name, "cockpit-base");
+        assert_eq!(spec.name, "studio-base");
         let warnings = validate_surface(&spec);
         assert!(
             warnings.is_empty(),
@@ -1010,7 +1008,7 @@ mod tests {
         };
         let loaded = load_surface(&opts);
         assert!(matches!(loaded, LoadedSurface::Builtin { .. }));
-        assert_eq!(loaded.spec().name, "cockpit-base");
+        assert_eq!(loaded.spec().name, "studio-base");
         assert!(matches!(loaded.source(), SurfaceSource::BuiltinDefault));
     }
 
@@ -1118,10 +1116,10 @@ view = "thread_list"
         assert_eq!(local.source_label(), "local preview (untrusted)");
 
         let resolved = LoadedSurface::RyeResolved {
-            requested_ref: "surface:ryeos/cockpit/graph".into(),
+            requested_ref: "surface:ryeos/studio/graph".into(),
             spec: builtin_default(),
             trusted: true,
-            provenance: empty_provenance("surface:ryeos/cockpit/graph"),
+            provenance: empty_provenance("surface:ryeos/studio/graph"),
             item_diagnostics: Vec::new(),
             tui_diagnostics: Vec::new(),
         };
@@ -1148,12 +1146,12 @@ view = "thread_list"
     fn bundled_base_surface_loads() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/cockpit/.ai/surfaces/ryeos/cockpit/base.yaml");
+            .join("bundles/studio/.ai/surfaces/ryeos/studio/base.yaml");
         assert!(path.exists(), "bundled surface missing at {path:?}");
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
             .unwrap_or_else(|e| panic!("failed to parse bundled base surface: {}", e));
-        assert_eq!(spec.name, "cockpit-base");
+        assert_eq!(spec.name, "studio-base");
         assert!(!spec.affordances.is_empty());
         assert!(spec.layout.nodes.contains_key("main"));
         let warnings = validate_surface(&spec);
@@ -1170,13 +1168,13 @@ view = "thread_list"
     fn bundled_graph_surface_loads() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/cockpit/.ai/surfaces/ryeos/cockpit/graph.yaml");
+            .join("bundles/studio/.ai/surfaces/ryeos/studio/graph.yaml");
         assert!(path.exists(), "bundled graph surface missing at {path:?}");
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
             .unwrap_or_else(|e| panic!("failed to parse bundled graph surface: {}", e));
         assert_eq!(spec.name, "graph-operator");
-        assert_eq!(spec.extends.as_deref(), Some("surface:ryeos/cockpit/base"));
+        assert_eq!(spec.extends.as_deref(), Some("surface:ryeos/studio/base"));
     }
 
     #[test]
@@ -1271,14 +1269,14 @@ id = "test"
     #[test]
     fn from_daemon_signed_surface() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/cockpit/base",
-            "canonical_ref": "surface:ryeos/cockpit/base",
+            "requested_ref": "surface:ryeos/studio/base",
+            "canonical_ref": "surface:ryeos/studio/base",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_system",
             "root_trust_class": "trusted_system",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/base.yaml" },
-            "provenance": provenance_json("surface:ryeos/cockpit/base", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/base.yaml" },
+            "provenance": provenance_json("surface:ryeos/studio/base", []),
             "composed_value": {
                 "name": "base",
                 "layout": {
@@ -1296,7 +1294,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let loaded = LoadedSurface::from_daemon("surface:ryeos/cockpit/base", response).unwrap();
+        let loaded = LoadedSurface::from_daemon("surface:ryeos/studio/base", response).unwrap();
 
         match &loaded {
             LoadedSurface::RyeResolved {
@@ -1307,12 +1305,12 @@ id = "test"
                 item_diagnostics,
                 tui_diagnostics,
             } => {
-                assert_eq!(requested_ref, "surface:ryeos/cockpit/base");
+                assert_eq!(requested_ref, "surface:ryeos/studio/base");
                 assert_eq!(spec.name, "base");
                 assert_eq!(spec.affordances.len(), 1);
                 assert_eq!(spec.affordances[0].id, "view.thread");
                 assert!(*trusted, "signed surface should be trusted");
-                assert_eq!(provenance.root.resolved_ref, "surface:ryeos/cockpit/base");
+                assert_eq!(provenance.root.resolved_ref, "surface:ryeos/studio/base");
                 assert!(provenance.ancestors.is_empty());
                 assert!(
                     item_diagnostics.is_empty(),
@@ -1330,14 +1328,14 @@ id = "test"
     #[test]
     fn from_daemon_unsigned_surface_fails_closed() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/cockpit/graph",
-            "canonical_ref": "surface:ryeos/cockpit/graph",
+            "requested_ref": "surface:ryeos/studio/graph",
+            "canonical_ref": "surface:ryeos/studio/graph",
             "kind": "surface",
             "trusted": false,
             "trust_class": "unsigned",
             "root_trust_class": "unsigned",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/graph.yaml" },
-            "provenance": provenance_json("surface:ryeos/cockpit/graph", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/graph.yaml" },
+            "provenance": provenance_json("surface:ryeos/studio/graph", []),
             "composed_value": {
                 "name": "graph",
                 "layout": {
@@ -1353,7 +1351,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/cockpit/graph", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/studio/graph", response).unwrap_err();
 
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
@@ -1366,21 +1364,21 @@ id = "test"
     #[test]
     fn from_daemon_invalid_composed_fails_closed() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/cockpit/bad",
-            "canonical_ref": "surface:ryeos/cockpit/bad",
+            "requested_ref": "surface:ryeos/studio/bad",
+            "canonical_ref": "surface:ryeos/studio/bad",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_system",
             "root_trust_class": "trusted_system",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/bad.yaml" },
-            "provenance": provenance_json("surface:ryeos/cockpit/bad", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/bad.yaml" },
+            "provenance": provenance_json("surface:ryeos/studio/bad", []),
             "composed_value": { "garbage": true },
             "derived": {},
             "policy_facts": {},
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/cockpit/bad", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/studio/bad", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
                 assert!(message.contains("daemon returned invalid surface"));
@@ -1392,14 +1390,14 @@ id = "test"
     #[test]
     fn from_daemon_rejects_old_commands_field() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/cockpit/old",
-            "canonical_ref": "surface:ryeos/cockpit/old",
+            "requested_ref": "surface:ryeos/studio/old",
+            "canonical_ref": "surface:ryeos/studio/old",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_system",
             "root_trust_class": "trusted_system",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/old.yaml" },
-            "provenance": provenance_json("surface:ryeos/cockpit/old", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/old.yaml" },
+            "provenance": provenance_json("surface:ryeos/studio/old", []),
             "composed_value": {
                 "name": "old",
                 "layout": {
@@ -1415,7 +1413,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/cockpit/old", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/studio/old", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
                 assert!(message.contains("unknown field `commands`"));
@@ -1427,13 +1425,13 @@ id = "test"
     #[test]
     fn from_daemon_invalid_provenance_fails_closed() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/cockpit/bad-provenance",
-            "canonical_ref": "surface:ryeos/cockpit/bad-provenance",
+            "requested_ref": "surface:ryeos/studio/bad-provenance",
+            "canonical_ref": "surface:ryeos/studio/bad-provenance",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_system",
             "root_trust_class": "trusted_system",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/cockpit/bad-provenance.yaml" },
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/bad-provenance.yaml" },
             "provenance": ["old-string-list-is-invalid"],
             "composed_value": {
                 "name": "bad-provenance",
@@ -1450,7 +1448,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/cockpit/bad-provenance", response)
+        let err = LoadedSurface::from_daemon("surface:ryeos/studio/bad-provenance", response)
             .unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
@@ -1472,7 +1470,7 @@ id = "test"
             "source": { "path": "/home/user/.ai/surfaces/my/custom.yaml" },
             "provenance": provenance_json(
                 "surface:my/custom",
-                ["surface:ryeos/cockpit/base"]
+                ["surface:ryeos/studio/base"]
             ),
             "composed_value": {
                 "name": "custom",
@@ -1496,7 +1494,7 @@ id = "test"
                 assert_eq!(provenance.root.resolved_ref, "surface:my/custom");
                 assert_eq!(
                     provenance.ancestors[0].resolved_ref,
-                    "surface:ryeos/cockpit/base"
+                    "surface:ryeos/studio/base"
                 );
             }
             other => panic!(

@@ -325,17 +325,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     let resolved = &item.resolved;
     let canonical_ref = resolved.canonical_ref.to_string();
 
-    // Step 1: Item MUST declare executor_id — no default, no fallback
-    let executor_id = resolved
-        .metadata
-        .executor_id
-        .as_deref()
-        .ok_or_else(|| EngineError::MissingExecutorId {
-            item_ref: canonical_ref.clone(),
-        })?
-        .to_owned();
-
-    // Step 1a: Parse the root tool's content. Used for caller-param
+    // Step 1: Parse the root tool's content. Used for caller-param
     // validation (config_schema) AND for constructing the root chain
     // intermediate (Step 2a below). Kept outside the inner scope so
     // `root_parsed` is available after validation.
@@ -346,19 +336,34 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
                 resolved.source_path.display()
             ))
         })?;
-        let tool_block = parsers.dispatch(
+        parsers.dispatch(
             &resolved.source_format.parser,
             &content,
             Some(&resolved.source_path),
             &resolved.source_format.signature,
-        )?;
-        crate::runtime::config_schema::validate_caller_params(
-            &tool_block,
-            parameters,
-            &canonical_ref,
-        )?;
-        tool_block
+        )?
     };
+
+    // Step 1a: Requested/root items MUST declare a non-null executor_id —
+    // no default, no fallback. `executor_id: null` is valid only for
+    // terminal executor-chain hops such as `tool:ryeos/core/subprocess/execute`;
+    // it is not directly invokable as the requested item. Reject before
+    // validating root config_schema so terminal primitives don't look like
+    // public parameterized command runners.
+    let executor_id = resolved
+        .metadata
+        .executor_id
+        .as_deref()
+        .ok_or_else(|| EngineError::RootExecutorMissingOrTerminal {
+            item_ref: canonical_ref.clone(),
+        })?
+        .to_owned();
+
+    crate::runtime::config_schema::validate_caller_params(
+        &root_parsed,
+        parameters,
+        &canonical_ref,
+    )?;
 
     // Step 2: Follow the executor chain to a terminal
     let mut terminal = resolve_executor_chain(
@@ -1013,23 +1018,24 @@ config:
 
     #[test]
     fn no_executor_id_fails() {
-        let _project_dir = tempdir();
+        let project_dir = tempdir();
         let kinds_dir = tempdir();
         let ts = test_ts();
         write_tool_schema(&kinds_dir);
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let tool_path = write_chain_tool(&project_dir, "my_tool", None);
 
         let item = make_verified_item(
             "tool:my_tool",
             "tool",
-            PathBuf::from("/tmp/test.py"),
+            tool_path,
             None,
-            None,
+            Some(project_dir.clone()),
         );
 
-        let ctx = test_plan_context(None);
-        let roots = ResolutionRoots::from_flat(None, None, vec![]);
+        let ctx = test_plan_context(Some(project_dir.clone()));
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
 
         let err = build_plan(BuildPlanInput {
             item: &item,
@@ -1045,7 +1051,13 @@ config:
         })
         .unwrap_err();
 
-        assert!(matches!(err, EngineError::MissingExecutorId { .. }));
+        assert!(matches!(
+            err,
+            EngineError::RootExecutorMissingOrTerminal { .. }
+        ));
+        let msg = err.to_string();
+        assert!(msg.contains("@subprocess"), "missing remediation: {msg}");
+        assert!(msg.contains("config"), "missing config guidance: {msg}");
     }
 
     // ── Tests for template/interpreter primitives now live in the

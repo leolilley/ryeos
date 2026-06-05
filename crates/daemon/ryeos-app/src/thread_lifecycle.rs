@@ -776,7 +776,12 @@ pub fn resolve_root_execution(
         .metadata
         .executor_id
         .clone()
-        .ok_or_else(|| anyhow!("item {} does not declare an executor_id", item_ref))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "root item `{}` is not directly executable because it has no root executor_id or declares `executor_id: null`; terminal executors end an executor chain. Define a wrapper tool with `executor_id: \"@subprocess\"` and a `config:` block, then execute the wrapper.",
+                item_ref
+            )
+        })?;
 
     Ok(ResolvedExecutionRequest {
         kind: thread_kind,

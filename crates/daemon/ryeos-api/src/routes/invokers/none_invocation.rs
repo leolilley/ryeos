@@ -103,30 +103,14 @@ mod tests {
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
             bundles: vec![],
             routes: vec![],
-            verbs: vec![],
-            aliases: vec![],
+            commands: vec![],
             hosted_node_policies: vec![],
+            command_registration_policy: Default::default(),
         };
-        let test_vr = Arc::new(
-            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "execute".into(),
-                    execute: None,
-                },
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "fetch".into(),
-                    execute: None,
-                },
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "sign".into(),
-                    execute: Some("tool:ryeos/core/sign".into()),
-                },
-            ])
-            .unwrap(),
+        let test_command_registry = Arc::new(
+            ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         );
-        let test_ar =
-            Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
-        let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
+        let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             state_store,
@@ -153,10 +137,10 @@ mod tests {
             service_descriptors: crate::handlers::ALL,
             node_config: Arc::new(snapshot.clone()),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
-            verb_registry: test_vr,
-            alias_registry: test_ar,
+            command_registry: test_command_registry,
             authorizer: test_auth,
             scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap()),
+            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
             scheduler_reload_tx: None,
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,

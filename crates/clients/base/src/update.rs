@@ -9,12 +9,12 @@ use crate::input::{InputEvent, Key, Mouse, MouseAction, ScrollDirection};
 use crate::layout::Rect;
 use crate::model::AppModel;
 use crate::store::{
-    BundleSummaryModel, CockpitSnapshotModel, DaemonStatus, EventRecord, FileBrowserModel,
+    BundleSummaryModel, CommandSummaryModel, DaemonStatus, EventRecord, FileBrowserModel,
     FileEntryModel, FileReadModel, GcStatusModel, GcSummaryModel, IdentityInfoModel, IdentityModel,
     ItemInspectionModel, ItemModel, LocalNodeModel, ProjectInfoModel, ProjectModel,
     ScheduleListModel, ScheduleModel, ScheduleSummaryModel, ServiceSummaryModel, SessionModel,
-    SpaceSummaryModel, ThreadInspectionModel, ThreadModel, ThreadStatus, ThreadUsage,
-    VerbAliasSummaryModel,
+    SpaceSummaryModel, StudioDimensionModel, ThreadInspectionModel, ThreadModel, ThreadStatus,
+    ThreadUsage,
 };
 use crate::workspace::InputCapability;
 use crate::workspace::ViewSpec;
@@ -30,14 +30,14 @@ pub enum AppEvent {
     Daemon(DaemonEvent),
     DaemonBatch(Vec<DaemonEvent>),
     PollSnapshot(PollSnapshot),
-    CockpitSnapshot(CockpitSnapshot),
-    CockpitItems(CockpitItemsList),
-    CockpitItemInspection(CockpitItemInspection),
-    CockpitSchedules(CockpitSchedulesList),
-    CockpitGcStatus(CockpitGcStatus),
-    CockpitFiles(CockpitFilesList),
-    CockpitFileRead(CockpitFileRead),
-    CockpitThreadInspection(CockpitThreadInspection),
+    StudioDimension(StudioDimension),
+    StudioItems(StudioItemsList),
+    StudioItemInspection(StudioItemInspection),
+    StudioSchedules(StudioSchedulesList),
+    StudioGcStatus(StudioGcStatus),
+    StudioFiles(StudioFilesList),
+    StudioFileRead(StudioFileRead),
+    StudioThreadInspection(StudioThreadInspection),
     Resize {
         width: u16,
         height: u16,
@@ -116,29 +116,29 @@ pub struct RemoteSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitSnapshot {
+pub struct StudioDimension {
     #[serde(default)]
     pub schema_version: String,
     #[serde(default)]
     pub generated_at: String,
     #[serde(default)]
-    pub session: CockpitSession,
+    pub session: StudioSession,
     #[serde(default)]
-    pub local_node: CockpitLocalNode,
+    pub local_node: StudioLocalNode,
     #[serde(default)]
-    pub project: Option<CockpitProject>,
+    pub project: Option<StudioProject>,
     #[serde(default)]
-    pub remotes: Vec<CockpitRemote>,
+    pub remotes: Vec<StudioRemote>,
     #[serde(default)]
-    pub threads: CockpitThreadSummary,
+    pub threads: StudioThreadSummary,
     #[serde(default)]
-    pub schedules: CockpitScheduleSummary,
+    pub schedules: StudioScheduleSummary,
     #[serde(default)]
-    pub gc: CockpitGcSummary,
+    pub gc: StudioGcSummary,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitSession {
+pub struct StudioSession {
     #[serde(default)]
     pub session_id: String,
     #[serde(default)]
@@ -150,27 +150,27 @@ pub struct CockpitSession {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitLocalNode {
+pub struct StudioLocalNode {
     #[serde(default)]
-    pub identity: CockpitIdentity,
+    pub identity: StudioIdentity,
     #[serde(default)]
     pub status: serde_json::Value,
     #[serde(default)]
     pub health: serde_json::Value,
     #[serde(default)]
-    pub spaces: Vec<CockpitSpace>,
+    pub spaces: Vec<StudioSpace>,
     #[serde(default)]
-    pub bundles: Vec<CockpitBundle>,
+    pub bundles: Vec<StudioBundle>,
     #[serde(default)]
-    pub services: Vec<CockpitService>,
+    pub services: Vec<StudioService>,
     #[serde(default)]
-    pub verbs: Vec<CockpitVerbAlias>,
+    pub commands: Vec<CockpitCommand>,
     #[serde(default)]
-    pub aliases: Vec<CockpitVerbAlias>,
+    pub command_aliases: Vec<CockpitCommand>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitIdentity {
+pub struct StudioIdentity {
     #[serde(default)]
     pub principal_id: String,
     #[serde(default)]
@@ -178,7 +178,7 @@ pub struct CockpitIdentity {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitSpace {
+pub struct StudioSpace {
     #[serde(default)]
     pub space: String,
     #[serde(default)]
@@ -188,7 +188,7 @@ pub struct CockpitSpace {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitBundle {
+pub struct StudioBundle {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -196,7 +196,7 @@ pub struct CockpitBundle {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitService {
+pub struct StudioService {
     #[serde(default)]
     pub endpoint: String,
     #[serde(default)]
@@ -208,7 +208,7 @@ pub struct CockpitService {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitVerbAlias {
+pub struct CockpitCommand {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -216,13 +216,13 @@ pub struct CockpitVerbAlias {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitProject {
+pub struct StudioProject {
     #[serde(default)]
     pub path: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitRemote {
+pub struct StudioRemote {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -232,13 +232,13 @@ pub struct CockpitRemote {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitThreadSummary {
+pub struct StudioThreadSummary {
     #[serde(default)]
     pub active_count: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitScheduleSummary {
+pub struct StudioScheduleSummary {
     #[serde(default)]
     pub total: usize,
     #[serde(default)]
@@ -246,7 +246,7 @@ pub struct CockpitScheduleSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitGcSummary {
+pub struct StudioGcSummary {
     #[serde(default)]
     pub running: bool,
     #[serde(default)]
@@ -254,15 +254,15 @@ pub struct CockpitGcSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitItemsList {
+pub struct StudioItemsList {
     #[serde(default)]
     pub schema_version: String,
     #[serde(default)]
-    pub items: Vec<CockpitItemSummary>,
+    pub items: Vec<StudioItemSummary>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitItemSummary {
+pub struct StudioItemSummary {
     #[serde(default)]
     pub canonical_ref: String,
     #[serde(default)]
@@ -282,19 +282,19 @@ pub struct CockpitItemSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitItemInspection {
+pub struct StudioItemInspection {
     #[serde(default)]
     pub schema_version: String,
     #[serde(default)]
-    pub item: InspectedCockpitItem,
+    pub item: InspectedStudioItem,
     #[serde(default)]
-    pub raw: Option<CockpitRawContent>,
+    pub raw: Option<StudioRawContent>,
     #[serde(default)]
     pub effective: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct InspectedCockpitItem {
+pub struct InspectedStudioItem {
     #[serde(default)]
     pub canonical_ref: String,
     #[serde(default)]
@@ -306,7 +306,7 @@ pub struct InspectedCockpitItem {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitRawContent {
+pub struct StudioRawContent {
     #[serde(default)]
     pub content: String,
     #[serde(default)]
@@ -314,13 +314,13 @@ pub struct CockpitRawContent {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitSchedulesList {
+pub struct StudioSchedulesList {
     #[serde(default)]
-    pub schedules: Vec<CockpitSchedule>,
+    pub schedules: Vec<StudioSchedule>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitSchedule {
+pub struct StudioSchedule {
     #[serde(default)]
     pub schedule_id: String,
     #[serde(default)]
@@ -342,7 +342,7 @@ pub struct CockpitSchedule {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitGcStatus {
+pub struct StudioGcStatus {
     #[serde(default)]
     pub schema_version: String,
     #[serde(default)]
@@ -354,7 +354,7 @@ pub struct CockpitGcStatus {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitFilesList {
+pub struct StudioFilesList {
     #[serde(default)]
     pub root: String,
     #[serde(default)]
@@ -362,11 +362,11 @@ pub struct CockpitFilesList {
     #[serde(default)]
     pub truncated: bool,
     #[serde(default)]
-    pub entries: Vec<CockpitFileEntry>,
+    pub entries: Vec<StudioFileEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitFileEntry {
+pub struct StudioFileEntry {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -378,7 +378,7 @@ pub struct CockpitFileEntry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitFileRead {
+pub struct StudioFileRead {
     #[serde(default)]
     pub root: String,
     #[serde(default)]
@@ -392,7 +392,7 @@ pub struct CockpitFileRead {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CockpitThreadInspection {
+pub struct StudioThreadInspection {
     #[serde(default)]
     pub schema_version: String,
     #[serde(default)]
@@ -453,50 +453,50 @@ pub fn update(model: &mut AppModel, event: AppEvent) -> Vec<Effect> {
             vec![Effect::RefreshState]
         }
 
-        AppEvent::CockpitSnapshot(snapshot) => {
-            apply_cockpit_snapshot(model, snapshot);
+        AppEvent::StudioDimension(dimension) => {
+            apply_studio_dimension(model, dimension);
             model.mark_dirty();
             Vec::new()
         }
 
-        AppEvent::CockpitItems(items) => {
-            apply_cockpit_items(model, items);
+        AppEvent::StudioItems(items) => {
+            apply_studio_items(model, items);
             model.mark_dirty();
             Vec::new()
         }
 
-        AppEvent::CockpitItemInspection(inspection) => {
-            apply_cockpit_item_inspection(model, inspection);
+        AppEvent::StudioItemInspection(inspection) => {
+            apply_studio_item_inspection(model, inspection);
             model.mark_dirty();
             Vec::new()
         }
 
-        AppEvent::CockpitSchedules(schedules) => {
-            apply_cockpit_schedules(model, schedules);
+        AppEvent::StudioSchedules(schedules) => {
+            apply_studio_schedules(model, schedules);
             model.mark_dirty();
             Vec::new()
         }
 
-        AppEvent::CockpitGcStatus(gc) => {
-            apply_cockpit_gc_status(model, gc);
+        AppEvent::StudioGcStatus(gc) => {
+            apply_studio_gc_status(model, gc);
             model.mark_dirty();
             Vec::new()
         }
 
-        AppEvent::CockpitFiles(files) => {
-            apply_cockpit_files(model, files);
+        AppEvent::StudioFiles(files) => {
+            apply_studio_files(model, files);
             model.mark_dirty();
             Vec::new()
         }
 
-        AppEvent::CockpitFileRead(file) => {
-            apply_cockpit_file_read(model, file);
+        AppEvent::StudioFileRead(file) => {
+            apply_studio_file_read(model, file);
             model.mark_dirty();
             Vec::new()
         }
 
-        AppEvent::CockpitThreadInspection(inspection) => {
-            apply_cockpit_thread_inspection(model, inspection);
+        AppEvent::StudioThreadInspection(inspection) => {
+            apply_studio_thread_inspection(model, inspection);
             model.mark_dirty();
             Vec::new()
         }
@@ -1206,15 +1206,15 @@ fn apply_poll_snapshot(model: &mut AppModel, snapshot: &PollSnapshot) {
     }
 }
 
-fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
-    let health_status = snapshot
+fn apply_studio_dimension(model: &mut AppModel, dimension: StudioDimension) {
+    let health_status = dimension
         .local_node
         .health
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let operational_services = snapshot
+    let operational_services = dimension
         .local_node
         .health
         .get("operational_services")
@@ -1223,7 +1223,7 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
             _ => v.to_string(),
         })
         .unwrap_or_else(|| "unknown".into());
-    let missing_services = snapshot
+    let missing_services = dimension
         .local_node
         .health
         .get("missing_services")
@@ -1241,16 +1241,16 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
     } else {
         DaemonStatus::Disconnected
     };
-    model.store.daemon.active_threads = snapshot.threads.active_count.max(0) as u32;
+    model.store.daemon.active_threads = dimension.threads.active_count.max(0) as u32;
 
-    if !snapshot.local_node.identity.fingerprint.is_empty() {
+    if !dimension.local_node.identity.fingerprint.is_empty() {
         model.store.identity = Some(IdentityModel {
-            fingerprint: snapshot.local_node.identity.fingerprint.clone(),
+            fingerprint: dimension.local_node.identity.fingerprint.clone(),
             has_signing_key: true,
         });
     }
 
-    if let Some(project) = &snapshot.project {
+    if let Some(project) = &dimension.project {
         let id = crate::ids::ProjectId::new(stable_hash_id(&project.path));
         let name = project
             .path
@@ -1269,7 +1269,7 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
         );
     }
 
-    for remote in &snapshot.remotes {
+    for remote in &dimension.remotes {
         let id = crate::ids::RemoteId::new(stable_hash_id(&format!(
             "{}\0{}\0{}",
             remote.name, remote.url, remote.principal_id
@@ -1295,24 +1295,24 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
         entry.trust_fingerprint = remote.principal_id.clone();
     }
 
-    model.store.cockpit = Some(CockpitSnapshotModel {
-        schema_version: snapshot.schema_version,
-        generated_at: snapshot.generated_at,
+    model.store.studio = Some(StudioDimensionModel {
+        schema_version: dimension.schema_version,
+        generated_at: dimension.generated_at,
         session: SessionModel {
-            session_id: snapshot.session.session_id,
-            surface_ref: snapshot.session.surface_ref,
-            read_only: snapshot.session.read_only,
-            granted_caps: snapshot.session.granted_caps,
+            session_id: dimension.session.session_id,
+            surface_ref: dimension.session.surface_ref,
+            read_only: dimension.session.read_only,
+            granted_caps: dimension.session.granted_caps,
         },
         local_node: LocalNodeModel {
             identity: IdentityInfoModel {
-                principal_id: snapshot.local_node.identity.principal_id,
-                fingerprint: snapshot.local_node.identity.fingerprint,
+                principal_id: dimension.local_node.identity.principal_id,
+                fingerprint: dimension.local_node.identity.fingerprint,
             },
             health_status,
             operational_services,
             missing_services,
-            spaces: snapshot
+            spaces: dimension
                 .local_node
                 .spaces
                 .into_iter()
@@ -1322,7 +1322,7 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
                     path: space.path,
                 })
                 .collect(),
-            bundles: snapshot
+            bundles: dimension
                 .local_node
                 .bundles
                 .into_iter()
@@ -1331,7 +1331,7 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
                     path: bundle.path,
                 })
                 .collect(),
-            services: snapshot
+            services: dimension
                 .local_node
                 .services
                 .into_iter()
@@ -1342,40 +1342,40 @@ fn apply_cockpit_snapshot(model: &mut AppModel, snapshot: CockpitSnapshot) {
                     required_caps: service.required_caps,
                 })
                 .collect(),
-            verbs: snapshot
+            commands: dimension
                 .local_node
-                .verbs
+                .commands
                 .into_iter()
-                .map(|verb| VerbAliasSummaryModel {
-                    name: verb.name,
-                    target: verb.target,
+                .map(|command| CommandSummaryModel {
+                    name: command.name,
+                    target: command.target,
                 })
                 .collect(),
-            aliases: snapshot
+            command_aliases: dimension
                 .local_node
-                .aliases
+                .command_aliases
                 .into_iter()
-                .map(|alias| VerbAliasSummaryModel {
+                .map(|alias| CommandSummaryModel {
                     name: alias.name,
                     target: alias.target,
                 })
                 .collect(),
         },
-        project: snapshot
+        project: dimension
             .project
             .map(|project| ProjectInfoModel { path: project.path }),
         schedules: ScheduleSummaryModel {
-            total: snapshot.schedules.total,
-            enabled: snapshot.schedules.enabled,
+            total: dimension.schedules.total,
+            enabled: dimension.schedules.enabled,
         },
         gc: GcSummaryModel {
-            running: snapshot.gc.running,
-            recent_event_count: snapshot.gc.recent_events.len(),
+            running: dimension.gc.running,
+            recent_event_count: dimension.gc.recent_events.len(),
         },
     });
 }
 
-fn apply_cockpit_items(model: &mut AppModel, list: CockpitItemsList) {
+fn apply_studio_items(model: &mut AppModel, list: StudioItemsList) {
     model.store.items.clear();
 
     for item in list.items {
@@ -1409,7 +1409,7 @@ fn apply_cockpit_items(model: &mut AppModel, list: CockpitItemsList) {
     }
 }
 
-fn apply_cockpit_item_inspection(model: &mut AppModel, inspection: CockpitItemInspection) {
+fn apply_studio_item_inspection(model: &mut AppModel, inspection: StudioItemInspection) {
     model.store.item_inspection = Some(ItemInspectionModel {
         canonical_ref: inspection.item.canonical_ref,
         item_kind: inspection.item.item_kind,
@@ -1421,7 +1421,7 @@ fn apply_cockpit_item_inspection(model: &mut AppModel, inspection: CockpitItemIn
     });
 }
 
-fn apply_cockpit_schedules(model: &mut AppModel, list: CockpitSchedulesList) {
+fn apply_studio_schedules(model: &mut AppModel, list: StudioSchedulesList) {
     model.store.schedules = ScheduleListModel {
         schedules: list
             .schedules
@@ -1441,7 +1441,7 @@ fn apply_cockpit_schedules(model: &mut AppModel, list: CockpitSchedulesList) {
     };
 }
 
-fn apply_cockpit_gc_status(model: &mut AppModel, gc: CockpitGcStatus) {
+fn apply_studio_gc_status(model: &mut AppModel, gc: StudioGcStatus) {
     model.store.gc_status = Some(GcStatusModel {
         running: gc.running,
         state: gc.state,
@@ -1449,7 +1449,7 @@ fn apply_cockpit_gc_status(model: &mut AppModel, gc: CockpitGcStatus) {
     });
 }
 
-fn apply_cockpit_files(model: &mut AppModel, files: CockpitFilesList) {
+fn apply_studio_files(model: &mut AppModel, files: StudioFilesList) {
     let listing_changed = model
         .store
         .files
@@ -1476,7 +1476,7 @@ fn apply_cockpit_files(model: &mut AppModel, files: CockpitFilesList) {
     }
 }
 
-fn apply_cockpit_file_read(model: &mut AppModel, file: CockpitFileRead) {
+fn apply_studio_file_read(model: &mut AppModel, file: StudioFileRead) {
     model.store.file_read = Some(FileReadModel {
         root: file.root,
         path: file.path,
@@ -1486,7 +1486,7 @@ fn apply_cockpit_file_read(model: &mut AppModel, file: CockpitFileRead) {
     });
 }
 
-fn apply_cockpit_thread_inspection(model: &mut AppModel, inspection: CockpitThreadInspection) {
+fn apply_studio_thread_inspection(model: &mut AppModel, inspection: StudioThreadInspection) {
     let thread = &inspection.thread;
     model.store.thread_inspection = Some(ThreadInspectionModel {
         thread_id: string_field(thread, "thread_id"),
@@ -1555,7 +1555,7 @@ fn list_item_count(model: &AppModel) -> usize {
             ViewSpec::Overview => 0,
             ViewSpec::Services => model
                 .store
-                .cockpit
+                .studio
                 .as_ref()
                 .map(|snapshot| snapshot.local_node.services.len())
                 .unwrap_or(0),
@@ -1729,13 +1729,13 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_thread_inspection_populates_detail_model() {
+    fn studio_thread_inspection_populates_detail_model() {
         let mut model = AppModel::new_default("/tmp/test");
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitThreadInspection(CockpitThreadInspection {
-                schema_version: "cockpit.thread.inspect.v1".into(),
+            AppEvent::StudioThreadInspection(StudioThreadInspection {
+                schema_version: "studio.thread.inspect.v1".into(),
                 thread: serde_json::json!({
                     "thread_id": "T-thread-42",
                     "status": "completed",
@@ -1759,22 +1759,22 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_snapshot_populates_operational_model() {
+    fn studio_dimension_populates_operational_model() {
         let mut model = AppModel::new_default("/tmp/test");
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitSnapshot(CockpitSnapshot {
-                schema_version: "cockpit.snapshot.v1".into(),
+            AppEvent::StudioDimension(StudioDimension {
+                schema_version: "ryeos.studio.dimension.v0".into(),
                 generated_at: "2026-05-29T00:00:00Z".into(),
-                session: CockpitSession {
+                session: StudioSession {
                     session_id: "session-1".into(),
-                    surface_ref: "surface:ryeos/cockpit/base".into(),
+                    surface_ref: "surface:ryeos/studio/base".into(),
                     read_only: false,
                     granted_caps: vec!["execute".into()],
                 },
-                local_node: CockpitLocalNode {
-                    identity: CockpitIdentity {
+                local_node: StudioLocalNode {
+                    identity: StudioIdentity {
                         principal_id: "principal".into(),
                         fingerprint: "abcdef1234567890".into(),
                     },
@@ -1783,33 +1783,33 @@ mod tests {
                         "operational_services": "all",
                         "missing_services": [],
                     }),
-                    spaces: vec![CockpitSpace {
+                    spaces: vec![StudioSpace {
                         space: "project".into(),
                         label: "Project".into(),
                         path: "/tmp/test/.ai".into(),
                     }],
-                    services: vec![CockpitService {
-                        endpoint: "ui.cockpit.snapshot".into(),
-                        service_ref: "service:ui/cockpit/snapshot".into(),
+                    services: vec![StudioService {
+                        endpoint: "ui.studio.dimension.get".into(),
+                        service_ref: "service:ui/studio/dimension/get".into(),
                         availability: "DaemonOnly".into(),
                         required_caps: Vec::new(),
                     }],
                     ..Default::default()
                 },
-                project: Some(CockpitProject {
+                project: Some(StudioProject {
                     path: "/tmp/test".into(),
                 }),
-                remotes: vec![CockpitRemote {
+                remotes: vec![StudioRemote {
                     name: "default".into(),
                     url: "http://remote:7400".into(),
                     principal_id: "remote-principal".into(),
                 }],
-                threads: CockpitThreadSummary { active_count: 2 },
-                schedules: CockpitScheduleSummary {
+                threads: StudioThreadSummary { active_count: 2 },
+                schedules: StudioScheduleSummary {
                     total: 3,
                     enabled: 1,
                 },
-                gc: CockpitGcSummary {
+                gc: StudioGcSummary {
                     running: false,
                     recent_events: vec![serde_json::json!({"event": "sweep"})],
                 },
@@ -1821,25 +1821,25 @@ mod tests {
         assert_eq!(model.store.daemon.active_threads, 2);
         assert_eq!(model.store.projects.len(), 1);
         assert_eq!(model.store.remotes.len(), 1);
-        let cockpit = model
+        let studio = model
             .store
-            .cockpit
-            .expect("cockpit snapshot should be stored");
-        assert_eq!(cockpit.local_node.health_status, "healthy");
-        assert_eq!(cockpit.local_node.services.len(), 1);
-        assert_eq!(cockpit.schedules.enabled, 1);
-        assert_eq!(cockpit.gc.recent_event_count, 1);
+            .studio
+            .expect("studio dimension should be stored");
+        assert_eq!(studio.local_node.health_status, "healthy");
+        assert_eq!(studio.local_node.services.len(), 1);
+        assert_eq!(studio.schedules.enabled, 1);
+        assert_eq!(studio.gc.recent_event_count, 1);
     }
 
     #[test]
-    fn cockpit_items_populate_space_browser() {
+    fn studio_items_populate_space_browser() {
         let mut model = AppModel::new_default("/tmp/test");
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitItems(CockpitItemsList {
-                schema_version: "cockpit.items.v1".into(),
-                items: vec![CockpitItemSummary {
+            AppEvent::StudioItems(StudioItemsList {
+                schema_version: "studio.items.v1".into(),
+                items: vec![StudioItemSummary {
                     canonical_ref: "tool:apps/demo/build".into(),
                     item_kind: "tool".into(),
                     bare_id: "apps/demo/build".into(),
@@ -1868,9 +1868,9 @@ mod tests {
         let mut model = AppModel::new_default("/tmp/test");
         update(
             &mut model,
-            AppEvent::CockpitItems(CockpitItemsList {
-                schema_version: "cockpit.items.v1".into(),
-                items: vec![CockpitItemSummary {
+            AppEvent::StudioItems(StudioItemsList {
+                schema_version: "studio.items.v1".into(),
+                items: vec![StudioItemSummary {
                     canonical_ref: "directive:apps/demo/deploy".into(),
                     item_kind: "directive".into(),
                     bare_id: "apps/demo/deploy".into(),
@@ -1905,20 +1905,20 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_item_inspection_populates_inspector_model() {
+    fn studio_item_inspection_populates_inspector_model() {
         let mut model = AppModel::new_default("/tmp/test");
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitItemInspection(CockpitItemInspection {
-                schema_version: "cockpit.item.inspect.v1".into(),
-                item: InspectedCockpitItem {
+            AppEvent::StudioItemInspection(StudioItemInspection {
+                schema_version: "studio.item.inspect.v1".into(),
+                item: InspectedStudioItem {
                     canonical_ref: "tool:apps/demo/build".into(),
                     item_kind: "tool".into(),
                     source_path: "/tmp/test/.ai/tools/apps/demo/build.py".into(),
                     space: "project".into(),
                 },
-                raw: Some(CockpitRawContent {
+                raw: Some(StudioRawContent {
                     content: "print('hello')".into(),
                     truncated: false,
                 }),
@@ -1934,13 +1934,13 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_schedules_and_gc_populate_operational_models() {
+    fn studio_schedules_and_gc_populate_operational_models() {
         let mut model = AppModel::new_default("/tmp/test");
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitSchedules(CockpitSchedulesList {
-                schedules: vec![CockpitSchedule {
+            AppEvent::StudioSchedules(StudioSchedulesList {
+                schedules: vec![StudioSchedule {
                     schedule_id: "nightly".into(),
                     item_ref: "directive:apps/demo/nightly".into(),
                     schedule_type: "cron".into(),
@@ -1959,8 +1959,8 @@ mod tests {
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitGcStatus(CockpitGcStatus {
-                schema_version: "cockpit.gc.status.v1".into(),
+            AppEvent::StudioGcStatus(StudioGcStatus {
+                schema_version: "studio.gc.status.v1".into(),
                 running: true,
                 state: Some(serde_json::json!({ "phase": "sweep" })),
                 recent_events: vec![serde_json::json!({ "event": "started" })],
@@ -1974,16 +1974,16 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_files_populate_safe_file_browser_model() {
+    fn studio_files_populate_safe_file_browser_model() {
         let mut model = AppModel::new_default("/tmp/test");
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitFiles(CockpitFilesList {
+            AppEvent::StudioFiles(StudioFilesList {
                 root: "project_ai".into(),
                 path: "directives".into(),
                 truncated: false,
-                entries: vec![CockpitFileEntry {
+                entries: vec![StudioFileEntry {
                     name: "build.md".into(),
                     is_dir: false,
                     size: Some(2048),
@@ -2006,16 +2006,16 @@ mod tests {
         let mut model = AppModel::new_default("/tmp/test");
         update(
             &mut model,
-            AppEvent::CockpitFiles(CockpitFilesList {
+            AppEvent::StudioFiles(StudioFilesList {
                 root: "project_ai".into(),
                 path: "".into(),
                 entries: vec![
-                    CockpitFileEntry {
+                    StudioFileEntry {
                         name: "directives".into(),
                         is_dir: true,
                         ..Default::default()
                     },
-                    CockpitFileEntry {
+                    StudioFileEntry {
                         name: "README.md".into(),
                         is_dir: false,
                         ..Default::default()
@@ -2054,7 +2054,7 @@ mod tests {
 
         update(
             &mut model,
-            AppEvent::CockpitFiles(CockpitFilesList {
+            AppEvent::StudioFiles(StudioFilesList {
                 root: "project_ai".into(),
                 path: "directives/build".into(),
                 entries: Vec::new(),
@@ -2075,12 +2075,12 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_file_read_populates_file_preview_model() {
+    fn studio_file_read_populates_file_preview_model() {
         let mut model = AppModel::new_default("/tmp/test");
 
         let effects = update(
             &mut model,
-            AppEvent::CockpitFileRead(CockpitFileRead {
+            AppEvent::StudioFileRead(StudioFileRead {
                 root: "project_ai".into(),
                 path: "README.md".into(),
                 size: 12,
@@ -2096,14 +2096,14 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_files_refresh_preserves_preview_for_same_directory() {
+    fn studio_files_refresh_preserves_preview_for_same_directory() {
         let mut model = AppModel::new_default("/tmp/test");
         update(
             &mut model,
-            AppEvent::CockpitFiles(CockpitFilesList {
+            AppEvent::StudioFiles(StudioFilesList {
                 root: "project_ai".into(),
                 path: "directives".into(),
-                entries: vec![CockpitFileEntry {
+                entries: vec![StudioFileEntry {
                     name: "README.md".into(),
                     ..Default::default()
                 }],
@@ -2112,7 +2112,7 @@ mod tests {
         );
         update(
             &mut model,
-            AppEvent::CockpitFileRead(CockpitFileRead {
+            AppEvent::StudioFileRead(StudioFileRead {
                 root: "project_ai".into(),
                 path: "directives/README.md".into(),
                 content: "preview".into(),
@@ -2122,7 +2122,7 @@ mod tests {
 
         update(
             &mut model,
-            AppEvent::CockpitFiles(CockpitFilesList {
+            AppEvent::StudioFiles(StudioFilesList {
                 root: "project_ai".into(),
                 path: "directives".into(),
                 entries: Vec::new(),
@@ -2133,7 +2133,7 @@ mod tests {
 
         update(
             &mut model,
-            AppEvent::CockpitFiles(CockpitFilesList {
+            AppEvent::StudioFiles(StudioFilesList {
                 root: "project_ai".into(),
                 path: "tools".into(),
                 entries: Vec::new(),

@@ -18,7 +18,7 @@ pub struct ScheduleRecord {
     pub item_ref: String,
     pub schedule_type: String,
     pub expression: String,
-    #[serde(default)]
+    #[serde(default = "default_params")]
     pub params: Value,
     #[serde(default = "default_utc")]
     pub timezone: String,
@@ -40,6 +40,11 @@ pub struct ScheduleRecord {
     /// Set at registration time by scheduler_register. Read by projection on rebuild.
     #[serde(default)]
     pub execution: Option<ScheduleExecution>,
+    /// Ownership metadata for specs reconciled from project-authored intent.
+    /// Node-owned runtime specs use this only for admission/reconciliation;
+    /// dispatch authority still comes from `execution`.
+    #[serde(default)]
+    pub managed_by: Option<ScheduleManagedBy>,
     /// Path to the YAML file. Set by loader.
     #[serde(skip)]
     pub source_file: std::path::PathBuf,
@@ -53,12 +58,30 @@ pub struct ScheduleExecution {
     pub capabilities: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleManagedBy {
+    #[serde(rename = "type")]
+    pub managed_type: String,
+    pub project_root: String,
+    pub project_key: String,
+    pub source_snapshot_hash: String,
+    pub source_path: String,
+    pub source_body_hash: String,
+    #[serde(default)]
+    pub source_signer_fingerprint: Option<String>,
+}
+
 fn default_utc() -> String {
     "UTC".to_string()
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_params() -> Value {
+    serde_json::json!({})
 }
 
 pub struct ScheduleSection;
@@ -139,10 +162,18 @@ impl NodeConfigSection for ScheduleSection {
 }
 
 fn is_valid_misfire_policy(p: &str) -> bool {
-    matches!(
-        p,
-        "skip" | "fire_once_now"
-    ) || p.starts_with("catch_up_bounded:") || p.starts_with("catch_up_within_secs:")
+    match p {
+        "skip" | "fire_once_now" => true,
+        s if s.starts_with("catch_up_bounded:") => s
+            .strip_prefix("catch_up_bounded:")
+            .and_then(|n| n.parse::<usize>().ok())
+            .is_some(),
+        s if s.starts_with("catch_up_within_secs:") => s
+            .strip_prefix("catch_up_within_secs:")
+            .and_then(|n| n.parse::<u64>().ok())
+            .is_some(),
+        _ => false,
+    }
 }
 
 impl SectionRecord for ScheduleRecord {

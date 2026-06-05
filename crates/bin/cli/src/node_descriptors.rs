@@ -2,21 +2,23 @@ use std::path::Path;
 
 use anyhow::Context;
 use ryeos_app::node_config::loader::BootstrapLoader;
-use ryeos_app::node_config::sections::alias as node_alias;
 use ryeos_app::node_config::{NodeConfigSnapshot, SectionTable};
-use ryeos_runtime::alias_registry as runtime_alias;
-use ryeos_runtime::alias_registry::AliasDef;
+use ryeos_runtime::{CommandDef, CommandDispatch};
 
 #[derive(Debug, Clone)]
-pub struct LoadedAliasDescriptor {
-    pub def: AliasDef,
+pub struct LoadedCommandDescriptor {
+    pub command: CommandDef,
+    pub tokens: Vec<String>,
     pub description: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct LoadedVerbDescriptor {
-    pub description: String,
-    pub execute: String,
+impl LoadedCommandDescriptor {
+    pub fn execute_ref(&self) -> Option<&str> {
+        match &self.command.dispatch {
+            CommandDispatch::ExecuteRef { execute, .. } => Some(execute.as_str()),
+            _ => None,
+        }
+    }
 }
 
 pub fn load_verified_snapshot(system_space_dir: &Path) -> anyhow::Result<NodeConfigSnapshot> {
@@ -36,101 +38,39 @@ pub fn load_verified_snapshot(system_space_dir: &Path) -> anyhow::Result<NodeCon
         .context("load verified node config")
 }
 
-pub fn load_alias_descriptors_from_snapshot(
+pub fn load_command_descriptors_from_snapshot(
     snapshot: &NodeConfigSnapshot,
-) -> Vec<LoadedAliasDescriptor> {
+) -> Vec<LoadedCommandDescriptor> {
     let mut out = Vec::new();
 
-    for alias in &snapshot.aliases {
-        out.push(LoadedAliasDescriptor {
-            description: alias.description.clone(),
-            def: AliasDef {
-                tokens: alias.tokens.clone(),
-                verb: alias.verb.clone(),
-                deprecated: alias.deprecated.unwrap_or(false),
-                replacement_tokens: alias.replacement_tokens.clone(),
-                removed_in: alias.removed_in.clone(),
-                positional_forms: alias
-                    .positional_forms
-                    .iter()
-                    .map(convert_positional_form)
-                    .collect(),
-                project_resolution: convert_project_resolution(alias.project_resolution),
-            },
+    for command in &snapshot.commands {
+        out.push(LoadedCommandDescriptor {
+            command: command.clone(),
+            tokens: command.tokens.clone(),
+            description: command.description.clone(),
         });
+        for alias in &command.aliases {
+            out.push(LoadedCommandDescriptor {
+                command: command.clone(),
+                tokens: alias.tokens.clone(),
+                description: alias
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| command.description.clone()),
+            });
+        }
     }
 
     out
 }
 
-pub fn load_alias_descriptors(
-    system_space_dir: &Path,
-) -> anyhow::Result<Vec<LoadedAliasDescriptor>> {
-    let snapshot = load_verified_snapshot(system_space_dir)?;
-    Ok(load_alias_descriptors_from_snapshot(&snapshot))
-}
-
-pub fn load_verb_descriptor_from_snapshot(
+pub fn find_command(
     snapshot: &NodeConfigSnapshot,
-    verb_name: &str,
-) -> Option<LoadedVerbDescriptor> {
-    for verb in &snapshot.verbs {
-        if verb.name != verb_name {
-            continue;
-        }
-        let Some(execute) = &verb.execute else {
-            continue;
-        };
-        return Some(LoadedVerbDescriptor {
-            description: verb.description.clone(),
-            execute: execute.clone(),
-        });
-    }
-
-    None
-}
-
-fn convert_project_resolution(
-    value: node_alias::ProjectResolution,
-) -> runtime_alias::ProjectResolution {
-    match value {
-        node_alias::ProjectResolution::None => runtime_alias::ProjectResolution::None,
-        node_alias::ProjectResolution::Required => runtime_alias::ProjectResolution::Required,
-        node_alias::ProjectResolution::Optional => runtime_alias::ProjectResolution::Optional,
-    }
-}
-
-fn convert_positional_form(value: &node_alias::PositionalForm) -> runtime_alias::PositionalForm {
-    runtime_alias::PositionalForm {
-        slots: value
-            .slots
-            .iter()
-            .map(|slot| runtime_alias::PositionalSlot {
-                field: slot.field.clone(),
-                matcher: convert_positional_matcher(slot.matcher),
-            })
-            .collect(),
-    }
-}
-
-fn convert_positional_matcher(
-    value: node_alias::PositionalMatcher,
-) -> runtime_alias::PositionalMatcher {
-    match value {
-        node_alias::PositionalMatcher::Any => runtime_alias::PositionalMatcher::Any,
-        node_alias::PositionalMatcher::CanonicalRef => {
-            runtime_alias::PositionalMatcher::CanonicalRef
-        }
-    }
-}
-
-pub fn find_alias(
-    snapshot: &NodeConfigSnapshot,
-    verb_tokens: &[String],
-) -> Option<LoadedAliasDescriptor> {
-    load_alias_descriptors_from_snapshot(snapshot)
+    command_tokens: &[String],
+) -> Option<LoadedCommandDescriptor> {
+    load_command_descriptors_from_snapshot(snapshot)
         .into_iter()
-        .find(|alias| alias.def.tokens == verb_tokens)
+        .find(|command| command.tokens == command_tokens)
 }
 
 #[cfg(test)]
@@ -139,40 +79,52 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn converts_snapshot_aliases_to_runtime_aliases() {
+    fn exposes_snapshot_commands_without_legacy_alias_conversion() {
         let snapshot = NodeConfigSnapshot {
             bundles: vec![],
             routes: vec![],
-            verbs: vec![],
-            aliases: vec![node_alias::AliasRecord {
-                category: "aliases".into(),
-                section: "aliases".into(),
+            commands: vec![ryeos_runtime::CommandDef {
+                category: "commands".into(),
+                section: "commands".into(),
+                name: "bundle-sign".into(),
                 tokens: vec!["bundle".into(), "sign".into()],
-                verb: "bundle-sign".into(),
                 description: "Sign bundle".into(),
-                deprecated: Some(false),
-                replacement_tokens: None,
-                removed_in: None,
-                positional_forms: vec![node_alias::PositionalForm {
-                    slots: vec![node_alias::PositionalSlot {
+                aliases: vec![],
+                help: None,
+                arguments: vec![],
+                forms: vec![ryeos_runtime::CommandArgumentForm {
+                    slots: vec![ryeos_runtime::CommandArgumentSlot {
                         field: "source".into(),
-                        matcher: node_alias::PositionalMatcher::Any,
+                        matcher: ryeos_runtime::CommandArgumentKind::String,
                     }],
                 }],
-                project_resolution: node_alias::ProjectResolution::Optional,
-                source_file: PathBuf::from("/tmp/verb.yaml"),
+                parameter_binding: None,
+                project: Some(ryeos_runtime::CommandProjectPolicy {
+                    resolution: ryeos_runtime::CommandProjectResolution::Optional,
+                    default: ryeos_runtime::CommandProjectDefault::None,
+                    no_project_flag: false,
+                    request_project_path: false,
+                    bind_parameter: None,
+                }),
+                dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
+                    execute: "tool:bundle/sign".into(),
+                    availability: ryeos_runtime::CommandAvailability::Auto,
+                },
+                source_file: PathBuf::from("/tmp/command.yaml"),
+                provenance: ryeos_runtime::CommandProvenance::default(),
             }],
             hosted_node_policies: vec![],
+            command_registration_policy: Default::default(),
         };
 
-        let aliases = load_alias_descriptors_from_snapshot(&snapshot);
-        assert_eq!(aliases.len(), 1);
-        assert_eq!(aliases[0].def.tokens, ["bundle", "sign"]);
-        assert_eq!(aliases[0].def.verb, "bundle-sign");
-        assert_eq!(aliases[0].def.positional_forms[0].slots[0].field, "source");
+        let commands = load_command_descriptors_from_snapshot(&snapshot);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].tokens, ["bundle", "sign"]);
+        assert_eq!(commands[0].command.name, "bundle-sign");
+        assert_eq!(commands[0].command.forms[0].slots[0].field, "source");
         assert_eq!(
-            aliases[0].def.project_resolution,
-            runtime_alias::ProjectResolution::Optional
+            commands[0].command.project.as_ref().unwrap().resolution,
+            ryeos_runtime::CommandProjectResolution::Optional
         );
     }
 }

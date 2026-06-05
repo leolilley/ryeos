@@ -86,7 +86,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     )
 }
 
-/// Build an AppState backed by the live workspace core + standard + cockpit bundles.
+/// Build an AppState backed by the live workspace core + standard + Studio bundles.
 /// Suitable for happy-path topology/session tests that need real kind schemas,
 /// parsers, handlers, runtimes, and bundled items.
 #[allow(dead_code)]
@@ -170,7 +170,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
     let core_bundle = workspace.join("bundles/core");
     let std_bundle = workspace.join("bundles/standard");
-    let cockpit_bundle = workspace.join("bundles/cockpit");
+    let studio_bundle = workspace.join("bundles/studio");
 
     let kinds = KindRegistry::load_base(
         &[
@@ -181,7 +181,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     )
     .expect("load kind registry");
 
-    let bundle_roots = vec![core_bundle, std_bundle, cockpit_bundle];
+    let bundle_roots = vec![core_bundle, std_bundle, studio_bundle];
     let (parser_tools, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
             .expect("load parser tools");
@@ -212,14 +212,13 @@ fn build_app_state(
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         bundles: vec![],
         routes: vec![],
-        verbs: vec![],
-        aliases: vec![],
+        commands: vec![],
         hosted_node_policies: vec![],
+        command_registration_policy: Default::default(),
     };
-    let test_vr = Arc::new(ryeos_runtime::verb_registry::VerbRegistry::from_records(&[]).unwrap());
-    let test_ar =
-        Arc::new(ryeos_runtime::alias_registry::AliasRegistry::from_records(&[]).unwrap());
-    let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new(test_vr.clone()));
+    let test_command_registry =
+        Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
+    let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
     let state = AppState {
         config: Arc::new(config),
@@ -253,10 +252,10 @@ fn build_app_state(
         service_descriptors: ryeos_ui::handlers::ALL,
         node_config: Arc::new(snapshot),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
-        verb_registry: test_vr,
-        alias_registry: test_ar,
+        command_registry: test_command_registry,
         authorizer: test_auth,
         scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap()),
+        scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
         vault_fingerprint: None,

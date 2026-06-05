@@ -18,6 +18,7 @@ use crate::error::CliDispatchError;
 /// Thin wrapper around the shared binder. Returns `Result` for API
 /// compatibility with callers that expect it (no fallibility today,
 /// but the return type keeps the seam clean).
+#[allow(dead_code)]
 pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
     Ok(ryeos_runtime::bind_argv(tail))
 }

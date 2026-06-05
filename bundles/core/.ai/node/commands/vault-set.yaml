@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-04T04:39:02Z:de784bcc40ff25634d032bc4bce9c2f246e41538b629a652804442d253e4d962:+QB6mNmUyVoER4UAOcxjhXBuzfibXOjL3iGdVmMyAm+xZuSA2HDXmh/KRVLRqdA/z2gCLlBpq/PTQPCW/h/lAw==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: vault-set
+tokens:
+- vault
+- set
+description: Set a secret in the node vault
+dispatch:
+  kind: execute_ref
+  execute: service:vault/set

@@ -4,13 +4,19 @@
 //! fails, the method logs a warning and returns `Ok`. Projection drift is
 //! repaired by the startup reconcile pass.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Context;
 
 use crate::chain::{self, AppendResult, CreateResult, SnapshotUpdate};
+use crate::domain_events::{
+    self, DomainEventAppendRequest, DomainEventAppendResult, DomainEventRecord,
+};
+use crate::domain_projection::DomainProjectionDb;
 use crate::head_cache::HeadCache;
+use crate::objects::domain_event::validate_domain_identifier;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
 use crate::projection::{
@@ -285,6 +291,52 @@ impl StateDb {
     /// List namespace-neutral signed heads beneath `refs/generic/<prefix>`.
     pub fn list_generic_head_refs(&self, prefix: &str) -> anyhow::Result<Vec<GenericHeadRef>> {
         crate::refs::list_generic_head_refs(&self.refs_root, prefix)
+    }
+
+    // ── Bundle/domain event chains ────────────────────────────────
+
+    pub fn append_domain_event(
+        &self,
+        request: DomainEventAppendRequest,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<DomainEventAppendResult> {
+        domain_events::append_domain_event(&self.cas_root, &self.refs_root, request, signer)
+    }
+
+    pub fn read_domain_event_chain(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        chain_id: &str,
+    ) -> anyhow::Result<Vec<DomainEventRecord>> {
+        domain_events::read_domain_event_chain(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            chain_id,
+        )
+    }
+
+    pub fn scan_domain_events(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+    ) -> anyhow::Result<Vec<DomainEventRecord>> {
+        domain_events::scan_domain_events(&self.cas_root, &self.refs_root, bundle_id, event_kind)
+    }
+
+    pub fn open_domain_projection(
+        &self,
+        projection_name: &str,
+    ) -> anyhow::Result<DomainProjectionDb> {
+        validate_domain_identifier("projection_name", projection_name)?;
+        let state_root = self.cas_root.parent().ok_or_else(|| {
+            anyhow::anyhow!("CAS root has no parent: {}", self.cas_root.display())
+        })?;
+        let projection_root = state_root.join("domain-projections");
+        fs::create_dir_all(&projection_root).context("creating domain projection root")?;
+        DomainProjectionDb::open(&projection_root.join(format!("{projection_name}.sqlite3")))
     }
 
     // ── Query helpers ──────────────────────────────────────────────

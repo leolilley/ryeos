@@ -4,7 +4,7 @@
 # This intentionally skips yay/makepkg but installs the same runtime layout
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
-#   - bundle sources -> /usr/share/ryeos/{core,standard,cockpit,web,hosted-node}
+#   - bundle sources -> /usr/share/ryeos/{core,standard,studio,web,hosted-node}
 #     or, with --bundle-set hosted-node, /usr/share/ryeos/{core,hosted-node}
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
@@ -19,8 +19,8 @@ Usage: scripts/pkg/install-local-direct.sh [options]
 
 Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
-  /usr/share/ryeos/{core,standard,cockpit,web,hosted-node}/.ai
-  ~/.local/share/ryeos/.ai/bundles/{core,standard,cockpit,web,hosted-node}  (after init)
+  /usr/share/ryeos/{core,standard,studio,web,hosted-node}/.ai
+  ~/.local/share/ryeos/.ai/bundles/{core,standard,studio,web,hosted-node}  (after init)
 
 Options:
   --skip-populate       Do not run scripts/populate-bundles.sh first
@@ -155,7 +155,7 @@ cd "$repo_root"
 
 case "$bundle_set" in
     full)
-        bundle_names=(core standard cockpit web hosted-node)
+        bundle_names=(core standard studio web hosted-node)
         ;;
     hosted-node)
         bundle_names=(core hosted-node)
@@ -235,9 +235,10 @@ done
 
 for name in "${bundle_names[@]}"; do
     [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
-    [[ -f "$repo_root/bundles/$name/PUBLISHER_TRUST.toml" ]] || \
-        die "missing bundles/$name/PUBLISHER_TRUST.toml"
 done
+[[ -d "$repo_root/bundles/.ai" ]] || die "missing source-root seed data: bundles/.ai"
+[[ -f "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" ]] || \
+    die "missing source-root trust doc: bundles/.ai/PUBLISHER_TRUST.toml"
 
 echo "[install-local-direct] installing binaries -> $bin_dir"
 for b in "${required_bins[@]}"; do
@@ -253,19 +254,23 @@ done
 
 echo "[install-local-direct] installing bundle sources -> $share_dir"
 sudo mkdir -p "$share_dir"
-if [[ "$bundle_set" == "hosted-node" ]]; then
-    for path in "$share_dir"/*; do
-        [[ -d "$path/.ai" ]] || continue
-        name="$(basename "$path")"
-        case "$name" in
-            core|hosted-node) ;;
-            *)
-                echo "[install-local-direct] removing non-hosted bundle source: $path"
-                sudo rm -rf "$path"
-                ;;
-        esac
+sudo rm -rf "$share_dir/.ai"
+sudo cp -a "$repo_root/bundles/.ai" "$share_dir/.ai"
+for path in "$share_dir"/*; do
+    [[ -d "$path/.ai" ]] || continue
+    name="$(basename "$path")"
+    keep=0
+    for bundle_name in "${bundle_names[@]}"; do
+        if [[ "$name" == "$bundle_name" ]]; then
+            keep=1
+            break
+        fi
     done
-fi
+    if [[ $keep -eq 0 ]]; then
+        echo "[install-local-direct] removing stale bundle source: $path"
+        sudo rm -rf "$path"
+    fi
+done
 for name in "${bundle_names[@]}"; do
     bundle_dir="$repo_root/bundles/$name"
     [[ -d "$bundle_dir/.ai" ]] || continue
@@ -312,27 +317,39 @@ fi
 
 if [[ $run_init -eq 1 ]]; then
     echo "[install-local-direct] running ryeos init from PATH"
-    if [[ "$bundle_set" == "hosted-node" ]]; then
-        state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
-        for path in "$state_root/.ai/bundles"/*; do
-            [[ -d "$path/.ai" ]] || continue
-            name="$(basename "$path")"
-            case "$name" in
-                core|hosted-node) ;;
-                *) rm -rf "$path" ;;
-            esac
+    state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
+    for path in "$state_root/.ai/bundles"/*; do
+        [[ -d "$path/.ai" ]] || continue
+        name="$(basename "$path")"
+        keep=0
+        for bundle_name in "${bundle_names[@]}"; do
+            if [[ "$name" == "$bundle_name" ]]; then
+                keep=1
+                break
+            fi
         done
-        for path in "$state_root/.ai/node/bundles"/*.yaml; do
-            [[ -f "$path" ]] || continue
-            name="$(basename "$path" .yaml)"
-            case "$name" in
-                core|hosted-node) ;;
-                *) rm -f "$path" ;;
-            esac
+        if [[ $keep -eq 0 ]]; then
+            echo "[install-local-direct] removing stale initialized bundle: $path"
+            rm -rf "$path"
+        fi
+    done
+    for path in "$state_root/.ai/node/bundles"/*.yaml; do
+        [[ -f "$path" ]] || continue
+        name="$(basename "$path" .yaml)"
+        keep=0
+        for bundle_name in "${bundle_names[@]}"; do
+            if [[ "$name" == "$bundle_name" ]]; then
+                keep=1
+                break
+            fi
         done
-    fi
+        if [[ $keep -eq 0 ]]; then
+            echo "[install-local-direct] removing stale initialized bundle registration: $path"
+            rm -f "$path"
+        fi
+    done
     trust_args=()
-    for trust_file in "$share_dir"/*/PUBLISHER_TRUST.toml; do
+    for trust_file in "$share_dir/.ai/PUBLISHER_TRUST.toml" "$share_dir"/*/PUBLISHER_TRUST.toml; do
         [[ -f "$trust_file" ]] || continue
         trust_args+=(--trust-file "$trust_file")
     done
@@ -349,7 +366,7 @@ if [[ $run_init -eq 1 ]]; then
             die "initialized $name bundle missing from $state_root"
     done
     if [[ "$bundle_set" == "hosted-node" ]]; then
-        for name in standard cockpit web; do
+        for name in standard studio web; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized hosted-node state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -357,9 +374,9 @@ if [[ $run_init -eq 1 ]]; then
         done
     fi
     if [[ "$bundle_set" == "full" ]]; then
-        grep -q '^execute: client:ryeos/tui$' \
-            "$state_root/.ai/bundles/cockpit/.ai/node/verbs/tui.yaml" || \
-            die "initialized tui verb is stale or not client-backed"
+        grep -q '^  execute: client:ryeos/tui$' \
+            "$state_root/.ai/bundles/studio/.ai/node/commands/tui.yaml" || \
+            die "initialized tui command is stale or not client-backed"
     fi
 fi
 

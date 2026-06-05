@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-04T04:39:02Z:d03aca2ff9e67aa81944974c8b0759fe9bc1e785255d553d7d355eda0b465a7c:wAoYXTNtuIkTShC5nFAZTjUrT3liHwLO/3vH2HkZOs/GOmI2YRfMPDB+3qWl6K64t5c2AyHCn4+OzxcqEb5rAg==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-bind-project
+tokens:
+- remote
+- bind-project
+description: Bind a local project path to a remote project path
+forms:
+- slots:
+  - field: remote
+project:
+  resolution: required
+  bind_parameter: project
+dispatch:
+  kind: execute_ref
+  execute: service:remote/bind-project

@@ -1,0 +1,14 @@
+# ryeos:signed:2026-06-04T04:39:02Z:76735b4dd2d80f121e3da19591ee656b6681196cf5661ca00a9a353e0fa7b930:G50LeJiX0Zeu4NP+6n5Dn5JNPFqBG/9nI2W06HkdV/O4wSLW2EY/zKwplH4bZ4Y1oIHvmZzEvNX1G5ZFp/2rDg==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+category: commands
+section: commands
+name: remote-threads
+tokens:
+- remote
+- threads
+description: List threads on a remote node
+forms:
+- slots:
+  - field: remote
+dispatch:
+  kind: execute_ref
+  execute: service:remote/threads

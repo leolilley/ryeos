@@ -50,7 +50,7 @@ pub enum StudioAction {
     ResizeFocused {
         direction: FocusDirection,
     },
-    SelectSnapshot,
+    SelectDimension,
     InspectItem {
         canonical_ref: String,
     },

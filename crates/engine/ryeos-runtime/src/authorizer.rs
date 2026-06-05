@@ -16,23 +16,9 @@
 //! # Example
 //!
 //! ```
-//! use std::sync::Arc;
-//! use ryeos_runtime::verb_registry::VerbRegistry;
 //! use ryeos_runtime::authorizer::{Authorizer, AuthorizationPolicy};
 //!
-//! let registry = Arc::new(VerbRegistry::from_records(&[
-//!     ryeos_runtime::verb_registry::VerbDef {
-//!         name: "execute".into(), execute: None,
-//!     },
-//!     ryeos_runtime::verb_registry::VerbDef {
-//!         name: "fetch".into(), execute: None,
-//!     },
-//!     ryeos_runtime::verb_registry::VerbDef {
-//!         name: "sign".into(),
-//!         execute: Some("tool:ryeos/core/sign".into()),
-//!     },
-//! ]).unwrap());
-//! let authorizer = Authorizer::new(registry);
+//! let authorizer = Authorizer::new();
 //!
 //! let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle.install");
 //! let scopes = vec!["ryeos.execute.service.*".to_string()];
@@ -40,11 +26,7 @@
 //! assert!(authorizer.authorize(&scopes, &policy).is_ok());
 //! ```
 
-use std::sync::Arc;
-
 use regex::Regex;
-
-use crate::verb_registry::VerbRegistry;
 
 // ── Capability struct ─────────────────────────────────────────────────
 
@@ -267,21 +249,13 @@ pub enum AuthorizationError {
 /// Unified capability evaluator. One implementation of matching logic
 /// for the entire system.
 ///
-/// Holds a `VerbRegistry` for verb lookup and token routing. The registry
-/// is shared via `Arc` so the same instance is used across `AppState` and
-/// this authorizer.
-pub struct Authorizer {
-    verbs: Arc<VerbRegistry>,
-}
+/// Unified capability evaluator. Capability actions such as `execute` are
+/// authorization vocabulary, not node command descriptors.
+pub struct Authorizer;
 
 impl Authorizer {
-    pub fn new(verbs: Arc<VerbRegistry>) -> Self {
-        Self { verbs }
-    }
-
-    /// Access the underlying `VerbRegistry`.
-    pub fn verb_registry(&self) -> &VerbRegistry {
-        &self.verbs
+    pub fn new() -> Self {
+        Self
     }
 
     /// Authorize a principal's scopes against a policy.
@@ -331,6 +305,12 @@ impl Authorizer {
     }
 }
 
+impl Default for Authorizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Pattern matching ─────────────────────────────────────────────────
 
 /// Match a granted capability pattern against a required capability string.
@@ -377,26 +357,9 @@ pub fn cap_matches(granted: &str, required: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verb_registry::VerbDef;
 
     fn test_authorizer() -> Authorizer {
-        Authorizer::new(Arc::new(
-            VerbRegistry::from_records(&[
-                VerbDef {
-                    name: "execute".into(),
-                    execute: None,
-                },
-                VerbDef {
-                    name: "fetch".into(),
-                    execute: None,
-                },
-                VerbDef {
-                    name: "sign".into(),
-                    execute: Some("tool:ryeos/core/sign".into()),
-                },
-            ])
-            .unwrap(),
-        ))
+        Authorizer::new()
     }
 
     // ── Capability parsing ────────────────────────────────────────
@@ -776,36 +739,6 @@ mod tests {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require_all(&[]);
         assert!(auth.authorize(&[], &policy).is_ok());
-    }
-
-    // ── Authorizer: verb_registry getter ──────────────────────────
-
-    #[test]
-    fn authorizer_shares_registry_instance() {
-        let vr = Arc::new(
-            VerbRegistry::from_records(&[
-                VerbDef {
-                    name: "execute".into(),
-                    execute: None,
-                },
-                VerbDef {
-                    name: "fetch".into(),
-                    execute: None,
-                },
-                VerbDef {
-                    name: "sign".into(),
-                    execute: Some("tool:ryeos/core/sign".into()),
-                },
-            ])
-            .unwrap(),
-        );
-        let auth = Authorizer::new(vr.clone());
-        let state_ptr = &*vr as *const VerbRegistry;
-        let auth_ptr = auth.verb_registry() as *const VerbRegistry;
-        assert_eq!(
-            state_ptr, auth_ptr,
-            "Authorizer must share the same VerbRegistry instance"
-        );
     }
 
     // ── Subject formatting consistency ────────────────────────────

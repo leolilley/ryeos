@@ -1,0 +1,18 @@
+# ryeos:signed:2026-06-03T06:08:01Z:5168335606e8864bc2c5bb6434d68528b66b94b685ee109595bac00953ce9e11:SBaUNeivwPKAkxn2uR77ZnffEHqN8dKTroNiCLRoLrxxtFCky3z/B48qmYDLTTWkKM3UVSIQoyFLtO5TE4P6Cw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/events
+section: routes
+id: ui/events/session
+path: /ui/events/session/{session_id}
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 0
+  concurrent_max: 256
+response:
+  mode: event_stream
+  source: session_events
+  source_config:
+    session_id: "${path.session_id}"
+    keep_alive_secs: 15

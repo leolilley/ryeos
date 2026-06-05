@@ -96,7 +96,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "project"
     };
 
-    let mut remotes = config::load_remotes_at(&config::remotes_config_path(&target_root))?;
+    let config_path = config::remotes_config_path(&target_root);
+    let mut remotes = config::load_remotes_at(&config_path)?;
+    let existing_project_bindings = if let Some(remote) = remotes.get(&remote_name) {
+        remote.project_bindings.clone()
+    } else {
+        config::load_remote_project_bindings_at(&config_path, &remote_name)?
+    };
     let vault_fp = pubkey.vault_fingerprint.clone();
     let signing_key = pubkey.signing_key.clone();
     let remote_config = config::RemoteConfig {
@@ -107,10 +113,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         site_id: pubkey.site_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
         ingest_ignore,
-        project_bindings: remotes
-            .get(&remote_name)
-            .map(|r| r.project_bindings.clone())
-            .unwrap_or_default(),
+        project_bindings: existing_project_bindings,
     };
     remote_config.validate()?;
     remotes.insert(remote_name.clone(), remote_config);

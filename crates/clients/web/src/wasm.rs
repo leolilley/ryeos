@@ -17,9 +17,9 @@ use ryeos_client_base::studio::{
 };
 use ryeos_client_base::surface::LoadedSurface;
 use ryeos_client_base::update::{
-    self, AppEvent, CockpitFileRead, CockpitFilesList, CockpitGcStatus, CockpitItemInspection,
-    CockpitItemsList, CockpitSchedulesList, CockpitSnapshot, CockpitThreadInspection, DaemonEvent,
-    PollSnapshot, RemoteSummary, ThreadSummary,
+    self, AppEvent, DaemonEvent, PollSnapshot, RemoteSummary, StudioDimension, StudioFileRead,
+    StudioFilesList, StudioGcStatus, StudioItemInspection, StudioItemsList, StudioSchedulesList,
+    StudioThreadInspection, ThreadSummary,
 };
 
 use std::cell::RefCell;
@@ -287,15 +287,15 @@ pub fn dispatch_poll_snapshot(snapshot_json: JsValue) -> Result<JsValue, JsValue
     render_response()
 }
 
-/// Apply the daemon's renderer-neutral operational cockpit snapshot.
+/// Apply the daemon's renderer-neutral operational studio dimension.
 #[wasm_bindgen]
-pub fn dispatch_cockpit_snapshot(snapshot_json: JsValue) -> Result<JsValue, JsValue> {
-    let snapshot: CockpitSnapshot = serde_wasm_bindgen::from_value(snapshot_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit snapshot: {e}")))?;
+pub fn dispatch_studio_dimension(dimension_json: JsValue) -> Result<JsValue, JsValue> {
+    let dimension: StudioDimension = serde_wasm_bindgen::from_value(dimension_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio dimension: {e}")))?;
 
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
-            let effects = update::update(&mut state.model, AppEvent::CockpitSnapshot(snapshot));
+            let effects = update::update(&mut state.model, AppEvent::StudioDimension(dimension));
             state.effects.extend(effects);
         }
     });
@@ -304,13 +304,13 @@ pub fn dispatch_cockpit_snapshot(snapshot_json: JsValue) -> Result<JsValue, JsVa
 
 /// Apply the daemon's real item inventory for the existing Items pane.
 #[wasm_bindgen]
-pub fn dispatch_cockpit_items(items_json: JsValue) -> Result<JsValue, JsValue> {
-    let items: CockpitItemsList = serde_wasm_bindgen::from_value(items_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit items list: {e}")))?;
+pub fn dispatch_studio_items(items_json: JsValue) -> Result<JsValue, JsValue> {
+    let items: StudioItemsList = serde_wasm_bindgen::from_value(items_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio items list: {e}")))?;
 
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
-            let effects = update::update(&mut state.model, AppEvent::CockpitItems(items));
+            let effects = update::update(&mut state.model, AppEvent::StudioItems(items));
             state.effects.extend(effects);
         }
     });
@@ -319,88 +319,86 @@ pub fn dispatch_cockpit_items(items_json: JsValue) -> Result<JsValue, JsValue> {
 
 /// Apply the daemon's read-only item inspection response.
 #[wasm_bindgen]
-pub fn dispatch_cockpit_item_inspection(inspection_json: JsValue) -> Result<JsValue, JsValue> {
-    let inspection: CockpitItemInspection = serde_wasm_bindgen::from_value(inspection_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit item inspection: {e}")))?;
+pub fn dispatch_studio_item_inspection(inspection_json: JsValue) -> Result<JsValue, JsValue> {
+    let inspection: StudioItemInspection = serde_wasm_bindgen::from_value(inspection_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio item inspection: {e}")))?;
+
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            let effects =
+                update::update(&mut state.model, AppEvent::StudioItemInspection(inspection));
+            state.effects.extend(effects);
+        }
+    });
+    render_response()
+}
+
+#[wasm_bindgen]
+pub fn dispatch_studio_schedules(schedules_json: JsValue) -> Result<JsValue, JsValue> {
+    let schedules: StudioSchedulesList = serde_wasm_bindgen::from_value(schedules_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio schedules: {e}")))?;
+
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            let effects = update::update(&mut state.model, AppEvent::StudioSchedules(schedules));
+            state.effects.extend(effects);
+        }
+    });
+    render_response()
+}
+
+#[wasm_bindgen]
+pub fn dispatch_studio_gc_status(gc_json: JsValue) -> Result<JsValue, JsValue> {
+    let gc: StudioGcStatus = serde_wasm_bindgen::from_value(gc_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio GC status: {e}")))?;
+
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            let effects = update::update(&mut state.model, AppEvent::StudioGcStatus(gc));
+            state.effects.extend(effects);
+        }
+    });
+    render_response()
+}
+
+#[wasm_bindgen]
+pub fn dispatch_studio_files(files_json: JsValue) -> Result<JsValue, JsValue> {
+    let files: StudioFilesList = serde_wasm_bindgen::from_value(files_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio files list: {e}")))?;
+
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            let effects = update::update(&mut state.model, AppEvent::StudioFiles(files));
+            state.effects.extend(effects);
+        }
+    });
+    render_response()
+}
+
+#[wasm_bindgen]
+pub fn dispatch_studio_file_read(file_json: JsValue) -> Result<JsValue, JsValue> {
+    let file: StudioFileRead = serde_wasm_bindgen::from_value(file_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio file read: {e}")))?;
+
+    STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            let effects = update::update(&mut state.model, AppEvent::StudioFileRead(file));
+            state.effects.extend(effects);
+        }
+    });
+    render_response()
+}
+
+#[wasm_bindgen]
+pub fn dispatch_studio_thread_inspection(inspection_json: JsValue) -> Result<JsValue, JsValue> {
+    let inspection: StudioThreadInspection = serde_wasm_bindgen::from_value(inspection_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid studio thread inspection: {e}")))?;
 
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             let effects = update::update(
                 &mut state.model,
-                AppEvent::CockpitItemInspection(inspection),
-            );
-            state.effects.extend(effects);
-        }
-    });
-    render_response()
-}
-
-#[wasm_bindgen]
-pub fn dispatch_cockpit_schedules(schedules_json: JsValue) -> Result<JsValue, JsValue> {
-    let schedules: CockpitSchedulesList = serde_wasm_bindgen::from_value(schedules_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit schedules: {e}")))?;
-
-    STATE.with(|s| {
-        if let Some(state) = s.borrow_mut().as_mut() {
-            let effects = update::update(&mut state.model, AppEvent::CockpitSchedules(schedules));
-            state.effects.extend(effects);
-        }
-    });
-    render_response()
-}
-
-#[wasm_bindgen]
-pub fn dispatch_cockpit_gc_status(gc_json: JsValue) -> Result<JsValue, JsValue> {
-    let gc: CockpitGcStatus = serde_wasm_bindgen::from_value(gc_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit GC status: {e}")))?;
-
-    STATE.with(|s| {
-        if let Some(state) = s.borrow_mut().as_mut() {
-            let effects = update::update(&mut state.model, AppEvent::CockpitGcStatus(gc));
-            state.effects.extend(effects);
-        }
-    });
-    render_response()
-}
-
-#[wasm_bindgen]
-pub fn dispatch_cockpit_files(files_json: JsValue) -> Result<JsValue, JsValue> {
-    let files: CockpitFilesList = serde_wasm_bindgen::from_value(files_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit files list: {e}")))?;
-
-    STATE.with(|s| {
-        if let Some(state) = s.borrow_mut().as_mut() {
-            let effects = update::update(&mut state.model, AppEvent::CockpitFiles(files));
-            state.effects.extend(effects);
-        }
-    });
-    render_response()
-}
-
-#[wasm_bindgen]
-pub fn dispatch_cockpit_file_read(file_json: JsValue) -> Result<JsValue, JsValue> {
-    let file: CockpitFileRead = serde_wasm_bindgen::from_value(file_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit file read: {e}")))?;
-
-    STATE.with(|s| {
-        if let Some(state) = s.borrow_mut().as_mut() {
-            let effects = update::update(&mut state.model, AppEvent::CockpitFileRead(file));
-            state.effects.extend(effects);
-        }
-    });
-    render_response()
-}
-
-#[wasm_bindgen]
-pub fn dispatch_cockpit_thread_inspection(inspection_json: JsValue) -> Result<JsValue, JsValue> {
-    let inspection: CockpitThreadInspection = serde_wasm_bindgen::from_value(inspection_json)
-        .map_err(|e| JsValue::from_str(&format!("invalid cockpit thread inspection: {e}")))?;
-
-    STATE.with(|s| {
-        if let Some(state) = s.borrow_mut().as_mut() {
-            let effects = update::update(
-                &mut state.model,
-                AppEvent::CockpitThreadInspection(inspection),
+                AppEvent::StudioThreadInspection(inspection),
             );
             state.effects.extend(effects);
         }

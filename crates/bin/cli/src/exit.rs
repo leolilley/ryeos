@@ -11,7 +11,6 @@ impl CliError {
             CliError::Config(_) => EX_CONFIG,
             CliError::Dispatch(d) => d.exit_code(),
             CliError::Transport(t) => t.exit_code(),
-            CliError::UnknownVerb { .. } => EX_USAGE,
             CliError::Io(_) => EX_SOFTWARE,
             CliError::Local { .. } => 1,
             CliError::ProjectResolution(_) => EX_USAGE,

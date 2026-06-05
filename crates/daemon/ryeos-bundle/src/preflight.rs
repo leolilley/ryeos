@@ -295,6 +295,9 @@ fn preflight_verify_bundle_in_context_inner(
             }
 
             let rel = file_path.strip_prefix(&ai_dir).unwrap_or(&file_path);
+            if is_runtime_support_file(kind_schema.directory.as_str(), rel) {
+                continue;
+            }
 
             let content = match fs::read_to_string(&file_path) {
                 Ok(c) => c,
@@ -539,6 +542,19 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn is_runtime_support_file(kind_directory: &str, rel: &Path) -> bool {
+    if kind_directory != "tools" {
+        return false;
+    }
+
+    rel.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name) if name == "lib" || name == "__pycache__"
+        )
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightNodeBundleRecord {
@@ -548,6 +564,9 @@ struct PreflightNodeBundleRecord {
     #[allow(dead_code)]
     id: Option<String>,
     path: PathBuf,
+    #[allow(dead_code)]
+    #[serde(default)]
+    command_registration_caps: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,20 +683,34 @@ enum PreflightRawRequestBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PreflightVerbRecord {
+struct PreflightCommandRecord {
     category: String,
     section: String,
     name: String,
+    tokens: Vec<String>,
     description: String,
     #[serde(default)]
-    execute: Option<String>,
+    aliases: Vec<PreflightCommandAliasRecord>,
+    #[allow(dead_code)]
     #[serde(default)]
-    aliases: Vec<PreflightVerbAliasRecord>,
+    help: Option<PreflightCommandHelp>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    arguments: Vec<PreflightCommandArgument>,
+    #[serde(default)]
+    forms: Vec<PreflightCommandForm>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    parameter_binding: Option<PreflightCommandParameterBinding>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    project: Option<PreflightCommandProject>,
+    dispatch: PreflightCommandDispatch,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PreflightVerbAliasRecord {
+struct PreflightCommandAliasRecord {
     tokens: Vec<String>,
     #[allow(dead_code)]
     #[serde(default)]
@@ -691,44 +724,175 @@ struct PreflightVerbAliasRecord {
     #[allow(dead_code)]
     #[serde(default)]
     removed_in: Option<String>,
-    #[serde(default)]
-    positional_forms: Vec<PreflightPositionalForm>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandHelp {
     #[allow(dead_code)]
     #[serde(default)]
-    project_resolution: PreflightProjectResolution,
+    usage: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    examples: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandArgument {
+    name: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    kind: PreflightCommandArgumentKind,
+    positional: usize,
+    #[allow(dead_code)]
+    #[serde(default)]
+    required: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
+    arity: PreflightCommandArgumentArity,
+    #[allow(dead_code)]
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandForm {
+    #[serde(default)]
+    slots: Vec<PreflightCommandSlot>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandSlot {
+    field: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    matcher: PreflightCommandArgumentKind,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-enum PreflightProjectResolution {
+enum PreflightCommandArgumentKind {
+    #[default]
+    String,
+    CanonicalRef,
+    Path,
+    Json,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightCommandArgumentArity {
+    #[default]
+    One,
+    Optional,
+    Variadic,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandParameterBinding {
+    #[allow(dead_code)]
+    mode: PreflightCommandParameterBindingMode,
+    #[allow(dead_code)]
+    #[serde(default)]
+    input_flag: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    single_json_object_arg: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
+    flag_key_normalization: PreflightFlagKeyNormalization,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightCommandParameterBindingMode {
+    #[default]
+    None,
+    TailObject,
+    SchemaObject,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightFlagKeyNormalization {
+    #[default]
+    HyphenToUnderscore,
+    Preserve,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandProject {
+    #[allow(dead_code)]
+    #[serde(default)]
+    resolution: PreflightCommandProjectResolution,
+    #[allow(dead_code)]
+    #[serde(default)]
+    default: PreflightCommandProjectDefault,
+    #[allow(dead_code)]
+    #[serde(default)]
+    no_project_flag: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
+    request_project_path: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
+    bind_parameter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightCommandProjectResolution {
     #[default]
     None,
     Required,
     Optional,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightPositionalForm {
-    #[serde(default)]
-    slots: Vec<PreflightPositionalSlot>,
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum PreflightCommandProjectDefault {
+    #[default]
+    None,
+    DiscoverUpwardAi,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreflightPositionalSlot {
-    field: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    matcher: PreflightPositionalMatcher,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum PreflightCommandDispatch {
+    Group,
+    LocalHandler {
+        handler: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        bootstrap: bool,
+    },
+    DirectExecuteItemRef {
+        item_ref_arg: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        availability: PreflightCommandAvailability,
+    },
+    ExecuteRef {
+        execute: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        availability: PreflightCommandAvailability,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-enum PreflightPositionalMatcher {
+enum PreflightCommandAvailability {
     #[default]
-    Any,
-    CanonicalRef,
+    Auto,
+    Daemon,
+    Offline,
+    Both,
 }
 
 #[derive(Debug, Deserialize)]
@@ -842,7 +1006,24 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
             continue;
         };
 
-        if !matches!(section, "bundles" | "hosted" | "routes" | "verbs") {
+        if matches!(section, "verbs" | "aliases") {
+            failures.push(format!(
+                "{}: legacy node config section '.ai/node/{}' is no longer supported; use '.ai/node/commands'",
+                rel.display(),
+                section
+            ));
+            continue;
+        }
+
+        if section == "command_registration" {
+            failures.push(format!(
+                "{}: command registration policy is node-owned seed/system config; normal bundles may not ship '.ai/node/command_registration'",
+                rel.display()
+            ));
+            continue;
+        }
+
+        if !matches!(section, "bundles" | "hosted" | "routes" | "commands") {
             continue;
         }
 
@@ -946,7 +1127,7 @@ fn validate_node_config_item(
         "bundles" => validate_node_bundle_record(file_path, &body),
         "hosted" => validate_hosted_node_policy(file_path, &body),
         "routes" => validate_node_route_record(&body),
-        "verbs" => validate_node_verb_record(file_path, &body),
+        "commands" => validate_node_command_record(file_path, &body),
         _ => Ok(()),
     }
 }
@@ -996,54 +1177,63 @@ fn validate_node_route_record(body: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_node_verb_record(file_path: &Path, body: &serde_json::Value) -> Result<()> {
-    let record: PreflightVerbRecord =
-        serde_json::from_value(body.clone()).context("failed to parse verb node-config record")?;
-    if record.category != "verbs" {
-        bail!("verb record category must be 'verbs'");
+fn validate_node_command_record(file_path: &Path, body: &serde_json::Value) -> Result<()> {
+    let record: PreflightCommandRecord = serde_json::from_value(body.clone())
+        .context("failed to parse command node-config record")?;
+    if record.category != "commands" {
+        bail!("command record category must be 'commands'");
     }
-    if record.section != "verbs" {
-        bail!("verb record section must be 'verbs'");
+    if record.section != "commands" {
+        bail!("command record section must be 'commands'");
     }
     let filename = file_path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .context("verb record has no filename stem")?;
+        .context("command record has no filename stem")?;
     if record.name != filename {
         bail!(
-            "verb record declares name '{}' but filename is '{}'",
+            "command record declares name '{}' but filename is '{}'",
             record.name,
             filename
         );
     }
-    if !is_valid_verb_name(&record.name) {
+    if !is_valid_command_name(&record.name) {
         bail!(
-            "invalid verb name '{}': must match ^[a-z][a-z0-9-]*$",
+            "invalid command name '{}': must match ^[a-z][a-z0-9-]*$",
             record.name
         );
     }
     if record.description.is_empty() {
-        bail!("verb record missing non-empty 'description'");
+        bail!("command record missing non-empty 'description'");
     }
-    if let Some(execute) = &record.execute {
-        ryeos_engine::canonical_ref::CanonicalRef::parse(execute)
-            .with_context(|| format!("invalid execute ref '{execute}' in verb record"))?;
+    validate_preflight_command_tokens(&record.name, &record.tokens)?;
+    validate_preflight_command_dispatch(&record.name, &record.dispatch)?;
+    for (arg_idx, argument) in record.arguments.iter().enumerate() {
+        if argument.name.is_empty() {
+            bail!("{} arguments[{arg_idx}] has empty name", record.name);
+        }
+        if argument.positional == 0 {
+            bail!(
+                "{} arguments[{arg_idx}] positional must be greater than zero",
+                record.name
+            );
+        }
     }
-    if record.execute.is_none() && !record.aliases.is_empty() {
-        bail!("abstract verb cannot declare aliases");
-    }
-    for (idx, alias) in record.aliases.iter().enumerate() {
-        validate_preflight_alias_tokens(&format!("{} aliases[{idx}]", record.name), &alias.tokens)?;
-        for (form_idx, form) in alias.positional_forms.iter().enumerate() {
-            for (slot_idx, slot) in form.slots.iter().enumerate() {
-                if slot.field.is_empty() {
-                    bail!(
-                        "{} aliases[{idx}] positional_forms[{form_idx}].slots[{slot_idx}] has empty field",
-                        record.name
-                    );
-                }
+    for (form_idx, form) in record.forms.iter().enumerate() {
+        for (slot_idx, slot) in form.slots.iter().enumerate() {
+            if slot.field.is_empty() {
+                bail!(
+                    "{} forms[{form_idx}].slots[{slot_idx}] has empty field",
+                    record.name
+                );
             }
         }
+    }
+    for (idx, alias) in record.aliases.iter().enumerate() {
+        validate_preflight_command_tokens(
+            &format!("{} aliases[{idx}]", record.name),
+            &alias.tokens,
+        )?;
     }
     Ok(())
 }
@@ -1096,27 +1286,47 @@ fn validate_hosted_node_policy(file_path: &Path, body: &serde_json::Value) -> Re
     Ok(())
 }
 
-fn validate_preflight_alias_tokens(name: &str, tokens: &[String]) -> Result<()> {
+fn validate_preflight_command_tokens(name: &str, tokens: &[String]) -> Result<()> {
     if tokens.is_empty() {
-        bail!("alias '{}' has empty tokens list", name);
+        bail!("command '{}' has empty tokens list", name);
     }
     for token in tokens {
         if token.is_empty() {
-            bail!("alias '{}' has empty token in tokens list", name);
+            bail!("command '{}' has empty token in tokens list", name);
         }
         if token.starts_with('-') {
-            bail!("alias '{}' has dash-prefixed token '{}'", name, token);
-        }
-    }
-    if let Some(first) = tokens.first() {
-        if first == "help" || first == "init" || first == "execute" {
-            bail!("alias '{}' uses reserved first token '{}'", name, first);
+            bail!("command '{}' has dash-prefixed token '{}'", name, token);
         }
     }
     Ok(())
 }
 
-fn is_valid_verb_name(name: &str) -> bool {
+fn validate_preflight_command_dispatch(
+    name: &str,
+    dispatch: &PreflightCommandDispatch,
+) -> Result<()> {
+    match dispatch {
+        PreflightCommandDispatch::Group => {}
+        PreflightCommandDispatch::LocalHandler { handler, .. } if handler.is_empty() => {
+            bail!("command '{}' has empty local handler", name);
+        }
+        PreflightCommandDispatch::LocalHandler { .. } => {}
+        PreflightCommandDispatch::DirectExecuteItemRef { item_ref_arg, .. }
+            if item_ref_arg.is_empty() =>
+        {
+            bail!("command '{}' has empty item_ref_arg", name);
+        }
+        PreflightCommandDispatch::DirectExecuteItemRef { .. } => {}
+        PreflightCommandDispatch::ExecuteRef { execute, .. } => {
+            ryeos_engine::canonical_ref::CanonicalRef::parse(execute).with_context(|| {
+                format!("invalid execute ref '{execute}' in command record '{name}'")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_command_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -1479,43 +1689,49 @@ description: "fixed parser handler for preflight tests"
     }
 
     #[test]
-    fn node_config_preflight_accepts_signed_valid_verb() {
+    fn node_config_preflight_accepts_signed_valid_command() {
         let layout = BundleLayout::new("test-bundle");
         layout.sign_and_write(
-            "node/verbs/demo.yaml",
-            r#"category: verbs
-section: verbs
+            "node/commands/demo.yaml",
+            r#"category: commands
+section: commands
 name: demo
-description: Demo verb
-execute: tool:demo/run
+tokens: ["demo"]
+description: Demo command
+dispatch:
+  kind: execute_ref
+  execute: tool:demo/run
 aliases:
-  - tokens: ["demo"]
-    description: Demo command
+  - tokens: ["demo", "run"]
+    description: Demo command alias
 "#,
         );
         let trust_store = layout.trust_store();
 
         validate_node_config_item(
-            &layout.ai_dir.join("node/verbs/demo.yaml"),
-            &layout.ai_dir.join("node/verbs"),
-            "verbs",
+            &layout.ai_dir.join("node/commands/demo.yaml"),
+            &layout.ai_dir.join("node/commands"),
+            "commands",
             &trust_store,
         )
-        .expect("signed valid verb should pass node-config preflight");
+        .expect("signed valid command should pass node-config preflight");
     }
 
     #[test]
-    fn node_config_preflight_rejects_unsigned_verb() {
+    fn node_config_preflight_rejects_unsigned_command() {
         let layout = BundleLayout::new("test-bundle");
-        let path = layout.ai_dir.join("node/verbs/demo.yaml");
+        let path = layout.ai_dir.join("node/commands/demo.yaml");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"category: verbs
-section: verbs
+            r#"category: commands
+section: commands
 name: demo
-description: Demo verb
-execute: tool:demo/run
+tokens: ["demo"]
+description: Demo command
+dispatch:
+  kind: execute_ref
+  execute: tool:demo/run
 "#,
         )
         .unwrap();
@@ -1523,8 +1739,8 @@ execute: tool:demo/run
 
         let err = validate_node_config_item(
             &path,
-            &layout.ai_dir.join("node/verbs"),
-            "verbs",
+            &layout.ai_dir.join("node/commands"),
+            "commands",
             &trust_store,
         )
         .unwrap_err();
@@ -1533,6 +1749,58 @@ execute: tool:demo/run
         assert!(
             msg.contains("no valid signature line"),
             "expected unsigned node-config rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn node_config_preflight_rejects_legacy_verb_section() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.sign_and_write(
+            "node/verbs/demo.yaml",
+            r#"category: verbs
+section: verbs
+name: demo
+description: Legacy verb
+execute: tool:demo/run
+"#,
+        );
+        let trust_store = layout.trust_store();
+
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("legacy node config section")),
+            "expected legacy node/verbs rejection, got: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn node_config_preflight_rejects_bundle_authored_command_registration_policy() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.sign_and_write(
+            "node/command_registration/default.yaml",
+            r#"section: command_registration
+name: default
+claim_rules:
+  - claim:
+      kind: command.root
+      value: execute
+    required_caps:
+      - ryeos.register.command.root.execute
+system_source_caps:
+  - ryeos.register.command.root.execute
+"#,
+        );
+        let trust_store = layout.trust_store();
+
+        let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);
+
+        assert!(
+            failures.iter().any(|failure| failure
+                .contains("command registration policy is node-owned seed/system config")),
+            "expected command_registration rejection, got: {failures:?}"
         );
     }
 
@@ -1559,10 +1827,10 @@ execute: tool:demo/run
     #[test]
     fn node_config_preflight_rejects_nested_section_symlink() {
         let layout = BundleLayout::new("test-bundle");
-        let target = layout._tmp.path().join("outside-verbs");
+        let target = layout._tmp.path().join("outside-commands");
         fs::create_dir_all(&target).unwrap();
         fs::create_dir_all(layout.ai_dir.join("node")).unwrap();
-        std::os::unix::fs::symlink(&target, layout.ai_dir.join("node/verbs")).unwrap();
+        std::os::unix::fs::symlink(&target, layout.ai_dir.join("node/commands")).unwrap();
         let trust_store = layout.trust_store();
 
         let failures = collect_node_config_failures(&layout.ai_dir, &trust_store);

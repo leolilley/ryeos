@@ -208,7 +208,7 @@ RyeOS behavior is shipped as bundles. A bundle may contain:
 - item YAML and Markdown;
 - schemas and composer rules;
 - runtime and handler binaries;
-- CLI verb descriptors;
+- CLI command descriptors;
 - knowledge docs;
 - publisher trust metadata;
 - content-addressed manifests and refs.
@@ -224,7 +224,7 @@ The repository currently includes bundles such as:
 | `core`         | Node, trust, identity, signing, state, service, and bundle primitives.                      |
 | `standard`     | Agent-facing workflows: directives, tools, graphs, threads, scheduler, and common runtimes. |
 | `web`          | Web-oriented tools and runtimes.                                                            |
-| `cockpit`      | UI/operator-facing bundle assets.                                                           |
+| `studio`       | UI/operator-facing bundle assets.                                                           |
 | `hosted-node`  | Policy for exposing a node as a hosted remote target.                                       |
 | `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                               |
 

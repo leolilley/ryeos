@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-03T06:08:05Z:c9be978af4ed07d46e39eaadca07e4fc1449d12e64caf4cb4bcf6c16b428c9d7:/sRDNtJg0Krl02lfDYCE08KyieHZhpNCzy49ByjBPbqBP0hyzyDwWjyLDXGpSL1sW/uZmicafQ9/59iT1eWYAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/session
+section: routes
+id: ui/api/session/current
+path: /ui/api/session/current
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 256
+response:
+  mode: json
+  source: "service:ui/session/current"

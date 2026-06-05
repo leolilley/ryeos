@@ -1,10 +1,12 @@
 export async function runEffect(effect) {
   const kind = effect.kind;
   switch (kind.type) {
-    case "fetch_snapshot":
-      return result(effect, "snapshot", await getJson("/ui/api/studio/snapshot"));
+    case "fetch_dimension":
+      return result(effect, "dimension", await getJson("/ui/api/studio/dimension"));
     case "fetch_projects":
       return result(effect, "projects", await optionalProjectsJson());
+    case "fetch_topology":
+      return result(effect, "topology", await getJson("/ui/api/graph/topology"));
     case "add_project":
       return result(effect, "project_added", await postJson("/ui/api/studio/projects/add", { root: kind.root }));
     case "open_project":
@@ -35,6 +37,15 @@ export async function runEffect(effect) {
       return result(effect, "thread_inspection", await postJson("/ui/api/studio/thread/inspect", {
         thread_id: kind.thread_id,
         event_limit: kind.event_limit,
+      }));
+    case "invoke_action":
+      return result(effect, "action_invocation", await postJson("/ui/api/actions/invoke", {
+        command_id: kind.command_id,
+        args: kind.args ?? {},
+      }));
+    case "cancel_thread":
+      return result(effect, "thread_cancelled", await postJson("/ui/api/studio/thread/cancel", {
+        thread_id: kind.thread_id,
       }));
     case "set_location_hash":
       location.hash = kind.hash;
@@ -99,8 +110,9 @@ function result(effect, kind, data) {
 
 function resultKindFor(effect) {
   const type = effect?.kind?.type;
-  if (type === "fetch_snapshot") return "snapshot";
+  if (type === "fetch_dimension") return "dimension";
   if (type === "fetch_projects") return "projects";
+  if (type === "fetch_topology") return "topology";
   if (type === "add_project") return "project_added";
   if (type === "open_project") return "project_opened";
   if (type === "fetch_threads") return "threads";
@@ -111,6 +123,8 @@ function resultKindFor(effect) {
   if (type === "read_file") return "file_read";
   if (type === "inspect_item") return "item_inspection";
   if (type === "inspect_thread") return "thread_inspection";
+  if (type === "invoke_action") return "action_invocation";
+  if (type === "cancel_thread") return "thread_cancelled";
   return "browser_only";
 }
 

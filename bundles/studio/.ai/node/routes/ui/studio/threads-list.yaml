@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-03T06:08:16Z:9c76020e4a9d10647a369ee85387c4f7c51b149b5bfa940ef4680011c2ba5532:DlkhIUXvjRwoIDcQHXi9FvZNpLSTJe8D9e+63Pxp4Lfc9ZgL5BscrIYXq5tRtShfJ9v7Y2pP9OI026i9hwR+Cg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/threads/list
+path: /ui/api/studio/threads/list
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/studio/threads/list"

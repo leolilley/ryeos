@@ -1,0 +1,18 @@
+# ryeos:signed:2026-06-03T06:08:00Z:14280661fdf28230e02c7118b098a775066f308f7616cb15d9e3858b68a2e37c:HsT1VGPEnbhNJQBfdw3LTjdkbkjNxiobc8Kn6AWE/h/+nuC5ldNnPSNjJNdi2yVoxoMsn19dZHIGJ2/R8JWJBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: routes/ui
+section: routes
+id: ui/assets
+path: /ui/assets/{asset}
+methods:
+  - GET
+auth: none
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 256
+response:
+  mode: static
+  source: embedded_asset
+  source_config:
+    path: "${path.asset}"
+  status: 200

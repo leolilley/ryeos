@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-04T08:53:57Z:ee02d263059ed3a31069a8b5c22303e7d9433a6a8302a074a135795d4a61c5bb:raB6oVV33yQq9nkVVHwArJJNPrAerqOaEwAI9zAD78dwC2CKwNknpGhk9Q0+9fqtxtxATSJyJBSoxDnZHskkBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: studio/remotes/list
+version: "1.0.0"
+description: List configured remotes for the active Studio project session.
+endpoint: ui.studio.remotes.list
+availability: daemon_only

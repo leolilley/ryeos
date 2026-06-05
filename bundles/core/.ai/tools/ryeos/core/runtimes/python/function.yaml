@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-29T12:43:26Z:0c47c1900b57b2ddb8a11e4ada9a45d54f4b0aa42b53f8d40afaaecd00aec0ca:ChAyu5KWvpOFidxUGyoahculSq5rS8+y+TGYLLY6YFpJQjkuiDNNe6m97CWUxWDIeueXYLajE2waH1b0GKZiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-04T06:02:08Z:e3aac8df4c79c9ae0ee30315484038df39a200e9692c8cdb155440842e4b8e55:KVlwa2mLCyd0lKptocPTr9seM/xgBHdZHI/Q6IlQ3le9Ti1ulPdkO87eY2S8UZmtt/Ka07B69TWl3nQQBHn/DA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -17,7 +17,7 @@ env_config:
     PROJECT_VENV_PYTHON: "{interpreter}"
   env_paths:
     PYTHONPATH:
-      prepend: ["{tool_dir}"]
+      prepend: ["{tool_dir}", "{runtime_dir}/lib"]
 
 verify_deps:
   enabled: true

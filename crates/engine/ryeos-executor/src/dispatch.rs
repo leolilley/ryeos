@@ -43,7 +43,7 @@
 //!   alternatives so an operator can fix the schema/cap/registry
 //!   without spelunking the source.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -780,12 +780,14 @@ pub(crate) async fn dispatch_op(
     // provenance instead of minting an unprovenanced token.
     let ttl = ryeos_app::callback_token::compute_ttl(None);
     let child_provenance = request.provenance.clone_for_borrowed_child();
-    let cap = state.callback_tokens.generate(
+    let cap = state.callback_tokens.generate_with_context(
         &thread_id,
         request.project_path.to_path_buf(),
         ttl,
         Vec::new(), // op threads have no caps for now
         child_provenance,
+        None,
+        Some(canonical_ref.to_string()),
     );
 
     let callback = ryeos_runtime::envelope::EnvelopeCallback {
@@ -1584,12 +1586,20 @@ async fn dispatch_streaming_subprocess(
 async fn dispatch_tool_subprocess(
     current_ref: &CanonicalRef,
     thread_profile: &str,
-    _verified: Option<&VerifiedItem>,
+    verified: Option<&VerifiedItem>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
+
+    if verified.is_some_and(|item| item.resolved.metadata.executor_id.is_none()) {
+        return Err(DispatchError::RootExecutorMissing {
+            item_ref,
+            detail: "items with no executor_id, including terminal executors such as `tool:ryeos/core/subprocess/execute`, cannot be launched as root tools. Create a wrapper tool with `executor_id: \"@subprocess\"` and a `config:` block, then execute the wrapper."
+                .into(),
+        });
+    }
 
     let mut resolved = ryeos_app::thread_lifecycle::resolve_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
@@ -1644,6 +1654,7 @@ async fn dispatch_tool_subprocess(
     }
 
     let item_ref_for_error = resolved.item_ref.clone();
+    let effective_caps = derive_direct_tool_domain_event_caps(&resolved, ctx)?;
 
     let required_caps =
         ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);
@@ -1672,7 +1683,7 @@ async fn dispatch_tool_subprocess(
         vault_bindings,
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
-        effective_caps: Vec::new(),
+        effective_caps,
         provenance: request.provenance.clone(),
     };
 
@@ -1699,6 +1710,86 @@ async fn dispatch_tool_subprocess(
             "result": result.result,
         }))
     }
+}
+
+fn derive_direct_tool_domain_event_caps(
+    resolved: &ResolvedExecutionRequest,
+    ctx: &ExecutionContext,
+) -> Result<Vec<String>, DispatchError> {
+    let item_ref = resolved.resolved_item.canonical_ref.to_string();
+    let effective_bundle_id = ryeos_app::callback_token::effective_bundle_id_from_item_ref(
+        &item_ref,
+    )
+    .ok_or_else(|| {
+        DispatchError::InvalidRef(
+            item_ref.clone(),
+            "direct tool domain-event authority requires a bundle-qualified tool ref".into(),
+        )
+    })?;
+    ryeos_state::objects::validate_domain_identifier("bundle_id", &effective_bundle_id)
+        .map_err(|err| DispatchError::InvalidRef(item_ref.clone(), err.to_string()))?;
+
+    let Some(ai_dir) = resolved_item_ai_dir(&resolved.resolved_item) else {
+        return Ok(Vec::new());
+    };
+    let manifest =
+        ryeos_bundle::manifest::load_verified_manifest_yaml(&ai_dir, None, &ctx.engine.trust_store)
+            .map_err(|err| DispatchError::InvalidRef(item_ref.clone(), err.to_string()))?;
+    let Some(manifest) = manifest else {
+        return Ok(Vec::new());
+    };
+    if manifest.domain_events.is_empty() {
+        return Ok(Vec::new());
+    }
+    if manifest.name != effective_bundle_id {
+        return Err(DispatchError::InvalidRef(
+            item_ref,
+            format!(
+                "domain-event manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
+                manifest.name, effective_bundle_id
+            ),
+        ));
+    }
+
+    let mut caps = BTreeSet::new();
+    for decl in manifest.domain_events {
+        ryeos_state::objects::validate_domain_identifier("event_kind", &decl.event_kind)
+            .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
+        if decl.operations.is_empty() {
+            return Err(DispatchError::InvalidRef(
+                resolved.item_ref.clone(),
+                format!(
+                    "domain_events declaration for '{}' must list at least one operation",
+                    decl.event_kind
+                ),
+            ));
+        }
+        for op in decl.operations {
+            match op {
+                ryeos_bundle::manifest::BundleDomainEventOperation::Append => {
+                    caps.insert(format!(
+                        "ryeos.append.domain_events.{effective_bundle_id}/{}",
+                        decl.event_kind
+                    ));
+                }
+                ryeos_bundle::manifest::BundleDomainEventOperation::Scan => {
+                    caps.insert(format!(
+                        "ryeos.scan.domain_events.{effective_bundle_id}/{}",
+                        decl.event_kind
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(caps.into_iter().collect())
+}
+
+fn resolved_item_ai_dir(item: &ResolvedItem) -> Option<std::path::PathBuf> {
+    item.source_path
+        .ancestors()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(ryeos_engine::AI_DIR))
+        .map(Path::to_path_buf)
 }
 
 // ── Top-level dispatch loop ───────────────────────────────────────────
@@ -2028,6 +2119,236 @@ metadata:
         Engine::new(kinds, parser_dispatcher, None, vec![]).with_trust_store(ts)
     }
 
+    fn test_plan_context(project_path: PathBuf) -> ryeos_engine::contracts::PlanContext {
+        ryeos_engine::contracts::PlanContext {
+            requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                ryeos_engine::contracts::Principal {
+                    fingerprint: "fp:test".into(),
+                    scopes: vec!["*".into()],
+                },
+            ),
+            project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+                path: project_path,
+            },
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            execution_hints: Default::default(),
+            validate_only: false,
+        }
+    }
+
+    fn test_execution_context(project_path: PathBuf) -> ExecutionContext {
+        ExecutionContext {
+            principal_fingerprint: "fp:test".into(),
+            caller_scopes: vec!["*".into()],
+            engine: std::sync::Arc::new(build_test_engine()),
+            plan_ctx: test_plan_context(project_path),
+            requested_op: None,
+            requested_inputs: None,
+        }
+    }
+
+    fn write_signed_manifest(ai_dir: &std::path::Path, body: &str) {
+        fs::create_dir_all(ai_dir).unwrap();
+        let signed = lillux::signature::sign_content(body, &signing_key(), "#", None);
+        fs::write(ai_dir.join("manifest.yaml"), signed).unwrap();
+    }
+
+    fn resolved_tool(bundle_root: &std::path::Path, item_ref: &str) -> ResolvedExecutionRequest {
+        let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
+        let source_path = ai_dir.join("tools/ryeos-email/send.yaml");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(
+            &source_path,
+            "category: ryeos-email\nexecutor_id: '@subprocess'\n",
+        )
+        .unwrap();
+        let canonical_ref = CanonicalRef::parse(item_ref).unwrap();
+        let resolved_item = ResolvedItem {
+            canonical_ref: canonical_ref.clone(),
+            kind: canonical_ref.kind.clone(),
+            source_path,
+            source_space: ryeos_engine::contracts::ItemSpace::Project,
+            resolved_from: "project".into(),
+            shadowed: Vec::new(),
+            materialized_project_root: None,
+            content_hash: lillux::cas::sha256_hex(b"test"),
+            signature_header: None,
+            source_format: ryeos_engine::contracts::ResolvedSourceFormat {
+                extension: ".yaml".into(),
+                parser: "parser:ryeos/core/yaml/yaml".into(),
+                signature: ryeos_engine::contracts::SignatureEnvelope {
+                    prefix: "#".into(),
+                    suffix: None,
+                    after_shebang: false,
+                },
+            },
+            metadata: Default::default(),
+        };
+        ResolvedExecutionRequest {
+            kind: "tool_run".into(),
+            item_ref: item_ref.into(),
+            executor_ref: "@subprocess".into(),
+            launch_mode: "inline".into(),
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            target_site_id: None,
+            requested_by: Some("fp:test".into()),
+            parameters: serde_json::Value::Null,
+            resolved_item,
+            plan_context: test_plan_context(bundle_root.to_path_buf()),
+        }
+    }
+
+    fn resolved_tool_with_extra(
+        bundle_root: &std::path::Path,
+        item_ref: &str,
+        extra: std::collections::HashMap<String, serde_json::Value>,
+    ) -> ResolvedExecutionRequest {
+        let mut resolved = resolved_tool(bundle_root, item_ref);
+        resolved.resolved_item.metadata.extra = extra;
+        resolved
+    }
+
+    #[test]
+    fn direct_tool_domain_event_caps_derive_exact_self_bundle_caps() {
+        let bundle = tempdir().join("ryeos-email");
+        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        write_signed_manifest(
+            &ai_dir,
+            r#"name: ryeos-email
+version: "0.1.0"
+description: test
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+domain_events:
+  - event_kind: email_event
+    operations: [append, scan]
+"#,
+        );
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+
+        let caps = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap();
+        assert_eq!(
+            caps,
+            vec![
+                "ryeos.append.domain_events.ryeos-email/email_event".to_string(),
+                "ryeos.scan.domain_events.ryeos-email/email_event".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_tool_domain_event_caps_empty_without_signed_declarations() {
+        let bundle = tempdir().join("ryeos-email");
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+        assert!(derive_direct_tool_domain_event_caps(&resolved, &ctx)
+            .unwrap()
+            .is_empty());
+
+        write_signed_manifest(
+            &bundle.join(ryeos_engine::AI_DIR),
+            r#"name: ryeos-email
+version: "0.1.0"
+description: test
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+domain_events: []
+"#,
+        );
+        assert!(derive_direct_tool_domain_event_caps(&resolved, &ctx)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn direct_tool_domain_event_caps_reject_manifest_namespace_mismatch_when_declared() {
+        let bundle = tempdir().join("ryeos-email");
+        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        write_signed_manifest(
+            &ai_dir,
+            r#"name: other-bundle
+version: "0.1.0"
+description: test
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+domain_events:
+  - event_kind: email_event
+    operations: [append]
+"#,
+        );
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+        let err = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap_err();
+        assert!(err.to_string().contains("namespace mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn direct_tool_domain_event_caps_reject_invalid_manifest_declarations() {
+        let bundle = tempdir().join("ryeos-email");
+        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+
+        write_signed_manifest(
+            &ai_dir,
+            r#"name: ryeos-email
+version: "0.1.0"
+description: test
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+domain_events:
+  - event_kind: ../bad
+    operations: [append]
+"#,
+        );
+        let err = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap_err();
+        assert!(err.to_string().contains("unsafe character"), "got: {err}");
+
+        write_signed_manifest(
+            &ai_dir,
+            r#"name: ryeos-email
+version: "0.1.0"
+description: test
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+domain_events:
+  - event_kind: email_event
+    operations: []
+"#,
+        );
+        let err = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("must list at least one operation"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn direct_tool_required_caps_do_not_become_callback_caps() {
+        let bundle = tempdir().join("ryeos-email");
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:ryeos-email/send",
+            std::collections::HashMap::from([(
+                "required_caps".to_string(),
+                serde_json::json!(["ryeos.*"]),
+            )]),
+        );
+
+        assert!(derive_direct_tool_domain_event_caps(&resolved, &ctx)
+            .unwrap()
+            .is_empty());
+    }
+
     // P1.4: tests for `lookup_runtime_for_dispatch` were removed when
     // that helper was deleted. The dispatch loop now attaches the
     // verified runtime to the hop via `RuntimeRegistry::lookup_by_ref`
@@ -2052,23 +2373,7 @@ metadata:
     }
 
     fn test_authorizer() -> ryeos_runtime::authorizer::Authorizer {
-        ryeos_runtime::authorizer::Authorizer::new(std::sync::Arc::new(
-            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "execute".into(),
-                    execute: None,
-                },
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "fetch".into(),
-                    execute: None,
-                },
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "sign".into(),
-                    execute: Some("tool:ryeos/core/sign".into()),
-                },
-            ])
-            .unwrap(),
-        ))
+        ryeos_runtime::authorizer::Authorizer::new()
     }
 
     /// **B1 unit test**: `enforce_runtime_caps` itself is unconditional

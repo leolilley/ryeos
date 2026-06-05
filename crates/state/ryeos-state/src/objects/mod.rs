@@ -15,6 +15,7 @@
 
 pub mod attestation;
 pub mod chain_state;
+pub mod domain_event;
 pub mod item_source;
 pub mod project_snapshot;
 pub mod source_manifest;
@@ -23,6 +24,10 @@ pub mod thread_snapshot;
 
 pub use attestation::Attestation;
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
+pub use domain_event::{
+    hash_domain_event, validate_domain_identifier, DomainEventAttribution, DomainEventObject,
+    DOMAIN_EVENT_KIND,
+};
 pub use item_source::ItemSource;
 pub use project_snapshot::ProjectSnapshot;
 pub use source_manifest::SourceManifest;

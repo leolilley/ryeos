@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use ryeos_runtime::alias_registry::{AliasDef, ProjectResolution};
+use ryeos_runtime::{
+    CommandDef, CommandDispatch, CommandParameterBindingMode, CommandProjectDefault,
+    CommandProjectResolution, CommandRegistry,
+};
 use serde_json::Value;
 
 use crate::error::CliError;
@@ -11,6 +14,7 @@ use crate::local_verbs;
 #[command(
     name = "ryeos",
     about = "CLI for Rye OS",
+    version,
     disable_help_subcommand = true,
     trailing_var_arg = true
 )]
@@ -31,10 +35,10 @@ pub struct Cli {
 /// Main dispatch flow.
 pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 1. Project root
-    let body_project_path = match &cli.project {
-        Some(p) => p.to_string_lossy().into_owned(),
-        None => ".".to_string(),
-    };
+    let body_project_path = cli
+        .project
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
 
     // 2. System space dir
     let system_space_dir = discover_system_space_dir();
@@ -62,7 +66,12 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     // `ryeos help <verb...>` → verb help (queries daemon for alias info)
     if cli.rest.len() > 1 && cli.rest[0] == "help" {
-        crate::help::print_verb_help(&cli.rest[1..], &system_space_dir, &body_project_path).await?;
+        crate::help::print_verb_help(
+            &cli.rest[1..],
+            &system_space_dir,
+            body_project_path.as_deref().unwrap_or("."),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -74,61 +83,23 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         if verb_tokens.is_empty() {
             crate::help::print_help(std::io::stdout())?;
         } else {
-            crate::help::print_verb_help(verb_tokens, &system_space_dir, &body_project_path)
-                .await?;
+            crate::help::print_verb_help(
+                verb_tokens,
+                &system_space_dir,
+                body_project_path.as_deref().unwrap_or("."),
+            )
+            .await?;
         }
         return Ok(());
     }
 
-    // 5. Hardcoded `ryeos execute <item_ref>` — the universal escape hatch
-    if cli.rest.first().map(|s| s.as_str()) == Some("execute") {
-        if cli.rest.len() < 2 {
-            return Err(CliError::UnknownVerb {
-                argv: cli.rest.clone(),
-            });
-        }
-        let item_ref = &cli.rest[1];
-        // Validate it parses as a canonical ref
-        let _canonical =
-            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|_| {
-                crate::error::CliConfigError::InvalidExecuteRef {
-                    path: "<cli>".into(),
-                    item_ref: item_ref.clone(),
-                    detail: "not a valid canonical ref".into(),
-                }
-            })?;
-
-        // Scan tail for --input <path> (mutually exclusive with flag-style binding)
-        let tail = &cli.rest[2..];
-        let parameters = if let Some(input_val) = crate::arg_bind::parse_input_arg(tail)? {
-            input_val
-        } else if let [json_arg] = tail {
-            match serde_json::from_str::<Value>(json_arg) {
-                Ok(value) if value.is_object() => value,
-                _ => crate::arg_bind::bind_tail(tail)?,
-            }
-        } else {
-            crate::arg_bind::bind_tail(tail)?
-        };
-
-        let body = serde_json::json!({
-            "item_ref": item_ref,
-            "project_path": body_project_path,
-            "parameters": parameters,
-        });
-
-        let result = post_to_daemon(&system_space_dir, &body).await?;
-        print_result(result);
-        return Ok(());
-    }
-
-    // 6. Descriptor-driven offline dispatch.
+    // 5. Descriptor-driven offline dispatch.
     //    For commands whose service descriptor declares availability: offline,
     //    run the in-process handler. Returns None to fall through to daemon.
     if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(
         &cli.rest,
         &system_space_dir,
-        &body_project_path,
+        body_project_path.as_deref().unwrap_or("."),
     )? {
         if let crate::offline_dispatch::OfflineDispatchOutcome::Json(result) = outcome {
             print_result(result);
@@ -136,7 +107,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // 7. Token dispatch — send tokens to daemon, it resolves via alias
+    // 6. Token dispatch — send tokens to daemon, it resolves the command
     //    registry and binds tail parameters server-side.
     //
     //    For remote verbs that take a project root, CLI-side rewrite injects a canonical
@@ -146,66 +117,297 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    service-schema `project` field, while global `-p/--project` before
     //    the verb remains supported by clap above.
 
-    let tokens = canonicalize_tokens_from_alias_metadata(
-        &cli.rest,
-        &system_space_dir,
-        cli.project.as_deref(),
-    )?;
+    let resolved =
+        resolve_command_for_daemon(&cli.rest, &system_space_dir, cli.project.as_deref())?;
 
-    let body = serde_json::json!({
-        "tokens": tokens,
-        "project_path": body_project_path,
+    let mut body = serde_json::json!({
+        "item_ref": resolved.item_ref,
+        "parameters": resolved.parameters,
     });
+    if resolved.async_launch {
+        body["launch_mode"] = Value::String("accepted".to_string());
+    }
+    if let Some(project_path) = resolved.project_path {
+        body["project_path"] = Value::String(project_path.to_string_lossy().into_owned());
+    }
 
-    let result = post_to_daemon(&system_space_dir, &body).await?;
+    let route_path = if resolved.async_launch {
+        "/execute/launch"
+    } else {
+        "/execute"
+    };
+    let result = post_to_daemon(&system_space_dir, route_path, &body).await?;
     print_result(result);
     Ok(())
 }
 
-fn canonicalize_tokens_from_alias_metadata(
+struct CliResolvedExecute {
+    item_ref: String,
+    parameters: Value,
+    project_path: Option<PathBuf>,
+    async_launch: bool,
+}
+
+fn resolve_command_for_daemon(
     rest: &[String],
-    system_space_dir: &std::path::Path,
-    default_project: Option<&std::path::Path>,
-) -> Result<Vec<String>, CliError> {
-    let aliases = load_aliases_from_disk(system_space_dir)?;
-    canonicalize_tokens_with_aliases_and_project(rest, &aliases, default_project)
+    system_space_dir: &Path,
+    default_project: Option<&Path>,
+) -> Result<CliResolvedExecute, CliError> {
+    let snapshot = load_verified_snapshot(system_space_dir)?;
+    resolve_command_for_daemon_with_commands(
+        rest,
+        &snapshot.commands,
+        &snapshot.command_registration_policy.policy,
+        default_project,
+    )
+}
+
+fn resolve_command_for_daemon_with_commands(
+    rest: &[String],
+    commands: &[CommandDef],
+    policy: &ryeos_runtime::CommandRegistrationPolicy,
+    default_project: Option<&Path>,
+) -> Result<CliResolvedExecute, CliError> {
+    let registry =
+        CommandRegistry::from_records(commands, policy).map_err(|error| CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        })?;
+    let initial_match = registry.resolve(rest).map_err(|error| CliError::Local {
+        detail: error.to_string(),
+    })?;
+    let tokens = if matches!(
+        initial_match.command.dispatch,
+        CommandDispatch::DirectExecuteItemRef { .. }
+    ) {
+        rest.to_vec()
+    } else {
+        canonicalize_tokens_with_commands_policy_and_project(
+            rest,
+            commands,
+            policy,
+            default_project,
+        )?
+    };
+    let matched = registry.resolve(&tokens).map_err(|error| CliError::Local {
+        detail: error.to_string(),
+    })?;
+    let mut tail = tokens[matched.consumed..].to_vec();
+    let async_launch = if matches!(
+        matched.command.dispatch,
+        CommandDispatch::DirectExecuteItemRef { .. }
+    ) {
+        strip_execute_control_flags(&mut tail)?
+    } else {
+        false
+    };
+    let item_ref = match &matched.command.dispatch {
+        CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
+        CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => tail
+            .first()
+            .filter(|token| !token.starts_with('-'))
+            .cloned()
+            .ok_or_else(|| CliError::Local {
+                detail: format!(
+                    "command '{}' requires argument '{}'",
+                    matched.command.name, item_ref_arg
+                ),
+            })?,
+        CommandDispatch::Group | CommandDispatch::LocalHandler { .. } => {
+            return Err(CliError::Local {
+                detail: format!(
+                    "command '{}' does not dispatch to an executable item ref",
+                    matched.command.name
+                ),
+            });
+        }
+    };
+    let parameter_tail = match matched.command.dispatch {
+        CommandDispatch::DirectExecuteItemRef { .. } => &tail[1..],
+        _ => &tail,
+    };
+    let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
+    let project_path = apply_project_policy(&matched.command, &mut parameters)?;
+    Ok(CliResolvedExecute {
+        item_ref,
+        parameters,
+        project_path,
+        async_launch,
+    })
+}
+
+fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<bool, CliError> {
+    let mut async_launch = false;
+    let mut out = Vec::with_capacity(tail.len());
+    for token in tail.drain(..) {
+        match token.as_str() {
+            "--async" | "--async=true" => {
+                async_launch = true;
+            }
+            "--async=false" => {}
+            token if token.starts_with("--async=") => {
+                return Err(CliError::Local {
+                    detail: format!("invalid execute control flag value: {token}"),
+                });
+            }
+            _ => out.push(token),
+        }
+    }
+    *tail = out;
+    Ok(async_launch)
+}
+
+fn bind_command_parameters_for_daemon(
+    tail: &[String],
+    command: &CommandDef,
+) -> Result<Value, CliError> {
+    let binding = command.parameter_binding.as_ref();
+    if binding.is_some_and(|binding| binding.input_flag.is_some()) {
+        if let Some(input) = crate::arg_bind::parse_input_arg(tail)? {
+            return Ok(input);
+        }
+    }
+
+    if binding.is_some_and(|binding| binding.single_json_object_arg) && tail.len() == 1 {
+        if let Ok(value) = serde_json::from_str::<Value>(&tail[0]) {
+            if value.is_object() {
+                return Ok(value);
+            }
+        }
+    }
+
+    match binding.map(|binding| binding.mode).unwrap_or_default() {
+        CommandParameterBindingMode::None
+        | CommandParameterBindingMode::TailObject
+        | CommandParameterBindingMode::SchemaObject => {
+            ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(command))
+                .map_err(CliError::ProjectResolution)
+        }
+    }
+}
+
+fn apply_project_policy(
+    command: &CommandDef,
+    parameters: &mut Value,
+) -> Result<Option<PathBuf>, CliError> {
+    let Some(project) = command.project.as_ref() else {
+        return Ok(None);
+    };
+
+    let obj = parameters.as_object_mut().ok_or_else(|| {
+        CliError::ProjectResolution("command parameters must be a JSON object".into())
+    })?;
+    let no_project = obj
+        .remove("no_project")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if no_project && !project.no_project_flag {
+        return Err(CliError::ProjectResolution(format!(
+            "command '{}' does not accept --no-project",
+            command.name
+        )));
+    }
+
+    let mut project_path = obj
+        .remove("project")
+        .and_then(|value| value.as_str().map(PathBuf::from));
+    if project_path.is_none() && project.default == CommandProjectDefault::DiscoverUpwardAi {
+        project_path = discover_upward_ai_project()?;
+    }
+
+    if project.resolution == CommandProjectResolution::Required
+        && project_path.is_none()
+        && !no_project
+    {
+        return Err(CliError::ProjectResolution(format!(
+            "command '{}' requires a project",
+            command.name
+        )));
+    }
+
+    if let (Some(bind_parameter), Some(path)) = (&project.bind_parameter, &project_path) {
+        obj.insert(
+            bind_parameter.clone(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+    }
+    if no_project && project.bind_parameter.is_none() {
+        obj.insert("no_project".to_string(), Value::Bool(true));
+    }
+
+    if project.request_project_path {
+        Ok(project_path)
+    } else {
+        Ok(None)
+    }
+}
+
+fn discover_upward_ai_project() -> Result<Option<PathBuf>, CliError> {
+    let cwd =
+        std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
+    for ancestor in cwd.ancestors() {
+        if ancestor.join(ryeos_engine::AI_DIR).is_dir() {
+            return ancestor.canonicalize().map(Some).map_err(|e| {
+                CliError::ProjectResolution(format!(
+                    "cannot canonicalize project path '{}': {e}",
+                    ancestor.display()
+                ))
+            });
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
-fn canonicalize_tokens_with_aliases(
+fn canonicalize_tokens_with_commands(
     rest: &[String],
-    aliases: &[AliasDef],
+    commands: &[CommandDef],
 ) -> Result<Vec<String>, CliError> {
-    canonicalize_tokens_with_aliases_and_project(rest, aliases, None)
+    canonicalize_tokens_with_commands_and_project(rest, commands, None)
 }
 
-fn canonicalize_tokens_with_aliases_and_project(
+#[cfg(test)]
+fn canonicalize_tokens_with_commands_and_project(
     rest: &[String],
-    aliases: &[AliasDef],
+    commands: &[CommandDef],
     default_project: Option<&std::path::Path>,
 ) -> Result<Vec<String>, CliError> {
-    let Some((alias, consumed)) = match_alias(rest, aliases) else {
+    let policy = ryeos_runtime::CommandRegistrationPolicy::default();
+    canonicalize_tokens_with_commands_policy_and_project(rest, commands, &policy, default_project)
+}
+
+fn canonicalize_tokens_with_commands_policy_and_project(
+    rest: &[String],
+    commands: &[CommandDef],
+    policy: &ryeos_runtime::CommandRegistrationPolicy,
+    default_project: Option<&std::path::Path>,
+) -> Result<Vec<String>, CliError> {
+    let registry =
+        CommandRegistry::from_records(commands, policy).map_err(|error| CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        })?;
+    let Ok(matched) = registry.resolve(rest) else {
         return Ok(rest.to_vec());
     };
-    let tail = &rest[consumed..];
+    let tail = &rest[matched.consumed..];
+    let resolution = command_project_resolution(&matched.command);
 
-    if alias.positional_forms.is_empty() && alias.project_resolution == ProjectResolution::None {
+    if matched.command.forms.is_empty() && resolution == CommandProjectResolution::None {
         return Ok(rest.to_vec());
     }
 
-    let bound = ryeos_runtime::arg_binder::bind_argv_with_alias(tail, Some(alias))
+    let bound = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(&matched.command))
         .map_err(CliError::ProjectResolution)?;
     let mut canonical_tail = params_to_tail(&bound);
 
-    match alias.project_resolution {
-        ProjectResolution::None => {}
-        ProjectResolution::Optional => {
+    match resolution {
+        CommandProjectResolution::None => {}
+        CommandProjectResolution::Optional => {
             canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
                 &canonical_tail,
                 default_project,
             )?;
         }
-        ProjectResolution::Required => {
+        CommandProjectResolution::Required => {
             if canonical_tail.iter().any(|t| t == "--no-project") {
                 return Err(CliError::ProjectResolution(
                     "this command requires a project; do not pass --no-project".into(),
@@ -225,19 +427,17 @@ fn canonicalize_tokens_with_aliases_and_project(
         }
     }
 
-    let mut out = rest[..consumed].to_vec();
+    let mut out = rest[..matched.consumed].to_vec();
     out.extend(canonical_tail);
     Ok(out)
 }
 
-fn match_alias<'a>(rest: &[String], aliases: &'a [AliasDef]) -> Option<(&'a AliasDef, usize)> {
-    for len in (1..=rest.len()).rev() {
-        let prefix = &rest[..len];
-        if let Some(alias) = aliases.iter().find(|a| a.tokens == prefix) {
-            return Some((alias, len));
-        }
-    }
-    None
+fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution {
+    command
+        .project
+        .as_ref()
+        .map(|p| p.resolution)
+        .unwrap_or_default()
 }
 
 fn params_to_tail(params: &Value) -> Vec<String> {
@@ -272,17 +472,20 @@ fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
     }
 }
 
-fn load_aliases_from_disk(system_space_dir: &std::path::Path) -> Result<Vec<AliasDef>, CliError> {
-    crate::node_descriptors::load_alias_descriptors(system_space_dir)
-        .map(|aliases| aliases.into_iter().map(|alias| alias.def).collect())
-        .map_err(|error| CliError::Local {
-            detail: format!("load verified node aliases: {error:#}"),
-        })
+fn load_verified_snapshot(
+    system_space_dir: &std::path::Path,
+) -> Result<ryeos_app::node_config::NodeConfigSnapshot, CliError> {
+    crate::node_descriptors::load_verified_snapshot(system_space_dir).map_err(|error| {
+        CliError::Local {
+            detail: format!("load verified node commands: {error:#}"),
+        }
+    })
 }
 
-/// POST a JSON body to the daemon's /execute endpoint and return the response.
+/// POST a JSON body to a daemon execute route and return the response.
 async fn post_to_daemon(
     system_space_dir: &std::path::Path,
+    route_path: &str,
     body: &Value,
 ) -> Result<Value, CliError> {
     lifecycle_preflight(system_space_dir).await?;
@@ -293,9 +496,9 @@ async fn post_to_daemon(
     let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", "/execute", &body_bytes, &audience)?;
+    let headers = signer.sign("POST", route_path, &body_bytes, &audience)?;
 
-    let url = format!("{}/execute", daemon_url);
+    let url = format!("{}{}", daemon_url, route_path);
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
 }
@@ -356,7 +559,7 @@ fn discover_system_space_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::{PositionalForm, PositionalMatcher, PositionalSlot};
+    use ryeos_runtime::CommandArgumentKind;
     fn with_user_space<T>(f: impl FnOnce() -> T) -> T {
         let _g = crate::test_env::lock();
         let saved = std::env::var_os("USER_SPACE");
@@ -376,55 +579,214 @@ mod tests {
         v.iter().map(|x| x.to_string()).collect()
     }
 
-    fn alias(
+    fn command(
         tokens: &[&str],
-        forms: Vec<Vec<(&str, PositionalMatcher)>>,
-        project_resolution: ProjectResolution,
-    ) -> AliasDef {
-        AliasDef {
+        forms: Vec<Vec<(&str, CommandArgumentKind)>>,
+        project_resolution: CommandProjectResolution,
+    ) -> CommandDef {
+        CommandDef {
+            category: "commands".into(),
+            section: "commands".into(),
+            name: tokens.join("-"),
             tokens: s(tokens),
-            verb: tokens.join("-"),
-            deprecated: false,
-            replacement_tokens: None,
-            removed_in: None,
-            positional_forms: forms
+            description: String::new(),
+            aliases: Vec::new(),
+            help: None,
+            arguments: Vec::new(),
+            forms: forms
                 .into_iter()
-                .map(|slots| PositionalForm {
+                .map(|slots| ryeos_runtime::CommandArgumentForm {
                     slots: slots
                         .into_iter()
-                        .map(|(field, matcher)| PositionalSlot {
+                        .map(|(field, matcher)| ryeos_runtime::CommandArgumentSlot {
                             field: field.to_string(),
                             matcher,
                         })
                         .collect(),
                 })
                 .collect(),
-            project_resolution,
+            parameter_binding: None,
+            project: Some(ryeos_runtime::CommandProjectPolicy {
+                resolution: project_resolution,
+                default: ryeos_runtime::CommandProjectDefault::None,
+                no_project_flag: false,
+                request_project_path: false,
+                bind_parameter: None,
+            }),
+            dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
+                execute: "tool:test/command".into(),
+                availability: ryeos_runtime::CommandAvailability::Auto,
+            },
+            source_file: PathBuf::new(),
+            provenance: ryeos_runtime::CommandProvenance::default(),
+        }
+    }
+
+    fn direct_execute_command() -> CommandDef {
+        CommandDef {
+            category: "commands".into(),
+            section: "commands".into(),
+            name: "execute".into(),
+            tokens: s(&["execute"]),
+            description: "Execute an item".into(),
+            aliases: Vec::new(),
+            help: None,
+            arguments: Vec::new(),
+            forms: vec![ryeos_runtime::CommandArgumentForm {
+                slots: vec![ryeos_runtime::CommandArgumentSlot {
+                    field: "item_ref".into(),
+                    matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
+                }],
+            }],
+            parameter_binding: Some(ryeos_runtime::CommandParameterBinding {
+                mode: ryeos_runtime::CommandParameterBindingMode::TailObject,
+                input_flag: Some("input".into()),
+                single_json_object_arg: true,
+                flag_key_normalization: ryeos_runtime::FlagKeyNormalization::HyphenToUnderscore,
+            }),
+            project: Some(ryeos_runtime::CommandProjectPolicy {
+                resolution: ryeos_runtime::CommandProjectResolution::Optional,
+                default: ryeos_runtime::CommandProjectDefault::None,
+                no_project_flag: true,
+                request_project_path: false,
+                bind_parameter: None,
+            }),
+            dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
+                item_ref_arg: "item_ref".into(),
+                availability: ryeos_runtime::CommandAvailability::Both,
+            },
+            source_file: PathBuf::new(),
+            provenance: ryeos_runtime::CommandProvenance::default(),
         }
     }
 
     #[test]
-    fn remote_threads_positional_remote_is_normalized() {
-        let aliases = vec![alias(
-            &["remote", "threads"],
-            vec![vec![("remote", PositionalMatcher::Any)]],
-            ProjectResolution::None,
+    fn direct_execute_async_before_item_is_control_flag() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--async", "tool:test/run", "--batch-size", "50"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert_eq!(resolved.parameters["batch_size"], serde_json::json!("50"));
+        assert!(resolved.parameters.get("async").is_none());
+    }
+
+    #[test]
+    fn direct_execute_async_after_item_is_control_flag() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "tool:test/run", "--async", "--provider", "zen"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert_eq!(resolved.parameters["provider"], serde_json::json!("zen"));
+        assert!(resolved.parameters.get("async").is_none());
+    }
+
+    #[test]
+    fn direct_execute_without_async_uses_foreground_execute() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "tool:test/run", "--provider", "zen"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(!resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert_eq!(resolved.parameters["provider"], serde_json::json!("zen"));
+    }
+
+    #[test]
+    fn direct_execute_async_false_keeps_foreground_execute() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--async=false", "tool:test/run"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(!resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert!(resolved.parameters.get("async").is_none());
+    }
+
+    #[test]
+    fn direct_execute_async_invalid_value_errors() {
+        let commands = vec![direct_execute_command()];
+        let result = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--async=maybe", "tool:test/run"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        );
+
+        match result {
+            Ok(_) => panic!("invalid --async value unexpectedly succeeded"),
+            Err(err) => {
+                assert!(format!("{err}").contains("invalid execute control flag value"));
+            }
+        }
+    }
+
+    #[test]
+    fn non_direct_command_async_remains_parameter() {
+        let commands = vec![command(
+            &["demo"],
+            Vec::new(),
+            CommandProjectResolution::None,
         )];
-        let out = canonicalize_tokens_with_aliases(&s(&["remote", "threads", "railway"]), &aliases)
-            .unwrap();
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["demo", "--async"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(!resolved.async_launch);
+        assert_eq!(resolved.item_ref, "tool:test/command");
+        assert_eq!(resolved.parameters["async"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn remote_threads_positional_remote_is_normalized() {
+        let commands = vec![command(
+            &["remote", "threads"],
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::None,
+        )];
+        let out =
+            canonicalize_tokens_with_commands(&s(&["remote", "threads", "railway"]), &commands)
+                .unwrap();
         assert_eq!(out, s(&["remote", "threads", "--remote", "railway"]));
     }
 
     #[test]
     fn remote_project_status_positional_remote_is_normalized() {
-        let aliases = vec![alias(
+        let commands = vec![command(
             &["remote", "project-status"],
-            vec![vec![("remote", PositionalMatcher::Any)]],
-            ProjectResolution::Required,
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::Required,
         )];
-        let out = canonicalize_tokens_with_aliases(
+        let out = canonicalize_tokens_with_commands(
             &s(&["remote", "project-status", "railway", "--project", "/tmp"]),
-            &aliases,
+            &commands,
         )
         .unwrap();
         assert_eq!(
@@ -443,12 +805,12 @@ mod tests {
     #[test]
     fn remote_bind_project_accepts_project_after_verb() {
         let tmp = tempfile::tempdir().unwrap();
-        let aliases = vec![alias(
+        let commands = vec![command(
             &["remote", "bind-project"],
-            vec![vec![("remote", PositionalMatcher::Any)]],
-            ProjectResolution::Required,
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::Required,
         )];
-        let out = canonicalize_tokens_with_aliases(
+        let out = canonicalize_tokens_with_commands(
             &s(&[
                 "remote",
                 "bind-project",
@@ -460,7 +822,7 @@ mod tests {
                 "--sync-scope",
                 "ai_only",
             ]),
-            &aliases,
+            &commands,
         )
         .unwrap();
         assert_eq!(
@@ -476,12 +838,12 @@ mod tests {
     fn remote_doctor_accepts_optional_project_after_verb() {
         with_user_space(|| {
             let tmp = tempfile::tempdir().unwrap();
-            let aliases = vec![alias(
+            let commands = vec![command(
                 &["remote", "doctor"],
-                vec![vec![("remote", PositionalMatcher::Any)]],
-                ProjectResolution::Optional,
+                vec![vec![("remote", CommandArgumentKind::String)]],
+                CommandProjectResolution::Optional,
             )];
-            let out = canonicalize_tokens_with_aliases(
+            let out = canonicalize_tokens_with_commands(
                 &s(&[
                     "remote",
                     "doctor",
@@ -489,7 +851,7 @@ mod tests {
                     "--project",
                     &tmp.path().to_string_lossy(),
                 ]),
-                &aliases,
+                &commands,
             )
             .unwrap();
             assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
@@ -502,12 +864,12 @@ mod tests {
     #[test]
     fn project_aware_alias_uses_global_project_default() {
         let tmp = tempfile::tempdir().unwrap();
-        let aliases = vec![alias(
+        let commands = vec![command(
             &["remote", "bind-project"],
-            vec![vec![("remote", PositionalMatcher::Any)]],
-            ProjectResolution::Required,
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::Required,
         )];
-        let out = canonicalize_tokens_with_aliases_and_project(
+        let out = canonicalize_tokens_with_commands_and_project(
             &s(&[
                 "remote",
                 "bind-project",
@@ -515,7 +877,7 @@ mod tests {
                 "--remote-project",
                 "/data/app",
             ]),
-            &aliases,
+            &commands,
             Some(tmp.path()),
         )
         .unwrap();
@@ -527,18 +889,18 @@ mod tests {
     #[test]
     fn remote_execute_remote_then_item_is_normalized() {
         with_user_space(|| {
-            let aliases = vec![alias(
+            let commands = vec![command(
                 &["remote", "execute"],
                 vec![
                     vec![
-                        ("remote", PositionalMatcher::Any),
-                        ("item_ref", PositionalMatcher::CanonicalRef),
+                        ("remote", CommandArgumentKind::String),
+                        ("item_ref", CommandArgumentKind::CanonicalRef),
                     ],
-                    vec![("item_ref", PositionalMatcher::CanonicalRef)],
+                    vec![("item_ref", CommandArgumentKind::CanonicalRef)],
                 ],
-                ProjectResolution::Optional,
+                CommandProjectResolution::Optional,
             )];
-            let out = canonicalize_tokens_with_aliases(
+            let out = canonicalize_tokens_with_commands(
                 &s(&[
                     "remote",
                     "execute",
@@ -546,7 +908,7 @@ mod tests {
                     "service:health/status",
                     "--no-project",
                 ]),
-                &aliases,
+                &commands,
             )
             .unwrap();
             assert_eq!(
@@ -567,19 +929,19 @@ mod tests {
     #[test]
     fn remote_execute_item_only_is_left_for_default_remote() {
         with_user_space(|| {
-            let aliases = vec![alias(
+            let commands = vec![command(
                 &["remote", "execute"],
                 vec![
                     vec![
-                        ("remote", PositionalMatcher::Any),
-                        ("item_ref", PositionalMatcher::CanonicalRef),
+                        ("remote", CommandArgumentKind::String),
+                        ("item_ref", CommandArgumentKind::CanonicalRef),
                     ],
-                    vec![("item_ref", PositionalMatcher::CanonicalRef)],
+                    vec![("item_ref", CommandArgumentKind::CanonicalRef)],
                 ],
-                ProjectResolution::Optional,
+                CommandProjectResolution::Optional,
             )];
             let input = s(&["remote", "execute", "service:health/status", "--no-project"]);
-            let out = canonicalize_tokens_with_aliases(&input, &aliases).unwrap();
+            let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
             assert_eq!(
                 out,
                 s(&[
@@ -595,29 +957,33 @@ mod tests {
 
     #[test]
     fn explicit_remote_forms_are_not_rewritten() {
-        let aliases = vec![alias(
+        let commands = vec![command(
             &["remote", "threads"],
-            vec![vec![("remote", PositionalMatcher::Any)]],
-            ProjectResolution::None,
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::None,
         )];
         let flag = s(&["remote", "threads", "--remote", "railway"]);
         assert_eq!(
-            canonicalize_tokens_with_aliases(&flag, &aliases).unwrap(),
+            canonicalize_tokens_with_commands(&flag, &commands).unwrap(),
             flag
         );
 
         let equals_flag = s(&["remote", "threads", "--remote=railway"]);
         assert_eq!(
-            canonicalize_tokens_with_aliases(&equals_flag, &aliases).unwrap(),
+            canonicalize_tokens_with_commands(&equals_flag, &commands).unwrap(),
             s(&["remote", "threads", "--remote", "railway"])
         );
     }
 
     #[test]
     fn aliases_without_metadata_preserve_positional_tail() {
-        let aliases = vec![alias(&["status"], Vec::new(), ProjectResolution::None)];
+        let commands = vec![command(
+            &["status"],
+            Vec::new(),
+            CommandProjectResolution::None,
+        )];
         let input = s(&["status", "extra-arg"]);
-        let out = canonicalize_tokens_with_aliases(&input, &aliases).unwrap();
+        let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
         assert_eq!(out, input);
     }
 }

@@ -1,0 +1,18 @@
+# ryeos:signed:2026-06-04T07:15:08Z:15bc99da069ce51f82b52cb39af3fe9c1ee934c8eea821b325bcf643790b2731:888HK5YCIrHl+M4v0cDg3iRCGjN1b4zCzEu0113FcFOPfvjsrNMYzPVyl3pm8CEJC6S96R1JiSVd/xaPTa1jCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+category: commands
+section: commands
+name: surface-open
+tokens:
+- surface
+- open
+description: Open a surface in the selected renderer
+forms:
+- slots:
+  - field: surface
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/surface-open

@@ -481,16 +481,7 @@ mod tests {
 
         // Defense in depth: loaded scopes must actually satisfy a real
         // handler's required cap when fed to the authorizer.
-        let registry = std::sync::Arc::new(
-            ryeos_runtime::verb_registry::VerbRegistry::from_records(&[
-                ryeos_runtime::verb_registry::VerbDef {
-                    name: "execute".into(),
-                    execute: None,
-                },
-            ])
-            .unwrap(),
-        );
-        let authorizer = ryeos_runtime::authorizer::Authorizer::new(registry);
+        let authorizer = ryeos_runtime::authorizer::Authorizer::new();
         let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(
             "ryeos.execute.service.bundle.install",
         );

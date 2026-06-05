@@ -31,7 +31,7 @@ COPY target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
 COPY bundles/core        /opt/ryeos/core
 COPY bundles/standard    /opt/ryeos/standard
 COPY bundles/web         /opt/ryeos/web
-COPY bundles/cockpit     /opt/ryeos/cockpit
+COPY bundles/studio     /opt/ryeos/studio
 COPY bundles/hosted-node /opt/ryeos/hosted-node
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh

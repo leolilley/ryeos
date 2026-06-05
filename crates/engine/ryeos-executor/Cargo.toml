@@ -10,6 +10,7 @@ chrono = "0.4"
 lillux = { path = "../../kernel/lillux" }
 rand = "0.8"
 ryeos-app = { path = "../../daemon/ryeos-app" }
+ryeos-bundle = { path = "../../daemon/ryeos-bundle" }
 ryeos-engine = { path = "../ryeos-engine" }
 ryeos-runtime = { path = "../ryeos-runtime" }
 ryeos-state = { path = "../../state/ryeos-state" }

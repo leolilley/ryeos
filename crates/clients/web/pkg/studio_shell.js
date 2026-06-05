@@ -10,7 +10,7 @@ let root = null;
 let committing = false;
 let queuedEnvelope = null;
 let currentEnvelope = null;
-let latestSnapshot = null;
+let latestDimension = null;
 
 export async function bootStudio(appRoot) {
   root = appRoot;
@@ -47,7 +47,7 @@ async function commit(envelope) {
     for (const effect of envelope.effects || []) {
       runEffect(effect)
         .then((result) => {
-          if (result?.kind === "snapshot" && result?.data) latestSnapshot = result.data;
+          if (result?.kind === "dimension" && result?.data) latestDimension = result.data;
           return commit(studio_apply_effect_result(result));
         })
         .catch((error) => commit(studio_apply_effect_result(failedResultFor(effect, error))));
@@ -73,7 +73,7 @@ function rerenderShell() {
 
 function shellController() {
   return {
-    snapshot: latestSnapshot,
+    dimension: latestDimension,
     openLauncher() {
       dispatchUi({ type: "open_launcher" });
     },

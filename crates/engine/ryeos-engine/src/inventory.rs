@@ -151,6 +151,17 @@ pub fn build_inventory_for_kind(
                     source: Box::new(e),
                 }
             })?;
+        // Tool inventory is a direct-invocation surface: runtimes hand
+        // these descriptors back to dispatch as tools an agent may ask
+        // to run as the requested/root item. A tool with no extracted
+        // executor_id cannot be used that way. In core, terminal chain
+        // nodes such as `ryeos/core/subprocess/execute` are represented
+        // with `executor_id: null`: they are valid endpoints of another
+        // tool's executor chain, but they are not ordinary launchable
+        // tools and should not be offered in inventory.
+        if is_not_directly_invokable_tool_descriptor(inventoried_kind, &descriptor) {
+            continue;
+        }
         if let Some(prev_id) = seen_names.get(&descriptor.name) {
             return Err(EngineError::DuplicateInventoryName {
                 kind: inventoried_kind.to_owned(),
@@ -247,6 +258,13 @@ fn build_descriptor_for_ref(
     })
 }
 
+fn is_not_directly_invokable_tool_descriptor(
+    inventoried_kind: &str,
+    descriptor: &ItemDescriptor,
+) -> bool {
+    inventoried_kind == "tool" && !descriptor.extra.contains_key("executor_id")
+}
+
 /// Read the parsed body and return the first non-null value at any
 /// of `keys`. `None` when the list is empty (kind opts out of schema)
 /// or no candidate is present.
@@ -320,5 +338,27 @@ mod tests {
     fn pick_schema_returns_none_when_no_keys() {
         let parsed = serde_json::json!({"x": 1});
         assert!(pick_schema(&parsed, &[]).is_none());
+    }
+
+    #[test]
+    fn tool_descriptors_without_executor_id_are_not_directly_invokable() {
+        let mut descriptor = ItemDescriptor::default();
+        assert!(is_not_directly_invokable_tool_descriptor(
+            "tool",
+            &descriptor
+        ));
+        assert!(!is_not_directly_invokable_tool_descriptor(
+            "knowledge",
+            &descriptor
+        ));
+
+        descriptor.extra.insert(
+            "executor_id".to_owned(),
+            Value::String("@subprocess".to_owned()),
+        );
+        assert!(!is_not_directly_invokable_tool_descriptor(
+            "tool",
+            &descriptor
+        ));
     }
 }
