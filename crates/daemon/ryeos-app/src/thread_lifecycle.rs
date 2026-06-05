@@ -22,6 +22,7 @@ use ryeos_engine::contracts::{
     ThreadTerminalStatus, TrustClass,
 };
 use ryeos_engine::engine::Engine;
+use ryeos_state::UsageSubject;
 
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
@@ -63,6 +64,10 @@ pub struct ThreadCreateParams {
     pub upstream_thread_id: Option<String>,
     #[serde(default)]
     pub requested_by: Option<String>,
+    #[serde(default)]
+    pub usage_subject: Option<UsageSubject>,
+    #[serde(default)]
+    pub usage_subject_asserted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +162,8 @@ pub struct ResolvedExecutionRequest {
     pub origin_site_id: String,
     pub target_site_id: Option<String>,
     pub requested_by: Option<String>,
+    pub usage_subject: Option<UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
     pub parameters: Value,
     /// The engine's resolved item — carried through for verify/build_plan/execute.
     pub resolved_item: ResolvedItem,
@@ -247,6 +254,8 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         };
 
         let _persisted = self.state_store.create_thread(&thread_record)?;
@@ -281,6 +290,8 @@ impl ThreadLifecycleService {
             origin_site_id: params.origin_site_id.clone(),
             upstream_thread_id: params.upstream_thread_id.clone(),
             requested_by: params.requested_by.clone(),
+            usage_subject: params.usage_subject.clone(),
+            usage_subject_asserted_by: params.usage_subject_asserted_by.clone(),
         };
 
         let _persisted = self.state_store.create_thread(&thread_record)?;
@@ -584,6 +595,8 @@ impl ThreadLifecycleService {
             origin_site_id: source.origin_site_id.clone(),
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: source.requested_by.clone(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
         };
 
         // Create successor, write continued edge, finalize source — all in one transaction
@@ -639,7 +652,7 @@ impl ThreadLifecycleService {
     ///
     /// When `filter_principal` is `Some(fp)`, only threads with
     /// `requested_by = fp` are returned. `None` returns all threads
-    /// (admin callers).
+    /// (internal callers that intentionally request an unfiltered view).
     pub fn list_threads_filtered(
         &self,
         limit: usize,
@@ -754,6 +767,8 @@ pub struct ResolveRootExecutionParams<'a> {
     pub launch_mode: &'a str,
     pub parameters: Value,
     pub requested_by: Option<String>,
+    pub usage_subject: Option<UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
     pub caller_scopes: Vec<String>,
     pub validate_only: bool,
 }
@@ -769,6 +784,8 @@ pub fn resolve_root_execution(
         launch_mode,
         parameters,
         requested_by,
+        usage_subject,
+        usage_subject_asserted_by,
         caller_scopes,
         validate_only,
     } = params;
@@ -817,6 +834,8 @@ pub fn resolve_root_execution(
         origin_site_id: site_id.to_string(),
         target_site_id: None,
         requested_by,
+        usage_subject,
+        usage_subject_asserted_by,
         parameters,
         resolved_item: resolved,
         plan_context: plan_ctx,

@@ -133,6 +133,8 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             provenance,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
             operation: None,
             inputs: None,
         };

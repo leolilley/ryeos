@@ -1,6 +1,6 @@
 //! `scheduler.explain` — explain a schedule's current planning state.
 //!
-//! Ownership check: non-admin callers can only explain schedules they own.
+//! Ownership check: callers can only explain schedules they own.
 
 use std::sync::Arc;
 

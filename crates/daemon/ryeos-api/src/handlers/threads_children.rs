@@ -1,6 +1,6 @@
 //! `threads.children` — list immediate child threads of a parent.
 //!
-//! Ownership check: non-admin callers can only access children of
+//! Ownership check: callers can only access children of
 //! threads they own.
 
 use std::sync::Arc;

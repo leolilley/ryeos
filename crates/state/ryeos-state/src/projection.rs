@@ -131,6 +131,52 @@ CREATE TABLE IF NOT EXISTS thread_facets (
 
 CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
 
+-- Latest cumulative usage per thread. Raw thread_usage events are cumulative,
+-- so summary queries must read this latest-per-thread projection instead of
+-- summing the events table directly.
+CREATE TABLE IF NOT EXISTS thread_usage_latest (
+    thread_id TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL,
+    thread_seq INTEGER NOT NULL,
+
+    completed_turns INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    spend_usd REAL NOT NULL,
+    spawns_used INTEGER NOT NULL,
+
+    started_at TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    last_settled_turn_seq INTEGER NOT NULL,
+    elapsed_ms INTEGER NOT NULL,
+
+    provider_id TEXT,
+    model TEXT,
+    profile TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_chain
+    ON thread_usage_latest(chain_root_id);
+CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_settled_at
+    ON thread_usage_latest(settled_at);
+CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_model
+    ON thread_usage_latest(provider_id, model);
+
+-- App-level usage attribution asserted by an authorized RyeOS principal at
+-- root launch time. Keyed by chain root so child/continuation usage can join
+-- back to the root app subject.
+CREATE TABLE IF NOT EXISTS thread_usage_subjects (
+    chain_root_id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    asserted_by TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_usage_subjects_subject
+    ON thread_usage_subjects(namespace, subject);
+
 -- CAS entry attribution: why a CAS object/blob is present locally.
 CREATE TABLE IF NOT EXISTS cas_entries (
     hash TEXT NOT NULL,
@@ -603,6 +649,142 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "thread_usage_latest",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completed_turns",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "input_tokens",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "output_tokens",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spend_usd",
+                        col_type: "REAL",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spawns_used",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "started_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settled_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_settled_turn_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "elapsed_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "provider_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "model",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "profile",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_usage_subjects",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "namespace",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "subject",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "asserted_by",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "cas_entries",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -976,6 +1158,30 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_facets_thread",
                 table: "thread_facets",
                 columns: &["thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_latest_chain",
+                table: "thread_usage_latest",
+                columns: &["chain_root_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_latest_settled_at",
+                table: "thread_usage_latest",
+                columns: &["settled_at"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_latest_model",
+                table: "thread_usage_latest",
+                columns: &["provider_id", "model"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_subjects_subject",
+                table: "thread_usage_subjects",
+                columns: &["namespace", "subject"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -2482,7 +2688,157 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         }
     }
 
+    if event.event_type == "thread_usage" {
+        project_thread_usage_latest(db, event)?;
+    }
+
+    if event.event_type == "thread_created" {
+        project_thread_usage_subject(db, event)?;
+    }
+
     Ok(())
+}
+
+fn project_thread_usage_subject(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+) -> anyhow::Result<()> {
+    let Some(subject_value) = event.payload.get("usage_subject") else {
+        return Ok(());
+    };
+
+    let usage_subject: crate::UsageSubject = serde_json::from_value(subject_value.clone())
+        .context("failed to deserialize thread_created usage_subject")?;
+    usage_subject.validate()?;
+    let asserted_by = event
+        .payload
+        .get("usage_subject_asserted_by")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    db.connection()
+        .execute(
+            "INSERT INTO thread_usage_subjects (
+                chain_root_id, namespace, subject, asserted_by, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chain_root_id) DO UPDATE SET
+                namespace = excluded.namespace,
+                subject = excluded.subject,
+                asserted_by = excluded.asserted_by,
+                created_at = excluded.created_at",
+            rusqlite::params![
+                &event.chain_root_id,
+                &usage_subject.namespace,
+                &usage_subject.subject,
+                asserted_by,
+                &event.ts,
+            ],
+        )
+        .context("failed to project thread_usage_subjects")?;
+
+    Ok(())
+}
+
+fn project_thread_usage_latest(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+) -> anyhow::Result<()> {
+    let completed_turns = payload_u64_to_i64(&event.payload, "completed_turns")?;
+    let input_tokens = payload_u64_to_i64(&event.payload, "input_tokens")?;
+    let output_tokens = payload_u64_to_i64(&event.payload, "output_tokens")?;
+    let spawns_used = payload_u64_to_i64(&event.payload, "spawns_used")?;
+    let last_settled_turn_seq = payload_u64_to_i64(&event.payload, "last_settled_turn_seq")?;
+    let elapsed_ms = payload_u64_to_i64(&event.payload, "elapsed_ms")?;
+    let started_at = payload_str(&event.payload, "started_at")?;
+    let settled_at = payload_str(&event.payload, "settled_at")?;
+    let spend_usd = event
+        .payload
+        .get("spend_usd")
+        .and_then(|value| value.as_f64())
+        .context("thread_usage payload missing numeric spend_usd")?;
+    let provider_id = event
+        .payload
+        .get("provider_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let model = event
+        .payload
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let profile = event
+        .payload
+        .get("profile")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    db.connection()
+        .execute(
+            "INSERT INTO thread_usage_latest (
+                thread_id, chain_root_id, chain_seq, thread_seq,
+                completed_turns, input_tokens, output_tokens, spend_usd, spawns_used,
+                started_at, settled_at, last_settled_turn_seq, elapsed_ms,
+                provider_id, model, profile
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                chain_root_id = excluded.chain_root_id,
+                chain_seq = excluded.chain_seq,
+                thread_seq = excluded.thread_seq,
+                completed_turns = excluded.completed_turns,
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                spend_usd = excluded.spend_usd,
+                spawns_used = excluded.spawns_used,
+                started_at = excluded.started_at,
+                settled_at = excluded.settled_at,
+                last_settled_turn_seq = excluded.last_settled_turn_seq,
+                elapsed_ms = excluded.elapsed_ms,
+                provider_id = excluded.provider_id,
+                model = excluded.model,
+                profile = excluded.profile
+            WHERE excluded.chain_seq > thread_usage_latest.chain_seq",
+            rusqlite::params![
+                &event.thread_id,
+                &event.chain_root_id,
+                u64_to_i64(event.chain_seq, "chain_seq")?,
+                u64_to_i64(event.thread_seq, "thread_seq")?,
+                completed_turns,
+                input_tokens,
+                output_tokens,
+                spend_usd,
+                spawns_used,
+                started_at,
+                settled_at,
+                last_settled_turn_seq,
+                elapsed_ms,
+                provider_id,
+                model,
+                profile,
+            ],
+        )
+        .context("failed to project thread_usage_latest")?;
+
+    Ok(())
+}
+
+fn payload_u64_to_i64(payload: &serde_json::Value, field: &str) -> anyhow::Result<i64> {
+    let value = payload
+        .get(field)
+        .and_then(|value| value.as_u64())
+        .with_context(|| format!("thread_usage payload missing integer {field}"))?;
+    u64_to_i64(value, field)
+}
+
+fn payload_str(payload: &serde_json::Value, field: &str) -> anyhow::Result<String> {
+    payload
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .with_context(|| format!("thread_usage payload missing string {field}"))
+}
+
+fn u64_to_i64(value: u64, field: &str) -> anyhow::Result<i64> {
+    i64::try_from(value).with_context(|| format!("thread_usage {field} exceeds i64"))
 }
 
 /// Project a thread edge (parent-child relationship).
@@ -2550,6 +2906,7 @@ mod tests {
 
         assert!(tables.contains(&"projection_meta".to_string()));
         assert!(tables.contains(&"threads".to_string()));
+        assert!(tables.contains(&"thread_usage_latest".to_string()));
     }
 
     #[test]

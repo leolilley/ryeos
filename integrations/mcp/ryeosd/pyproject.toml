@@ -1,6 +1,6 @@
 [project]
 name = "ryeosd-mcp"
-version = "0.5.0"
+version = "0.5.4"
 description = "MCP server for RYE OS — thin wrapper over the ryeos CLI"
 requires-python = ">=3.10"
 license = "MIT"

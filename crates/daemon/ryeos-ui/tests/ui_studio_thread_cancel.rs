@@ -41,6 +41,8 @@ fn create_thread(state: &ryeos_app::state::AppState, thread_id: &str, requested_
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
             requested_by: Some(requested_by.to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
         })
         .expect("create thread");
 }

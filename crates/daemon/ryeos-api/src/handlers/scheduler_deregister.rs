@@ -1,6 +1,6 @@
 //! `scheduler.deregister` — remove a schedule spec.
 //!
-//! Ownership check: non-admin callers can only deregister their own schedules.
+//! Ownership check: callers can only deregister their own schedules.
 
 use std::sync::Arc;
 

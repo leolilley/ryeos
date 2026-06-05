@@ -52,7 +52,9 @@ pub fn rebuild_projection(
          DELETE FROM thread_edges;
          DELETE FROM thread_results;
          DELETE FROM thread_artifacts;
-         DELETE FROM thread_facets;",
+         DELETE FROM thread_facets;
+         DELETE FROM thread_usage_latest;
+         DELETE FROM thread_usage_subjects;",
     )
     .context("failed to clear projection tables")?;
 

@@ -13,6 +13,7 @@ use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
 use ryeos_state::signer::Signer;
 use ryeos_state::StateDb;
+use ryeos_state::UsageSubject;
 
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
@@ -68,6 +69,8 @@ pub struct NewThreadRecord {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub usage_subject: Option<UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -377,15 +380,25 @@ impl StateStore {
         // Edge is derived from snapshot's upstream_thread_id during
         // project_thread_snapshot (see projection.rs). No direct write needed.
 
+        let mut payload = json!({
+            "kind": &thread.kind,
+            "item_ref": &thread.item_ref,
+            "executor_ref": &thread.executor_ref,
+            "launch_mode": &thread.launch_mode,
+        });
+        if let Some(usage_subject) = &thread.usage_subject {
+            usage_subject.validate()?;
+            payload["usage_subject"] =
+                serde_json::to_value(usage_subject).context("failed to encode usage_subject")?;
+            if let Some(asserted_by) = &thread.usage_subject_asserted_by {
+                payload["usage_subject_asserted_by"] = json!(asserted_by);
+            }
+        }
+
         let create_event = NewEventRecord {
             event_type: "thread_created".to_string(),
             storage_class: "indexed".to_string(),
-            payload: json!({
-                "kind": &thread.kind,
-                "item_ref": &thread.item_ref,
-                "executor_ref": &thread.executor_ref,
-                "launch_mode": &thread.launch_mode,
-            }),
+            payload,
         };
 
         let te = convert_events(
@@ -579,6 +592,9 @@ impl StateStore {
                     settled_at: now.clone(),
                     last_settled_turn_seq: cost.turns as u64,
                     elapsed_ms: 0, // daemon doesn't track wall-clock time
+                    provider_id: None,
+                    model: None,
+                    profile: None,
                 }
             }),
             artifacts: artifacts_json,
@@ -945,7 +961,7 @@ impl StateStore {
     ///
     /// When `filter_principal` is `Some(fp)`, only threads with
     /// `requested_by = fp` are returned. `None` returns all threads
-    /// (used by admin callers).
+    /// (used by internal callers that intentionally request an unfiltered view).
     pub fn list_threads_filtered(
         &self,
         limit: usize,
@@ -970,6 +986,14 @@ impl StateStore {
                 updated_at: row.updated_at,
             })
             .collect())
+    }
+
+    pub fn summarize_usage_by_subject(
+        &self,
+        filter: queries::UsageSummaryFilter<'_>,
+    ) -> Result<Vec<queries::UsageSummaryRow>> {
+        let g = self.lock()?;
+        queries::summarize_usage_by_subject(g.state_db.projection(), filter)
     }
 
     pub fn list_thread_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {

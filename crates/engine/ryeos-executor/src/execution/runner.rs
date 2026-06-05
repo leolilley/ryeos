@@ -1419,6 +1419,8 @@ pub fn execution_params_from_resume_context(
         origin_site_id: resume.origin_site_id.clone(),
         target_site_id: None,
         requested_by: resume.requested_by_name(),
+        usage_subject: None,
+        usage_subject_asserted_by: None,
         parameters: resume.parameters.clone(),
         resolved_item,
         plan_context: plan_ctx,

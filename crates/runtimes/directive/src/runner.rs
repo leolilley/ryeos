@@ -404,6 +404,9 @@ impl Runner {
                                 settled_at: lillux::time::iso8601_now(),
                                 last_settled_turn_seq: turn as u64,
                                 elapsed_ms: turn_start.elapsed().as_millis() as u64,
+                                provider_id: Some(self.provider_id.clone()),
+                                model: Some(self.model_name.clone()),
+                                profile: self.matched_profile.clone(),
                             };
 
                             if let Err(e) = self.callback.emit_thread_usage(&proposed_usage).await {

@@ -106,6 +106,8 @@ impl SchedulerContext for AppSchedulerContext {
             provenance,
             original_root_kind: &original_root_kind,
             pre_minted_thread_id: Some(thread_id.to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
             operation: None,
             inputs: None,
         };

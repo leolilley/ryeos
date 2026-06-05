@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-runtime"
-version = "0.5.0"
+version = "0.5.4"
 edition = "2021"
 license = "MIT"
 description = "Shared runtime library for Rye OS Rust runtimes"

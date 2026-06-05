@@ -1,7 +1,6 @@
 //! `threads.list` — paginated thread listing.
 //!
-//! Supports optional owner filtering: when the caller is authenticated
-//! and is not an admin, only threads owned by the caller are returned.
+//! Supports owner filtering: authenticated callers see only threads they own.
 
 use std::sync::Arc;
 
@@ -23,15 +22,12 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    // Non-admin callers see only their own threads.
-    let filter_principal = if ctx.is_present() && !ctx.is_admin() {
-        Some(ctx.fingerprint.as_str())
-    } else {
-        None
+    let Some(filter_principal) = ctx.is_present().then_some(ctx.fingerprint.as_str()) else {
+        return Ok(serde_json::json!([]));
     };
     state
         .threads
-        .list_threads_filtered(req.limit, filter_principal)
+        .list_threads_filtered(req.limit, Some(filter_principal))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

@@ -9,8 +9,52 @@ use serde::{Deserialize, Serialize};
 
 use super::{validate_object_kind, SCHEMA_VERSION};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct UsageSubject {
+    pub namespace: String,
+    pub subject: String,
+}
+
+impl UsageSubject {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_usage_namespace(&self.namespace)?;
+        validate_usage_subject(&self.subject)?;
+        Ok(())
+    }
+}
+
+fn validate_usage_namespace(value: &str) -> anyhow::Result<()> {
+    if value.is_empty() || value.len() > 64 {
+        anyhow::bail!("usage_subject.namespace must be 1..=64 characters");
+    }
+    let mut chars = value.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        anyhow::bail!("usage_subject.namespace must start with lowercase ASCII or digit");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+    {
+        anyhow::bail!(
+            "usage_subject.namespace may contain only lowercase ASCII, digits, '_' and '-'"
+        );
+    }
+    Ok(())
+}
+
+fn validate_usage_subject(value: &str) -> anyhow::Result<()> {
+    if value.is_empty() || value.len() > 256 {
+        anyhow::bail!("usage_subject.subject must be 1..=256 characters");
+    }
+    if value.chars().any(char::is_control) {
+        anyhow::bail!("usage_subject.subject must not contain control characters");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadUsage {
     pub completed_turns: u32,
     pub input_tokens: u64,
@@ -21,6 +65,12 @@ pub struct ThreadUsage {
     pub settled_at: String,
     pub last_settled_turn_seq: u64,
     pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// Thread status enum — must match the CHECK constraint in db.rs exactly:

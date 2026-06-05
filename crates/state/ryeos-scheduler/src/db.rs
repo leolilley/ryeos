@@ -580,7 +580,7 @@ impl SchedulerDb {
     ///
     /// When `filter_requester` is `Some(fp)`, only schedules with
     /// `requester_fingerprint = fp` are returned. `None` returns all
-    /// schedules (admin callers).
+    /// schedules (internal callers that intentionally request an unfiltered view).
     pub fn list_specs_filtered(
         &self,
         enabled_only: bool,

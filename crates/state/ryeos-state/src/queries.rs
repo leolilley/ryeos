@@ -166,6 +166,121 @@ impl FacetRow {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ThreadUsageLatestRow {
+    pub thread_id: String,
+    pub chain_root_id: String,
+    pub chain_seq: i64,
+    pub thread_seq: i64,
+    pub completed_turns: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub spend_usd: f64,
+    pub spawns_used: i64,
+    pub started_at: String,
+    pub settled_at: String,
+    pub last_settled_turn_seq: i64,
+    pub elapsed_ms: i64,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+    pub profile: Option<String>,
+}
+
+impl ThreadUsageLatestRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            thread_id: row.get("thread_id")?,
+            chain_root_id: row.get("chain_root_id")?,
+            chain_seq: row.get("chain_seq")?,
+            thread_seq: row.get("thread_seq")?,
+            completed_turns: row.get("completed_turns")?,
+            input_tokens: row.get("input_tokens")?,
+            output_tokens: row.get("output_tokens")?,
+            spend_usd: row.get("spend_usd")?,
+            spawns_used: row.get("spawns_used")?,
+            started_at: row.get("started_at")?,
+            settled_at: row.get("settled_at")?,
+            last_settled_turn_seq: row.get("last_settled_turn_seq")?,
+            elapsed_ms: row.get("elapsed_ms")?,
+            provider_id: row.get("provider_id")?,
+            model: row.get("model")?,
+            profile: row.get("profile")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThreadUsageTotals {
+    pub thread_count: i64,
+    pub completed_turns: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub spend_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadUsageSubjectRow {
+    pub chain_root_id: String,
+    pub namespace: String,
+    pub subject: String,
+    pub asserted_by: Option<String>,
+    pub created_at: String,
+}
+
+impl ThreadUsageSubjectRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            chain_root_id: row.get("chain_root_id")?,
+            namespace: row.get("namespace")?,
+            subject: row.get("subject")?,
+            asserted_by: row.get("asserted_by")?,
+            created_at: row.get("created_at")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageSummaryFilter<'a> {
+    pub namespace: Option<&'a str>,
+    pub subject: Option<&'a str>,
+    pub asserted_by: Option<&'a str>,
+    pub settled_at_gte: Option<&'a str>,
+    pub settled_at_lt: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageSummaryRow {
+    pub namespace: String,
+    pub subject: String,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+    pub profile: Option<String>,
+    pub chain_count: i64,
+    pub thread_count: i64,
+    pub completed_turns: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub spend_usd: f64,
+}
+
+impl UsageSummaryRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            namespace: row.get("namespace")?,
+            subject: row.get("subject")?,
+            provider_id: row.get("provider_id")?,
+            model: row.get("model")?,
+            profile: row.get("profile")?,
+            chain_count: row.get("chain_count")?,
+            thread_count: row.get("thread_count")?,
+            completed_turns: row.get("completed_turns")?,
+            input_tokens: row.get("input_tokens")?,
+            output_tokens: row.get("output_tokens")?,
+            spend_usd: row.get("spend_usd")?,
+        })
+    }
+}
+
 // ============= Query functions =============
 
 const THREAD_COLUMNS: &str = r#"
@@ -443,13 +558,178 @@ pub fn get_facets(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<Face
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+const THREAD_USAGE_LATEST_COLUMNS: &str = r#"
+    thread_id, chain_root_id, chain_seq, thread_seq,
+    completed_turns, input_tokens, output_tokens, spend_usd, spawns_used,
+    started_at, settled_at, last_settled_turn_seq, elapsed_ms,
+    provider_id, model, profile
+"#;
+
+const EFFECTIVE_USAGE_CTE: &str = r#"
+    WITH RECURSIVE
+    continuation_edges(source_thread_id, successor_thread_id, chain_root_id) AS (
+        SELECT
+            e.thread_id AS source_thread_id,
+            json_extract(CAST(e.payload AS TEXT), '$.successor_thread_id') AS successor_thread_id,
+            e.chain_root_id AS chain_root_id
+        FROM events e
+        JOIN threads src
+          ON src.thread_id = e.thread_id
+         AND src.chain_root_id = e.chain_root_id
+         AND src.status = 'continued'
+        JOIN threads succ
+          ON succ.thread_id = json_extract(CAST(e.payload AS TEXT), '$.successor_thread_id')
+         AND succ.chain_root_id = e.chain_root_id
+         AND succ.upstream_thread_id = e.thread_id
+        WHERE e.event_type = 'thread_continued'
+          AND json_extract(CAST(e.payload AS TEXT), '$.successor_thread_id') IS NOT NULL
+    ),
+    continuation_paths(source_thread_id, descendant_thread_id, chain_root_id) AS (
+        SELECT source_thread_id, successor_thread_id, chain_root_id
+        FROM continuation_edges
+
+        UNION
+
+        SELECT
+            p.source_thread_id,
+            ce.successor_thread_id,
+            p.chain_root_id
+        FROM continuation_paths p
+        JOIN continuation_edges ce
+          ON ce.source_thread_id = p.descendant_thread_id
+         AND ce.chain_root_id = p.chain_root_id
+    ),
+    effective_usage AS (
+        SELECT u.*
+        FROM thread_usage_latest u
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM continuation_paths p
+            JOIN thread_usage_latest downstream
+              ON downstream.thread_id = p.descendant_thread_id
+             AND downstream.chain_root_id = p.chain_root_id
+            WHERE p.source_thread_id = u.thread_id
+              AND p.chain_root_id = u.chain_root_id
+        )
+    )
+"#;
+
+pub fn get_thread_usage_latest(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<ThreadUsageLatestRow>> {
+    let sql = &format!(
+        "SELECT {THREAD_USAGE_LATEST_COLUMNS} FROM thread_usage_latest WHERE thread_id = ?"
+    );
+    let mut stmt = db
+        .connection()
+        .prepare(sql)
+        .context("prepare get_thread_usage_latest")?;
+    stmt.query_row([thread_id], ThreadUsageLatestRow::from_row)
+        .optional()
+        .context("query get_thread_usage_latest")
+}
+
+pub fn sum_thread_usage_latest_by_chain(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+) -> anyhow::Result<ThreadUsageTotals> {
+    let sql = format!(
+        "{EFFECTIVE_USAGE_CTE}
+         SELECT
+            COUNT(DISTINCT u.thread_id) AS thread_count,
+            COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
+            COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
+         FROM effective_usage u
+         WHERE u.chain_root_id = ?"
+    );
+    db.connection()
+        .query_row(&sql, [chain_root_id], |row| {
+            Ok(ThreadUsageTotals {
+                thread_count: row.get("thread_count")?,
+                completed_turns: row.get("completed_turns")?,
+                input_tokens: row.get("input_tokens")?,
+                output_tokens: row.get("output_tokens")?,
+                spend_usd: row.get("spend_usd")?,
+            })
+        })
+        .context("query sum_thread_usage_latest_by_chain")
+}
+
+pub fn get_thread_usage_subject(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+) -> anyhow::Result<Option<ThreadUsageSubjectRow>> {
+    let mut stmt = db
+        .connection()
+        .prepare(
+            "SELECT chain_root_id, namespace, subject, asserted_by, created_at \
+             FROM thread_usage_subjects WHERE chain_root_id = ?",
+        )
+        .context("prepare get_thread_usage_subject")?;
+    stmt.query_row([chain_root_id], ThreadUsageSubjectRow::from_row)
+        .optional()
+        .context("query get_thread_usage_subject")
+}
+
+pub fn summarize_usage_by_subject(
+    db: &ProjectionDb,
+    filter: UsageSummaryFilter<'_>,
+) -> anyhow::Result<Vec<UsageSummaryRow>> {
+    let sql = format!(
+        "{EFFECTIVE_USAGE_CTE}
+         SELECT
+            s.namespace AS namespace,
+            s.subject AS subject,
+            u.provider_id AS provider_id,
+            u.model AS model,
+            u.profile AS profile,
+            COUNT(DISTINCT s.chain_root_id) AS chain_count,
+            COUNT(DISTINCT u.thread_id) AS thread_count,
+            COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
+            COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
+         FROM thread_usage_subjects s
+         JOIN effective_usage u ON u.chain_root_id = s.chain_root_id
+         WHERE (?1 IS NULL OR s.namespace = ?1)
+           AND (?2 IS NULL OR s.subject = ?2)
+           AND (?3 IS NULL OR s.asserted_by = ?3)
+           AND (?4 IS NULL OR u.settled_at >= ?4)
+           AND (?5 IS NULL OR u.settled_at < ?5)
+         GROUP BY s.namespace, s.subject, u.provider_id, u.model, u.profile
+         ORDER BY s.namespace, s.subject, u.provider_id, u.model, u.profile"
+    );
+    let mut stmt = db
+        .connection()
+        .prepare(&sql)
+        .context("prepare summarize_usage_by_subject")?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                filter.namespace,
+                filter.subject,
+                filter.asserted_by,
+                filter.settled_at_gte,
+                filter.settled_at_lt,
+            ],
+            UsageSummaryRow::from_row,
+        )
+        .context("query summarize_usage_by_subject")?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 // ============= Tests =============
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::objects::thread_event::NewEvent;
     use crate::objects::thread_snapshot::{ThreadSnapshotBuilder, ThreadStatus};
-    use crate::projection::{project_thread_edge, project_thread_snapshot};
+    use crate::projection::{project_event, project_thread_edge, project_thread_snapshot};
+    use serde_json::json;
 
     fn test_db() -> ProjectionDb {
         let tempdir = tempfile::tempdir().unwrap();
@@ -463,6 +743,16 @@ mod tests {
         chain_root_id: &str,
         status: ThreadStatus,
     ) {
+        insert_thread_with_upstream(db, thread_id, chain_root_id, status, None);
+    }
+
+    fn insert_thread_with_upstream(
+        db: &ProjectionDb,
+        thread_id: &str,
+        chain_root_id: &str,
+        status: ThreadStatus,
+        upstream_thread_id: Option<&str>,
+    ) {
         let snapshot = ThreadSnapshotBuilder::new(
             thread_id,
             chain_root_id,
@@ -471,8 +761,53 @@ mod tests {
             "directive-runtime",
         )
         .status(status)
+        .upstream_thread_id(upstream_thread_id.map(str::to_string))
         .build();
         project_thread_snapshot(db, &snapshot, chain_root_id).unwrap();
+    }
+
+    fn project_continuation_event(
+        db: &ProjectionDb,
+        chain_root_id: &str,
+        source_thread_id: &str,
+        successor_thread_id: &str,
+        chain_seq: u64,
+    ) {
+        let event = NewEvent::new(chain_root_id, source_thread_id, "thread_continued")
+            .chain_seq(chain_seq)
+            .thread_seq(chain_seq)
+            .payload(json!({
+                "successor_thread_id": successor_thread_id,
+                "reason": "test",
+            }))
+            .build_with_ts(format!("2026-06-01T00:{chain_seq:02}:00Z"));
+        project_event(db, &event).unwrap();
+    }
+
+    fn project_usage_event(
+        db: &ProjectionDb,
+        chain_root_id: &str,
+        thread_id: &str,
+        chain_seq: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        let event = NewEvent::new(chain_root_id, thread_id, "thread_usage")
+            .chain_seq(chain_seq)
+            .thread_seq(chain_seq)
+            .payload(json!({
+                "completed_turns": chain_seq,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "spend_usd": (input_tokens + output_tokens) as f64 / 1000.0,
+                "spawns_used": 0,
+                "started_at": "2026-06-01T00:00:00Z",
+                "settled_at": format!("2026-06-01T00:0{chain_seq}:00Z"),
+                "last_settled_turn_seq": chain_seq,
+                "elapsed_ms": chain_seq * 100,
+            }))
+            .build_with_ts(format!("2026-06-01T00:0{chain_seq}:00Z"));
+        project_event(db, &event).unwrap();
     }
 
     #[test]
@@ -650,5 +985,294 @@ mod tests {
         let db = test_db();
         let arts = list_thread_artifacts(&db, "T-1").unwrap();
         assert!(arts.is_empty());
+    }
+
+    #[test]
+    fn thread_usage_latest_keeps_newest_cumulative_event() {
+        let db = test_db();
+        insert_thread(&db, "T-1", "chain-A", ThreadStatus::Completed);
+
+        project_usage_event(&db, "chain-A", "T-1", 1, 100, 10);
+        project_usage_event(&db, "chain-A", "T-1", 2, 175, 25);
+        project_usage_event(&db, "chain-A", "T-1", 1, 100, 10);
+
+        let latest = get_thread_usage_latest(&db, "T-1").unwrap().unwrap();
+        assert_eq!(latest.chain_seq, 2);
+        assert_eq!(latest.input_tokens, 175);
+        assert_eq!(latest.output_tokens, 25);
+        assert_eq!(latest.completed_turns, 2);
+
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 1);
+        assert_eq!(totals.input_tokens, 175);
+        assert_eq!(totals.output_tokens, 25);
+    }
+
+    #[test]
+    fn thread_usage_latest_projects_provider_model_metadata() {
+        let db = test_db();
+        insert_thread(&db, "T-1", "chain-A", ThreadStatus::Completed);
+
+        let event = NewEvent::new("chain-A", "T-1", "thread_usage")
+            .chain_seq(1)
+            .thread_seq(1)
+            .payload(json!({
+                "completed_turns": 1,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "spend_usd": 0.11,
+                "spawns_used": 0,
+                "started_at": "2026-06-01T00:00:00Z",
+                "settled_at": "2026-06-01T00:01:00Z",
+                "last_settled_turn_seq": 1,
+                "elapsed_ms": 100,
+                "provider_id": "openrouter",
+                "model": "anthropic/claude-sonnet-4.5",
+                "profile": "default",
+            }))
+            .build_with_ts("2026-06-01T00:01:00Z".to_string());
+        project_event(&db, &event).unwrap();
+
+        let latest = get_thread_usage_latest(&db, "T-1").unwrap().unwrap();
+        assert_eq!(latest.provider_id.as_deref(), Some("openrouter"));
+        assert_eq!(latest.model.as_deref(), Some("anthropic/claude-sonnet-4.5"));
+        assert_eq!(latest.profile.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn usage_totals_exclude_continued_source_threads() {
+        let db = test_db();
+        insert_thread(&db, "T-source", "chain-A", ThreadStatus::Running);
+        project_usage_event(&db, "chain-A", "T-source", 1, 100, 10);
+        insert_thread(&db, "T-source", "chain-A", ThreadStatus::Continued);
+
+        insert_thread_with_upstream(
+            &db,
+            "T-successor",
+            "chain-A",
+            ThreadStatus::Completed,
+            Some("T-source"),
+        );
+        project_continuation_event(&db, "chain-A", "T-source", "T-successor", 2);
+        project_usage_event(&db, "chain-A", "T-successor", 2, 150, 15);
+
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 1);
+        assert_eq!(totals.input_tokens, 150);
+        assert_eq!(totals.output_tokens, 15);
+    }
+
+    #[test]
+    fn usage_totals_keep_continued_source_until_successor_reports_usage() {
+        let db = test_db();
+        insert_thread(&db, "T-source", "chain-A", ThreadStatus::Running);
+        project_usage_event(&db, "chain-A", "T-source", 1, 100, 10);
+        insert_thread(&db, "T-source", "chain-A", ThreadStatus::Continued);
+        insert_thread_with_upstream(
+            &db,
+            "T-successor",
+            "chain-A",
+            ThreadStatus::Running,
+            Some("T-source"),
+        );
+        project_continuation_event(&db, "chain-A", "T-source", "T-successor", 2);
+
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 1);
+        assert_eq!(totals.input_tokens, 100);
+        assert_eq!(totals.output_tokens, 10);
+    }
+
+    #[test]
+    fn usage_totals_resolve_multihop_continuation_to_newest_usage_bearing_thread() {
+        let db = test_db();
+        insert_thread(&db, "T-a", "chain-A", ThreadStatus::Running);
+        project_usage_event(&db, "chain-A", "T-a", 1, 100, 10);
+        insert_thread(&db, "T-a", "chain-A", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db, "T-b", "chain-A", ThreadStatus::Running, Some("T-a"));
+        project_continuation_event(&db, "chain-A", "T-a", "T-b", 2);
+        project_usage_event(&db, "chain-A", "T-b", 3, 150, 15);
+        insert_thread_with_upstream(&db, "T-b", "chain-A", ThreadStatus::Continued, Some("T-a"));
+        insert_thread_with_upstream(&db, "T-c", "chain-A", ThreadStatus::Running, Some("T-b"));
+        project_continuation_event(&db, "chain-A", "T-b", "T-c", 4);
+
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 1);
+        assert_eq!(totals.input_tokens, 150);
+        assert_eq!(totals.output_tokens, 15);
+
+        project_usage_event(&db, "chain-A", "T-c", 5, 200, 20);
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 1);
+        assert_eq!(totals.input_tokens, 200);
+        assert_eq!(totals.output_tokens, 20);
+    }
+
+    #[test]
+    fn usage_totals_do_not_treat_normal_child_as_continuation_successor() {
+        let db = test_db();
+        insert_thread(&db, "T-parent", "chain-A", ThreadStatus::Continued);
+        project_usage_event(&db, "chain-A", "T-parent", 1, 100, 10);
+        insert_thread_with_upstream(
+            &db,
+            "T-child",
+            "chain-A",
+            ThreadStatus::Completed,
+            Some("T-parent"),
+        );
+        project_usage_event(&db, "chain-A", "T-child", 2, 50, 5);
+
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 2);
+        assert_eq!(totals.input_tokens, 150);
+        assert_eq!(totals.output_tokens, 15);
+    }
+
+    #[test]
+    fn usage_totals_ignore_invalid_continuation_successor_relationship() {
+        let db = test_db();
+        insert_thread(&db, "T-source", "chain-A", ThreadStatus::Continued);
+        project_usage_event(&db, "chain-A", "T-source", 1, 100, 10);
+        insert_thread_with_upstream(
+            &db,
+            "T-not-successor",
+            "chain-A",
+            ThreadStatus::Completed,
+            Some("T-other"),
+        );
+        project_continuation_event(&db, "chain-A", "T-source", "T-not-successor", 2);
+        project_usage_event(&db, "chain-A", "T-not-successor", 3, 50, 5);
+
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 2);
+        assert_eq!(totals.input_tokens, 150);
+        assert_eq!(totals.output_tokens, 15);
+    }
+
+    #[test]
+    fn thread_created_projects_usage_subject() {
+        let db = test_db();
+        let event = NewEvent::new("T-root", "T-root", "thread_created")
+            .chain_seq(1)
+            .thread_seq(1)
+            .payload(json!({
+                "kind": "directive",
+                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "executor_ref": "runtime:directive-runtime",
+                "launch_mode": "inline",
+                "usage_subject": {
+                    "namespace": "tv-tracker",
+                    "subject": "csm01"
+                },
+                "usage_subject_asserted_by": "fp:backend"
+            }))
+            .build_with_ts("2026-06-01T00:00:00Z".to_string());
+        project_event(&db, &event).unwrap();
+
+        let row = get_thread_usage_subject(&db, "T-root").unwrap().unwrap();
+        assert_eq!(row.namespace, "tv-tracker");
+        assert_eq!(row.subject, "csm01");
+        assert_eq!(row.asserted_by.as_deref(), Some("fp:backend"));
+        assert_eq!(row.created_at, "2026-06-01T00:00:00Z");
+    }
+
+    #[test]
+    fn usage_summary_groups_by_subject_and_asserted_by() {
+        let db = test_db();
+
+        insert_thread(&db, "T-a", "T-a", ThreadStatus::Completed);
+        let event = NewEvent::new("T-a", "T-a", "thread_created")
+            .chain_seq(1)
+            .thread_seq(1)
+            .payload(json!({
+                "kind": "directive",
+                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "executor_ref": "runtime:directive-runtime",
+                "launch_mode": "inline",
+                "usage_subject": { "namespace": "tv-tracker", "subject": "user-a" },
+                "usage_subject_asserted_by": "fp:backend"
+            }))
+            .build_with_ts("2026-06-01T00:00:00Z".to_string());
+        project_event(&db, &event).unwrap();
+        project_usage_event(&db, "T-a", "T-a", 2, 100, 10);
+
+        insert_thread(&db, "T-b", "T-b", ThreadStatus::Completed);
+        let event = NewEvent::new("T-b", "T-b", "thread_created")
+            .chain_seq(1)
+            .thread_seq(1)
+            .payload(json!({
+                "kind": "directive",
+                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "executor_ref": "runtime:directive-runtime",
+                "launch_mode": "inline",
+                "usage_subject": { "namespace": "tv-tracker", "subject": "user-b" },
+                "usage_subject_asserted_by": "fp:other"
+            }))
+            .build_with_ts("2026-06-01T00:00:00Z".to_string());
+        project_event(&db, &event).unwrap();
+        project_usage_event(&db, "T-b", "T-b", 2, 300, 30);
+
+        let rows = summarize_usage_by_subject(
+            &db,
+            UsageSummaryFilter {
+                namespace: Some("tv-tracker"),
+                asserted_by: Some("fp:backend"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].namespace, "tv-tracker");
+        assert_eq!(rows[0].subject, "user-a");
+        assert_eq!(rows[0].chain_count, 1);
+        assert_eq!(rows[0].thread_count, 1);
+        assert_eq!(rows[0].input_tokens, 100);
+        assert_eq!(rows[0].output_tokens, 10);
+    }
+
+    #[test]
+    fn usage_summary_uses_continuation_effective_usage() {
+        let db = test_db();
+        insert_thread(&db, "T-root", "T-root", ThreadStatus::Running);
+        let event = NewEvent::new("T-root", "T-root", "thread_created")
+            .chain_seq(1)
+            .thread_seq(1)
+            .payload(json!({
+                "kind": "directive",
+                "item_ref": "directive:apps/tv-tracker/ai_chat",
+                "executor_ref": "runtime:directive-runtime",
+                "launch_mode": "inline",
+                "usage_subject": { "namespace": "tv-tracker", "subject": "user-a" },
+                "usage_subject_asserted_by": "fp:backend"
+            }))
+            .build_with_ts("2026-06-01T00:00:00Z".to_string());
+        project_event(&db, &event).unwrap();
+        project_usage_event(&db, "T-root", "T-root", 2, 100, 10);
+        insert_thread(&db, "T-root", "T-root", ThreadStatus::Continued);
+        insert_thread_with_upstream(
+            &db,
+            "T-successor",
+            "T-root",
+            ThreadStatus::Completed,
+            Some("T-root"),
+        );
+        project_continuation_event(&db, "T-root", "T-root", "T-successor", 3);
+        project_usage_event(&db, "T-root", "T-successor", 4, 150, 15);
+
+        let rows = summarize_usage_by_subject(
+            &db,
+            UsageSummaryFilter {
+                namespace: Some("tv-tracker"),
+                asserted_by: Some("fp:backend"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].thread_count, 1);
+        assert_eq!(rows[0].input_tokens, 150);
+        assert_eq!(rows[0].output_tokens, 15);
     }
 }

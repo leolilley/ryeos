@@ -78,6 +78,7 @@ pub mod threads_chain;
 pub mod threads_children;
 pub mod threads_get;
 pub mod threads_list;
+pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
 pub mod vault_set;
@@ -113,6 +114,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     threads_cancel::DESCRIPTOR,
     threads_children::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
+    usage_summary::DESCRIPTOR,
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,
     commands_submit::DESCRIPTOR,

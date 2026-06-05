@@ -263,7 +263,7 @@ class RYEServer:
                 write_stream,
                 InitializationOptions(
                     server_name="ryeos",
-                    server_version="0.5.0",
+                    server_version="0.5.4",
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},

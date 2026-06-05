@@ -1,6 +1,6 @@
 //! `threads.chain` — return the chain rooted at the given thread.
 //!
-//! Ownership check: non-admin callers can only access chains rooted
+//! Ownership check: callers can only access chains rooted
 //! at a thread they own.
 
 use std::sync::Arc;

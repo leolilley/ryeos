@@ -1,6 +1,6 @@
 //! `scheduler.show_fires` — fire history for a schedule.
 //!
-//! Ownership check: non-admin callers can only view fires for
+//! Ownership check: callers can only view fires for
 //! schedules they own.
 
 use std::sync::Arc;

@@ -16,7 +16,6 @@
 //!
 //! - `require_owner()` asserts `verified == true` — unverified contexts
 //!   always get `HandlerError::NotFound` (never 403).
-//! - Admin bypass: `["*"]` is the only admin scope in v1.
 //! - Owner check: fingerprint matches the resource owner.
 //! - Not-found-never-forbidden: `require_owner()` returns
 //!   `HandlerError::NotFound` (not 403) to avoid leaking resource
@@ -52,11 +51,6 @@ impl HandlerContext {
         Self::default()
     }
 
-    /// Returns true when the caller holds the admin wildcard scope `["*"]`.
-    pub fn is_admin(&self) -> bool {
-        self.scopes.iter().any(|s| s == "*")
-    }
-
     /// Returns true when a verified fingerprint is present.
     ///
     /// Unlike checking `!fingerprint.is_empty()`, this requires
@@ -81,14 +75,10 @@ impl HandlerContext {
         }
     }
 
-    /// Returns true when the caller is verified and is an admin or
-    /// matches the resource owner.
-    pub fn is_owner_or_admin(&self, owner: Option<&str>) -> bool {
+    /// Returns true when the caller is verified and matches the resource owner.
+    pub fn is_owner(&self, owner: Option<&str>) -> bool {
         if !self.verified {
             return false;
-        }
-        if self.is_admin() {
-            return true;
         }
         match owner {
             Some(fp) => fp == self.fingerprint,
@@ -96,13 +86,12 @@ impl HandlerContext {
         }
     }
 
-    /// Returns `Ok(())` when the caller is verified and is the owner
-    /// or an admin.
+    /// Returns `Ok(())` when the caller is verified and is the owner.
     ///
     /// Returns `HandlerError::NotFound` on miss (never 403) to avoid
     /// leaking resource existence to non-owners.
     pub fn require_owner(&self, owner: Option<&str>) -> Result<(), HandlerError> {
-        if self.is_owner_or_admin(owner) {
+        if self.is_owner(owner) {
             Ok(())
         } else {
             Err(HandlerError::NotFound)

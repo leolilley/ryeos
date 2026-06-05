@@ -3,7 +3,7 @@
 //! Distinct from `events.replay` (thread-scoped). Splitting the two
 //! prevents the V5.1 chain-events bug from recurring.
 //!
-//! Ownership check: non-admin callers can only replay chain events
+//! Ownership check: callers can only replay chain events
 //! rooted at a thread they own.
 
 use std::sync::Arc;
